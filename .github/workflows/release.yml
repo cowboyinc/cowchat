@@ -140,6 +140,7 @@ jobs:
           else
             git checkout -b "cowchat-${TAG}"
           fi
+          mkdir -p Formula
           cp /tmp/cowchat.rb Formula/cowchat.rb
           git -c user.name=cowchat-release -c user.email=noreply@cowboy.inc add Formula/cowchat.rb
           if ! git diff --cached --quiet; then
