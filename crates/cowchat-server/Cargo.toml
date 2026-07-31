@@ -1,0 +1,45 @@
+[package]
+name = "cowchat-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cowchat server daemon"
+
+[[bin]]
+name = "cowchat-server"
+path = "src/main.rs"
+
+[lib]
+name = "cowchat_server"
+path = "src/lib.rs"
+
+[dependencies]
+cowchat-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+dashmap = "6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+rand = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+rust-embed = "8"
+mime_guess = "2"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+cowchat-client.workspace = true
+tempfile = "3"
+tokio-tungstenite = "0.26"

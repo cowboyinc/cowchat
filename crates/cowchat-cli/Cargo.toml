@@ -1,0 +1,27 @@
+[package]
+name = "cowchat-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cowchat CLI client"
+
+[[bin]]
+name = "cowchat"
+path = "src/main.rs"
+
+[dependencies]
+cowchat-core.workspace = true
+cowchat-client.workspace = true
+tokio.workspace = true
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+directories = "5"
+
+[dev-dependencies]
+cowchat-server.workspace = true
+tempfile = "3"
+chrono.workspace = true

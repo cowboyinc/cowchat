@@ -1,0 +1,159 @@
+name: Release
+
+# Build prebuilt cowchat + cowchat-server binaries for four targets, create a
+# prerelease, and open an idempotent formula PR against cowboyinc/homebrew-lasso.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and release, e.g. v0.4.0"
+        required: true
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-14
+            target: x86_64-apple-darwin
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Build release binaries and third-party notices
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "${{ matrix.target }}" \
+            -p cowchat-cli -p cowchat-server
+          cargo install cargo-about --locked --features cli
+          cargo about generate --locked --target "${{ matrix.target }}" \
+            about.hbs > THIRD-PARTY-NOTICES.md
+      - name: Package tarball
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "refusing suspicious tag: $TAG" >&2
+            exit 1
+          }
+          tar -czf "cowchat-${TAG}-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" cowchat cowchat-server \
+            -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cowchat-${{ matrix.target }}
+          path: cowchat-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish prerelease and render Homebrew formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "refusing suspicious tag: $TAG" >&2
+            exit 1
+          }
+          VERSION="${TAG#v}"
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+          NOTES='ClawChat is now Cowchat. Prebuilt cowchat + cowchat-server binaries (macOS arm64/x86_64, Linux arm64/x86_64); the server migrates ~/.clawchat automatically (stop the old server first). Homebrew install: pending formula merge — this note is updated on promotion.'
+
+          sha() {
+            shasum -a 256 "dist/cowchat-${TAG}-$1.tar.gz" | awk '{print $1}'
+          }
+          MAC_ARM=$(sha aarch64-apple-darwin)
+          MAC_X86=$(sha x86_64-apple-darwin)
+          LIN_ARM=$(sha aarch64-unknown-linux-gnu)
+          LIN_X86=$(sha x86_64-unknown-linux-gnu)
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/cowchat-*.tar.gz --repo "$REPO" --clobber
+            gh release edit "$TAG" --repo "$REPO" --prerelease \
+              --title "Cowchat $TAG" --notes "$NOTES"
+          else
+            gh release create "$TAG" dist/cowchat-*.tar.gz --repo "$REPO" \
+              --prerelease --title "Cowchat $TAG" --notes "$NOTES"
+          fi
+
+          sed \
+            -e "s|@VERSION@|${VERSION}|g" \
+            -e "s|@TAG@|${TAG}|g" \
+            -e "s|@BASE@|${BASE}|g" \
+            -e "s|@MAC_ARM@|${MAC_ARM}|g" \
+            -e "s|@MAC_X86@|${MAC_X86}|g" \
+            -e "s|@LIN_ARM@|${LIN_ARM}|g" \
+            -e "s|@LIN_X86@|${LIN_X86}|g" \
+            .github/cowchat-formula.rb.tmpl > /tmp/cowchat.rb
+      - name: Open formula PR against cowboyinc/homebrew-lasso
+        env:
+          GH_TOKEN: ${{ secrets.LASSO_PR_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "refusing suspicious tag: $TAG" >&2
+            exit 1
+          }
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/cowboyinc/homebrew-lasso.git" lasso
+          cd lasso
+          if git show origin/main:Formula/cowchat.rb 2>/dev/null | cmp -s - /tmp/cowchat.rb; then
+            echo "rendered formula already on main; nothing to do"
+            exit 0
+          fi
+          if git ls-remote --exit-code origin "refs/heads/cowchat-${TAG}" >/dev/null 2>&1; then
+            git checkout -b "cowchat-${TAG}" "origin/cowchat-${TAG}"
+            if [ -f Formula/cowchat.rb ] && ! cmp -s /tmp/cowchat.rb Formula/cowchat.rb; then
+              echo "Formula/cowchat.rb on the existing cowchat-${TAG} branch differs from the render — human edits present; resolve manually" >&2
+              exit 1
+            fi
+          else
+            git checkout -b "cowchat-${TAG}"
+          fi
+          cp /tmp/cowchat.rb Formula/cowchat.rb
+          git -c user.name=cowchat-release -c user.email=noreply@cowboy.inc add Formula/cowchat.rb
+          if ! git diff --cached --quiet; then
+            git -c user.name=cowchat-release -c user.email=noreply@cowboy.inc \
+              commit -m "cowchat ${TAG}"
+            git push origin "cowchat-${TAG}"
+          fi
+          gh pr create --repo cowboyinc/homebrew-lasso \
+            --head "cowchat-${TAG}" --base main \
+            --title "cowchat ${TAG}" \
+            --body "Automated formula bump from the cowchat release workflow." || true
+          OPEN=$(gh pr list --repo cowboyinc/homebrew-lasso \
+            --head "cowchat-${TAG}" --state open --json number --jq 'length')
+          [ "$OPEN" -ge 1 ] || {
+            echo "no open formula PR for cowchat-${TAG}" >&2
+            exit 1
+          }

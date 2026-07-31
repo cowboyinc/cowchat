@@ -1,0 +1,8 @@
+target/
+.git/
+examples/
+skill/
+*.md
+.dockerignore
+fly.toml
+.github/

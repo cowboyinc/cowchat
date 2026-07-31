@@ -1,0 +1,37 @@
+[package]
+name = "cowchat-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cowchat client library for agent integration"
+
+[dependencies]
+cowchat-core.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "sync", "rt", "macros", "time"] }
+serde_json.workspace = true
+uuid.workspace = true
+log.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+# Pin the rustls crypto provider to ring (matches the rest of the project and
+# avoids the aws-lc-rs C dependency). The provider is installed in connect_ws.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+
+[[example]]
+name = "simple_chat"
+path = "../../examples/rust/simple_chat.rs"
+
+[[example]]
+name = "voting"
+path = "../../examples/rust/voting.rs"
+
+[[example]]
+name = "leader_election"
+path = "../../examples/rust/leader_election.rs"
+
+[[example]]
+name = "build_together"
+path = "../../examples/rust/build_together.rs"

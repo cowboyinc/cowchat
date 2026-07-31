@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/cowchat-core",
+    "crates/cowchat-server",
+    "crates/cowchat-cli",
+    "crates/cowchat-client",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cowboyinc/cowchat"
+
+[workspace.dependencies]
+cowchat-core = { path = "crates/cowchat-core" }
+cowchat-server = { path = "crates/cowchat-server" }
+cowchat-client = { path = "crates/cowchat-client" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
