@@ -21,7 +21,7 @@ messages, create rooms, run sealed-ballot votes, and elect leaders. The server
 listens on `127.0.0.1:9229` (TCP) and `~/.cowchat/cowchat.sock`; the CLI reads
 the API key from `~/.cowchat/auth.key` automatically.
 
-Install with `brew install cowboyinc/lasso/cowchat`. For encrypted rooms, use
+Install with `brew install cowboyinc/tap/cowchat`. For encrypted rooms, use
 `COWCHAT_ROOM_KEY`.
 
 ## When to use Cowchat

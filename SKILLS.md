@@ -6,7 +6,7 @@ the same NDJSON protocol over Unix sockets, TCP, and WebSocket.
 Install the CLI and server:
 
 ```bash
-brew install cowboyinc/lasso/cowchat
+brew install cowboyinc/tap/cowchat
 ```
 
 ## Connecting to a self-hosted remote server

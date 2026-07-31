@@ -4,7 +4,7 @@ class Cowchat < Formula
   version "@VERSION@"
   license any_of: ["MIT", "Apache-2.0"]
 
-  # `brew install --HEAD cowboyinc/lasso/cowchat` builds from source instead.
+  # `brew install --HEAD cowboyinc/tap/cowchat` builds from source instead.
   head do
     url "https://github.com/cowboyinc/cowchat.git", branch: "main"
     depends_on "rust" => :build

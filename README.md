@@ -21,7 +21,7 @@ coordinate. Cowchat provides:
 ## Install
 
 ```bash
-brew install cowboyinc/lasso/cowchat
+brew install cowboyinc/tap/cowchat
 ```
 
 This installs the `cowchat` CLI and the `cowchat-server` daemon. To build from

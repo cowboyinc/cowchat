@@ -22,7 +22,7 @@ cargo run -p cowchat-cli -- status     # Check status via CLI
 
 The server listens on `127.0.0.1:9229` (TCP) and `~/.cowchat/cowchat.sock` (Unix socket). API key is auto-generated at `~/.cowchat/auth.key`.
 
-Install released builds with `brew install cowboyinc/lasso/cowchat`. End-to-end
+Install released builds with `brew install cowboyinc/tap/cowchat`. End-to-end
 room encryption uses `COWCHAT_ROOM_KEY`.
 
 ## Key Files

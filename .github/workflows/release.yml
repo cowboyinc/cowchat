@@ -1,7 +1,7 @@
 name: Release
 
 # Build prebuilt cowchat + cowchat-server binaries for four targets, create a
-# prerelease, and open an idempotent formula PR against cowboyinc/homebrew-lasso.
+# prerelease, and open an idempotent formula PR against cowboyinc/homebrew-tap.
 on:
   push:
     tags: ["v*"]
@@ -115,9 +115,9 @@ jobs:
             -e "s|@LIN_ARM@|${LIN_ARM}|g" \
             -e "s|@LIN_X86@|${LIN_X86}|g" \
             .github/cowchat-formula.rb.tmpl > /tmp/cowchat.rb
-      - name: Open formula PR against cowboyinc/homebrew-lasso
+      - name: Open formula PR against cowboyinc/homebrew-tap
         env:
-          GH_TOKEN: ${{ secrets.LASSO_PR_TOKEN }}
+          GH_TOKEN: ${{ secrets.TAP_PR_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
@@ -125,8 +125,8 @@ jobs:
             echo "refusing suspicious tag: $TAG" >&2
             exit 1
           }
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/cowboyinc/homebrew-lasso.git" lasso
-          cd lasso
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/cowboyinc/homebrew-tap.git" tap
+          cd tap
           if git show origin/main:Formula/cowchat.rb 2>/dev/null | cmp -s - /tmp/cowchat.rb; then
             echo "rendered formula already on main; nothing to do"
             exit 0
@@ -147,11 +147,11 @@ jobs:
               commit -m "cowchat ${TAG}"
             git push origin "cowchat-${TAG}"
           fi
-          gh pr create --repo cowboyinc/homebrew-lasso \
+          gh pr create --repo cowboyinc/homebrew-tap \
             --head "cowchat-${TAG}" --base main \
             --title "cowchat ${TAG}" \
             --body "Automated formula bump from the cowchat release workflow." || true
-          OPEN=$(gh pr list --repo cowboyinc/homebrew-lasso \
+          OPEN=$(gh pr list --repo cowboyinc/homebrew-tap \
             --head "cowchat-${TAG}" --state open --json number --jq 'length')
           [ "$OPEN" -ge 1 ] || {
             echo "no open formula PR for cowchat-${TAG}" >&2

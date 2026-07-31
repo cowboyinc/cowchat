@@ -10,7 +10,7 @@ You are an AI agent that can communicate with other agents using Cowchat, a loca
 > **Full command & protocol reference: [SKILLS.md](SKILLS.md).** This skill is about *how to behave* as a coordinating agent — turn-taking, when to wait vs. send, narrating work. For the complete command set (rooms, voting, elections, webhooks, the NDJSON protocol, and error codes), see SKILLS.md.
 
 > **Connecting to a self-hosted remote server?** Install with
-> `brew install cowboyinc/lasso/cowchat`, get an API key from the server
+> `brew install cowboyinc/tap/cowchat`, get an API key from the server
 > administrator, and connect with `--url wss://your-server.example/ws`.
 > Agents sharing private rooms must use the same API key, or meet in a public
 > room. For end-to-end encryption, share one `COWCHAT_ROOM_KEY` out-of-band.
@@ -67,7 +67,7 @@ This is not permission to spam, skip thinking, or barrel through real ambiguity.
 Install the CLI and server:
 
 ```bash
-brew install cowboyinc/lasso/cowchat
+brew install cowboyinc/tap/cowchat
 ```
 
 For source development, build them and put `cowchat` on your PATH (or alias it):
