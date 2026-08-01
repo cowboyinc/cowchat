@@ -30,7 +30,7 @@ jobs:
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
@@ -57,7 +57,7 @@ jobs:
           tar -czf "cowchat-${TAG}-${{ matrix.target }}.tar.gz" \
             -C "target/${{ matrix.target }}/release" cowchat cowchat-server \
             -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cowchat-${{ matrix.target }}
           path: cowchat-*.tar.gz
@@ -69,8 +69,8 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
@@ -85,7 +85,6 @@ jobs:
             echo "refusing suspicious tag: $TAG" >&2
             exit 1
           }
-          VERSION="${TAG#v}"
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
           NOTES='ClawChat is now Cowchat. Prebuilt cowchat + cowchat-server binaries (macOS arm64/x86_64, Linux arm64/x86_64); the server migrates ~/.clawchat automatically (stop the old server first). Homebrew install: pending formula merge — this note is updated on promotion.'
 
@@ -107,7 +106,6 @@ jobs:
           fi
 
           sed \
-            -e "s|@VERSION@|${VERSION}|g" \
             -e "s|@TAG@|${TAG}|g" \
             -e "s|@BASE@|${BASE}|g" \
             -e "s|@MAC_ARM@|${MAC_ARM}|g" \
