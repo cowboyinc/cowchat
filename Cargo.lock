@@ -323,7 +323,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cowchat-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "clap",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "cowchat-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "cowchat-core",
@@ -357,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "cowchat-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "cowchat-server"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "axum",
  "base64",

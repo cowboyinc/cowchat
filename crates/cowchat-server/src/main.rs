@@ -33,8 +33,8 @@ enum Commands {
         #[arg(long, requires = "http_admin_secret")]
         enable_http_signup: bool,
 
-        /// Secret required in X-ClawChat-Admin for HTTP key creation
-        /// (header name predates the rename — frozen).
+        /// Secret required in X-Cowchat-Admin for HTTP key creation
+        ///.
         #[arg(long)]
         http_admin_secret: Option<String>,
 
@@ -117,38 +117,6 @@ fn default_key_path() -> &'static str {
     )
 }
 
-/// True when at least one path in use is one of the exact default files.
-pub(crate) fn uses_default_data_paths(
-    paths_in_use: &[&std::path::Path],
-    default_dir: &std::path::Path,
-) -> bool {
-    let defaults = ["cowchat.sock", "cowchat.db", "auth.key"].map(|f| default_dir.join(f));
-    paths_in_use
-        .iter()
-        .any(|p| defaults.iter().any(|d| *p == d))
-}
-
-fn maybe_migrate(paths_in_use: &[&std::path::Path]) {
-    let Some(base) = directories::BaseDirs::new() else {
-        return;
-    };
-    let new = base.home_dir().join(".cowchat");
-    if !uses_default_data_paths(paths_in_use, &new) {
-        return;
-    }
-    let old = base.home_dir().join(".clawchat");
-    match cowchat_server::migrate::migrate_legacy_data_dir(&old, &new) {
-        Ok(cowchat_server::migrate::MigrationOutcome::Migrated) => {
-            log::info!("migrated legacy data dir ~/.clawchat -> ~/.cowchat");
-        }
-        Ok(cowchat_server::migrate::MigrationOutcome::NothingToDo) => {}
-        Err(e) => {
-            eprintln!("fatal: legacy data-dir migration failed: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -169,7 +137,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             db,
             key_file,
         } => {
-            maybe_migrate(&[socket.as_path(), db.as_path(), key_file.as_path()]);
             let config = ServerConfig {
                 socket_path: socket,
                 tcp_addr: if no_tcp { None } else { Some(tcp) },
@@ -194,12 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Auth { action } => match action {
             AuthAction::ShowKey { key_file } => {
-                maybe_migrate(&[key_file.as_path()]);
                 let key = auth::load_or_create_key(&key_file)?;
                 println!("{}", key);
             }
             AuthAction::RotateKey { key_file } => {
-                maybe_migrate(&[key_file.as_path()]);
                 let key = auth::rotate_key(&key_file)?;
                 println!("New API key: {}", key);
                 println!("All connected agents will need to reconnect with the new key.");
@@ -208,28 +173,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod default_path_tests {
-    use super::uses_default_data_paths;
-    use std::path::Path;
-
-    #[test]
-    fn predicate_matches_exact_defaults_only() {
-        let dir = Path::new("/home/u/.cowchat");
-        let sock = dir.join("cowchat.sock");
-        let db = dir.join("cowchat.db");
-        let key = dir.join("auth.key");
-        let custom = dir.join("custom.db");
-        let tmp = Path::new("/tmp/x/t.db");
-
-        assert!(uses_default_data_paths(&[&sock, &db, &key], dir));
-        assert!(uses_default_data_paths(&[tmp, &db], dir));
-        assert!(!uses_default_data_paths(&[tmp, &custom], dir));
-        assert!(
-            !uses_default_data_paths(&[&custom], dir),
-            "prefix is not enough"
-        );
-    }
 }

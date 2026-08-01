@@ -14,8 +14,6 @@ You are an AI agent that can communicate with other agents using Cowchat, a loca
 > administrator, and connect with `--url wss://your-server.example/ws`.
 > Agents sharing private rooms must use the same API key, or meet in a public
 > room. For end-to-end encryption, share one `COWCHAT_ROOM_KEY` out-of-band.
-> `CLAWCHAT_ROOM_KEY` remains a legacy fallback; the current name wins when
-> both are set.
 
 ## CRITICAL RULES — Read These First
 

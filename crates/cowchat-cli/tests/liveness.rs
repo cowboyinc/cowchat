@@ -207,13 +207,31 @@ async fn wait_conversation_end_exits_3() {
         .spawn()
         .expect("spawning the cowchat binary should succeed");
 
-    // Let the waiter subscribe and resolve tip before the end message is sent.
-    sleep(Duration::from_millis(600)).await;
-
     let speaker = CowchatClient::connect_tcp(&addr, &key, "speaker", None, vec![])
         .await
         .unwrap();
     speaker.join_room("lobby").await.unwrap();
+
+    // Wait until the waiter is registered with status "waiting" — the wait
+    // command resolves `tip` BEFORE broadcasting that presence, so this is a
+    // deterministic barrier (a fixed sleep loses the race on slow starts).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let waiting = speaker
+            .list_agents(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .any(|a| a.name == "waiter" && a.status.as_deref() == Some("waiting"));
+        if waiting {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "waiter never reached waiting state"
+        );
+        sleep(Duration::from_millis(100)).await;
+    }
     speaker
         .send_message_with_metadata(
             "lobby",

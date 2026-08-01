@@ -45,15 +45,14 @@ def read_api_key() -> str:
 #
 # Message content in an encrypted room is ChaCha20-Poly1305 (IETF, 96-bit nonce)
 # ciphertext under a per-room key derived from a pre-shared secret via
-# HKDF-SHA256. The blob is a self-describing "clw1:" string carrying the 12-byte
+# HKDF-SHA256. The blob is a self-describing "cow1:" string carrying the 12-byte
 # nonce + AEAD output. This is wire-compatible with the Rust
 # `cowchat-core::crypto` module.
 #
 # The crypto path needs the `cryptography` package (pip install cryptography);
 # everything else in this client is dependency-free, so the import is lazy.
 
-# Protocol identifier — frozen for compatibility with pre-rename data/clients. Do not rename.
-_ENC_PREFIX = "clw1:"
+_ENC_PREFIX = "cow1:"
 _NONCE_LEN = 12
 
 
@@ -81,13 +80,12 @@ def _derive_room_key(secret: bytes, room_id: str) -> bytes:
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        # Protocol identifier — frozen for compatibility with pre-rename data/clients. Do not rename.
-        info=b"clawchat-e2e-v1:" + room_id.encode(),
+        info=b"cowchat-e2e-v1:" + room_id.encode(),
     ).derive(secret)
 
 
 def encrypt(secret: bytes, room_id: str, plaintext: str) -> str:
-    """Encrypt `plaintext` for `room_id`, returning a `clw1:` blob."""
+    """Encrypt `plaintext` for `room_id`, returning a `cow1:` blob."""
     ChaCha20Poly1305, _, _ = _load_crypto()
     key = _derive_room_key(secret, room_id)
     nonce = os.urandom(_NONCE_LEN)
@@ -97,7 +95,7 @@ def encrypt(secret: bytes, room_id: str, plaintext: str) -> str:
 
 
 def decrypt(secret: bytes, room_id: str, blob: str) -> str:
-    """Decrypt a `clw1:` blob produced for the same `room_id` and `secret`."""
+    """Decrypt a `cow1:` blob produced for the same `room_id` and `secret`."""
     ChaCha20Poly1305, _, _ = _load_crypto()
     b64 = blob[len(_ENC_PREFIX):]
     raw = base64.b64decode(b64 + "=" * (-len(b64) % 4))  # restore padding

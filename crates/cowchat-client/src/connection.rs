@@ -428,7 +428,7 @@ impl CowchatClient {
 
     /// Decrypt `msg.content` in place when a room secret is set and the content
     /// is a Cowchat ciphertext blob. Leaves content untouched on decrypt
-    /// failure or when no key is configured (callers then see the `clw1:` blob).
+    /// failure or when no key is configured (callers then see the `cow1:` blob).
     fn decrypt_message(&self, msg: &mut ChatMessage) {
         if let Some(secret) = &self.room_secret {
             if cowchat_core::crypto::is_ciphertext(&msg.content) {

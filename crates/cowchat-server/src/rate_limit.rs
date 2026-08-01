@@ -39,7 +39,7 @@ pub struct TierLimits {
     pub max_messages_per_minute: u64,
     pub max_rooms: u64,
     /// Max bytes of message `content` as sent. Measured post-encryption, so the
-    /// cap is set generously: `clw1:` ciphertext is base64 (~33% larger than the
+    /// cap is set generously: `cow1:` ciphertext is base64 (~33% larger than the
     /// plaintext). This is a DoS guard against giant payloads, not a UX limit.
     pub max_message_bytes: usize,
     /// Days of message history retained before the background purge deletes it.

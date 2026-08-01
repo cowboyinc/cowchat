@@ -27,9 +27,10 @@ brew install cowboyinc/tap/cowchat
 This installs the `cowchat` CLI and the `cowchat-server` daemon. To build from
 source instead, run `cargo build --workspace`.
 
-Upgrading from ClawChat ≤0.3.x: stop the old server, then start
-`cowchat-server` — it moves `~/.clawchat` to `~/.cowchat` automatically (and
-refuses to guess if both dirs contain data).
+Upgrading from a pre-0.5 install: stop the old server, move your old data
+directory to `~/.cowchat`, and rename the database file (plus its `-wal`/`-shm`
+sidecars) to `cowchat.db`. Old encrypted messages use a retired key derivation
+and can no longer be decrypted.
 
 ## Quick Start
 

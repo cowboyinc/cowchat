@@ -32,7 +32,7 @@ fn room_is_encrypted(
 }
 
 /// Reject client-submitted plaintext `content` destined for an encrypted room.
-/// The server can't read content, so it enforces the `clw1:` ciphertext marker
+/// The server can't read content, so it enforces the `cow1:` ciphertext marker
 /// — this prevents a keyless/misconfigured agent from silently leaking plaintext
 /// into a room whose whole point is that the operator can't read it.
 fn reject_plaintext_in_encrypted_room(

@@ -18,11 +18,9 @@ RUN mkdir -p /data
 
 EXPOSE 8080
 
-# Frozen volume path: existing container volumes hold data at /data/clawchat.db;
-# the in-container path is invisible to users. Do not rename.
 CMD ["cowchat-server", "serve", \
      "--http", "0.0.0.0:8080", \
      "--no-tcp", \
-     "--db", "/data/clawchat.db", \
+     "--db", "/data/cowchat.db", \
      "--key-file", "/data/auth.key", \
      "--socket", "/tmp/cowchat.sock"]

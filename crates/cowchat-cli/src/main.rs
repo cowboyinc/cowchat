@@ -137,7 +137,7 @@ struct Cli {
     key: Option<String>,
 
     /// Pre-shared key for end-to-end encrypted rooms. Overrides the
-    /// COWCHAT_ROOM_KEY environment variable (or legacy CLAWCHAT_ROOM_KEY).
+    /// COWCHAT_ROOM_KEY environment variable.
     /// Content is encrypted before send and decrypted after receive, per-room.
     #[arg(long, global = true)]
     room_key: Option<String>,
@@ -721,8 +721,6 @@ fn env_non_empty(key: &str) -> Option<String> {
 pub(crate) fn resolve_room_key(flag: Option<String>) -> Option<String> {
     flag.filter(|v| !v.is_empty())
         .or_else(|| env_non_empty("COWCHAT_ROOM_KEY"))
-        // Legacy pre-rename name — kept for compatibility.
-        .or_else(|| env_non_empty("CLAWCHAT_ROOM_KEY"))
 }
 
 /// Resolve the end-to-end room secret. Returns None when no flag or supported
@@ -2935,17 +2933,13 @@ mod room_key_tests {
     #[test]
     fn room_key_resolution_precedence() {
         std::env::remove_var("COWCHAT_ROOM_KEY");
-        std::env::remove_var("CLAWCHAT_ROOM_KEY");
         assert_eq!(resolve_room_key(None), None);
 
-        std::env::set_var("CLAWCHAT_ROOM_KEY", "legacy");
-        assert_eq!(resolve_room_key(None).as_deref(), Some("legacy"));
-
         std::env::set_var("COWCHAT_ROOM_KEY", "");
-        assert_eq!(resolve_room_key(None).as_deref(), Some("legacy"));
+        assert_eq!(resolve_room_key(None), None, "empty env = unset");
 
-        std::env::set_var("COWCHAT_ROOM_KEY", "new");
-        assert_eq!(resolve_room_key(None).as_deref(), Some("new"));
+        std::env::set_var("COWCHAT_ROOM_KEY", "from-env");
+        assert_eq!(resolve_room_key(None).as_deref(), Some("from-env"));
 
         assert_eq!(
             resolve_room_key(Some("flag".into())).as_deref(),
@@ -2953,6 +2947,5 @@ mod room_key_tests {
         );
 
         std::env::remove_var("COWCHAT_ROOM_KEY");
-        std::env::remove_var("CLAWCHAT_ROOM_KEY");
     }
 }

@@ -86,7 +86,7 @@ jobs:
             exit 1
           }
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
-          NOTES='ClawChat is now Cowchat. Prebuilt cowchat + cowchat-server binaries (macOS arm64/x86_64, Linux arm64/x86_64); the server migrates ~/.clawchat automatically (stop the old server first). Homebrew install: pending formula merge — this note is updated on promotion.'
+          NOTES='Prebuilt cowchat + cowchat-server binaries (macOS arm64/x86_64, Linux arm64/x86_64). Homebrew install: pending formula merge — this note is updated on promotion.'
 
           sha() {
             shasum -a 256 "dist/cowchat-${TAG}-$1.tar.gz" | awk '{print $1}'

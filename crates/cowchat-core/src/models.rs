@@ -110,7 +110,7 @@ pub struct CreateRoomPayload {
     #[serde(default)]
     pub public: bool,
     /// If true, the room is end-to-end encrypted: the server rejects plaintext
-    /// `content` and only relays `clw1:` ciphertext blobs. Agents must share a
+    /// `content` and only relays `cow1:` ciphertext blobs. Agents must share a
     /// pre-shared room key to read messages.
     #[serde(default)]
     pub encrypted: bool,

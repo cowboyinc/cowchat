@@ -2250,8 +2250,7 @@ async fn test_webhook_delivers_signed_post() {
     assert!(verify_signature(req, "topsecret"), "signature verifies");
 
     let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
-    // Protocol identifier — frozen for compatibility with pre-rename receivers. Do not rename.
-    assert_eq!(body["type"], "clawchat.message.created");
+    assert_eq!(body["type"], "cowchat.message.created");
     assert_eq!(body["subscription_id"], sub.subscription_id);
     assert_eq!(body["room_id"], "lobby");
     assert_eq!(body["message"]["content"], "hello webhook");
@@ -2576,7 +2575,7 @@ async fn test_e2e_encrypted_room() {
         )
         .unwrap();
     assert!(
-        stored.starts_with("clw1:"),
+        stored.starts_with("cow1:"),
         "stored content should be a ciphertext blob, got: {stored}"
     );
     assert!(
@@ -2590,7 +2589,7 @@ async fn test_e2e_encrypted_room() {
     let history = outsider.get_history(&room.room_id, 50, None).await.unwrap();
     let last = history.last().expect("a message exists in history");
     assert!(
-        last.content.starts_with("clw1:"),
+        last.content.starts_with("cow1:"),
         "keyless agent should see ciphertext, got: {}",
         last.content
     );

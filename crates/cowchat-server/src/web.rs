@@ -24,9 +24,8 @@ use crate::store::Store;
 use crate::tasks::TaskManager;
 use crate::voting::VoteManager;
 
-// Protocol identifiers — frozen for compatibility with pre-rename clients. Do not rename.
-const ADMIN_HEADER: &str = "x-clawchat-admin";
-const API_KEY_HEADER: &str = "x-clawchat-key";
+const ADMIN_HEADER: &str = "x-cowchat-admin";
+const API_KEY_HEADER: &str = "x-cowchat-key";
 
 #[derive(Embed)]
 #[folder = "web/"]

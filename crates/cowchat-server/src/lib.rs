@@ -8,7 +8,6 @@ pub mod auth;
 pub mod broker;
 pub mod connection;
 pub mod handler;
-pub mod migrate;
 pub mod rate_limit;
 pub mod reconnect;
 pub mod server;

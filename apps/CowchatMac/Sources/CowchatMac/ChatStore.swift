@@ -34,16 +34,10 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    static func resolveAgentID(defaults: UserDefaults, legacy: UserDefaults?) -> String {
+    static func resolveAgentID(defaults: UserDefaults) -> String {
         let key = "CowchatMac.agentID"
         if let existing = defaults.string(forKey: key), !existing.isEmpty {
             return existing
-        }
-        // Pre-rename identity (ClawChat <=0.3.x): copy it over, never delete
-        // it. This stable ID is how other agents know this app.
-        if let legacyID = legacy?.string(forKey: "ClawChatMac.agentID"), !legacyID.isEmpty {
-            defaults.set(legacyID, forKey: key)
-            return legacyID
         }
         let generated = "cowchat-mac-\(UUID().uuidString.lowercased())"
         defaults.set(generated, forKey: key)
@@ -56,10 +50,7 @@ final class ChatStore: ObservableObject {
 
     init(connection: any CowchatConnectionProtocol) {
         self.connection = connection
-        stableAgentID = Self.resolveAgentID(
-            defaults: .standard,
-            legacy: UserDefaults(suiteName: "chat.clawchat.mac")
-        )
+        stableAgentID = Self.resolveAgentID(defaults: .standard)
         connection.onEvent = { [weak self] type, payload in
             self?.handleEvent(type: type, payload: payload)
         }

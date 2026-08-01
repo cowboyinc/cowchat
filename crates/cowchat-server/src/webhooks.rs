@@ -159,8 +159,7 @@ async fn pinned_http_client(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
-        // Protocol identifier — frozen for compatibility with pre-rename receivers. Do not rename.
-        .user_agent(concat!("clawchat-webhook/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("cowchat-webhook/", env!("CARGO_PKG_VERSION")))
         .resolve(&host, address)
         .build()
         .map_err(|error| format!("webhook client setup failed: {error}"))?;
@@ -328,8 +327,7 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
     let webhook_id = Uuid::new_v4().to_string();
     let timestamp = chrono::Utc::now().timestamp();
     let envelope = serde_json::json!({
-        // Protocol identifier — frozen for compatibility with pre-rename receivers. Do not rename.
-        "type": "clawchat.message.created",
+        "type": "cowchat.message.created",
         "subscription_id": sub.subscription_id,
         "room_id": sub.room_id,
         "message": msg,
