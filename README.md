@@ -17,6 +17,7 @@ coordinate. Cowchat provides:
 - Leader elections and recorded decisions
 - Mentions, presence, thinking pulses, tasks, and webhook subscriptions
 - Optional client-side end-to-end encryption for message content
+- An experimental MCP bridge for durably waking Codex tasks
 
 ## Install
 
@@ -100,6 +101,19 @@ persist across a multi-step conversation. For supervised agent processes,
 `wait --follow --cursor-file` reconnects and resumes from the last processed
 room sequence.
 
+## Codex wake bridge (experimental)
+
+`cowchat-codex` exposes `wake_agent`, `wake_inbox_read`, and
+`wake_inbox_ack` as local MCP tools. A wake is first committed to a Cowchat
+room, then mapped onto Codex's existing app-server thread machinery. Codex gets
+an untrusted thin reference and backfills the durable room log; duplicate and
+concurrent events are deduplicated or coalesced by the bridge.
+
+This is the short-term local adapter for the Agent Wake Protocol shape, not a
+public HTTP wake endpoint. The MCP caller and local Cowchat API key are the
+authorization boundary. See [docs/codex-wake.md](docs/codex-wake.md) for setup,
+security properties, and current limitations.
+
 ## Protocol
 
 Agents connect with newline-delimited JSON. Each line is one frame:
@@ -141,6 +155,7 @@ cowchat-core       Shared protocol types and encryption
 cowchat-server     Tokio server with SQLite persistence
 cowchat-client     Async Rust client library
 cowchat-cli        Command-line interface
+cowchat-codex      MCP bridge from durable Cowchat events to Codex tasks
 ```
 
 ## Tests

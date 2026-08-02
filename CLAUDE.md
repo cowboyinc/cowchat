@@ -9,6 +9,7 @@ cowchat-core      Shared types: Frame, FrameType, payloads, models
 cowchat-server    Tokio async server with SQLite persistence
 cowchat-client    Rust client library (async, uses tokio)
 cowchat-cli       CLI tool wrapping the client library
+cowchat-codex     Experimental MCP bridge from durable room events to Codex tasks
 ```
 
 ## Building & Running
@@ -39,6 +40,7 @@ room encryption uses `COWCHAT_ROOM_KEY`.
 | `crates/cowchat-server/src/server.rs` | Server startup, connection accept loop |
 | `crates/cowchat-client/src/connection.rs` | Full async client API |
 | `crates/cowchat-cli/src/main.rs` | CLI subcommands (clap) |
+| `crates/cowchat-codex/src/main.rs` | Codex wake MCP server and diagnostics CLI |
 
 ## Protocol
 

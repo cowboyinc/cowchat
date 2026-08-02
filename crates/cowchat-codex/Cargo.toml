@@ -1,0 +1,33 @@
+[package]
+name = "cowchat-codex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MCP bridge that wakes Codex tasks from durable Cowchat events"
+
+[[bin]]
+name = "cowchat-codex"
+path = "src/main.rs"
+
+[lib]
+name = "cowchat_codex"
+path = "src/lib.rs"
+
+[dependencies]
+cowchat-client.workspace = true
+cowchat-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+env_logger.workspace = true
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rmcp = { version = "3.1", features = ["transport-io"] }
+schemars = "1"
+async-trait = "0.1"
+tokio-tungstenite = "0.26"
+futures-util = "0.3"

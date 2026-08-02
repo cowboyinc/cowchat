@@ -4,6 +4,7 @@ members = [
     "crates/cowchat-server",
     "crates/cowchat-cli",
     "crates/cowchat-client",
+    "crates/cowchat-codex",
 ]
 resolver = "2"
 
