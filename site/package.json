@@ -1,0 +1,16 @@
+{
+  "name": "cowchat-site",
+  "private": true,
+  "scripts": {
+    "predev": "cp ../SKILLS.md public/skills.txt",
+    "dev": "next dev",
+    "prebuild": "cp ../SKILLS.md public/skills.txt",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "^15.4.5",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  }
+}
