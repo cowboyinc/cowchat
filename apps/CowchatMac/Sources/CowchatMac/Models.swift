@@ -28,6 +28,32 @@ struct Room: Codable, Identifiable, Hashable {
         case encrypted
     }
 
+    init(
+        roomID: String,
+        name: String,
+        description: String?,
+        parentID: String?,
+        ephemeral: Bool,
+        createdAt: String,
+        createdBy: String?,
+        visibility: String,
+        lastActivity: String?,
+        memberCount: Int?,
+        encrypted: Bool
+    ) {
+        self.roomID = roomID
+        self.name = name
+        self.description = description
+        self.parentID = parentID
+        self.ephemeral = ephemeral
+        self.createdAt = createdAt
+        self.createdBy = createdBy
+        self.visibility = visibility
+        self.lastActivity = lastActivity
+        self.memberCount = memberCount
+        self.encrypted = encrypted
+    }
+
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         roomID = try values.decode(String.self, forKey: .roomID)
@@ -41,6 +67,38 @@ struct Room: Codable, Identifiable, Hashable {
         lastActivity = try values.decodeIfPresent(String.self, forKey: .lastActivity)
         memberCount = try values.decodeIfPresent(Int.self, forKey: .memberCount)
         encrypted = try values.decodeIfPresent(Bool.self, forKey: .encrypted) ?? false
+    }
+
+    func updating(lastActivity: String) -> Room {
+        Room(
+            roomID: roomID,
+            name: name,
+            description: description,
+            parentID: parentID,
+            ephemeral: ephemeral,
+            createdAt: createdAt,
+            createdBy: createdBy,
+            visibility: visibility,
+            lastActivity: lastActivity,
+            memberCount: memberCount,
+            encrypted: encrypted
+        )
+    }
+
+    func updating(memberCount: Int) -> Room {
+        Room(
+            roomID: roomID,
+            name: name,
+            description: description,
+            parentID: parentID,
+            ephemeral: ephemeral,
+            createdAt: createdAt,
+            createdBy: createdBy,
+            visibility: visibility,
+            lastActivity: lastActivity,
+            memberCount: memberCount,
+            encrypted: encrypted
+        )
     }
 }
 

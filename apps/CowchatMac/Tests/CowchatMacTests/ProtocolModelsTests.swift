@@ -59,6 +59,30 @@ final class ProtocolModelsTests: XCTestCase {
         XCTAssertEqual(agent.progress, 40)
     }
 
+    func testRoomActivityCanAdvanceWithoutDroppingRoomMetadata() throws {
+        let data = Data(#"""
+        {
+          "room_id":"room-1",
+          "name":"Design",
+          "description":"UI work",
+          "ephemeral":true,
+          "created_at":"2026-07-11T12:00:00Z",
+          "visibility":"private",
+          "member_count":2,
+          "encrypted":true
+        }
+        """#.utf8)
+
+        let room = try JSONDecoder().decode(Room.self, from: data)
+            .updating(lastActivity: "2026-08-04T21:30:00Z")
+
+        XCTAssertEqual(room.lastActivity, "2026-08-04T21:30:00Z")
+        XCTAssertEqual(room.description, "UI work")
+        XCTAssertEqual(room.memberCount, 2)
+        XCTAssertTrue(room.ephemeral)
+        XCTAssertTrue(room.encrypted)
+    }
+
     @MainActor
     func testHistoryMergePreservesLiveMessagesAndDeduplicates() throws {
         func message(_ id: String, _ seq: Int, _ content: String) throws -> ChatMessage {

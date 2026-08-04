@@ -15,9 +15,13 @@ final class ChatStore: ObservableObject {
 
     private let connection: any CowchatConnectionProtocol
     private var reconnectTask: Task<Void, Never>?
+    private var roomRefreshTask: Task<Void, Never>?
     private var roomLoadTask: Task<Void, Never>?
     private var joinedRoomID: String?
     private var roomSelectionGeneration = 0
+    private var roomMutationGeneration = 0
+    private var roomMutationGenerationByID: [String: Int] = [:]
+    private var isRefreshingRooms = false
     private(set) var agentID = ""
     let agentName = "Cowchat Mac"
     private let stableAgentID: String
@@ -76,6 +80,7 @@ final class ChatStore: ObservableObject {
             reconnectTask?.cancel()
             reconnectTask = nil
             try await refreshRooms()
+            startRoomRefreshLoop()
             if selectedRoomID == nil {
                 let initial = rooms.first(where: { $0.name.lowercased() == "lobby" }) ?? rooms.first
                 if let initial { await select(room: initial) }
@@ -87,7 +92,20 @@ final class ChatStore: ObservableObject {
     }
 
     func refreshRooms() async throws {
-        rooms = try await connection.listRooms().sorted(by: roomSort)
+        guard !isRefreshingRooms else { return }
+        isRefreshingRooms = true
+        defer { isRefreshingRooms = false }
+
+        let baseline = roomMutationGeneration
+        var refreshed = try await connection.listRooms()
+        if roomMutationGeneration != baseline {
+            let currentByID = Dictionary(uniqueKeysWithValues: rooms.map { ($0.id, $0) })
+            for (roomID, generation) in roomMutationGenerationByID where generation > baseline {
+                refreshed.removeAll { $0.id == roomID }
+                if let current = currentByID[roomID] { refreshed.append(current) }
+            }
+        }
+        rooms = refreshed.sorted(by: roomSort)
     }
 
     func select(room: Room) async {
@@ -110,6 +128,7 @@ final class ChatStore: ObservableObject {
             do {
                 if let joinedRoomID, joinedRoomID != room.roomID {
                     try await connection.leave(roomID: joinedRoomID)
+                    decrementRoomMemberCount(roomID: joinedRoomID)
                     self.joinedRoomID = nil
                 }
                 if joinedRoomID != room.roomID {
@@ -130,6 +149,7 @@ final class ChatStore: ObservableObject {
                 roomMembers = members.sorted {
                     $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
                 }
+                updateRoomMemberCount(roomID: room.roomID, count: members.count)
             } catch {
                 guard generation == roomSelectionGeneration,
                       selectedRoomID == room.roomID else { return }
@@ -150,7 +170,10 @@ final class ChatStore: ObservableObject {
                 ephemeral: ephemeral,
                 isPublic: isPublic
             )
-            if !rooms.contains(where: { $0.id == room.id }) { rooms.append(room) }
+            if !rooms.contains(where: { $0.id == room.id }) {
+                rooms.append(room)
+                recordRoomMutation(roomID: room.id)
+            }
             rooms.sort(by: roomSort)
             isCreateRoomPresented = false
             await select(room: room)
@@ -184,17 +207,23 @@ final class ChatStore: ObservableObject {
     private func handleEvent(type: String, payload: [String: Any]) {
         switch type {
         case "message_received":
-            if let message = try? decode(ChatMessage.self, payload), message.roomID == selectedRoomID {
-                append(message)
+            if let message = try? decode(ChatMessage.self, payload) {
+                if message.roomID == selectedRoomID {
+                    append(message)
+                } else {
+                    updateRoomActivity(from: message)
+                }
             }
         case "room_created":
             if let room = try? decode(Room.self, payload), !rooms.contains(where: { $0.id == room.id }) {
                 rooms.append(room)
                 rooms.sort(by: roomSort)
+                recordRoomMutation(roomID: room.id)
             }
         case "room_destroyed":
             if let id = payload["room_id"] as? String {
                 rooms.removeAll { $0.roomID == id }
+                recordRoomMutation(roomID: id)
                 if selectedRoomID == id { roomMembers = [] }
             }
         case "agent_joined", "agent_left":
@@ -208,6 +237,10 @@ final class ChatStore: ObservableObject {
 
     private func handleConnectionStatus(_ status: ConnectionStatus) {
         connectionStatus = status
+        if !status.isConnected {
+            roomRefreshTask?.cancel()
+            roomRefreshTask = nil
+        }
         if case .failed = status {
             joinedRoomID = nil
             roomMembers = []
@@ -222,6 +255,7 @@ final class ChatStore: ObservableObject {
         roomMembers = members.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
+        updateRoomMemberCount(roomID: roomID, count: members.count)
     }
 
     private func updatePresence(from payload: [String: Any]) {
@@ -244,11 +278,52 @@ final class ChatStore: ObservableObject {
         }
     }
 
+    private func startRoomRefreshLoop() {
+        roomRefreshTask?.cancel()
+        roomRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                guard !Task.isCancelled, let self, connectionStatus.isConnected else { return }
+                try? await refreshRooms()
+            }
+        }
+    }
+
     private func append(_ message: ChatMessage) {
         guard !messages.contains(where: { $0.id == message.id }) else { return }
         messages.append(message)
         messages.sort { $0.seq < $1.seq }
         if messages.count > 200 { messages.removeFirst(messages.count - 200) }
+        updateRoomActivity(from: message)
+    }
+
+    private func updateRoomActivity(from message: ChatMessage) {
+        guard let activity = message.timestamp.cowchatDate,
+              let index = rooms.firstIndex(where: { $0.roomID == message.roomID }) else { return }
+        let currentActivity = rooms[index].activityDate
+        if let currentActivity, activity <= currentActivity { return }
+        rooms[index] = rooms[index].updating(lastActivity: message.timestamp)
+        rooms.sort(by: roomSort)
+        recordRoomMutation(roomID: message.roomID)
+    }
+
+    private func updateRoomMemberCount(roomID: String, count: Int) {
+        guard let index = rooms.firstIndex(where: { $0.roomID == roomID }),
+              rooms[index].memberCount != count else { return }
+        rooms[index] = rooms[index].updating(memberCount: count)
+        recordRoomMutation(roomID: roomID)
+    }
+
+    private func decrementRoomMemberCount(roomID: String) {
+        guard let index = rooms.firstIndex(where: { $0.roomID == roomID }),
+              let count = rooms[index].memberCount else { return }
+        rooms[index] = rooms[index].updating(memberCount: max(0, count - 1))
+        recordRoomMutation(roomID: roomID)
+    }
+
+    private func recordRoomMutation(roomID: String) {
+        roomMutationGeneration += 1
+        roomMutationGenerationByID[roomID] = roomMutationGeneration
     }
 
     static func merging(history: [ChatMessage], live: [ChatMessage]) -> [ChatMessage] {

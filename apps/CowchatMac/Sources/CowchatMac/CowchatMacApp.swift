@@ -86,10 +86,10 @@ struct CowchatMacApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
-                .tint(Color(red: 0.16, green: 0.61, blue: 0.88))
+                .tint(GallopTheme.ColorToken.buttonPrimaryDefault.color)
         }
-        .windowStyle(.titleBar)
-        .defaultSize(width: 1120, height: 720)
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1080, height: 740)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("New Room") { store.isCreateRoomPresented = true }

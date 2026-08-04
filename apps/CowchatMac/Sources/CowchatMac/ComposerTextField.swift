@@ -14,26 +14,53 @@ struct ComposerTextField: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField()
+        let field = InitiallyFocusedTextField()
         field.isBordered = false
         field.isBezeled = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: NSFont.systemFontSize)
+        field.font = .systemFont(ofSize: GallopTheme.TypeRole.bodyL.fontSize, weight: .medium)
+        field.textColor = GallopTheme.ColorToken.textPrimary.nsColor
         field.isEditable = true
         field.isSelectable = true
         field.usesSingleLineMode = true
         field.lineBreakMode = .byTruncatingTail
         field.delegate = context.coordinator
+        field.setAccessibilityLabel(placeholder)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return field
+    }
+
+    private final class InitiallyFocusedTextField: NSTextField {
+        private var hasRequestedFocus = false
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil, !hasRequestedFocus else { return }
+            hasRequestedFocus = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let window = self.window, self.isEnabled else { return }
+                window.makeFirstResponder(self)
+            }
+        }
     }
 
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.text = $text
         context.coordinator.onSubmit = onSubmit
-        field.placeholderString = placeholder
+        field.placeholderAttributedString = NSAttributedString(
+            string: placeholder,
+            attributes: [
+                .foregroundColor: GallopTheme.ColorToken.textTertiary.nsColor,
+                .font: NSFont.systemFont(
+                    ofSize: GallopTheme.TypeRole.bodyL.fontSize,
+                    weight: .medium
+                ),
+            ]
+        )
+        field.textColor = GallopTheme.ColorToken.textPrimary.nsColor
         field.isEnabled = isEnabled
+        field.setAccessibilityLabel(placeholder)
         if field.stringValue != text { field.stringValue = text }
     }
 
