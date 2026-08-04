@@ -23,8 +23,10 @@ local profile whose authority comes from all of the following:
 
 1. The operator explicitly configures a target alias. Callers cannot supply a
    raw Codex thread id or choose an arbitrary Cowchat room.
-2. The MCP server runs as a local child process and reads the operator's local
-   Cowchat API key.
+2. The MCP server runs as a local child process and connects through Cowchat's
+   same-machine UDS/loopback trust boundary. No local API key is required. The
+   Unix socket is user-scoped, while loopback TCP is reachable by other local
+   processes; use `--require-local-auth` on a shared or untrusted host.
 3. The Codex app-server endpoint is a local Unix socket by default. A remote
    WebSocket endpoint should require its configured bearer token.
 4. Sender `wake_hint` is advisory. Each target has a recipient-controlled
@@ -75,6 +77,10 @@ Edit `~/.cowchat/codex-wake.json`:
   }
 }
 ```
+
+`api_key_file` is optional in practice for the default local transport: a
+missing file becomes an empty key. Keep it configured when this bridge targets
+a server started with `--require-local-auth` or a remote authenticated server.
 
 Start Cowchat and the managed Codex app-server daemon, then validate local
 files without waking a task:

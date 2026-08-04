@@ -11,6 +11,17 @@ async fn start_test_server() -> (
     String,
     tempfile::TempDir,
 ) {
+    start_test_server_with_keyless_local(false).await
+}
+
+async fn start_test_server_with_keyless_local(
+    allow_keyless_local: bool,
+) -> (
+    tokio::task::JoinHandle<()>,
+    String,
+    String,
+    tempfile::TempDir,
+) {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("test.db");
     let key_path = tmp_dir.path().join("auth.key");
@@ -29,6 +40,7 @@ async fn start_test_server() -> (
         db_path,
         auth_key_path: key_path,
         no_auth: false,
+        allow_keyless_local,
         allow_private_webhooks: true,
         http_signup_enabled: false,
         http_admin_secret: None,
@@ -121,6 +133,15 @@ async fn test_invalid_key_rejected() {
     let (_handle, addr, _key, _tmp) = start_test_server().await;
     let result = CowchatClient::connect_tcp(&addr, "wrong-key", "bad-agent", None, vec![]).await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_loopback_client_can_connect_without_key_when_enabled() {
+    let (_handle, addr, _key, _tmp) = start_test_server_with_keyless_local(true).await;
+    let client = CowchatClient::connect_tcp(&addr, "", "local-agent", None, vec![])
+        .await
+        .expect("a trusted loopback client should not need an API key");
+    client.ping().await.unwrap();
 }
 
 #[tokio::test]
@@ -812,6 +833,7 @@ async fn test_open_vote_and_ballots_survive_server_restart() {
         db_path: tmp.path().join("test.db"),
         auth_key_path: tmp.path().join("auth.key"),
         no_auth: false,
+        allow_keyless_local: false,
         allow_private_webhooks: true,
         http_signup_enabled: false,
         http_admin_secret: None,
@@ -2741,6 +2763,7 @@ async fn test_agent_id_ownership_survives_server_restart() {
         db_path: tmp.path().join("test.db"),
         auth_key_path: tmp.path().join("auth.key"),
         no_auth: false,
+        allow_keyless_local: false,
         allow_private_webhooks: true,
         http_signup_enabled: false,
         http_admin_secret: None,

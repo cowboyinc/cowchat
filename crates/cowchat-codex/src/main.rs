@@ -48,10 +48,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = BridgeConfig::load(&cli.config)?;
     let store = Arc::new(WakeStore::open(&config.state_db)?);
     if matches!(cli.command, Command::Doctor) {
-        let api_key = std::fs::read_to_string(&config.cowchat.api_key_file)?;
-        if api_key.trim().is_empty() {
-            return Err("Cowchat API key file is empty".into());
-        }
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
@@ -59,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "config": cli.config,
                 "state_db": config.state_db,
                 "targets": config.targets.keys().collect::<Vec<_>>(),
-                "note": "doctor validates local configuration and files; it does not wake a task"
+                "note": "doctor validates local configuration; local Cowchat transports are keyless and it does not wake a task"
             }))?
         );
         return Ok(());

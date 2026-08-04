@@ -2,7 +2,6 @@ import Foundation
 import Network
 
 enum CowchatConnectionError: LocalizedError {
-    case missingAPIKey
     case notConnected
     case invalidResponse
     case server(String)
@@ -11,8 +10,6 @@ enum CowchatConnectionError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingAPIKey:
-            return "No local API key was found. Start cowchat-server once to create ~/.cowchat/auth.key."
         case .notConnected:
             return "Cowchat is not connected."
         case .invalidResponse:
@@ -82,15 +79,8 @@ final class CowchatConnection: CowchatConnectionProtocol {
     }
 
     func register(name: String, agentID: String) async throws -> String {
-        let keyURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cowchat/auth.key")
-        guard let key = try? String(contentsOf: keyURL, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
-            throw CowchatConnectionError.missingAPIKey
-        }
-
         let payload = try await request(type: "register", payload: [
-            "key": key,
+            "key": "",
             "name": name,
             "agent_id": agentID,
             "reconnect": true,

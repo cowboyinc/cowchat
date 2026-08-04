@@ -50,6 +50,10 @@ enum Commands {
         #[arg(long)]
         no_auth: bool,
 
+        /// Require API keys even over the Unix socket and loopback TCP
+        #[arg(long)]
+        require_local_auth: bool,
+
         /// SQLite database path
         #[arg(long, default_value = default_db_path())]
         db: PathBuf,
@@ -134,16 +138,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             http_origins,
             trusted_proxy_ips,
             no_auth,
+            require_local_auth,
             db,
             key_file,
         } => {
             let config = ServerConfig {
                 socket_path: socket,
                 tcp_addr: if no_tcp { None } else { Some(tcp) },
-                http_addr: http,
+                http_addr: http.clone(),
                 db_path: db,
                 auth_key_path: key_file,
                 no_auth,
+                allow_keyless_local: !require_local_auth,
                 allow_private_webhooks: false,
                 http_signup_enabled: enable_http_signup,
                 http_admin_secret,
@@ -155,7 +161,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if no_auth {
                 log::info!("Running in NO-AUTH mode (open access)");
             } else {
-                log::info!("API key: {}", server.api_key());
+                if require_local_auth {
+                    log::info!("Local API-key authentication is required");
+                } else {
+                    log::info!("Local UDS and loopback TCP connections are keyless");
+                }
+                if http.is_some() {
+                    log::info!(
+                        "API key for remote HTTP/WebSocket clients: {}",
+                        server.api_key()
+                    );
+                }
             }
             server.run().await?;
         }

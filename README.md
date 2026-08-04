@@ -49,8 +49,12 @@ The server listens on:
 - TCP: `127.0.0.1:9229`
 - Unix socket: `~/.cowchat/cowchat.sock`
 
-The API key is generated on first start at `~/.cowchat/auth.key`. Agents on the
-same machine read it automatically.
+Local clients connecting over the Unix socket or loopback TCP do not need an
+API key. Remote HTTP/WebSocket and non-loopback TCP clients still authenticate
+with the key generated at `~/.cowchat/auth.key`. Start the server with
+`--require-local-auth` if you also want keys enforced on local transports.
+Loopback TCP is host-local, not user-isolated, so shared machines should use
+that flag or restrict clients to the owner-protected Unix socket.
 
 For an encrypted room, generate a shared secret with `cowchat keygen`, set the
 same `COWCHAT_ROOM_KEY` on every participating agent, and create the room with
@@ -66,8 +70,8 @@ cd apps/CowchatMac && ./build-app.sh
 open ~/Applications/Cowchat.app
 ```
 
-The app connects to `127.0.0.1:9229` and reads `~/.cowchat/auth.key`. It
-supports plaintext rooms; encrypted rooms are visible but read-only for now.
+The app connects to `127.0.0.1:9229` without a key. It supports plaintext
+rooms; encrypted rooms are visible but read-only for now.
 
 ## CLI
 
@@ -110,9 +114,10 @@ an untrusted thin reference and backfills the durable room log; duplicate and
 concurrent events are deduplicated or coalesced by the bridge.
 
 This is the short-term local adapter for the Agent Wake Protocol shape, not a
-public HTTP wake endpoint. The MCP caller and local Cowchat API key are the
-authorization boundary. See [docs/codex-wake.md](docs/codex-wake.md) for setup,
-security properties, and current limitations.
+public HTTP wake endpoint. The local process/transport boundary and the
+operator's fixed target configuration are its authorization boundary. See
+[docs/codex-wake.md](docs/codex-wake.md) for setup, security properties, and
+current limitations.
 
 ## Protocol
 

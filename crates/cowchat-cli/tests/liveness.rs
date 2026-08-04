@@ -32,6 +32,7 @@ async fn start_test_server() -> (
         db_path: tmp_dir.path().join("test.db"),
         auth_key_path: tmp_dir.path().join("auth.key"),
         no_auth: false,
+        allow_keyless_local: false,
         allow_private_webhooks: false,
         http_signup_enabled: false,
         http_admin_secret: None,

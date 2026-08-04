@@ -143,12 +143,11 @@ impl CowchatBackend {
     }
 
     async fn connect(&self) -> Result<CowchatClient, ServiceError> {
-        let key =
-            std::fs::read_to_string(&self.config.api_key_file).map_err(ServiceError::ReadApiKey)?;
+        // Backward-compatible remote credential: local UDS/loopback servers
+        // accept an empty key, while deployments that require auth can keep
+        // using the configured file.
+        let key = std::fs::read_to_string(&self.config.api_key_file).unwrap_or_default();
         let key = key.trim();
-        if key.is_empty() {
-            return Err(ServiceError::EmptyApiKey);
-        }
         let mut client = if let Some(socket) = &self.config.socket {
             CowchatClient::connect_uds(
                 socket,
@@ -574,10 +573,6 @@ pub enum ServiceError {
     AppServer(#[from] AppServerError),
     #[error("Cowchat client error: {0}")]
     Cowchat(#[from] ClientError),
-    #[error("failed to read Cowchat API key: {0}")]
-    ReadApiKey(#[source] std::io::Error),
-    #[error("Cowchat API key file is empty")]
-    EmptyApiKey,
     #[error("configure exactly one Cowchat transport")]
     InvalidCowchatTransport,
     #[error("environment variable {0} is required for the encrypted Cowchat room key")]

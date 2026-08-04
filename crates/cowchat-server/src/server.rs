@@ -28,6 +28,14 @@ const REGISTER_TIMEOUT_SECS: u64 = 10;
 /// How often the background task purges messages past their tier's retention.
 const PURGE_INTERVAL: Duration = Duration::from_secs(3600);
 
+fn tcp_connection_uses_no_auth(
+    no_auth: bool,
+    allow_keyless_local: bool,
+    peer_ip: std::net::IpAddr,
+) -> bool {
+    no_auth || (allow_keyless_local && peer_ip.is_loopback())
+}
+
 async fn read_frame_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
 ) -> std::io::Result<Option<String>> {
@@ -57,6 +65,9 @@ pub struct ServerConfig {
     pub db_path: PathBuf,
     pub auth_key_path: PathBuf,
     pub no_auth: bool,
+    /// Let same-machine clients use the UDS or loopback TCP without an API key.
+    /// HTTP/WebSocket and non-loopback TCP connections are never covered.
+    pub allow_keyless_local: bool,
     /// Explicit test/development escape hatch. Production defaults to false.
     pub allow_private_webhooks: bool,
     pub http_signup_enabled: bool,
@@ -136,7 +147,7 @@ impl CowchatServer {
         let uds_ephemeral = self.ephemeral_rooms.clone();
         let uds_vote_mgr = self.vote_mgr.clone();
         let uds_api_key = self.api_key.clone();
-        let uds_no_auth = self.config.no_auth;
+        let uds_no_auth = self.config.no_auth || self.config.allow_keyless_local;
         let uds_rate_limiter = self.rate_limiter.clone();
         let uds_reconnect_mgr = self.reconnect_mgr.clone();
         let uds_task_mgr = self.task_mgr.clone();
@@ -191,6 +202,7 @@ impl CowchatServer {
             let tcp_vote_mgr = self.vote_mgr.clone();
             let tcp_api_key = self.api_key.clone();
             let tcp_no_auth = self.config.no_auth;
+            let tcp_allow_keyless_local = self.config.allow_keyless_local;
             let tcp_rate_limiter = self.rate_limiter.clone();
             let tcp_reconnect_mgr = self.reconnect_mgr.clone();
             let tcp_task_mgr = self.task_mgr.clone();
@@ -200,6 +212,13 @@ impl CowchatServer {
                     match tcp_listener.accept().await {
                         Ok((stream, addr)) => {
                             log::info!("TCP connection from {}", addr);
+                            // The peer address, not the bind address or a
+                            // caller-supplied header, defines this trust edge.
+                            let connection_no_auth = tcp_connection_uses_no_auth(
+                                tcp_no_auth,
+                                tcp_allow_keyless_local,
+                                addr.ip(),
+                            );
                             let (read_half, write_half) = tokio::io::split(stream);
                             let broker = tcp_broker.clone();
                             let store = tcp_store.clone();
@@ -219,7 +238,7 @@ impl CowchatServer {
                                     ephemeral,
                                     vote_mgr,
                                     api_key,
-                                    tcp_no_auth,
+                                    connection_no_auth,
                                     rate_limiter,
                                     reconnect_mgr,
                                     task_mgr,
@@ -931,4 +950,38 @@ where
     let _ = store.record_session_end(&session_id);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod local_auth_tests {
+    use super::tcp_connection_uses_no_auth;
+
+    #[test]
+    fn keyless_local_never_covers_non_loopback_tcp() {
+        assert!(tcp_connection_uses_no_auth(
+            false,
+            true,
+            "127.0.0.1".parse().unwrap()
+        ));
+        assert!(tcp_connection_uses_no_auth(
+            false,
+            true,
+            "::1".parse().unwrap()
+        ));
+        assert!(!tcp_connection_uses_no_auth(
+            false,
+            true,
+            "192.0.2.10".parse().unwrap()
+        ));
+        assert!(!tcp_connection_uses_no_auth(
+            false,
+            false,
+            "127.0.0.1".parse().unwrap()
+        ));
+        assert!(tcp_connection_uses_no_auth(
+            true,
+            false,
+            "192.0.2.10".parse().unwrap()
+        ));
+    }
 }

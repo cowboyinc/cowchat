@@ -132,7 +132,7 @@ struct Cli {
     #[arg(long, global = true)]
     url: Option<String>,
 
-    /// API key (reads from ~/.cowchat/auth.key if not provided)
+    /// API key for authenticated remote servers (local connections are keyless)
     #[arg(long, global = true)]
     key: Option<String>,
 
@@ -702,16 +702,14 @@ fn default_key_path() -> PathBuf {
     default_data_dir().join("auth.key")
 }
 
-fn load_key(key_arg: &Option<String>) -> Result<String, Box<dyn std::error::Error>> {
+fn load_key(key_arg: &Option<String>) -> String {
     if let Some(key) = key_arg {
-        return Ok(key.clone());
+        return key.clone();
     }
     let key_path = default_key_path();
-    if key_path.exists() {
-        Ok(std::fs::read_to_string(key_path)?.trim().to_string())
-    } else {
-        Err("No API key provided. Use --key or ensure ~/.cowchat/auth.key exists.".into())
-    }
+    std::fs::read_to_string(key_path)
+        .map(|key| key.trim().to_string())
+        .unwrap_or_default()
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
@@ -743,7 +741,7 @@ fn decrypt_field(secret: Option<&[u8]>, room_id: &str, content: &str) -> String 
 }
 
 async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>> {
-    let key = load_key(&cli.key)?;
+    let key = load_key(&cli.key);
 
     let agent_id = cli.agent_id.as_deref();
     let mut client = if let Some(url) = &cli.url {
