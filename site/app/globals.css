@@ -1,0 +1,232 @@
+:root {
+  --bg: #0c0c0e;
+  --fg: #ededf0;
+  --muted: #87878f;
+  --accent: #d5846f; /* clay — brand continuity */
+  --line: #242428;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.65 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  -webkit-font-smoothing: antialiased;
+}
+
+main {
+  width: 100%;
+  max-width: 560px;
+  text-align: center;
+}
+
+h1 {
+  font-size: clamp(2rem, 6vw, 2.8rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.mark {
+  font-size: 0.8em;
+}
+
+.tagline {
+  color: var(--muted);
+  margin-top: 0.75rem;
+  font-size: 1.02rem;
+}
+
+.sub {
+  color: var(--muted);
+  margin-top: 1.15rem;
+  font-size: 0.9rem;
+}
+
+.sub.muted {
+  font-size: 0.84rem;
+  opacity: 0.8;
+}
+
+.prompt-box {
+  position: relative;
+  margin-top: 1rem;
+  text-align: left;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: rgba(213, 132, 111, 0.05);
+  padding: 1.1rem 1.2rem;
+}
+
+.prompt-box pre {
+  margin: 0;
+  /* clear the absolutely-positioned Copy button on the first line */
+  padding-top: 1.4rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: #d6d6dd;
+}
+
+.copy-btn {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--fg);
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.copy-btn:hover {
+  opacity: 0.85;
+}
+
+.run-label {
+  color: var(--muted);
+  margin-top: 2.4rem;
+  font-size: 0.88rem;
+}
+
+.run {
+  margin-top: 0.65rem;
+  padding: 0.7rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: #c7c7cf;
+  font-size: 0.88rem;
+  text-align: left;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.run .prompt {
+  color: var(--accent);
+  margin-right: 0.55rem;
+  user-select: none;
+}
+
+footer {
+  margin-top: 2.8rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  display: flex;
+  gap: 0.6rem;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+footer a {
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+footer a:hover {
+  color: var(--fg);
+  border-bottom-color: var(--muted);
+}
+
+/* --- How it works (doc) page --- */
+.doc {
+  max-width: 640px;
+  text-align: left;
+  align-self: start;
+  padding: 2rem 0 4rem;
+}
+
+.doc .back {
+  margin-bottom: 2rem;
+  font-size: 0.9rem;
+}
+
+.doc .back a,
+.doc a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.doc .back a {
+  color: var(--muted);
+}
+
+.doc .back a:hover,
+.doc a:hover {
+  color: var(--fg);
+}
+
+.doc h1 {
+  font-size: clamp(1.7rem, 4vw, 2.1rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.doc h2 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin-top: 2.2rem;
+}
+
+.doc p {
+  color: #c7c7cf;
+  margin-top: 0.85rem;
+}
+
+.doc .lead {
+  color: var(--muted);
+  margin-top: 1rem;
+  font-size: 1.02rem;
+}
+
+.doc ul {
+  list-style: none;
+  margin-top: 0.9rem;
+}
+
+.doc li {
+  color: #c7c7cf;
+  position: relative;
+  padding-left: 1.3rem;
+  margin-top: 0.55rem;
+}
+
+.doc li::before {
+  content: "—";
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+}
+
+.doc b {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.doc code {
+  color: #d8d8de;
+}
+
+.doc .more {
+  margin-top: 2.4rem;
+  color: var(--muted);
+}
