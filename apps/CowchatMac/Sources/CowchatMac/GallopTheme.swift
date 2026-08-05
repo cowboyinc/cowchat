@@ -266,7 +266,7 @@ enum GallopTheme {
             ceil(nsFont.ascender - nsFont.descender + nsFont.leading)
         }
 
-        private var nsFont: NSFont {
+        var nsFont: NSFont {
             switch family {
             case .display:
                 let base = NSFont.systemFont(ofSize: fontSize, weight: appKitWeight)
@@ -281,14 +281,15 @@ enum GallopTheme {
             }
         }
 
-        /// Interpolated AppKit weights retain Gallop's variable-weight intent as
-        /// closely as the installed system font permits.
+        /// AppKit's weight values are not a linear CSS/variable-font axis. Map
+        /// Gallop's weights optically so the system fallbacks keep the intended
+        /// hierarchy without rendering every body style as semibold.
         private var appKitWeight: NSFont.Weight {
             switch fontWeight {
-            case 500: return .medium
-            case 550: return NSFont.Weight(rawValue: 0.265)
-            case 750: return NSFont.Weight(rawValue: 0.48)
-            case 780: return NSFont.Weight(rawValue: 0.528)
+            case 500: return .regular
+            case 550: return NSFont.Weight(rawValue: 0.12)
+            case 750: return .semibold
+            case 780: return .bold
             default: return .regular
             }
         }
@@ -331,6 +332,7 @@ enum GallopTheme {
         var tracking: CGFloat { style.tracking }
         var lineSpacing: CGFloat { style.lineSpacing }
         var verticalPadding: CGFloat { style.verticalPadding }
+        var nsFont: NSFont { style.nsFont }
         var font: Font { style.font }
     }
 }

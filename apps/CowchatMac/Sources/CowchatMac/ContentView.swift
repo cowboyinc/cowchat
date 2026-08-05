@@ -687,7 +687,7 @@ private struct LobbyDashboardView: View {
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Lobby")
-                        .gallopText(.bodyMStrong, color: .textPrimary)
+                        .gallopText(.h4, color: .textPrimary)
                     Text("\(availableAgentCount) available agents · \(store.pinnedRoomIDs.count) pinned rooms")
                         .gallopText(.caption, color: .textTertiary)
                 }
@@ -727,7 +727,7 @@ private struct LobbyDashboardView: View {
                                 .background(GallopColor.buttonSecondaryDefault.color, in: Circle())
                             Spacer(minLength: 12)
                             Text("New Room")
-                                .gallopText(.bodyMStrong, color: .textPrimary)
+                                .gallopText(.h4, color: .textPrimary)
                         }
                         .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
                         .padding(16)
@@ -786,7 +786,7 @@ private struct DashboardRoomCard: View {
                             .lineLimit(1)
                     }
                     Text(room.name)
-                        .gallopText(.bodyMStrong, color: .textPrimary)
+                        .gallopText(.h4, color: .textPrimary)
                         .lineLimit(1)
                     Text(
                         store.roomMessagePreviews[room.id]
@@ -855,7 +855,7 @@ private struct RoomSetupView: View {
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(room.name)
-                        .gallopText(.bodyMStrong, color: .textPrimary)
+                        .gallopText(.h4, color: .textPrimary)
                     Text("Waiting for your first collaborator")
                         .gallopText(.caption, color: .textTertiary)
                 }
@@ -1042,7 +1042,7 @@ private struct ChatRoomView: View {
             }
 
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     if let parentRoom {
                         Button(parentRoom.name) {
                             Task { await store.select(room: parentRoom) }
@@ -1058,7 +1058,7 @@ private struct ChatRoomView: View {
                             .foregroundStyle(GallopColor.iconSubtle.color)
                     }
                     Text(room.name)
-                        .gallopText(.bodyMStrong, color: .textPrimary)
+                        .gallopText(.h4, color: .textPrimary)
                     if room.encrypted {
                         Image(systemName: "lock.fill")
                             .font(.system(size: 10, weight: .semibold))
@@ -1687,7 +1687,7 @@ private struct EmptyChatView: View {
                                 VStack(alignment: .leading, spacing: 12) {
                                     RoomAvatar(name: room.name, size: 38, accented: false)
                                     Text(room.name)
-                                        .gallopText(.bodyMStrong, color: .textPrimary)
+                                        .gallopText(.h4, color: .textPrimary)
                                     Text(room.description ?? "Open conversation")
                                         .gallopText(.caption, color: .textTertiary)
                                         .lineLimit(2)
