@@ -27,6 +27,7 @@ use crate::store::Store;
 /// (== length of this slice) the subscription is marked `failed` and stops
 /// receiving deliveries until the owner re-enables it.
 const RETRY_SCHEDULE_SECS: &[u64] = &[1, 4, 16, 64, 256];
+const WEBHOOK_DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -87,6 +88,14 @@ struct Inner {
     store: Arc<Store>,
     notify: Notify,
     allow_private: bool,
+    #[cfg(test)]
+    validation_gate: Option<ValidationGate>,
+}
+
+#[cfg(test)]
+struct ValidationGate {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
 }
 
 fn is_public_ip(ip: IpAddr) -> bool {
@@ -139,10 +148,14 @@ async fn resolve_public_webhook(
     let port = url
         .port_or_known_default()
         .ok_or_else(|| "webhook_url requires a known port".to_string())?;
-    let addresses = tokio::net::lookup_host((host.as_str(), port))
-        .await
-        .map_err(|error| format!("webhook host resolution failed: {error}"))?
-        .collect::<Vec<_>>();
+    let addresses = tokio::time::timeout(
+        WEBHOOK_DNS_TIMEOUT,
+        tokio::net::lookup_host((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| "webhook host resolution timed out".to_string())?
+    .map_err(|error| format!("webhook host resolution failed: {error}"))?
+    .collect::<Vec<_>>();
     if addresses.is_empty()
         || (!allow_private && addresses.iter().any(|addr| !is_public_ip(addr.ip())))
     {
@@ -173,11 +186,35 @@ impl WebhookManager {
                 store,
                 notify: Notify::new(),
                 allow_private,
+                #[cfg(test)]
+                validation_gate: None,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_validation_gate(
+        store: Arc<Store>,
+        allow_private: bool,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                store,
+                notify: Notify::new(),
+                allow_private,
+                validation_gate: Some(ValidationGate { started, release }),
             }),
         }
     }
 
     pub async fn validate_url(&self, raw: &str) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(gate) = self.inner.validation_gate.as_ref() {
+            gate.started.notify_one();
+            gate.release.notified().await;
+        }
         resolve_public_webhook(raw, self.inner.allow_private)
             .await
             .map(|_| ())

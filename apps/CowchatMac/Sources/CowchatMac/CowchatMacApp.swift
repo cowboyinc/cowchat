@@ -4,6 +4,13 @@ import SwiftUI
 @MainActor
 final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
     private var screenObserver: NSObjectProtocol?
+    private var terminationTask: Task<Void, Never>?
+    private var terminationShutdownCompleted = false
+    var onTerminationRequested: (@MainActor () async -> Void)?
+    var replyToApplicationShouldTerminate: @MainActor (NSApplication, Bool) -> Void = {
+        application, shouldTerminate in
+        application.reply(toApplicationShouldTerminate: shouldTerminate)
+    }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
@@ -48,6 +55,26 @@ final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationShutdownCompleted { return .terminateNow }
+        guard let onTerminationRequested else { return .terminateNow }
+
+        if terminationTask == nil {
+            let reply = replyToApplicationShouldTerminate
+            terminationTask = Task { @MainActor [weak self] in
+                await onTerminationRequested()
+                guard let self else {
+                    reply(sender, true)
+                    return
+                }
+                terminationShutdownCompleted = true
+                terminationTask = nil
+                reply(sender, true)
+            }
+        }
+        return .terminateLater
     }
 
     deinit {
@@ -108,7 +135,12 @@ struct CowchatMacApp: App {
             }
             .environmentObject(store)
             .tint(GallopTheme.ColorToken.buttonPrimaryDefault.color)
-            .task { store.start() }
+            .task {
+                appDelegate.onTerminationRequested = {
+                    await store.shutdownOwnedLocalServerForAppTermination()
+                }
+                store.start()
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1080, height: 740)

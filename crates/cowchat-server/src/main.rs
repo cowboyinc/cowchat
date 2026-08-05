@@ -1,6 +1,31 @@
 use clap::{Parser, Subcommand};
 use cowchat_server::{auth, CowchatServer, ServerConfig};
-use std::path::PathBuf;
+use std::{
+    io::{self, BufRead},
+    path::PathBuf,
+    thread,
+    time::Duration,
+};
+
+const APP_CONTROL_EOF_GRACE: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppControlCommand {
+    Interrupt,
+    Terminate,
+    Kill,
+}
+
+impl AppControlCommand {
+    fn parse(line: &str) -> Option<Self> {
+        match line.trim() {
+            "INT" => Some(Self::Interrupt),
+            "TERM" => Some(Self::Terminate),
+            "KILL" => Some(Self::Kill),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "cowchat-server", version, about = "Cowchat server daemon")]
@@ -61,6 +86,10 @@ enum Commands {
         /// API key file path
         #[arg(long, default_value = default_key_path())]
         key_file: PathBuf,
+
+        /// Accept lifecycle commands from the Cowchat app over inherited stdin.
+        #[arg(long, hide = true)]
+        app_control_stdin: bool,
     },
 
     /// Manage authentication
@@ -121,6 +150,78 @@ fn default_key_path() -> &'static str {
     )
 }
 
+fn monitor_app_control<R, D, W>(mut reader: R, mut dispatch: D, mut wait: W) -> io::Result<()>
+where
+    R: BufRead,
+    D: FnMut(AppControlCommand),
+    W: FnMut(Duration),
+{
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                // If the owning app disappears without an orderly handshake,
+                // stdin reaches EOF. Give the server one bounded TERM window,
+                // then make it impossible for the helper to remain orphaned.
+                dispatch(AppControlCommand::Terminate);
+                wait(APP_CONTROL_EOF_GRACE);
+                dispatch(AppControlCommand::Kill);
+                return Ok(());
+            }
+            Ok(_) => {
+                let Some(command) = AppControlCommand::parse(&line) else {
+                    continue;
+                };
+                dispatch(command);
+                if command == AppControlCommand::Kill {
+                    return Ok(());
+                }
+            }
+            Err(error) => {
+                // A broken ownership channel has the same meaning as EOF.
+                dispatch(AppControlCommand::Terminate);
+                wait(APP_CONTROL_EOF_GRACE);
+                dispatch(AppControlCommand::Kill);
+                return Err(error);
+            }
+        }
+    }
+}
+
+fn force_kill_self() {
+    // This code is executing inside the exact helper process. Even if another
+    // thread exits the process concurrently, it cannot continue from here with
+    // a recycled PID and accidentally target an unrelated process.
+    let result = unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+    if result != 0 {
+        log::error!(
+            "failed to force-stop helper from app control channel: {}",
+            io::Error::last_os_error()
+        );
+        std::process::abort();
+    }
+}
+
+fn start_app_control_stdin(
+    shutdown: tokio::sync::mpsc::UnboundedSender<AppControlCommand>,
+) -> io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("cowchat-app-control".to_owned())
+        .spawn(move || {
+            let stdin = io::stdin();
+            let dispatch = |command| match command {
+                AppControlCommand::Interrupt | AppControlCommand::Terminate => {
+                    let _ = shutdown.send(command);
+                }
+                AppControlCommand::Kill => force_kill_self(),
+            };
+            if let Err(error) = monitor_app_control(stdin.lock(), dispatch, thread::sleep) {
+                log::error!("app control channel failed: {error}");
+            }
+        })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -141,6 +242,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             require_local_auth,
             db,
             key_file,
+            app_control_stdin,
         } => {
             let config = ServerConfig {
                 socket_path: socket,
@@ -173,7 +275,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
-            server.run().await?;
+            if app_control_stdin {
+                let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel();
+                let _app_control_thread = start_app_control_stdin(shutdown_tx)?;
+                tokio::select! {
+                    result = server.run() => result?,
+                    command = shutdown_rx.recv() => {
+                        match command {
+                            Some(command) => log::info!(
+                                "Shutting down from Cowchat app control command: {:?}",
+                                command
+                            ),
+                            None => log::warn!(
+                                "Cowchat app control channel ended; shutting down helper"
+                            ),
+                        }
+                    }
+                }
+            } else {
+                server.run().await?;
+            }
         }
         Commands::Auth { action } => match action {
             AuthAction::ShowKey { key_file } => {
@@ -189,4 +310,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+    use std::{cell::RefCell, io::Cursor};
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum ControlEvent {
+        Command(AppControlCommand),
+        Wait(Duration),
+    }
+
+    #[test]
+    fn hidden_app_control_flag_is_parsed_for_serve() {
+        let cli = Cli::try_parse_from(["cowchat-server", "serve", "--app-control-stdin"])
+            .expect("hidden app control flag should parse");
+
+        match cli.command {
+            Commands::Serve {
+                app_control_stdin, ..
+            } => assert!(app_control_stdin),
+            Commands::Auth { .. } => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn app_control_flag_stays_out_of_serve_help() {
+        let mut command = Cli::command();
+        let serve = command
+            .find_subcommand_mut("serve")
+            .expect("serve subcommand should exist");
+        let help = serve.render_long_help().to_string();
+
+        assert!(!help.contains("app-control-stdin"));
+    }
+
+    #[test]
+    fn app_control_dispatches_only_known_newline_commands() {
+        let events = RefCell::new(Vec::new());
+        monitor_app_control(
+            Cursor::new(b"INT\nunknown\nTERM\r\nKILL\n"),
+            |command| events.borrow_mut().push(ControlEvent::Command(command)),
+            |duration| events.borrow_mut().push(ControlEvent::Wait(duration)),
+        )
+        .expect("in-memory control stream should succeed");
+
+        assert_eq!(
+            events.into_inner(),
+            vec![
+                ControlEvent::Command(AppControlCommand::Interrupt),
+                ControlEvent::Command(AppControlCommand::Terminate),
+                ControlEvent::Command(AppControlCommand::Kill),
+            ]
+        );
+    }
+
+    #[test]
+    fn app_control_eof_terminates_then_kills_after_bounded_wait() {
+        let events = RefCell::new(Vec::new());
+        monitor_app_control(
+            Cursor::new(Vec::<u8>::new()),
+            |command| events.borrow_mut().push(ControlEvent::Command(command)),
+            |duration| events.borrow_mut().push(ControlEvent::Wait(duration)),
+        )
+        .expect("EOF control stream should succeed");
+
+        assert_eq!(
+            events.into_inner(),
+            vec![
+                ControlEvent::Command(AppControlCommand::Terminate),
+                ControlEvent::Wait(APP_CONTROL_EOF_GRACE),
+                ControlEvent::Command(AppControlCommand::Kill),
+            ]
+        );
+    }
 }

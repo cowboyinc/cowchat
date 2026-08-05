@@ -8,6 +8,8 @@ SIGNING_IDENTITY=${COWCHAT_CODESIGN_IDENTITY:-}
 NOTARY_PROFILE=${COWCHAT_NOTARY_PROFILE:-}
 EXPECTED_TEAM_ID=${COWCHAT_EXPECTED_TEAM_ID:-}
 VOLUME_NAME="Cowchat"
+SERVER_NAME="cowchat-server"
+SERVER_RELATIVE_PATH="Contents/Helpers/$SERVER_NAME"
 WINDOW_WIDTH=660
 WINDOW_HEIGHT=450
 APP_POSITION_X=180
@@ -83,6 +85,93 @@ case $VERSION in
 		;;
 esac
 
+verify_server_helper() {
+	app_root=$1
+	verification_phase=$2
+	server_path="$app_root/$SERVER_RELATIVE_PATH"
+	if [ ! -f "$server_path" ] || [ ! -x "$server_path" ]; then
+		printf 'Cowchat server helper is missing or not executable (%s): %s\n' \
+			"$verification_phase" "$server_path" >&2
+		exit 1
+	fi
+	if ! lipo "$server_path" -verify_arch arm64 x86_64; then
+		printf 'Cowchat server helper is not universal (%s).\n' "$verification_phase" >&2
+		exit 1
+	fi
+	if ! codesign --verify --strict "$server_path"; then
+		printf 'Cowchat server helper signature is invalid (%s): %s\n' \
+			"$verification_phase" "$server_path" >&2
+		exit 1
+	fi
+	server_signature_info=$(codesign -dv --verbose=4 "$server_path" 2>&1 || true)
+	server_team_id=$(printf '%s\n' "$server_signature_info" | \
+		/usr/bin/sed -n 's/^TeamIdentifier=//p' | /usr/bin/head -n 1)
+	server_developer_authority=$(printf '%s\n' "$server_signature_info" | \
+		/usr/bin/grep -F 'Authority=Developer ID Application:' | /usr/bin/head -n 1 || true)
+
+	if [ "$APP_IS_DEVELOPER_ID" -eq 1 ]; then
+		if [ -z "$server_team_id" ] || [ "$server_team_id" != "$APP_TEAM_ID" ]; then
+			printf 'Cowchat server helper TeamIdentifier does not match the app (%s): helper=%s app=%s\n' \
+				"$verification_phase" "${server_team_id:-<missing>}" "$APP_TEAM_ID" >&2
+			exit 1
+		fi
+		if [ -z "$server_developer_authority" ] || \
+			[ "$server_developer_authority" != "$APP_DEVELOPER_AUTHORITY" ]; then
+			printf 'Cowchat server helper signing authority does not match the app (%s).\n' \
+				"$verification_phase" >&2
+			exit 1
+		fi
+	fi
+	if [ -n "$EXPECTED_TEAM_ID" ] && [ "$server_team_id" != "$EXPECTED_TEAM_ID" ]; then
+		printf 'Cowchat server helper is not signed by expected team %s (%s).\n' \
+			"$EXPECTED_TEAM_ID" "$verification_phase" >&2
+		exit 1
+	fi
+
+	# Execute the helper only after its signature identity has been accepted.
+	if ! server_version_output=$("$server_path" --version 2>/dev/null); then
+		printf 'Cowchat server helper could not report its version (%s).\n' "$verification_phase" >&2
+		exit 1
+	fi
+	if [ "$server_version_output" != "$SERVER_NAME $VERSION" ]; then
+		printf 'Unexpected Cowchat server helper version (%s): %s\n' \
+			"$verification_phase" "$server_version_output" >&2
+		exit 1
+	fi
+}
+
+verify_dmg_signer_matches_app() {
+	dmg_signature_info=$1
+	dmg_team_id=$(printf '%s\n' "$dmg_signature_info" | \
+		/usr/bin/sed -n 's/^TeamIdentifier=//p' | /usr/bin/head -n 1)
+	dmg_developer_authority=$(printf '%s\n' "$dmg_signature_info" | \
+		/usr/bin/grep -F 'Authority=Developer ID Application:' | /usr/bin/head -n 1 || true)
+
+	# The app and its helper were already accepted as one Developer ID signer
+	# chain. Do not let an unset EXPECTED_TEAM_ID turn the outer DMG into an
+	# independently signed envelope from another developer.
+	if [ "$APP_IS_DEVELOPER_ID" -eq 1 ]; then
+		if [ -z "$dmg_team_id" ] || [ "$dmg_team_id" != "$APP_TEAM_ID" ]; then
+			printf 'Cowchat DMG TeamIdentifier does not match the app: dmg=%s app=%s.\n' \
+				"${dmg_team_id:-<missing>}" "${APP_TEAM_ID:-<missing>}" >&2
+			return 1
+		fi
+		if [ -z "$dmg_developer_authority" ] || \
+			[ "$dmg_developer_authority" != "$APP_DEVELOPER_AUTHORITY" ]; then
+			printf '%s\n' 'Cowchat DMG signing authority does not match the app.' >&2
+			return 1
+		fi
+	fi
+	if [ -n "$EXPECTED_TEAM_ID" ] && [ "$dmg_team_id" != "$EXPECTED_TEAM_ID" ]; then
+		printf 'Cowchat DMG is not signed by expected team %s.\n' "$EXPECTED_TEAM_ID" >&2
+		return 1
+	fi
+	if [ -n "$NOTARY_PROFILE" ] && [ -z "$dmg_developer_authority" ]; then
+		printf '%s\n' 'Notarization requires a Developer ID Application signature on the DMG.' >&2
+		return 1
+	fi
+}
+
 if ! codesign --verify --deep --strict "$SOURCE_APP"; then
 	printf 'Cowchat.app is not validly signed: %s\n' "$SOURCE_APP" >&2
 	exit 1
@@ -95,6 +184,10 @@ fi
 
 APP_SIGNATURE_INFO=$(codesign -dv --verbose=4 "$SOURCE_APP" 2>&1 || true)
 APP_IS_DEVELOPER_ID=0
+APP_TEAM_ID=$(printf '%s\n' "$APP_SIGNATURE_INFO" | \
+	/usr/bin/sed -n 's/^TeamIdentifier=//p' | /usr/bin/head -n 1)
+APP_DEVELOPER_AUTHORITY=$(printf '%s\n' "$APP_SIGNATURE_INFO" | \
+	/usr/bin/grep -F 'Authority=Developer ID Application:' | /usr/bin/head -n 1 || true)
 if printf '%s\n' "$APP_SIGNATURE_INFO" | /usr/bin/grep -Fq 'Authority=Developer ID Application:'; then
 	APP_IS_DEVELOPER_ID=1
 fi
@@ -105,8 +198,7 @@ if printf '%s\n' "$APP_SIGNATURE_INFO" | /usr/bin/grep -Fq 'Signature=adhoc'; th
 	fi
 	printf '%s\n' 'Warning: packaging an ad-hoc signed app for local/development use only.' >&2
 fi
-if [ -n "$EXPECTED_TEAM_ID" ] && \
-	! printf '%s\n' "$APP_SIGNATURE_INFO" | /usr/bin/grep -Fq "TeamIdentifier=$EXPECTED_TEAM_ID"; then
+if [ -n "$EXPECTED_TEAM_ID" ] && [ "$APP_TEAM_ID" != "$EXPECTED_TEAM_ID" ]; then
 	printf 'Cowchat.app is not signed by expected team %s.\n' "$EXPECTED_TEAM_ID" >&2
 	exit 1
 fi
@@ -118,6 +210,7 @@ if [ -n "$NOTARY_PROFILE" ] && [ "$APP_IS_DEVELOPER_ID" -ne 1 ]; then
 	printf '%s\n' 'Notarization requires Cowchat.app to have a Developer ID Application signature.' >&2
 	exit 1
 fi
+verify_server_helper "$SOURCE_APP" "source app"
 
 if [ -e "/Volumes/$VOLUME_NAME" ]; then
 	printf 'A volume named %s is already mounted; detach it before building.\n' "$VOLUME_NAME" >&2
@@ -319,6 +412,7 @@ verify_payload() {
 		printf 'Cowchat.app lost a supported architecture in the %s image.\n' "$verification_phase" >&2
 		exit 1
 	fi
+	verify_server_helper "$volume_root/Cowchat.app" "$verification_phase image"
 }
 
 configure_and_verify_finder() {
@@ -483,16 +577,7 @@ if [ -n "$SIGNING_IDENTITY" ]; then
 	codesign --force --timestamp --sign "$SIGNING_IDENTITY" "$TEMP_OUTPUT" >/dev/null
 	codesign --verify --verbose=2 "$TEMP_OUTPUT"
 	DMG_SIGNATURE_INFO=$(codesign -dv --verbose=4 "$TEMP_OUTPUT" 2>&1 || true)
-	if [ -n "$EXPECTED_TEAM_ID" ] && \
-		! printf '%s\n' "$DMG_SIGNATURE_INFO" | /usr/bin/grep -Fq "TeamIdentifier=$EXPECTED_TEAM_ID"; then
-		printf 'Cowchat DMG is not signed by expected team %s.\n' "$EXPECTED_TEAM_ID" >&2
-		exit 1
-	fi
-	if [ -n "$NOTARY_PROFILE" ] && \
-		! printf '%s\n' "$DMG_SIGNATURE_INFO" | /usr/bin/grep -Fq 'Authority=Developer ID Application:'; then
-		printf '%s\n' 'Notarization requires a Developer ID Application signature on the DMG.' >&2
-		exit 1
-	fi
+	verify_dmg_signer_matches_app "$DMG_SIGNATURE_INFO"
 fi
 hdiutil verify "$TEMP_OUTPUT" >/dev/null
 

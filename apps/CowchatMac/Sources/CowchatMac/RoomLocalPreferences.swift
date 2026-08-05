@@ -8,9 +8,11 @@ struct RoomLocalPreferences {
     static let pendingSetupScreenRoomIDsKey = "CowchatMac.pendingSetupScreenRoomIDs"
 
     private let defaults: UserDefaults
+    private let scope: String?
 
-    init(defaults: UserDefaults) {
+    init(defaults: UserDefaults, scope: String? = nil) {
         self.defaults = defaults
+        self.scope = scope?.isEmpty == false ? scope : nil
     }
 
     var archivedRoomIDs: Set<String> {
@@ -22,7 +24,7 @@ struct RoomLocalPreferences {
     }
 
     var hasInitializedPinnedRooms: Bool {
-        defaults.bool(forKey: Self.pinnedRoomsInitializedKey)
+        defaults.bool(forKey: scopedKey(Self.pinnedRoomsInitializedKey))
     }
 
     var pendingSetupRoomIDs: Set<String> {
@@ -39,7 +41,7 @@ struct RoomLocalPreferences {
 
     func savePinnedRoomIDs(_ roomIDs: Set<String>) {
         save(roomIDs, forKey: Self.pinnedRoomIDsKey)
-        defaults.set(true, forKey: Self.pinnedRoomsInitializedKey)
+        defaults.set(true, forKey: scopedKey(Self.pinnedRoomsInitializedKey))
     }
 
     func savePendingSetupRoomIDs(_ roomIDs: Set<String>) {
@@ -51,10 +53,15 @@ struct RoomLocalPreferences {
     }
 
     private func loadIDs(forKey key: String) -> Set<String> {
-        Set(defaults.stringArray(forKey: key) ?? [])
+        Set(defaults.stringArray(forKey: scopedKey(key)) ?? [])
     }
 
     private func save(_ roomIDs: Set<String>, forKey key: String) {
-        defaults.set(roomIDs.sorted(), forKey: key)
+        defaults.set(roomIDs.sorted(), forKey: scopedKey(key))
+    }
+
+    private func scopedKey(_ key: String) -> String {
+        guard let scope else { return key }
+        return "\(key).\(scope)"
     }
 }

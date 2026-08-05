@@ -2,13 +2,75 @@
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$ROOT/../.." && pwd)
 cd "$ROOT"
 
 PRODUCT="CowchatMac"
 APP_NAME="Cowchat.app"
+SERVER_NAME="cowchat-server"
+SERVER_MANIFEST="$REPO_ROOT/Cargo.toml"
+SERVER_TARGET_DIR=${CARGO_TARGET_DIR:-"$REPO_ROOT/target"}
+RUST_TOOLCHAIN=${COWCHAT_RUST_TOOLCHAIN:-stable}
+APP_INFO_PLIST="$ROOT/AppBundle/Info.plist"
 ICON_SOURCE="$ROOT/Sources/CowchatMac/Resources/CowchatIcon.png"
 ICON_PACKAGE="$ROOT/Cowchat.icon"
 SIGNING_IDENTITY=${COWCHAT_CODESIGN_IDENTITY:--}
+
+SERVER_VERSION=$(awk '
+	$0 == "[workspace.package]" { in_workspace_package = 1; next }
+	in_workspace_package && /^\[/ { exit }
+	in_workspace_package && /^[[:space:]]*version[[:space:]]*=/ {
+		version = $0
+		sub(/^[^=]*=[[:space:]]*/, "", version)
+		gsub(/[[:space:]\"]/, "", version)
+		print version
+		exit
+	}
+' "$SERVER_MANIFEST")
+if [ -z "$SERVER_VERSION" ]; then
+	printf 'Could not resolve the Cowchat workspace version from: %s\n' "$SERVER_MANIFEST" >&2
+	exit 1
+fi
+APP_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+	"$APP_INFO_PLIST" 2>/dev/null || true)
+if [ -z "$APP_VERSION" ] || [ "$APP_VERSION" != "$SERVER_VERSION" ]; then
+	printf 'Cowchat app/server version mismatch (app=%s, server=%s).\n' \
+		"${APP_VERSION:-<missing>}" "$SERVER_VERSION" >&2
+	exit 1
+fi
+
+verify_server_binary() {
+	server_path=$1
+	verification_phase=$2
+	if [ ! -f "$server_path" ] || [ ! -x "$server_path" ]; then
+		printf 'Cowchat server helper is missing or not executable (%s): %s\n' \
+			"$verification_phase" "$server_path" >&2
+		exit 1
+	fi
+	if ! lipo "$server_path" -verify_arch arm64 x86_64; then
+		printf 'Cowchat server helper is not universal (%s).\n' "$verification_phase" >&2
+		exit 1
+	fi
+	if ! server_version_output=$("$server_path" --version 2>/dev/null); then
+		printf 'Cowchat server helper could not report its version (%s).\n' "$verification_phase" >&2
+		exit 1
+	fi
+	if [ "$server_version_output" != "$SERVER_NAME $SERVER_VERSION" ]; then
+		printf 'Unexpected Cowchat server helper version (%s): %s\n' \
+			"$verification_phase" "$server_version_output" >&2
+		exit 1
+	fi
+}
+
+verify_server_signature() {
+	server_path=$1
+	verification_phase=$2
+	if ! codesign --verify --strict "$server_path"; then
+		printf 'Cowchat server helper signature is invalid (%s): %s\n' \
+			"$verification_phase" "$server_path" >&2
+		exit 1
+	fi
+}
 
 if [ ! -d "$ICON_PACKAGE" ]; then
 	printf 'Missing Icon Composer source: %s\n' "$ICON_PACKAGE" >&2
@@ -22,6 +84,17 @@ if ! command -v xcrun >/dev/null 2>&1; then
 	printf '%s\n' 'Missing xcrun; Xcode is required to compile Cowchat.icon.' >&2
 	exit 1
 fi
+if ! command -v rustup >/dev/null 2>&1; then
+	printf '%s\n' 'Missing rustup; it is required to build both macOS server architectures.' >&2
+	exit 1
+fi
+CARGO_BIN=$(rustup which --toolchain "$RUST_TOOLCHAIN" cargo)
+RUSTC_BIN=$(rustup which --toolchain "$RUST_TOOLCHAIN" rustc)
+if [ ! -x "$CARGO_BIN" ] || [ ! -x "$RUSTC_BIN" ]; then
+	printf 'Rust toolchain %s does not provide executable cargo and rustc binaries.\n' \
+		"$RUST_TOOLCHAIN" >&2
+	exit 1
+fi
 
 # Build both supported Mac architectures so a versioned installer is never
 # silently tied to the architecture of the machine that produced it.
@@ -29,6 +102,26 @@ swift build -c release --arch arm64 --arch x86_64
 BIN_DIR=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)
 APP_DIR="$BIN_DIR/$APP_NAME"
 RESOURCE_BUNDLE="$BIN_DIR/${PRODUCT}_${PRODUCT}.bundle"
+
+for server_target in aarch64-apple-darwin x86_64-apple-darwin; do
+	if ! rustup target list --installed --toolchain "$RUST_TOOLCHAIN" | \
+		grep -Fxq "$server_target"; then
+		printf 'Rust target %s is not installed for toolchain %s.\n' \
+			"$server_target" "$RUST_TOOLCHAIN" >&2
+		printf 'Install it with: rustup target add --toolchain %s %s\n' \
+			"$RUST_TOOLCHAIN" "$server_target" >&2
+		exit 1
+	fi
+	MACOSX_DEPLOYMENT_TARGET=13.0 CARGO_TARGET_DIR="$SERVER_TARGET_DIR" \
+		RUSTC="$RUSTC_BIN" "$CARGO_BIN" build --locked --release --package "$SERVER_NAME" \
+		--target "$server_target" --manifest-path "$SERVER_MANIFEST"
+done
+ARM_SERVER="$SERVER_TARGET_DIR/aarch64-apple-darwin/release/$SERVER_NAME"
+INTEL_SERVER="$SERVER_TARGET_DIR/x86_64-apple-darwin/release/$SERVER_NAME"
+if [ ! -f "$ARM_SERVER" ] || [ ! -f "$INTEL_SERVER" ]; then
+	printf '%s\n' 'Missing one or more release cowchat-server target slices.' >&2
+	exit 1
+fi
 
 if [ ! -f "$BIN_DIR/$PRODUCT" ]; then
 	printf '%s\n' "Missing release executable: $BIN_DIR/$PRODUCT" >&2
@@ -44,10 +137,15 @@ if ! lipo "$BIN_DIR/$PRODUCT" -verify_arch arm64 x86_64; then
 fi
 
 rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" \
+	"$APP_DIR/Contents/Helpers"
 cp "$BIN_DIR/$PRODUCT" "$APP_DIR/Contents/MacOS/Cowchat"
-cp "$ROOT/AppBundle/Info.plist" "$APP_DIR/Contents/Info.plist"
+cp "$APP_INFO_PLIST" "$APP_DIR/Contents/Info.plist"
 cp -R "$RESOURCE_BUNDLE" "$APP_DIR/Contents/Resources/"
+SERVER_HELPER="$APP_DIR/Contents/Helpers/$SERVER_NAME"
+lipo "$ARM_SERVER" "$INTEL_SERVER" -create -output "$SERVER_HELPER"
+chmod 755 "$SERVER_HELPER"
+verify_server_binary "$SERVER_HELPER" "built app before signing"
 
 TMP_BASE=$(CDPATH='' cd -- "${TMPDIR:-/tmp}" && pwd)
 ICON_BUILD=$(mktemp -d "$TMP_BASE/CowchatIcon.XXXXXX")
@@ -126,9 +224,13 @@ if [ ! -s "$APP_DIR/Contents/Resources/Assets.car" ] || \
 fi
 
 if [ "$SIGNING_IDENTITY" = "-" ]; then
-	codesign --force --deep --sign - "$APP_DIR" >/dev/null
+	codesign --force --sign - "$SERVER_HELPER" >/dev/null
+	verify_server_signature "$SERVER_HELPER" "built app"
+	codesign --force --sign - "$APP_DIR" >/dev/null
 else
-	codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_DIR" >/dev/null
+	codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$SERVER_HELPER" >/dev/null
+	verify_server_signature "$SERVER_HELPER" "built app"
+	codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_DIR" >/dev/null
 fi
 codesign --verify --deep --strict "$APP_DIR"
 
@@ -144,6 +246,9 @@ if ! lipo "$INSTALL_CANDIDATE/Contents/MacOS/Cowchat" -verify_arch arm64 x86_64;
 	printf '%s\n' 'The staged installed app is not universal (arm64 + x86_64).' >&2
 	exit 1
 fi
+INSTALL_SERVER_HELPER="$INSTALL_CANDIDATE/Contents/Helpers/$SERVER_NAME"
+verify_server_binary "$INSTALL_SERVER_HELPER" "staged installed app"
+verify_server_signature "$INSTALL_SERVER_HELPER" "staged installed app"
 
 if [ -e "$INSTALL_APP" ] || [ -L "$INSTALL_APP" ]; then
 	INSTALL_BACKUP="$INSTALL_STAGE/previous-$APP_NAME"

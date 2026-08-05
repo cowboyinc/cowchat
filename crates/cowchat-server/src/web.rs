@@ -26,6 +26,34 @@ use crate::voting::VoteManager;
 
 const ADMIN_HEADER: &str = "x-cowchat-admin";
 const API_KEY_HEADER: &str = "x-cowchat-key";
+const WEBSOCKET_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Hyper may cancel an upgraded handler while its spawned bridge tasks are
+/// still live. Dropping this guard closes both halves of the pipe and wakes the
+/// detached connection loop so it can run registered-agent cleanup.
+struct WebSocketConnectionGuard {
+    transport_disconnect: Arc<tokio::sync::Notify>,
+    input_abort: tokio::task::AbortHandle,
+    output_abort: tokio::task::AbortHandle,
+    armed: bool,
+}
+
+impl WebSocketConnectionGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for WebSocketConnectionGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.input_abort.abort();
+        self.output_abort.abort();
+        self.transport_disconnect.notify_one();
+    }
+}
 
 #[derive(Embed)]
 #[folder = "web/"]
@@ -115,7 +143,7 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
 
     // Task 1: WebSocket receiver → pipe writer
     // Reads text messages from WS, writes them as NDJSON lines to the pipe
-    let ws_to_pipe = tokio::spawn(async move {
+    let mut ws_to_pipe = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 Message::Text(text) => {
@@ -140,7 +168,7 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
 
     // Task 2: Pipe reader → WebSocket sender
     // Reads NDJSON lines from the pipe, sends them as WS text messages
-    let pipe_to_ws = tokio::spawn(async move {
+    let mut pipe_to_ws = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(client_read);
         let mut line = String::new();
         loop {
@@ -156,6 +184,7 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
                 Err(_) => break,
             }
         }
+        let _ = ws_sender.close().await;
     });
 
     // Task 3: Run the existing connection_loop on the server side of the duplex
@@ -169,8 +198,10 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
     let reconnect_mgr = state.reconnect_mgr;
     let task_mgr = state.task_mgr;
     let webhook_mgr = state.webhook_mgr;
+    let transport_disconnect = Arc::new(tokio::sync::Notify::new());
+    let connection_disconnect = transport_disconnect.clone();
 
-    let connection_task = tokio::spawn(async move {
+    let mut connection_task = tokio::spawn(async move {
         let _ = connection_loop(
             server_read,
             server_write,
@@ -185,16 +216,69 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
             reconnect_mgr,
             task_mgr,
             webhook_mgr,
+            Some(connection_disconnect),
         )
         .await;
     });
+    let mut connection_guard = WebSocketConnectionGuard {
+        transport_disconnect: transport_disconnect.clone(),
+        input_abort: ws_to_pipe.abort_handle(),
+        output_abort: pipe_to_ws.abort_handle(),
+        armed: true,
+    };
 
-    // Wait for any task to complete (connection closing)
-    tokio::select! {
-        _ = ws_to_pipe => {},
-        _ = pipe_to_ws => {},
-        _ = connection_task => {},
+    enum CompletedTask {
+        WebSocketInput,
+        WebSocketOutput,
+        Connection,
     }
+
+    let completed = tokio::select! {
+        _ = &mut ws_to_pipe => CompletedTask::WebSocketInput,
+        _ = &mut pipe_to_ws => CompletedTask::WebSocketOutput,
+        _ = &mut connection_task => CompletedTask::Connection,
+    };
+
+    match completed {
+        CompletedTask::Connection => {
+            // connection_loop can write a terminal error and return immediately.
+            // Keep the WebSocket sender alive until it drains that final frame and
+            // emits a close; returning here first can strand or discard the error.
+            if tokio::time::timeout(WEBSOCKET_DRAIN_TIMEOUT, &mut pipe_to_ws)
+                .await
+                .is_err()
+            {
+                pipe_to_ws.abort();
+                let _ = pipe_to_ws.await;
+            }
+            ws_to_pipe.abort();
+            let _ = ws_to_pipe.await;
+        }
+        CompletedTask::WebSocketInput => {
+            // Dropping client_write at the end of ws_to_pipe delivers EOF to
+            // connection_loop. Also signal transport cancellation so an
+            // in-flight command (for example DNS validation) is cancelled and
+            // phase-4 cleanup cannot be held open by external I/O.
+            transport_disconnect.notify_one();
+            let _ = connection_task.await;
+            if tokio::time::timeout(WEBSOCKET_DRAIN_TIMEOUT, &mut pipe_to_ws)
+                .await
+                .is_err()
+            {
+                pipe_to_ws.abort();
+                let _ = pipe_to_ws.await;
+            }
+        }
+        CompletedTask::WebSocketOutput => {
+            // Stop receiving so client_write is dropped, then let
+            // connection_loop observe EOF and perform registered-agent cleanup.
+            ws_to_pipe.abort();
+            let _ = ws_to_pipe.await;
+            transport_disconnect.notify_one();
+            let _ = connection_task.await;
+        }
+    }
+    connection_guard.disarm();
 }
 
 // --- REST API endpoints ---
@@ -389,6 +473,8 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cowchat_core::{ErrorCode, ErrorPayload, Frame, FrameType, RegisterPayload};
+    use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
     fn test_state() -> AppState {
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -412,6 +498,272 @@ mod tests {
             allowed_origins: vec![],
             trusted_proxy_ips: vec![],
         }
+    }
+
+    async fn start_test_web_server(state: AppState) -> (tokio::task::JoinHandle<()>, SocketAddr) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router(state);
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        (server, addr)
+    }
+
+    #[tokio::test]
+    async fn websocket_delivers_terminal_registration_error_before_closing() {
+        let (server, addr) = start_test_web_server(test_state()).await;
+        let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        let register = Frame {
+            id: Some("invalid-registration".into()),
+            reply_to: None,
+            frame_type: FrameType::Register,
+            payload: serde_json::to_value(RegisterPayload {
+                key: "wrong-key".into(),
+                agent_id: None,
+                name: "invalid-agent".into(),
+                capabilities: vec![],
+                reconnect: false,
+                protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+            })
+            .unwrap(),
+        };
+        socket
+            .send(ClientMessage::Text(
+                register.to_line().unwrap().trim_end().to_owned().into(),
+            ))
+            .await
+            .unwrap();
+
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next())
+            .await
+            .expect("server should answer an invalid registration before closing")
+            .expect("server closed before delivering the registration error")
+            .expect("WebSocket read should succeed");
+        let ClientMessage::Text(text) = message else {
+            panic!("expected registration error text before close, got {message:?}");
+        };
+        let response = Frame::from_line(&text).unwrap();
+        let error: ErrorPayload = serde_json::from_value(response.payload).unwrap();
+        assert_eq!(response.frame_type, FrameType::Error);
+        assert_eq!(response.reply_to.as_deref(), Some("invalid-registration"));
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+        assert_eq!(error.message, "Invalid API key");
+
+        let close = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next())
+            .await
+            .expect("server should close after a terminal registration error");
+        assert!(
+            matches!(close, Some(Ok(ClientMessage::Close(_))) | None),
+            "registration error must precede connection close, got {close:?}"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn registered_websocket_close_cleans_up_agent_and_room_membership() {
+        let state = test_state();
+        let observed_state = state.clone();
+        let (server, addr) = start_test_web_server(state).await;
+        let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        let agent_id = "websocket-cleanup-agent";
+        let register = Frame {
+            id: Some("register-cleanup-agent".into()),
+            reply_to: None,
+            frame_type: FrameType::Register,
+            payload: serde_json::to_value(RegisterPayload {
+                key: "master".into(),
+                agent_id: Some(agent_id.into()),
+                name: "cleanup-agent".into(),
+                capabilities: vec![],
+                reconnect: false,
+                protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+            })
+            .unwrap(),
+        };
+        socket
+            .send(ClientMessage::Text(
+                register.to_line().unwrap().trim_end().to_owned().into(),
+            ))
+            .await
+            .unwrap();
+        let registered = next_text_frame(&mut socket).await;
+        assert_eq!(registered.frame_type, FrameType::Ok);
+        assert_eq!(
+            registered.reply_to.as_deref(),
+            Some("register-cleanup-agent")
+        );
+
+        let join = Frame {
+            id: Some("join-lobby".into()),
+            reply_to: None,
+            frame_type: FrameType::JoinRoom,
+            payload: serde_json::json!({"room_id": "lobby"}),
+        };
+        socket
+            .send(ClientMessage::Text(
+                join.to_line().unwrap().trim_end().to_owned().into(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !observed_state.broker.is_agent_in_room(agent_id, "lobby") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("registered WebSocket should join the lobby");
+        assert!(observed_state.broker.agents.contains_key(agent_id));
+
+        socket.send(ClientMessage::Close(None)).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while observed_state.broker.agents.contains_key(agent_id)
+                || observed_state.broker.is_agent_in_room(agent_id, "lobby")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("registered WebSocket close should finish server-side cleanup");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_close_cancels_inflight_command_before_cleanup() {
+        let validation_started = Arc::new(tokio::sync::Notify::new());
+        let validation_release = Arc::new(tokio::sync::Notify::new());
+        let mut state = test_state();
+        state.webhook_mgr = Arc::new(crate::webhooks::WebhookManager::new_with_validation_gate(
+            state.store.clone(),
+            true,
+            validation_started.clone(),
+            validation_release,
+        ));
+        let observed_state = state.clone();
+        let (server, addr) = start_test_web_server(state).await;
+        let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        let agent_id = "websocket-cancel-agent";
+
+        let register = Frame {
+            id: Some("register-cancel-agent".into()),
+            reply_to: None,
+            frame_type: FrameType::Register,
+            payload: serde_json::to_value(RegisterPayload {
+                key: "master".into(),
+                agent_id: Some(agent_id.into()),
+                name: "cancel-agent".into(),
+                capabilities: vec![],
+                reconnect: false,
+                protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+            })
+            .unwrap(),
+        };
+        socket
+            .send(ClientMessage::Text(
+                register.to_line().unwrap().trim_end().to_owned().into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(next_text_frame(&mut socket).await.frame_type, FrameType::Ok);
+
+        let join = Frame {
+            id: Some("join-before-cancel".into()),
+            reply_to: None,
+            frame_type: FrameType::JoinRoom,
+            payload: serde_json::json!({"room_id": "lobby"}),
+        };
+        socket
+            .send(ClientMessage::Text(
+                join.to_line().unwrap().trim_end().to_owned().into(),
+            ))
+            .await
+            .unwrap();
+        while next_text_frame(&mut socket).await.reply_to.as_deref() != Some("join-before-cancel") {
+        }
+        assert!(observed_state.broker.is_agent_in_room(agent_id, "lobby"));
+
+        let subscribe = Frame {
+            id: Some("blocked-subscribe".into()),
+            reply_to: None,
+            frame_type: FrameType::Subscribe,
+            payload: serde_json::json!({
+                "room_id": "lobby",
+                "webhook_url": "https://example.com/cowchat",
+                "secret": "test-only-secret"
+            }),
+        };
+        socket
+            .send(ClientMessage::Text(
+                subscribe.to_line().unwrap().trim_end().to_owned().into(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            validation_started.notified(),
+        )
+        .await
+        .expect("subscribe command should enter the controlled validation wait");
+
+        socket.send(ClientMessage::Close(None)).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while observed_state.broker.agents.contains_key(agent_id)
+                || observed_state.broker.is_agent_in_room(agent_id, "lobby")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("transport close must cancel the command and finish agent cleanup");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_connection_guard_aborts_bridges_and_signals_cleanup() {
+        let transport_disconnect = Arc::new(tokio::sync::Notify::new());
+        let input = tokio::spawn(std::future::pending::<()>());
+        let output = tokio::spawn(std::future::pending::<()>());
+        let guard = WebSocketConnectionGuard {
+            transport_disconnect: transport_disconnect.clone(),
+            input_abort: input.abort_handle(),
+            output_abort: output.abort_handle(),
+            armed: true,
+        };
+
+        drop(guard);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            transport_disconnect.notified(),
+        )
+        .await
+        .expect("dropping the outer WebSocket handler must wake connection cleanup");
+        assert!(input.await.unwrap_err().is_cancelled());
+        assert!(output.await.unwrap_err().is_cancelled());
+    }
+
+    async fn next_text_frame<S>(socket: &mut S) -> Frame
+    where
+        S: futures::Stream<Item = Result<ClientMessage, tokio_tungstenite::tungstenite::Error>>
+            + Unpin,
+    {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next())
+            .await
+            .expect("server should send a WebSocket frame")
+            .expect("server closed before sending the expected frame")
+            .expect("WebSocket read should succeed");
+        let ClientMessage::Text(text) = message else {
+            panic!("expected WebSocket text frame, got {message:?}");
+        };
+        Frame::from_line(&text).unwrap()
     }
 
     #[test]

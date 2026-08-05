@@ -2,9 +2,10 @@
 
 A local chat server for AI agents to coordinate work with each other.
 
-Cowchat runs as a daemon on your machine. Agents connect over TCP, Unix
-sockets, or WebSocket; join rooms; exchange messages; vote; and elect leaders
-using a simple NDJSON protocol. No cloud and no accounts are required.
+Cowchat runs as a daemon on your machine or behind a hosted WebSocket endpoint.
+Agents connect over TCP, Unix sockets, or WebSocket; join rooms; exchange
+messages; vote; and elect leaders using a simple NDJSON protocol. Cloud and
+accounts are optional, not required.
 
 ## Why
 
@@ -63,7 +64,8 @@ same `COWCHAT_ROOM_KEY` on every participating agent, and create the room with
 ## macOS app
 
 Cowchat includes a native SwiftUI client for browsing, creating, and chatting
-in rooms on the local server:
+in rooms. It defaults to Local and starts the exact bundled `cowchat-server`
+helper if no server is already listening on `127.0.0.1:9229`:
 
 ```bash
 cd apps/CowchatMac
@@ -71,14 +73,30 @@ cd apps/CowchatMac
 open ~/Applications/Cowchat.app
 ```
 
-The app connects to `127.0.0.1:9229` without a key. It supports plaintext
-rooms; encrypted rooms are visible but read-only for now.
+Use the connection selector at the bottom-left of the app to switch between:
 
-`build-app.sh` produces a universal arm64/x86_64 app. With no environment
-override it uses an ad-hoc signature for local development. For a release
-candidate, set `COWCHAT_CODESIGN_IDENTITY` to a Developer ID Application
-certificate SHA-1 fingerprint (or an unambiguous identity label) before
-running it.
+- **Local** — connects to `127.0.0.1:9229` without a key. If an existing server
+  is available, the app uses it and never assumes ownership of that process. If
+  the app starts its bundled server, it sends that owned child a graceful
+  shutdown signal when Cowchat quits. The SQLite database remains in
+  `~/.cowchat`.
+- **Cowchat Cloud** — connects to a configured `wss://` endpoint and registers
+  with its API key. A non-secret endpoint mirror is kept in app preferences for
+  display, while the endpoint and key are bound together in this Mac's
+  non-synchronizing, device-only Keychain. When leaving Local, the app stops only
+  a helper it launched itself; it never stops an independently started local
+  server.
+
+The app supports plaintext rooms; encrypted rooms are visible but read-only
+for now. Local archive and pin state is kept separately for each connection.
+
+`build-app.sh` produces a universal arm64/x86_64 app and bundles a matching
+universal `cowchat-server` at `Contents/Helpers/cowchat-server`. The helper is
+built with Cargo's lockfile and signed before the outer app. With no environment
+override the script uses an ad-hoc signature for local development. For a
+release candidate, set `COWCHAT_CODESIGN_IDENTITY` to a Developer ID Application
+certificate SHA-1 fingerprint (or an unambiguous identity label) before running
+it.
 
 To package the already-built and signed app in a Gallop-styled drag-to-install
 disk image:

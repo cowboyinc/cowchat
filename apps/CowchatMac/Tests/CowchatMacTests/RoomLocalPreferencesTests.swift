@@ -27,4 +27,26 @@ final class RoomLocalPreferencesTests: XCTestCase {
         XCTAssertEqual(reloaded.pendingSetupRoomIDs, ["room-b"])
         XCTAssertEqual(reloaded.pendingSetupScreenRoomIDs, ["room-b"])
     }
+
+    func testConnectionScopesDoNotLeakRoomSelections() {
+        let suiteName = "RoomLocalPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let local = RoomLocalPreferences(defaults: defaults)
+        let cloudA = RoomLocalPreferences(defaults: defaults, scope: "cloud-a")
+        let cloudB = RoomLocalPreferences(defaults: defaults, scope: "cloud-b")
+
+        local.saveArchivedRoomIDs(["lobby"])
+        cloudA.saveArchivedRoomIDs(["cloud-room"])
+        cloudA.savePinnedRoomIDs(["lobby"])
+
+        XCTAssertEqual(local.archivedRoomIDs, ["lobby"])
+        XCTAssertEqual(cloudA.archivedRoomIDs, ["cloud-room"])
+        XCTAssertEqual(cloudA.pinnedRoomIDs, ["lobby"])
+        XCTAssertTrue(cloudA.hasInitializedPinnedRooms)
+        XCTAssertEqual(cloudB.archivedRoomIDs, [])
+        XCTAssertEqual(cloudB.pinnedRoomIDs, [])
+        XCTAssertFalse(cloudB.hasInitializedPinnedRooms)
+    }
 }

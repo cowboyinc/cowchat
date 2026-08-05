@@ -1,8 +1,14 @@
 use cowchat_core::*;
 use dashmap::DashMap;
+use fs2::FileExt;
 use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener};
@@ -103,6 +109,9 @@ pub struct ServerConfig {
 
 pub struct CowchatServer {
     config: ServerConfig,
+    _instance_lock: File,
+    listeners: Mutex<Option<PreparedListeners>>,
+    _socket_guard: OwnedSocketPath,
     broker: Arc<Broker>,
     store: Arc<Store>,
     ephemeral_rooms: Arc<DashMap<String, Room>>,
@@ -114,8 +123,242 @@ pub struct CowchatServer {
     api_key: String,
 }
 
+struct PreparedListeners {
+    uds: StdUnixListener,
+    tcp: Option<std::net::TcpListener>,
+    http: Option<std::net::TcpListener>,
+}
+
+/// Removes only the exact socket inode created by this server. If another
+/// process replaces the path, dropping this server must not unlink it.
+struct OwnedSocketPath {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl OwnedSocketPath {
+    fn new(path: PathBuf) -> io::Result<Self> {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_socket() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bound Unix socket path is not a socket: {}", path.display()),
+            ));
+        }
+        Ok(Self {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn still_owns_path(&self) -> bool {
+        std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+            metadata.file_type().is_socket()
+                && metadata.dev() == self.device
+                && metadata.ino() == self.inode
+        })
+    }
+}
+
+impl Drop for OwnedSocketPath {
+    fn drop(&mut self) {
+        if self.still_owns_path() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn canonical_db_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    match std::fs::symlink_metadata(&absolute) {
+        Ok(_) => return std::fs::canonicalize(absolute),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let parent = absolute.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("database path has no parent: {}", absolute.display()),
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let canonical_parent = std::fs::canonicalize(parent)?;
+    let file_name = absolute.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("database path has no file name: {}", absolute.display()),
+        )
+    })?;
+    Ok(canonical_parent.join(file_name))
+}
+
+fn instance_lock_path(db_path: &Path) -> io::Result<PathBuf> {
+    let file_name = db_path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("database path has no file name: {}", db_path.display()),
+        )
+    })?;
+    let mut lock_name = file_name.to_os_string();
+    lock_name.push(".lock");
+    Ok(db_path.with_file_name(lock_name))
+}
+
+fn reject_hard_linked_database(db_path: &Path) -> io::Result<()> {
+    let metadata = match std::fs::metadata(db_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.nlink() > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to open Cowchat database with {} hard links: {}; use one canonical database path",
+                metadata.nlink(),
+                db_path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn acquire_instance_lock(db_path: &Path) -> io::Result<File> {
+    let lock_path = instance_lock_path(db_path)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).mode(0o600);
+    let lock = options.open(&lock_path)?;
+    lock.try_lock_exclusive().map_err(|error| {
+        io::Error::new(
+            if error.kind() == io::ErrorKind::WouldBlock {
+                io::ErrorKind::AlreadyExists
+            } else {
+                error.kind()
+            },
+            format!(
+                "another Cowchat server is already using database {}: {error}",
+                db_path.display()
+            ),
+        )
+    })?;
+    crate::auth::harden_file_permissions(&lock_path)?;
+    Ok(lock)
+}
+
+fn same_socket_inode(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.file_type().is_socket()
+        && right.file_type().is_socket()
+        && left.dev() == right.dev()
+        && left.ino() == right.ino()
+}
+
+fn bind_unix_listener(path: &Path) -> io::Result<(StdUnixListener, OwnedSocketPath)> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    loop {
+        match std::fs::symlink_metadata(path) {
+            Ok(existing) => {
+                if !existing.file_type().is_socket() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "refusing to replace non-socket Unix listener path {}",
+                            path.display()
+                        ),
+                    ));
+                }
+
+                match StdUnixStream::connect(path) {
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AddrInUse,
+                            format!(
+                                "Unix socket is already accepting connections: {}",
+                                path.display()
+                            ),
+                        ));
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                        ) =>
+                    {
+                        let current = match std::fs::symlink_metadata(path) {
+                            Ok(current) => current,
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                            Err(error) => return Err(error),
+                        };
+                        if !same_socket_inode(&existing, &current) {
+                            continue;
+                        }
+                        std::fs::remove_file(path)?;
+                    }
+                    Err(error) => {
+                        return Err(io::Error::new(
+                            error.kind(),
+                            format!(
+                                "refusing to replace Unix socket {} after connect failed: {error}",
+                                path.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        match StdUnixListener::bind(path) {
+            Ok(listener) => {
+                listener.set_nonblocking(true)?;
+                let guard = OwnedSocketPath::new(path.to_path_buf())?;
+                return Ok((listener, guard));
+            }
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn bind_tcp_listener(addr: &str) -> io::Result<std::net::TcpListener> {
+    let listener = std::net::TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
 impl CowchatServer {
-    pub fn new(config: ServerConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(mut config: ServerConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        // Lock the canonical database identity before touching SQLite, auth,
+        // webhooks, or any listener path. A losing launch cannot migrate the
+        // incumbent database or unlink its Unix socket.
+        config.db_path = canonical_db_path(&config.db_path)?;
+        // Path canonicalization collapses symlinks but cannot collapse hard
+        // links. SQLite WAL/SHM files are path-derived, so allowing two aliases
+        // of one inode would create independent lock domains over one database.
+        reject_hard_linked_database(&config.db_path)?;
+        let instance_lock = acquire_instance_lock(&config.db_path)?;
+
+        // Reserve every configured endpoint before opening the database. This
+        // keeps bind failures side-effect-free with respect to migrations,
+        // authentication material, and background workers.
+        let (uds_listener, socket_guard) = bind_unix_listener(&config.socket_path)?;
+        let tcp_listener = config
+            .tcp_addr
+            .as_deref()
+            .map(bind_tcp_listener)
+            .transpose()?;
+        let http_listener = config
+            .http_addr
+            .as_deref()
+            .map(bind_tcp_listener)
+            .transpose()?;
+
         let store = Arc::new(Store::open(&config.db_path)?);
         let agents: Arc<DashMap<String, AgentConnection>> = Arc::new(DashMap::new());
         let room_members: Arc<DashMap<String, Vec<String>>> = Arc::new(DashMap::new());
@@ -136,6 +379,13 @@ impl CowchatServer {
 
         Ok(Self {
             config,
+            _instance_lock: instance_lock,
+            listeners: Mutex::new(Some(PreparedListeners {
+                uds: uds_listener,
+                tcp: tcp_listener,
+                http: http_listener,
+            })),
+            _socket_guard: socket_guard,
             broker,
             store,
             ephemeral_rooms,
@@ -150,20 +400,23 @@ impl CowchatServer {
 
     /// Start the server, listening on UDS, TCP, and/or HTTP (as configured).
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let prepared = self
+            .listeners
+            .lock()
+            .map_err(|_| io::Error::other("prepared listener lock poisoned"))?
+            .take()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::AlreadyExists, "server is already running")
+            })?;
+        let uds_listener = UnixListener::from_std(prepared.uds)?;
+        let tcp_listener = prepared.tcp.map(TcpListener::from_std).transpose()?;
+        let http_listener = prepared.http.map(TcpListener::from_std).transpose()?;
+
         // Spawn the webhook delivery worker. Held implicitly by the running task;
         // we don't await it here — when `run` returns the task is dropped along
         // with the server.
         let _webhook_worker = self.webhook_mgr.start();
 
-        // Clean up stale socket file
-        if self.config.socket_path.exists() {
-            std::fs::remove_file(&self.config.socket_path)?;
-        }
-        if let Some(parent) = self.config.socket_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let uds_listener = UnixListener::bind(&self.config.socket_path)?;
         log::info!("Listening on UDS: {:?}", self.config.socket_path);
 
         // Spawn UDS accept loop as a task
@@ -207,6 +460,7 @@ impl CowchatServer {
                                 reconnect_mgr,
                                 task_mgr,
                                 webhook_mgr,
+                                None,
                             )
                             .await;
                         });
@@ -220,8 +474,8 @@ impl CowchatServer {
         });
 
         // Spawn TCP accept loop if configured
-        let tcp_task = if let Some(addr) = &self.config.tcp_addr {
-            let tcp_listener = TcpListener::bind(addr).await?;
+        let tcp_task = if let Some(tcp_listener) = tcp_listener {
+            let addr = tcp_listener.local_addr()?;
             log::info!("Listening on TCP: {}", addr);
             let tcp_broker = self.broker.clone();
             let tcp_store = self.store.clone();
@@ -268,6 +522,7 @@ impl CowchatServer {
                                     reconnect_mgr,
                                     task_mgr,
                                     webhook_mgr,
+                                    None,
                                 )
                                 .await;
                             });
@@ -284,7 +539,7 @@ impl CowchatServer {
         };
 
         // Spawn HTTP/WebSocket listener if configured
-        let http_task = if let Some(addr) = &self.config.http_addr {
+        let http_task = if let Some(listener) = http_listener {
             let app_state = crate::web::AppState {
                 broker: self.broker.clone(),
                 store: self.store.clone(),
@@ -302,7 +557,7 @@ impl CowchatServer {
                 trusted_proxy_ips: self.config.trusted_proxy_ips.clone(),
             };
             let router = crate::web::router(app_state);
-            let listener = tokio::net::TcpListener::bind(addr).await?;
+            let addr = listener.local_addr()?;
             log::info!("HTTP/WebSocket listening on {}", addr);
             Some(tokio::spawn(async move {
                 if let Err(e) = axum::serve(
@@ -352,7 +607,8 @@ impl CowchatServer {
             _ = uds_task => {},
             _ = async { if let Some(t) = tcp_task { t.await.ok(); } else { std::future::pending::<()>().await } } => {},
             _ = async { if let Some(t) = http_task { t.await.ok(); } else { std::future::pending::<()>().await } } => {},
-            _ = tokio::signal::ctrl_c() => {
+            signal = shutdown_signal() => {
+                signal?;
                 log::info!("Shutting down...");
             }
         }
@@ -389,10 +645,24 @@ impl CowchatServer {
     }
 }
 
-impl Drop for CowchatServer {
-    fn drop(&mut self) {
-        // Clean up socket file
-        let _ = std::fs::remove_file(&self.config.socket_path);
+#[cfg(unix)]
+async fn shutdown_signal() -> io::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> io::Result<()> {
+    tokio::signal::ctrl_c().await
+}
+
+async fn wait_for_transport_disconnect(disconnect: Option<&Arc<tokio::sync::Notify>>) {
+    match disconnect {
+        Some(disconnect) => disconnect.notified().await,
+        None => std::future::pending::<()>().await,
     }
 }
 
@@ -416,6 +686,7 @@ pub async fn connection_loop<R, W>(
     reconnect_mgr: Arc<ReconnectManager>,
     task_mgr: Arc<TaskManager>,
     webhook_mgr: Arc<crate::webhooks::WebhookManager>,
+    transport_disconnect: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -1021,6 +1292,8 @@ where
 
     loop {
         let read_result = tokio::select! {
+            biased;
+            _ = wait_for_transport_disconnect(transport_disconnect.as_ref()) => break,
             _ = disconnect.notified() => break,
             result = tokio::time::timeout(
                 Duration::from_secs(HEARTBEAT_TIMEOUT_SECS),
@@ -1055,7 +1328,12 @@ where
                     continue;
                 }
 
-                let response = handler::handle_frame(
+                // Subscribe performs its only suspending external operation (URL
+                // validation) before mutating state, so it is safe to cancel at
+                // transport close. Other commands may intentionally finish an
+                // atomic state transition before disconnect cleanup begins.
+                let cancel_during_webhook_validation = frame.frame_type == FrameType::Subscribe;
+                let response_future = handler::handle_frame(
                     frame,
                     &agent_id,
                     &agent_name,
@@ -1069,8 +1347,18 @@ where
                     &task_mgr,
                     &webhook_mgr,
                     &reconnect_mgr,
-                )
-                .await;
+                );
+                tokio::pin!(response_future);
+                let response = if cancel_during_webhook_validation {
+                    tokio::select! {
+                        biased;
+                        _ = wait_for_transport_disconnect(transport_disconnect.as_ref()) => break,
+                        _ = disconnect.notified() => break,
+                        response = &mut response_future => response,
+                    }
+                } else {
+                    response_future.await
+                };
                 if !matches!(
                     tokio::time::timeout(Duration::from_secs(5), tx.send(response)).await,
                     Ok(Ok(()))
@@ -1225,6 +1513,294 @@ where
     let _ = store.record_session_end(&session_id);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    fn config(db_path: PathBuf, socket_path: PathBuf, auth_key_path: PathBuf) -> ServerConfig {
+        ServerConfig {
+            socket_path,
+            tcp_addr: None,
+            http_addr: None,
+            db_path,
+            auth_key_path,
+            no_auth: false,
+            allow_keyless_local: true,
+            allow_private_webhooks: false,
+            http_signup_enabled: false,
+            http_admin_secret: None,
+            http_allowed_origins: vec![],
+            trusted_proxy_ips: vec![],
+        }
+    }
+
+    fn socket_identity(path: &Path) -> (u64, u64) {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        assert!(metadata.file_type().is_socket());
+        (metadata.dev(), metadata.ino())
+    }
+
+    #[tokio::test]
+    async fn same_database_loser_cannot_touch_incumbent_socket_or_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("cowchat.db");
+        let socket_path = temp.path().join("cowchat.sock");
+        let first_key_path = temp.path().join("first-auth.key");
+        let losing_key_path = temp.path().join("losing-auth.key");
+        let first =
+            CowchatServer::new(config(db_path.clone(), socket_path.clone(), first_key_path))
+                .unwrap();
+        let incumbent_identity = socket_identity(&socket_path);
+
+        let error = match CowchatServer::new(config(
+            db_path,
+            socket_path.clone(),
+            losing_key_path.clone(),
+        )) {
+            Ok(_) => panic!("a second server using the same database must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("already using database"));
+        assert!(
+            !losing_key_path.exists(),
+            "loser must not create auth state"
+        );
+        assert_eq!(socket_identity(&socket_path), incumbent_identity);
+        StdUnixStream::connect(&socket_path).expect("incumbent socket must remain live");
+        drop(first);
+        assert!(!socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn canonical_database_aliases_share_one_instance_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        let alias_dir = temp.path().join("data-alias");
+        std::os::unix::fs::symlink(&data_dir, &alias_dir).unwrap();
+        let first_socket = temp.path().join("first.sock");
+        let second_socket = temp.path().join("second.sock");
+        let first = CowchatServer::new(config(
+            data_dir.join("cowchat.db"),
+            first_socket,
+            temp.path().join("first.key"),
+        ))
+        .unwrap();
+
+        let error = match CowchatServer::new(config(
+            alias_dir.join("cowchat.db"),
+            second_socket.clone(),
+            temp.path().join("second.key"),
+        )) {
+            Ok(_) => panic!("canonical aliases of one database must share a lock"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("already using database"));
+        assert!(
+            !second_socket.exists(),
+            "canonical lock rejection must happen before socket binding"
+        );
+        drop(first);
+    }
+
+    #[tokio::test]
+    async fn hard_linked_database_alias_is_rejected_before_startup_side_effects() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("cowchat.db");
+        let first_socket = temp.path().join("first.sock");
+        let first = CowchatServer::new(config(
+            db_path.clone(),
+            first_socket.clone(),
+            temp.path().join("first.key"),
+        ))
+        .unwrap();
+        let incumbent_identity = socket_identity(&first_socket);
+
+        let alias_path = temp.path().join("cowchat-alias.db");
+        std::fs::hard_link(&db_path, &alias_path).unwrap();
+        assert_eq!(std::fs::metadata(&db_path).unwrap().nlink(), 2);
+        let losing_socket = temp.path().join("losing.sock");
+        let losing_key = temp.path().join("losing.key");
+        let losing_lock = instance_lock_path(&alias_path).unwrap();
+
+        let error = match CowchatServer::new(config(
+            alias_path.clone(),
+            losing_socket.clone(),
+            losing_key.clone(),
+        )) {
+            Ok(_) => panic!("a hard-linked database alias must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(error.to_string().contains("database with 2 hard links"));
+        assert!(!losing_lock.exists(), "loser must not create a lock file");
+        assert!(!losing_socket.exists(), "loser must not bind its socket");
+        assert!(!losing_key.exists(), "loser must not create auth state");
+        assert!(
+            !alias_path.with_extension("db-wal").exists(),
+            "loser must not create an alias WAL"
+        );
+        assert!(
+            !alias_path.with_extension("db-shm").exists(),
+            "loser must not create alias shared-memory state"
+        );
+        assert_eq!(socket_identity(&first_socket), incumbent_identity);
+        StdUnixStream::connect(&first_socket).expect("incumbent socket must remain live");
+
+        drop(first);
+        assert!(!first_socket.exists());
+    }
+
+    #[test]
+    fn live_unix_socket_is_preserved_before_database_or_auth_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("occupied.sock");
+        let incumbent = StdUnixListener::bind(&socket_path).unwrap();
+        incumbent.set_nonblocking(true).unwrap();
+        let incumbent_identity = socket_identity(&socket_path);
+        let db_path = temp.path().join("must-not-exist.db");
+        let key_path = temp.path().join("must-not-exist.key");
+
+        let error = match CowchatServer::new(config(
+            db_path.clone(),
+            socket_path.clone(),
+            key_path.clone(),
+        )) {
+            Ok(_) => panic!("a live Unix socket must not be replaced"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::AddrInUse
+        );
+        assert_eq!(socket_identity(&socket_path), incumbent_identity);
+        incumbent
+            .accept()
+            .expect("startup probe must have reached the incumbent listener");
+        assert!(
+            !db_path.exists(),
+            "listener failure must precede SQLite open"
+        );
+        assert!(
+            !key_path.exists(),
+            "listener failure must precede auth open"
+        );
+    }
+
+    #[test]
+    fn non_socket_unix_path_is_preserved_before_database_or_auth_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("occupied.sock");
+        std::fs::write(&socket_path, b"keep me").unwrap();
+        let metadata = std::fs::metadata(&socket_path).unwrap();
+        let db_path = temp.path().join("must-not-exist.db");
+        let key_path = temp.path().join("must-not-exist.key");
+
+        let error = match CowchatServer::new(config(
+            db_path.clone(),
+            socket_path.clone(),
+            key_path.clone(),
+        )) {
+            Ok(_) => panic!("a non-socket listener path must not be replaced"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&socket_path).unwrap(), b"keep me");
+        assert_eq!(
+            std::fs::metadata(&socket_path).unwrap().ino(),
+            metadata.ino()
+        );
+        assert!(
+            !db_path.exists(),
+            "listener failure must precede SQLite open"
+        );
+        assert!(
+            !key_path.exists(),
+            "listener failure must precede auth open"
+        );
+    }
+
+    #[test]
+    fn occupied_tcp_listener_fails_before_database_open_and_cleans_own_uds() {
+        let temp = tempfile::tempdir().unwrap();
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut server_config = config(
+            temp.path().join("must-not-exist.db"),
+            temp.path().join("candidate.sock"),
+            temp.path().join("must-not-exist.key"),
+        );
+        server_config.tcp_addr = Some(occupied.local_addr().unwrap().to_string());
+        let db_path = server_config.db_path.clone();
+        let key_path = server_config.auth_key_path.clone();
+        let socket_path = server_config.socket_path.clone();
+
+        assert!(CowchatServer::new(server_config).is_err());
+        assert!(
+            !db_path.exists(),
+            "TCP bind failure must precede SQLite open"
+        );
+        assert!(
+            !key_path.exists(),
+            "TCP bind failure must precede auth open"
+        );
+        assert!(
+            !socket_path.exists(),
+            "failed construction must remove only its own Unix socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_unix_socket_is_replaced_and_owned_cleanup_is_exact() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("stale.sock");
+        let stale = StdUnixListener::bind(&socket_path).unwrap();
+        let stale_identity = socket_identity(&socket_path);
+        drop(stale);
+
+        let server = CowchatServer::new(config(
+            temp.path().join("cowchat.db"),
+            socket_path.clone(),
+            temp.path().join("auth.key"),
+        ))
+        .unwrap();
+        assert_ne!(socket_identity(&socket_path), stale_identity);
+        StdUnixStream::connect(&socket_path).expect("replacement socket must be live");
+        drop(server);
+        assert!(!socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn dropping_server_does_not_unlink_a_replacement_socket() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("replace.sock");
+        let server = CowchatServer::new(config(
+            temp.path().join("cowchat.db"),
+            socket_path.clone(),
+            temp.path().join("auth.key"),
+        ))
+        .unwrap();
+
+        std::fs::remove_file(&socket_path).unwrap();
+        let replacement = StdUnixListener::bind(&socket_path).unwrap();
+        let replacement_identity = socket_identity(&socket_path);
+        drop(server);
+
+        assert_eq!(socket_identity(&socket_path), replacement_identity);
+        drop(replacement);
+    }
 }
 
 #[cfg(test)]

@@ -265,6 +265,11 @@ enum ConnectionStatus: Equatable {
         }
     }
 
+    var failureMessage: String? {
+        guard case let .failed(message) = self else { return nil }
+        return message
+    }
+
     var isConnected: Bool { self == .connected }
 }
 

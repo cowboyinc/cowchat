@@ -1,6 +1,19 @@
 import Foundation
 import Network
 
+@MainActor
+protocol CowchatWebSocketTaskProtocol: AnyObject {
+    func resume()
+    func cancel(
+        with closeCode: URLSessionWebSocketTask.CloseCode,
+        reason: Data?
+    )
+    func send(_ message: URLSessionWebSocketTask.Message) async throws
+    func receive() async throws -> URLSessionWebSocketTask.Message
+}
+
+extension URLSessionWebSocketTask: CowchatWebSocketTaskProtocol {}
+
 enum CowchatConnectionError: LocalizedError {
     case notConnected
     case invalidResponse
@@ -26,6 +39,7 @@ enum CowchatConnectionError: LocalizedError {
 protocol CowchatConnectionProtocol: AnyObject {
     var onEvent: ((String, [String: Any]) -> Void)? { get set }
     var onStatusChange: ((ConnectionStatus) -> Void)? { get set }
+    func reconfigure(profile: ConnectionProfile)
     func connect() async throws
     func register(name: String, agentID: String) async throws -> CowchatRegistration
     func listRooms() async throws -> [Room]
@@ -51,6 +65,8 @@ protocol CowchatConnectionProtocol: AnyObject {
 }
 
 extension CowchatConnectionProtocol {
+    func reconfigure(profile _: ConnectionProfile) {}
+
     func history(roomID: String, limit: Int) async throws -> [ChatMessage] {
         try await history(roomID: roomID, limit: limit, before: nil)
     }
@@ -65,26 +81,63 @@ final class CowchatConnection: CowchatConnectionProtocol {
     var onStatusChange: ((ConnectionStatus) -> Void)?
 
     private let queue = DispatchQueue(label: "inc.cowboy.cowchat.network")
-    private let host: NWEndpoint.Host
-    private let port: NWEndpoint.Port
+    private let makeWebSocketTask: (URL) -> any CowchatWebSocketTaskProtocol
+    private(set) var profile: ConnectionProfile
     private var connection: NWConnection?
+    private var webSocketTask: (any CowchatWebSocketTaskProtocol)?
+    private var webSocketReceiveTask: Task<Void, Never>?
+    private var webSocketTransportID: UUID?
     private var buffer = Data()
     private var readyContinuation: CheckedContinuation<Void, Error>?
     private var pending: [String: CheckedContinuation<Payload, Error>] = [:]
     private var connectAttempt: UUID?
 
     init(host: String = "127.0.0.1", port: UInt16 = 9229) {
-        self.host = NWEndpoint.Host(host)
-        self.port = NWEndpoint.Port(rawValue: port)!
+        profile = .local(host: host, port: port)
+        makeWebSocketTask = { URLSession.shared.webSocketTask(with: $0) }
+    }
+
+    init(profile: ConnectionProfile, webSocketSession: URLSession = .shared) {
+        self.profile = profile
+        makeWebSocketTask = { webSocketSession.webSocketTask(with: $0) }
+    }
+
+    init(
+        profile: ConnectionProfile,
+        webSocketTaskFactory: @escaping (URL) -> any CowchatWebSocketTaskProtocol
+    ) {
+        self.profile = profile
+        makeWebSocketTask = webSocketTaskFactory
+    }
+
+    func reconfigure(profile: ConnectionProfile) {
+        guard self.profile != profile else { return }
+        disconnect()
+        self.profile = profile
     }
 
     func connect() async throws {
         disconnect()
         onStatusChange?(.connecting)
 
+        switch profile.kind {
+        case .local:
+            try await connectTCP()
+        case .cowchatCloud:
+            try await connectWebSocket()
+        }
+    }
+
+    private func connectTCP() async throws {
+        guard let host = profile.localHost,
+              let portValue = profile.localPort,
+              let port = NWEndpoint.Port(rawValue: portValue) else {
+            throw CowchatConnectionError.transport("The local Cowchat connection is invalid.")
+        }
+
         let attempt = UUID()
         connectAttempt = attempt
-        let connection = NWConnection(host: host, port: port, using: .tcp)
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let connection else { return }
@@ -103,9 +156,22 @@ final class CowchatConnection: CowchatConnectionProtocol {
         }
     }
 
+    private func connectWebSocket() async throws {
+        guard let endpointURL = profile.endpointURL else {
+            throw CowchatConnectionError.transport("The Cowchat Cloud connection is invalid.")
+        }
+
+        let transportID = UUID()
+        let task = makeWebSocketTask(endpointURL)
+        webSocketTask = task
+        webSocketTransportID = transportID
+        startWebSocketReceiveLoop(task: task, transportID: transportID)
+        task.resume()
+    }
+
     func register(name: String, agentID: String) async throws -> CowchatRegistration {
         let payload = try await request(type: "register", payload: [
-            "key": "",
+            "key": profile.apiKey,
             "name": name,
             "agent_id": agentID,
             "reconnect": true,
@@ -196,9 +262,16 @@ final class CowchatConnection: CowchatConnectionProtocol {
 
     func disconnect() {
         let oldConnection = connection
+        let oldWebSocket = webSocketTask
+        let oldWebSocketReceiveTask = webSocketReceiveTask
         connection = nil
+        webSocketTask = nil
+        webSocketReceiveTask = nil
+        webSocketTransportID = nil
         oldConnection?.stateUpdateHandler = nil
         oldConnection?.cancel()
+        oldWebSocketReceiveTask?.cancel()
+        oldWebSocket?.cancel(with: .goingAway, reason: nil)
         buffer.removeAll(keepingCapacity: true)
         connectAttempt = nil
         readyContinuation?.resume(throwing: CowchatConnectionError.notConnected)
@@ -206,29 +279,64 @@ final class CowchatConnection: CowchatConnectionProtocol {
         failPending(with: CowchatConnectionError.notConnected)
     }
 
-    private func request(type: String, payload: Payload) async throws -> Payload {
-        guard let connection else { throw CowchatConnectionError.notConnected }
+    private func request(
+        type: String,
+        payload: Payload,
+        timeoutNanoseconds: UInt64 = 10_000_000_000
+    ) async throws -> Payload {
+        guard connection != nil || webSocketTask != nil else {
+            throw CowchatConnectionError.notConnected
+        }
         let id = UUID().uuidString
         let frame: Payload = ["id": id, "type": type, "payload": payload]
         guard JSONSerialization.isValidJSONObject(frame),
-              var data = try? JSONSerialization.data(withJSONObject: frame) else {
+              let data = try? JSONSerialization.data(withJSONObject: frame) else {
             throw CowchatConnectionError.invalidResponse
         }
-        data.append(0x0A)
+        guard data.count <= Self.maximumFrameBytes else {
+            throw CowchatConnectionError.transport("Cowchat frames cannot exceed 1 MiB.")
+        }
 
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
-            connection.send(content: data, completion: .contentProcessed { [weak self] error in
+            sendRequestFrame(data, id: id)
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                guard !Task.isCancelled else { return }
+                self?.timeoutRequest(id: id)
+            }
+        }
+    }
+
+    private func sendRequestFrame(_ data: Data, id: String) {
+        if let connection {
+            var terminated = data
+            terminated.append(0x0A)
+            connection.send(content: terminated, completion: .contentProcessed { [weak self] error in
                 guard let error else { return }
                 Task { @MainActor in
-                    self?.finishRequest(id: id, result: .failure(
-                        CowchatConnectionError.transport(error.localizedDescription)
-                    ))
+                    self?.finishRequest(
+                        id: id,
+                        result: .failure(Self.transportError(error))
+                    )
                 }
             })
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
-                self?.timeoutRequest(id: id)
+            return
+        }
+
+        guard let webSocketTask,
+              let text = String(data: data, encoding: .utf8) else {
+            finishRequest(id: id, result: .failure(CowchatConnectionError.notConnected))
+            return
+        }
+        Task { [weak self, webSocketTask] in
+            do {
+                try await webSocketTask.send(.string(text))
+            } catch {
+                self?.finishRequest(
+                    id: id,
+                    result: .failure(Self.transportError(error))
+                )
             }
         }
     }
@@ -239,7 +347,7 @@ final class CowchatConnection: CowchatConnectionProtocol {
                 guard let self, let connection, connection === self.connection else { return }
                 if let data { self.consume(data) }
                 if let error {
-                    self.failConnection(CowchatConnectionError.transport(error.localizedDescription))
+                    self.failConnection(Self.transportError(error))
                 } else if isComplete {
                     self.failConnection(CowchatConnectionError.notConnected)
                 } else {
@@ -249,15 +357,70 @@ final class CowchatConnection: CowchatConnectionProtocol {
         }
     }
 
-    private func consume(_ data: Data) {
-        buffer.append(data)
-        guard buffer.count <= Self.maximumFrameBytes else {
+    private func startWebSocketReceiveLoop(
+        task: any CowchatWebSocketTaskProtocol,
+        transportID: UUID
+    ) {
+        webSocketReceiveTask = Task { [weak self, task] in
+            do {
+                while !Task.isCancelled {
+                    let message = try await task.receive()
+                    guard !Task.isCancelled else { return }
+                    self?.consumeWebSocketMessage(
+                        message,
+                        from: task,
+                        transportID: transportID
+                    )
+                }
+            } catch {
+                guard !Task.isCancelled,
+                      let self,
+                      self.webSocketTask === task,
+                      self.webSocketTransportID == transportID else { return }
+                self.failConnection(Self.transportError(error))
+            }
+        }
+    }
+
+    private func consumeWebSocketMessage(
+        _ message: URLSessionWebSocketTask.Message,
+        from task: any CowchatWebSocketTaskProtocol,
+        transportID: UUID
+    ) {
+        guard webSocketTask === task, webSocketTransportID == transportID else { return }
+        let data: Data
+        switch message {
+        case .string(let text):
+            data = Data(text.utf8)
+        case .data:
+            failConnection(CowchatConnectionError.transport("Cowchat Cloud sent a non-text frame."))
+            return
+        @unknown default:
+            failConnection(CowchatConnectionError.invalidResponse)
+            return
+        }
+        guard data.count <= Self.maximumFrameBytes else {
             failConnection(CowchatConnectionError.transport("Cowchat sent a frame larger than 1 MiB."))
             return
         }
+        if data.last == 0x0A {
+            consume(data)
+        } else {
+            var terminated = data
+            terminated.append(0x0A)
+            consume(terminated)
+        }
+    }
+
+    private func consume(_ data: Data) {
+        buffer.append(data)
         while let newline = buffer.firstIndex(of: 0x0A) {
             let line = buffer[..<newline]
             buffer.removeSubrange(...newline)
+            guard line.count <= Self.maximumFrameBytes else {
+                failConnection(CowchatConnectionError.transport("Cowchat sent a frame larger than 1 MiB."))
+                return
+            }
             guard !line.isEmpty,
                   let object = try? JSONSerialization.jsonObject(with: Data(line)) as? Payload,
                   let type = object["type"] as? String else { continue }
@@ -276,6 +439,10 @@ final class CowchatConnection: CowchatConnectionProtocol {
                 onEvent?(type, payload)
             }
         }
+        guard buffer.count <= Self.maximumFrameBytes else {
+            failConnection(CowchatConnectionError.transport("Cowchat sent a frame larger than 1 MiB."))
+            return
+        }
     }
 
     private func handle(_ state: NWConnection.State, from source: NWConnection) {
@@ -286,9 +453,9 @@ final class CowchatConnection: CowchatConnectionProtocol {
             readyContinuation = nil
             connectAttempt = nil
         case .waiting(let error):
-            failConnection(CowchatConnectionError.transport(error.localizedDescription))
+            failConnection(Self.transportError(error))
         case .failed(let error):
-            failConnection(CowchatConnectionError.transport(error.localizedDescription))
+            failConnection(Self.transportError(error))
         case .cancelled:
             failConnection(CowchatConnectionError.notConnected)
         default:
@@ -301,10 +468,17 @@ final class CowchatConnection: CowchatConnectionProtocol {
         readyContinuation = nil
         failPending(with: error)
         let failedConnection = connection
+        let failedWebSocket = webSocketTask
+        let failedWebSocketReceiveTask = webSocketReceiveTask
         connection = nil
+        webSocketTask = nil
+        webSocketReceiveTask = nil
+        webSocketTransportID = nil
         connectAttempt = nil
         failedConnection?.stateUpdateHandler = nil
         failedConnection?.cancel()
+        failedWebSocketReceiveTask?.cancel()
+        failedWebSocket?.cancel(with: .goingAway, reason: nil)
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         onStatusChange?(.failed(message))
     }
@@ -330,12 +504,24 @@ final class CowchatConnection: CowchatConnectionProtocol {
     }
 
     private func sendFrame(_ frame: Payload) {
-        guard let connection,
-              JSONSerialization.isValidJSONObject(frame),
-              var data = try? JSONSerialization.data(withJSONObject: frame),
+        guard JSONSerialization.isValidJSONObject(frame),
+              let data = try? JSONSerialization.data(withJSONObject: frame),
               data.count <= Self.maximumFrameBytes else { return }
-        data.append(0x0A)
-        connection.send(content: data, completion: .idempotent)
+        if let connection {
+            var terminated = data
+            terminated.append(0x0A)
+            connection.send(content: terminated, completion: .idempotent)
+        } else if let webSocketTask,
+                  let text = String(data: data, encoding: .utf8) {
+            Task { [weak self, webSocketTask] in
+                do {
+                    try await webSocketTask.send(.string(text))
+                } catch {
+                    guard let self, self.webSocketTask === webSocketTask else { return }
+                    self.failConnection(Self.transportError(error))
+                }
+            }
+        }
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from object: Any) throws -> T {
@@ -344,5 +530,12 @@ final class CowchatConnection: CowchatConnectionProtocol {
         }
         let data = try JSONSerialization.data(withJSONObject: object)
         return try JSONDecoder().decode(type, from: data)
+    }
+
+    private static func transportError(_ error: Error) -> CowchatConnectionError {
+        if let connectionError = error as? CowchatConnectionError {
+            return connectionError
+        }
+        return .transport(error.localizedDescription)
     }
 }

@@ -498,17 +498,57 @@ private struct SidebarView: View {
 
     private var sidebarFooter: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 7, height: 7)
-            Text(store.connectionStatus.label)
-                .gallopText(.caption, color: .textSecondary)
+            Menu {
+                Button {
+                    store.useLocalConnection()
+                } label: {
+                    Label(
+                        "Local",
+                        systemImage: store.isLocalConnection ? "checkmark.circle.fill" : "desktopcomputer"
+                    )
+                }
+                Button {
+                    if store.isCowchatCloudConfigured {
+                        store.useCowchatCloud()
+                    } else {
+                        isSettingsPresented = true
+                    }
+                } label: {
+                    Label(
+                        "Cowchat Cloud",
+                        systemImage: !store.isLocalConnection ? "checkmark.circle.fill" : "cloud"
+                    )
+                }
+                Divider()
+                Button("Connection settings…") { isSettingsPresented = true }
+            } label: {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 7, height: 7)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(store.connectionTargetDescription)
+                            .gallopText(.caption, color: .textSecondary)
+                        Text(store.connectionStatus.label)
+                            .gallopText(.dataLabel, color: .textTertiary)
+                            .help(store.connectionStatus.failureMessage ?? store.connectionStatus.label)
+                    }
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(GallopColor.iconTertiary.color)
+                }
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Choose Local or Cowchat Cloud")
             Spacer()
             if !store.connectionStatus.isConnected {
-                Button("Reconnect") { store.start() }
-                    .buttonStyle(.plain)
-                    .gallopText(.caption, color: .surfaceGlassOnTextDefault)
-                    .macAccessibleAction(label: "Reconnect") { store.start() }
+                CircleIconButton(
+                    systemName: "arrow.clockwise",
+                    help: "Reconnect",
+                    action: store.reconnect
+                )
             }
             CircleIconButton(
                 systemName: "magnifyingglass",
@@ -533,7 +573,7 @@ private struct SidebarView: View {
             )
         }
         .padding(.horizontal, 12)
-        .frame(height: 52)
+        .frame(height: 58)
         .background(GallopColor.surface600.color.opacity(0.78))
         .overlay(alignment: .top) {
             Rectangle().fill(GallopColor.borderDefault.color).frame(height: 1)
@@ -888,7 +928,7 @@ private struct RoomSetupView: View {
 
     private var roomPrompt: String {
         """
-        You're going to collaborate with another AI chatbot in real time over Cowchat. Read the Cowchat skill, connect to the local server, join the exact room “\(room.name)”, and start listening right away. https://cowchat.cowboy.inc/skills.txt
+        You're going to collaborate with another AI chatbot in real time over Cowchat. Read the Cowchat skill, \(store.agentConnectionInstruction), join the exact room “\(room.name)”, and start listening right away. https://cowchat.cowboy.inc/skills.txt
         """
     }
 
@@ -1676,10 +1716,19 @@ private struct EmptyChatView: View {
     }
 }
 
+private enum SettingsPage {
+    case connection
+    case theme
+}
+
 private struct SettingsView: View {
+    @EnvironmentObject private var store: ChatStore
     @Binding var isPresented: Bool
     let onShowOnboarding: () -> Void
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
+    @State private var selectedPage = SettingsPage.connection
+    @State private var cloudURL = ""
+    @State private var cloudAPIKey = ""
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1689,7 +1738,16 @@ private struct SettingsView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 20)
                     .padding(.bottom, 8)
-                settingsRow("Theme", systemName: "circle.lefthalf.filled", selected: true)
+                settingsNavigationRow(
+                    "Connection",
+                    systemName: "network",
+                    page: .connection
+                )
+                settingsNavigationRow(
+                    "Theme",
+                    systemName: "circle.lefthalf.filled",
+                    page: .theme
+                )
                 Spacer()
             }
             .frame(width: 230)
@@ -1698,55 +1756,16 @@ private struct SettingsView: View {
             Rectangle().fill(GallopColor.borderDefault.color).frame(width: 1)
 
             VStack(alignment: .leading, spacing: 24) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Theme")
-                            .gallopText(.h4, color: .textPrimary)
-                        Text("Choose how Cowchat appears on this Mac.")
-                            .gallopText(.bodyM, color: .textTertiary)
+                settingsHeader
+
+                switch selectedPage {
+                case .connection:
+                    ScrollView {
+                        connectionSettings
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    Spacer()
-                    Button("Close") { isPresented = false }
-                        .buttonStyle(.plain)
-                        .gallopText(.bodySStrong, color: .buttonSecondaryTextDefault)
-                        .padding(.horizontal, 14)
-                        .frame(height: 32)
-                        .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
-                        .overlay {
-                            Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
-                        }
-                        .macAccessibleAction(label: "Close settings") { isPresented = false }
-                }
-
-                Picker("Appearance", selection: $appearance) {
-                    ForEach(AppAppearance.allCases) { option in
-                        Text(option.label).tag(option.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: 360)
-
-                HStack(spacing: 12) {
-                    themePreview(title: "Light", dark: false)
-                    themePreview(title: "Dark", dark: true)
-                }
-
-                Button("Show onboarding again") {
-                    isPresented = false
-                    onShowOnboarding()
-                }
-                .buttonStyle(.plain)
-                .gallopText(.bodyMStrong, color: .buttonSecondaryTextDefault)
-                .padding(.horizontal, 16)
-                .frame(height: 38)
-                .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
-                .overlay {
-                    Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
-                }
-                .macAccessibleAction(label: "Show onboarding again") {
-                    isPresented = false
-                    onShowOnboarding()
+                case .theme:
+                    themeSettings
                 }
 
                 Spacer()
@@ -1761,26 +1780,259 @@ private struct SettingsView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(GallopColor.borderDefault.color, lineWidth: 1)
         }
+        .onAppear(perform: loadCloudConfiguration)
     }
 
-    private func settingsRow(_ title: String, systemName: String, selected: Bool) -> some View {
-        HStack(spacing: 9) {
-            Image(systemName: systemName)
-                .font(.system(size: 13, weight: .medium))
-                .frame(width: 16)
-            Text(title)
-                .gallopText(.bodyM)
-                .lineLimit(1)
+    private var settingsHeader: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(selectedPage == .connection ? "Connection" : "Theme")
+                    .gallopText(.h4, color: .textPrimary)
+                Text(
+                    selectedPage == .connection
+                        ? "Choose where Cowchat stores and syncs your rooms."
+                        : "Choose how Cowchat appears on this Mac."
+                )
+                    .gallopText(.bodyM, color: .textTertiary)
+            }
             Spacer()
+            Button("Close") { isPresented = false }
+                .buttonStyle(.plain)
+                .gallopText(.bodySStrong, color: .buttonSecondaryTextDefault)
+                .padding(.horizontal, 14)
+                .frame(height: 32)
+                .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+                .overlay {
+                    Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+                }
+                .macAccessibleAction(label: "Close settings") { isPresented = false }
         }
-        .foregroundStyle(selected ? GallopColor.textPrimary.color : GallopColor.textSecondary.color)
-        .padding(.horizontal, 12)
-        .frame(height: 36)
-        .background(
-            selected ? GallopColor.surfaceGlassOnDefault.color : Color.clear,
-            in: RoundedRectangle(cornerRadius: 10)
-        )
-        .padding(.horizontal, 8)
+    }
+
+    private var connectionSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                connectionChoice(
+                    title: "Local",
+                    detail: "Runs on this Mac",
+                    systemName: "desktopcomputer",
+                    selected: store.isLocalConnection,
+                    action: store.useLocalConnection
+                )
+                connectionChoice(
+                    title: "Cowchat Cloud",
+                    detail: "Secure WebSocket",
+                    systemName: "cloud",
+                    selected: !store.isLocalConnection,
+                    action: {
+                        if store.isCowchatCloudConfigured {
+                            store.useCowchatCloud()
+                        }
+                    }
+                )
+            }
+
+            if let failureMessage = store.connectionStatus.failureMessage {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(GallopColor.warning.color)
+                    Text(failureMessage)
+                        .gallopText(.bodyS, color: .textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(12)
+                .background(GallopColor.surfaceGlassOnDefault.color, in: RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Local server")
+                    .gallopText(.bodyMStrong, color: .textPrimary)
+                Text("Local is the default. Cowchat starts its bundled server when needed, and your room database stays on this Mac.")
+                    .gallopText(.bodyM, color: .textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(16)
+            .background(GallopColor.surface500.color, in: RoundedRectangle(cornerRadius: 14))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Cowchat Cloud")
+                    .gallopText(.bodyMStrong, color: .textPrimary)
+                TextField("wss://your-cowchat.example/ws", text: $cloudURL)
+                    .textFieldStyle(.plain)
+                    .gallopText(.bodyM, color: .textPrimary)
+                    .padding(.horizontal, 13)
+                    .frame(height: 40)
+                    .background(GallopColor.textfieldDefault.color, in: Capsule())
+                    .overlay {
+                        Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                    }
+                SecureField("API key", text: $cloudAPIKey)
+                    .textFieldStyle(.plain)
+                    .gallopText(.bodyM, color: .textPrimary)
+                    .padding(.horizontal, 13)
+                    .frame(height: 40)
+                    .background(GallopColor.textfieldDefault.color, in: Capsule())
+                    .overlay {
+                        Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                    }
+                HStack {
+                    Label("Stored only in this Mac's Keychain", systemImage: "lock.fill")
+                        .gallopText(.caption, color: .textTertiary)
+                    Spacer()
+                    Button("Save and connect", action: saveCloudConfiguration)
+                        .buttonStyle(.plain)
+                        .gallopText(.bodyMStrong, color: .buttonPrimaryTextDefault)
+                        .padding(.horizontal, 16)
+                        .frame(height: 36)
+                        .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+                        .disabled(!canSaveCloudConfiguration)
+                        .opacity(canSaveCloudConfiguration ? 1 : 0.45)
+                }
+            }
+            .padding(16)
+            .background(GallopColor.surface500.color, in: RoundedRectangle(cornerRadius: 14))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+            }
+        }
+    }
+
+    private var themeSettings: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Picker("Appearance", selection: $appearance) {
+                ForEach(AppAppearance.allCases) { option in
+                    Text(option.label).tag(option.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 360)
+
+            HStack(spacing: 12) {
+                themePreview(title: "Light", dark: false)
+                themePreview(title: "Dark", dark: true)
+            }
+
+            Button("Show onboarding again") {
+                isPresented = false
+                onShowOnboarding()
+            }
+            .buttonStyle(.plain)
+            .gallopText(.bodyMStrong, color: .buttonSecondaryTextDefault)
+            .padding(.horizontal, 16)
+            .frame(height: 38)
+            .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+            .overlay {
+                Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+            }
+            .macAccessibleAction(label: "Show onboarding again") {
+                isPresented = false
+                onShowOnboarding()
+            }
+        }
+    }
+
+    private func settingsNavigationRow(
+        _ title: String,
+        systemName: String,
+        page: SettingsPage
+    ) -> some View {
+        Button { selectedPage = page } label: {
+            HStack(spacing: 9) {
+                Image(systemName: systemName)
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 16)
+                Text(title)
+                    .gallopText(.bodyM)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .foregroundStyle(
+                selectedPage == page
+                    ? GallopColor.textPrimary.color
+                    : GallopColor.textSecondary.color
+            )
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .background(
+                selectedPage == page ? GallopColor.surfaceGlassOnDefault.color : Color.clear,
+                in: RoundedRectangle(cornerRadius: 10)
+            )
+            .padding(.horizontal, 8)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func connectionChoice(
+        title: String,
+        detail: String,
+        systemName: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Image(systemName: systemName)
+                    .font(.system(size: 18, weight: .medium))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).gallopText(.bodyMStrong)
+                    Text(detail).gallopText(.caption)
+                }
+                Spacer()
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(
+                        selected
+                            ? GallopColor.buttonPrimaryDefault.color
+                            : GallopColor.iconSubtle.color
+                    )
+            }
+            .foregroundStyle(GallopColor.textSecondary.color)
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity)
+            .frame(height: 64)
+            .background(
+                selected ? GallopColor.surfaceGlassOnDefault.color : GallopColor.surface500.color,
+                in: RoundedRectangle(cornerRadius: 14)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(
+                        selected
+                            ? GallopColor.buttonPrimaryDefault.color
+                            : GallopColor.borderDefault.color,
+                        lineWidth: 1
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var canSaveCloudConfiguration: Bool {
+        !cloudURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !cloudAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func loadCloudConfiguration() {
+        let configured = store.configuredCowchatCloudValues()
+        cloudURL = configured.url
+        cloudAPIKey = configured.apiKey
+    }
+
+    private func saveCloudConfiguration() {
+        guard canSaveCloudConfiguration else { return }
+        if store.saveAndUseCowchatCloud(url: cloudURL, apiKey: cloudAPIKey) {
+            loadCloudConfiguration()
+        }
     }
 
     private func themePreview(title: String, dark: Bool) -> some View {

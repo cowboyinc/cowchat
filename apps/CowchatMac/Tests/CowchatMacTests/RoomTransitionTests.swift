@@ -12,8 +12,12 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
     var historyRequests: [(roomID: String, limit: Int, before: String?)] = []
     var listedRooms: [Room] = []
     var roomToCreate: Room?
+    var blocksCreate = false
     var registration = CowchatRegistration(agentID: "")
+    var registeredAgentIDs: [String] = []
+    var blocksNextRegistration = false
     var destroyedRoomIDs: [String] = []
+    var blocksDestroy = false
     var emitsDestroyEventBeforeReply = false
     var destroyShouldFailAfterEvent = false
     var renamedRooms: [(String, String)] = []
@@ -21,14 +25,37 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
     var blockedHistoryLimit: Int?
     var blocksSend = false
     var sendShouldFail = false
+    var connectCallCount = 0
+    var connectFailuresRemaining = 0
+    var blocksConnect = false
+    var registrationError: Error?
+    private var connectContinuation: CheckedContinuation<Void, Never>?
+    private var registrationContinuation: CheckedContinuation<Void, Never>?
+    private var createContinuation: CheckedContinuation<Void, Never>?
+    private var destroyContinuation: CheckedContinuation<Void, Never>?
     private var joinContinuation: CheckedContinuation<Void, Never>?
     private var listRoomsContinuation: CheckedContinuation<Void, Never>?
     private var historyContinuation: CheckedContinuation<Void, Never>?
     private var sendContinuations: [String: CheckedContinuation<Void, Never>] = [:]
 
-    func connect() async throws {}
+    func connect() async throws {
+        connectCallCount += 1
+        if blocksConnect {
+            await withCheckedContinuation { connectContinuation = $0 }
+        }
+        if connectFailuresRemaining > 0 {
+            connectFailuresRemaining -= 1
+            throw CowchatConnectionError.transport("Connection refused")
+        }
+    }
     func register(name: String, agentID: String) async throws -> CowchatRegistration {
-        CowchatRegistration(
+        registeredAgentIDs.append(agentID)
+        if blocksNextRegistration {
+            blocksNextRegistration = false
+            await withCheckedContinuation { registrationContinuation = $0 }
+        }
+        if let registrationError { throw registrationError }
+        return CowchatRegistration(
             agentID: registration.agentID.isEmpty ? agentID : registration.agentID,
             restoredRoomIDs: registration.restoredRoomIDs
         )
@@ -48,12 +75,19 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         ephemeral: Bool,
         isPublic: Bool
     ) async throws -> Room {
+        operations.append("create:\(name)")
+        if blocksCreate {
+            await withCheckedContinuation { createContinuation = $0 }
+        }
         guard let roomToCreate else { fatalError("set roomToCreate before creating") }
         return roomToCreate
     }
     func destroy(roomID: String) async throws {
         operations.append("destroy:\(roomID)")
         destroyedRoomIDs.append(roomID)
+        if blocksDestroy {
+            await withCheckedContinuation { destroyContinuation = $0 }
+        }
         if emitsDestroyEventBeforeReply {
             onEvent?("room_destroyed", ["room_id": roomID])
         }
@@ -125,6 +159,29 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         joinContinuation = nil
     }
 
+    func resumeBlockedConnect() {
+        blocksConnect = false
+        connectContinuation?.resume()
+        connectContinuation = nil
+    }
+
+    func resumeBlockedRegistration() {
+        registrationContinuation?.resume()
+        registrationContinuation = nil
+    }
+
+    func resumeBlockedCreate() {
+        blocksCreate = false
+        createContinuation?.resume()
+        createContinuation = nil
+    }
+
+    func resumeBlockedDestroy() {
+        blocksDestroy = false
+        destroyContinuation?.resume()
+        destroyContinuation = nil
+    }
+
     func resumeBlockedListRooms() {
         blocksListRooms = false
         listRoomsContinuation?.resume()
@@ -149,6 +206,52 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
     }
 }
 
+private final class RoomTransitionCredentialStore: CowchatCredentialStore {
+    var credential: String?
+    var readError: Error?
+    var writeError: Error?
+
+    func credential(for _: String) throws -> String? {
+        if let readError { throw readError }
+        return credential
+    }
+
+    func setCredential(_ credential: String?, for _: String) throws {
+        if let writeError { throw writeError }
+        self.credential = credential
+    }
+}
+
+@MainActor
+private final class MockLocalServerSupervisor: LocalServerSupervising {
+    var ownsRunningServer = false
+    var launchCount = 0
+    var stopCount = 0
+    var appTerminationShutdownCount = 0
+    var explicitRetryCount = 0
+    var launchError: Error?
+
+    func launchIfNeeded() async throws {
+        launchCount += 1
+        if let launchError { throw launchError }
+        ownsRunningServer = true
+    }
+
+    func stopOwnedServer() {
+        stopCount += 1
+        ownsRunningServer = false
+    }
+
+    func shutdownOwnedServerForAppTermination() async {
+        appTerminationShutdownCount += 1
+        stopOwnedServer()
+    }
+
+    func prepareForExplicitRetry() {
+        explicitRetryCount += 1
+    }
+}
+
 final class RoomTransitionTests: XCTestCase {
     @MainActor
     private func makeStore(connection: MockRoomConnection) -> ChatStore {
@@ -156,6 +259,512 @@ final class RoomTransitionTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         return ChatStore(connection: connection, defaults: defaults)
+    }
+
+    @MainActor
+    private func makeProfileSwitchingStore(connection: MockRoomConnection) -> ChatStore {
+        let suiteName = "RoomTransitionTests.profile.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set("profile-owner", forKey: "CowchatMac.agentID")
+        let preferences = ConnectionProfilePreferences(
+            defaults: defaults,
+            credentialStore: RoomTransitionCredentialStore()
+        )
+        return ChatStore(
+            connection: connection,
+            defaults: defaults,
+            connectionPreferences: preferences,
+            localServerRetryDelaysNanoseconds: []
+        )
+    }
+
+    @MainActor
+    private func switchToTestCloud(_ store: ChatStore, connection: MockRoomConnection) {
+        connection.connectFailuresRemaining = 1
+        XCTAssertTrue(
+            store.saveAndUseCowchatCloud(
+                url: "wss://cloud.example/ws",
+                apiKey: "profile-switch-key"
+            )
+        )
+        XCTAssertEqual(store.connectionProfile.kind, .cowchatCloud)
+    }
+
+    @MainActor
+    func testExistingLocalServerConnectsWithoutLaunchingBundledServer() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        let defaults = UserDefaults(suiteName: "RoomTransitionTests.\(UUID().uuidString)")!
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: [0]
+        )
+
+        await store.connect()
+
+        XCTAssertEqual(connection.connectCallCount, 1)
+        XCTAssertEqual(supervisor.launchCount, 0)
+        XCTAssertEqual(store.connectionStatus, .connected)
+    }
+
+    @MainActor
+    func testMissingLocalServerLaunchesOnceAndRetriesTransport() async {
+        let connection = MockRoomConnection()
+        connection.connectFailuresRemaining = 1
+        let supervisor = MockLocalServerSupervisor()
+        let defaults = UserDefaults(suiteName: "RoomTransitionTests.\(UUID().uuidString)")!
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: [0]
+        )
+
+        await store.connect()
+
+        XCTAssertEqual(connection.connectCallCount, 2)
+        XCTAssertEqual(supervisor.launchCount, 1)
+        XCTAssertTrue(supervisor.ownsRunningServer)
+        XCTAssertEqual(store.connectionStatus, .connected)
+    }
+
+    @MainActor
+    func testRegistrationFailureDoesNotLaunchBundledServer() async {
+        let connection = MockRoomConnection()
+        connection.registrationError = CowchatConnectionError.server("Protocol mismatch")
+        let supervisor = MockLocalServerSupervisor()
+        let defaults = UserDefaults(suiteName: "RoomTransitionTests.\(UUID().uuidString)")!
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: [0]
+        )
+
+        await store.connect()
+
+        XCTAssertEqual(connection.connectCallCount, 1)
+        XCTAssertEqual(supervisor.launchCount, 0)
+        XCTAssertEqual(store.connectionStatus, .failed("Protocol mismatch"))
+    }
+
+    @MainActor
+    func testCloudTransportFailureNeverLaunchesLocalServer() async throws {
+        let connection = MockRoomConnection()
+        connection.connectFailuresRemaining = 1
+        let supervisor = MockLocalServerSupervisor()
+        let profile = try ConnectionProfile.cowchatCloud(
+            urlString: "wss://cloud.example/ws",
+            apiKey: "test-key"
+        )
+        let defaults = UserDefaults(suiteName: "RoomTransitionTests.\(UUID().uuidString)")!
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            connectionProfile: profile,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: [0]
+        )
+
+        await store.connect()
+
+        XCTAssertEqual(connection.connectCallCount, 1)
+        XCTAssertEqual(supervisor.launchCount, 0)
+        XCTAssertFalse(store.connectionStatus.isConnected)
+    }
+
+    @MainActor
+    func testUnavailableSelectedCloudNeverFallsBackToLocalServer() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        let profile = ConnectionProfile.unavailableCowchatCloud(
+            urlString: "wss://cloud.example/ws"
+        )
+        let configurationError = ConnectionProfileError.missingAPIKey
+        let defaults = UserDefaults(suiteName: "RoomTransitionTests.\(UUID().uuidString)")!
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            connectionProfile: profile,
+            localServerSupervisor: supervisor,
+            connectionConfigurationError: configurationError,
+            localServerRetryDelaysNanoseconds: [0]
+        )
+
+        store.start()
+        for _ in 0..<10 { await Task.yield() }
+
+        XCTAssertEqual(store.connectionProfile.kind, .cowchatCloud)
+        XCTAssertEqual(connection.connectCallCount, 0)
+        XCTAssertEqual(supervisor.launchCount, 0)
+        XCTAssertEqual(store.connectionStatus, .failed(configurationError.localizedDescription))
+    }
+
+    @MainActor
+    func testManualReconnectReloadsTransientlyUnavailableSelectedCloudProfile() async throws {
+        let suiteName = "RoomTransitionTests.cloud-reload.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let credentialStore = RoomTransitionCredentialStore()
+        let preferences = ConnectionProfilePreferences(
+            defaults: defaults,
+            credentialStore: credentialStore
+        )
+        let savedProfile = try preferences.save(
+            ConnectionProfile.cowchatCloud(
+                urlString: "wss://cloud.example/ws",
+                apiKey: "transient-key"
+            )
+        )
+        let transientError = NSError(
+            domain: "RoomTransitionTests.Keychain",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "Keychain is temporarily unavailable"]
+        )
+        credentialStore.readError = transientError
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            connectionProfile: .unavailableCowchatCloud(
+                urlString: preferences.loadSavedCloudURL()
+            ),
+            connectionPreferences: preferences,
+            localServerSupervisor: supervisor,
+            connectionConfigurationError: transientError,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        credentialStore.readError = nil
+        store.reconnect()
+        for _ in 0..<100 where !store.connectionStatus.isConnected {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(store.connectionProfile, savedProfile)
+        XCTAssertEqual(store.connectionStatus, .connected)
+        XCTAssertEqual(connection.connectCallCount, 1)
+        XCTAssertEqual(connection.registeredAgentIDs.count, 1)
+        XCTAssertEqual(supervisor.launchCount, 0)
+        XCTAssertNil(store.errorMessage)
+    }
+
+    @MainActor
+    func testRepeatedStartCallsShareOneConnectionAttempt() async {
+        let connection = MockRoomConnection()
+        connection.blocksConnect = true
+        let defaults = UserDefaults(suiteName: "RoomTransitionTests.\(UUID().uuidString)")!
+        let store = ChatStore(connection: connection, defaults: defaults)
+
+        store.start()
+        store.start()
+        while connection.connectCallCount == 0 { await Task.yield() }
+
+        XCTAssertEqual(connection.connectCallCount, 1)
+        connection.resumeBlockedConnect()
+        while !store.connectionStatus.isConnected { await Task.yield() }
+        XCTAssertEqual(connection.connectCallCount, 1)
+    }
+
+    @MainActor
+    func testProfileSwitchBeforeScheduledConnectDoesNotStartCanceledAttempt() async {
+        let connection = MockRoomConnection()
+        let store = makeProfileSwitchingStore(connection: connection)
+
+        store.start()
+        XCTAssertTrue(store.saveAndUseCowchatCloud(
+            url: "wss://cloud.example/ws",
+            apiKey: "scheduled-switch-key"
+        ))
+        while !store.connectionStatus.isConnected { await Task.yield() }
+        for _ in 0..<10 { await Task.yield() }
+
+        XCTAssertEqual(connection.connectCallCount, 1)
+        XCTAssertEqual(connection.registeredAgentIDs.count, 1)
+        XCTAssertEqual(store.connectionProfile.kind, .cowchatCloud)
+    }
+
+    @MainActor
+    func testSwitchingFromLocalToCloudStopsOnlyTheOwnedHelper() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        supervisor.ownsRunningServer = true
+        let suiteName = "RoomTransitionTests.stop-helper.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        let preferences = ConnectionProfilePreferences(
+            defaults: defaults,
+            credentialStore: RoomTransitionCredentialStore()
+        )
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            connectionPreferences: preferences,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        XCTAssertTrue(store.saveAndUseCowchatCloud(
+            url: "wss://cloud.example/ws",
+            apiKey: "stop-owned-key"
+        ))
+
+        XCTAssertEqual(supervisor.stopCount, 1)
+        XCTAssertFalse(supervisor.ownsRunningServer)
+    }
+
+    @MainActor
+    func testReturningToLocalAndManualReconnectPermitOneExplicitHelperRetry() async throws {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        let cloud = try ConnectionProfile.cowchatCloud(
+            urlString: "wss://cloud.example/ws",
+            apiKey: "retry-key"
+        )
+        let defaults = UserDefaults(suiteName: "RoomTransitionTests.retry-helper.\(UUID().uuidString)")!
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            connectionProfile: cloud,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        store.useLocalConnection()
+        XCTAssertEqual(supervisor.explicitRetryCount, 1)
+        while !store.connectionStatus.isConnected { await Task.yield() }
+
+        store.connectionStatus = .failed("transient local failure")
+        store.reconnect()
+        XCTAssertEqual(supervisor.explicitRetryCount, 2)
+    }
+
+    @MainActor
+    func testProfileSwitchDiscardsCreateCompletionFromOldServer() async throws {
+        let localRoom = try decodeRoom(id: "local-room", name: "Local room", createdBy: "profile-owner")
+        let staleCreated = try decodeRoom(id: "stale-created", name: "Stale", createdBy: "profile-owner")
+        let connection = MockRoomConnection()
+        connection.listedRooms = [localRoom]
+        connection.roomToCreate = staleCreated
+        let store = makeProfileSwitchingStore(connection: connection)
+        await store.connect()
+        connection.blocksCreate = true
+
+        let creation = Task {
+            await store.createRoom(
+                name: "Stale",
+                description: "",
+                ephemeral: false,
+                isPublic: true
+            )
+        }
+        while !connection.operations.contains("create:Stale") { await Task.yield() }
+
+        switchToTestCloud(store, connection: connection)
+        connection.resumeBlockedCreate()
+
+        let creationSucceeded = await creation.value
+        XCTAssertFalse(creationSucceeded)
+        XCTAssertFalse(store.rooms.contains(where: { $0.id == staleCreated.id }))
+        XCTAssertNil(store.selectedRoomID)
+    }
+
+    @MainActor
+    func testManualReconnectDiscardsCreateCompletionFromPriorSession() async throws {
+        let staleCreated = try decodeRoom(
+            id: "stale-before-reconnect",
+            name: "Stale",
+            createdBy: "profile-owner"
+        )
+        let connection = MockRoomConnection()
+        connection.roomToCreate = staleCreated
+        let store = makeProfileSwitchingStore(connection: connection)
+        await store.connect()
+        connection.blocksCreate = true
+
+        let creation = Task {
+            await store.createRoom(
+                name: "Stale",
+                description: "",
+                ephemeral: false,
+                isPublic: true
+            )
+        }
+        while !connection.operations.contains("create:Stale") { await Task.yield() }
+
+        store.connectionStatus = .failed("transport dropped")
+        store.reconnect()
+        connection.resumeBlockedCreate()
+
+        let creationSucceeded = await creation.value
+        XCTAssertFalse(creationSucceeded)
+        XCTAssertFalse(store.rooms.contains(where: { $0.id == staleCreated.id }))
+    }
+
+    @MainActor
+    func testChangingCloudCredentialUsesANewStableAgentIdentity() async {
+        let connection = MockRoomConnection()
+        let store = makeProfileSwitchingStore(connection: connection)
+
+        XCTAssertTrue(store.saveAndUseCowchatCloud(
+            url: "wss://cloud.example/ws",
+            apiKey: "first-key"
+        ))
+        while connection.registeredAgentIDs.count < 1 { await Task.yield() }
+        let firstProfile = store.connectionProfile
+        let firstAgentID = connection.registeredAgentIDs[0]
+
+        XCTAssertTrue(store.saveAndUseCowchatCloud(
+            url: "wss://cloud.example/ws",
+            apiKey: "second-key"
+        ))
+        while connection.registeredAgentIDs.count < 2 { await Task.yield() }
+        let secondProfile = store.connectionProfile
+        let secondAgentID = connection.registeredAgentIDs[1]
+
+        XCTAssertNotEqual(firstProfile.cloudAccountID, secondProfile.cloudAccountID)
+        XCTAssertNotEqual(firstAgentID, secondAgentID)
+        XCTAssertTrue(firstAgentID.hasPrefix("cowchat-mac-"))
+        XCTAssertTrue(secondAgentID.hasPrefix("cowchat-mac-"))
+    }
+
+    @MainActor
+    func testProfileSwitchDuringRegistrationCannotRestoreOldIdentity() async {
+        let connection = MockRoomConnection()
+        connection.blocksNextRegistration = true
+        let store = makeProfileSwitchingStore(connection: connection)
+
+        store.start()
+        while connection.registeredAgentIDs.count < 1 { await Task.yield() }
+        let localAgentID = connection.registeredAgentIDs[0]
+
+        XCTAssertTrue(store.saveAndUseCowchatCloud(
+            url: "wss://cloud.example/ws",
+            apiKey: "cloud-key"
+        ))
+        while connection.registeredAgentIDs.count < 2 { await Task.yield() }
+        let cloudAgentID = connection.registeredAgentIDs[1]
+        while !store.connectionStatus.isConnected { await Task.yield() }
+
+        connection.resumeBlockedRegistration()
+        for _ in 0..<10 { await Task.yield() }
+
+        XCTAssertNotEqual(localAgentID, cloudAgentID)
+        XCTAssertEqual(store.connectionProfile.kind, .cowchatCloud)
+        XCTAssertEqual(store.agentID, cloudAgentID)
+    }
+
+    @MainActor
+    func testCloudSaveFailureReturnsFalseAndKeepsCurrentProfile() async {
+        let suiteName = "RoomTransitionTests.save-failure.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        let credentialStore = RoomTransitionCredentialStore()
+        let preferences = ConnectionProfilePreferences(
+            defaults: defaults,
+            credentialStore: credentialStore
+        )
+        let connection = MockRoomConnection()
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            connectionPreferences: preferences
+        )
+
+        XCTAssertTrue(store.saveAndUseCowchatCloud(
+            url: "wss://cloud.example/ws",
+            apiKey: "stable-key"
+        ))
+        while connection.registeredAgentIDs.isEmpty { await Task.yield() }
+        let originalProfile = store.connectionProfile
+        credentialStore.writeError = NSError(
+            domain: "RoomTransitionTests.Keychain",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Injected Keychain write failure"]
+        )
+
+        XCTAssertFalse(store.saveAndUseCowchatCloud(
+            url: "wss://cloud.example/ws",
+            apiKey: "stable-key"
+        ))
+        XCTAssertEqual(store.connectionProfile, originalProfile)
+        XCTAssertEqual(store.errorMessage, "Injected Keychain write failure")
+    }
+
+    @MainActor
+    func testProfileSwitchDoesNotRestoreFailedDraftFromOldServer() async throws {
+        let localRoom = try decodeRoom(id: "local-room", name: "Local room", createdBy: "profile-owner")
+        let connection = MockRoomConnection()
+        connection.listedRooms = [localRoom]
+        connection.historiesByRoom[localRoom.id] = [try decodeMessage(
+            id: "reply",
+            roomID: localRoom.id,
+            content: "sent",
+            timestamp: "2026-08-04T12:00:00Z",
+            sequence: 1
+        )]
+        let store = makeProfileSwitchingStore(connection: connection)
+        await store.connect()
+        connection.blocksSend = true
+        connection.sendShouldFail = true
+        store.draft = "belongs to local"
+
+        store.sendDraft()
+        while !connection.operations.contains("send:local-room:belongs to local") {
+            await Task.yield()
+        }
+
+        switchToTestCloud(store, connection: connection)
+        connection.resumeBlockedSend(content: "belongs to local")
+        for _ in 0..<10 { await Task.yield() }
+
+        XCTAssertEqual(store.draft, "")
+        XCTAssertNil(store.errorMessage)
+        XCTAssertTrue(store.rooms.isEmpty)
+    }
+
+    @MainActor
+    func testProfileSwitchDoesNotRemoveSameIDRoomAfterOldDestroyCompletes() async throws {
+        let localRoom = try decodeRoom(id: "shared-id", name: "Local room", createdBy: "profile-owner")
+        let cloudRoom = try decodeRoom(id: "shared-id", name: "Cloud room", createdBy: "another-agent")
+        let connection = MockRoomConnection()
+        connection.listedRooms = [localRoom]
+        let store = makeProfileSwitchingStore(connection: connection)
+        await store.connect()
+        connection.blocksDestroy = true
+
+        let destruction = Task { await store.destroy(localRoom) }
+        while !connection.operations.contains("destroy:shared-id") { await Task.yield() }
+
+        switchToTestCloud(store, connection: connection)
+        store.rooms = [cloudRoom]
+        connection.resumeBlockedDestroy()
+
+        let destructionSucceeded = await destruction.value
+        XCTAssertFalse(destructionSucceeded)
+        XCTAssertEqual(store.rooms.map(\.name), ["Cloud room"])
+    }
+
+    @MainActor
+    func testProfileSwitchDiscardsRoomRefreshFromOldServer() async throws {
+        let staleRoom = try decodeRoom(id: "stale", name: "Stale")
+        let cloudRoom = try decodeRoom(id: "cloud", name: "Cloud")
+        let connection = MockRoomConnection()
+        connection.listedRooms = [staleRoom]
+        connection.blocksListRooms = true
+        let store = makeProfileSwitchingStore(connection: connection)
+
+        let refresh = Task { try? await store.refreshRooms() }
+        while !connection.operations.contains("listRooms") { await Task.yield() }
+
+        switchToTestCloud(store, connection: connection)
+        store.rooms = [cloudRoom]
+        connection.resumeBlockedListRooms()
+        await refresh.value
+
+        XCTAssertEqual(store.rooms.map(\.id), ["cloud"])
     }
 
     @MainActor
