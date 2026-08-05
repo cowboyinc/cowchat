@@ -123,6 +123,16 @@ atomically replacing an existing artifact. Without a Developer ID identity and
 a `notarytool` keychain profile, the DMG is explicitly a local/development
 artifact, not a finished downloadable release.
 
+Version tags also run the GitHub release workflow on a headless macOS runner.
+Like Homestead, it imports a Developer ID certificate, builds and signs the
+universal app, creates a drag-to-Applications DMG, notarizes and staples it, and
+attaches `Cowchat-<version>.dmg` to the GitHub Release beside the CLI archives.
+The release fails closed unless the repository defines all five Apple secrets:
+`MACOS_CERT_P12`, `MACOS_CERT_P12_PASSWORD`, `APPLE_API_KEY`,
+`APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`. The CI image intentionally uses the
+simple headless layout; `build-dmg.sh` remains the Gallop-styled local release
+builder when Finder automation is available.
+
 ## CLI
 
 ```bash
