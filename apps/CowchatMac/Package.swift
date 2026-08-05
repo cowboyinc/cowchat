@@ -21,6 +21,7 @@ let package = Package(
                 // and declare .copy("Bundled/Fonts"), .copy("Bundled/Icons") instead
                 // (lookup subpaths stay "Fonts/…" and "Icons/…").
                 .copy("Bundled/Fonts"),
+                .copy("Bundled/Icons"),
             ]
         ),
         .testTarget(name: "CowchatMacTests", dependencies: ["CowchatMac"]),
