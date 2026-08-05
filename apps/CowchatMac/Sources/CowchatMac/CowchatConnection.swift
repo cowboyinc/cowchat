@@ -14,6 +14,19 @@ protocol CowchatWebSocketTaskProtocol: AnyObject {
 
 extension URLSessionWebSocketTask: CowchatWebSocketTaskProtocol {}
 
+enum CowchatLocalAPIKey {
+    static var defaultURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cowchat", isDirectory: true)
+            .appendingPathComponent("auth.key", isDirectory: false)
+    }
+
+    static func load(from url: URL = defaultURL) -> String {
+        guard let key = try? String(contentsOf: url, encoding: .utf8) else { return "" }
+        return key.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 enum CowchatConnectionError: LocalizedError {
     case notConnected
     case invalidResponse
@@ -170,8 +183,11 @@ final class CowchatConnection: CowchatConnectionProtocol {
     }
 
     func register(name: String, agentID: String) async throws -> CowchatRegistration {
+        let registrationKey = profile.kind == .local
+            ? CowchatLocalAPIKey.load()
+            : profile.apiKey
         let payload = try await request(type: "register", payload: [
-            "key": profile.apiKey,
+            "key": registrationKey,
             "name": name,
             "agent_id": agentID,
             "reconnect": true,

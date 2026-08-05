@@ -3,6 +3,28 @@ import XCTest
 
 final class LocalServerIntegrationTests: XCTestCase {
     @MainActor
+    func testLocalConnectionCanSeeExpectedPrivateRoom() async throws {
+        try requireLocalServer()
+        guard let expectedRoomID = ProcessInfo.processInfo.environment[
+            "COWCHAT_EXPECTED_PRIVATE_ROOM_ID"
+        ], !expectedRoomID.isEmpty else {
+            throw XCTSkip("Set COWCHAT_EXPECTED_PRIVATE_ROOM_ID to a private room owned by ~/.cowchat/auth.key.")
+        }
+
+        let connection = integrationConnection()
+        try await connection.connect()
+        _ = try await connection.register(
+            name: "Cowchat Mac Private Room Tests",
+            agentID: "cowchat-mac-private-room-tests-\(UUID().uuidString.lowercased())"
+        )
+
+        let rooms = try await connection.listRooms()
+
+        XCTAssertTrue(rooms.contains { $0.id == expectedRoomID })
+        connection.disconnect()
+    }
+
+    @MainActor
     func testReplacingAConnectionIgnoresTheOldCancellation() async throws {
         try requireLocalServer()
 
