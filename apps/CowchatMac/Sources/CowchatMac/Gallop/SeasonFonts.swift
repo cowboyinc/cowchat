@@ -29,7 +29,7 @@ public struct SeasonFontProvider: GallopFontProvider {
 
     /// Name SwiftPM gives the Gallop target's resource bundle
     /// (`<package>_<target>.bundle` — keep in sync with `Package.swift`).
-    static let resourceBundleName = "CowboyDesktopNative_Gallop.bundle"
+    static let resourceBundleName = "CowchatMac_CowchatMac.bundle"
 
     /// Directories that may hold the resource bundle, in lookup order: a
     /// packaged .app's Contents/Resources (both release scripts and Xcode
