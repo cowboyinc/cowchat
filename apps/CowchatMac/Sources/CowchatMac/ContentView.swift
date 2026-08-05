@@ -1083,7 +1083,7 @@ private struct ChatRoomView: View {
                         Task { await store.archive(room) }
                     }
                     Divider()
-                    Button("Create sub-room") {
+                    Button("Create nested room…") {
                         store.presentCreateRoom(parentID: room.id)
                     }
                     if !store.connectionStatus.isConnected {
@@ -2193,10 +2193,12 @@ private struct CreateRoomView: View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(parentRoom == nil ? "New room" : "New sub-room")
+                    Text(parentRoom == nil ? "New room" : "New nested room")
                         .gallopText(.h4, color: .textPrimary)
                     Text(
-                        parentRoom.map { "Create a conversation inside \($0.name)." }
+                        parentRoom.map {
+                            "Create a separate conversation inside \($0.name). Membership and history stay independent."
+                        }
                             ?? "Create a conversation on your local Cowchat server."
                     )
                         .gallopText(.bodyM, color: .textTertiary)
