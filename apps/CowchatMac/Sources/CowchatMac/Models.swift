@@ -1,5 +1,19 @@
 import Foundation
 
+enum CowchatWireProtocol {
+    static let currentVersion = 2
+}
+
+struct CowchatRegistration: Equatable {
+    let agentID: String
+    let restoredRoomIDs: Set<String>
+
+    init(agentID: String, restoredRoomIDs: Set<String> = []) {
+        self.agentID = agentID
+        self.restoredRoomIDs = restoredRoomIDs
+    }
+}
+
 struct Room: Codable, Identifiable, Hashable {
     let roomID: String
     let name: String
@@ -102,6 +116,14 @@ struct Room: Codable, Identifiable, Hashable {
     }
 }
 
+struct MessageMetadata: Codable, Equatable {
+    let type: String?
+
+    init(type: String? = nil) {
+        self.type = type
+    }
+}
+
 struct ChatMessage: Codable, Identifiable, Equatable {
     let messageID: String
     let roomID: String
@@ -109,6 +131,7 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     let agentName: String
     let content: String
     let replyToMessage: String?
+    let metadata: MessageMetadata
     let timestamp: String
     let seq: Int
 
@@ -121,6 +144,7 @@ struct ChatMessage: Codable, Identifiable, Equatable {
         case agentName = "agent_name"
         case content
         case replyToMessage = "reply_to_message"
+        case metadata
         case timestamp, seq
     }
 
@@ -132,8 +156,29 @@ struct ChatMessage: Codable, Identifiable, Equatable {
         agentName = try values.decode(String.self, forKey: .agentName)
         content = try values.decode(String.self, forKey: .content)
         replyToMessage = try values.decodeIfPresent(String.self, forKey: .replyToMessage)
+        // Metadata is an arbitrary JSON value on the wire. Read the optional
+        // string `type` when it has the expected object shape, but never drop
+        // an otherwise valid message because another client sent a scalar,
+        // array, or differently typed field.
+        metadata = (try? values.decode(MessageMetadata.self, forKey: .metadata))
+            ?? MessageMetadata()
         timestamp = try values.decodeIfPresent(String.self, forKey: .timestamp) ?? ""
         seq = try values.decodeIfPresent(Int.self, forKey: .seq) ?? 0
+    }
+
+    var isThinking: Bool {
+        metadata.type?.localizedCaseInsensitiveCompare("thinking") == .orderedSame
+    }
+}
+
+struct MessageArrivalIdentity: Equatable {
+    let messageID: String
+    let sequence: Int
+
+    static func latest(in messages: [ChatMessage]) -> MessageArrivalIdentity? {
+        messages.last.map {
+            MessageArrivalIdentity(messageID: $0.id, sequence: $0.seq)
+        }
     }
 }
 

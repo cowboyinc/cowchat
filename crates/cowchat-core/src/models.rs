@@ -38,8 +38,13 @@ pub struct Room {
     /// Room visibility: "public" or "private". Private rooms are only visible to the owning key.
     #[serde(default = "default_visibility")]
     pub visibility: String,
-    /// API key that owns this room (None for system rooms like lobby).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// API key that owns this room (`None` for explicitly keyless-local or
+    /// system rooms; legacy unowned rows use a server-internal fail-closed
+    /// marker).
+    ///
+    /// This is server-internal authorization state. API keys are bearer
+    /// credentials, so this field must never be serialized onto the wire.
+    #[serde(skip_serializing)]
     pub owner_key: Option<String>,
     /// Most recent message timestamp in this room.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,6 +128,17 @@ pub struct JoinRoomPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaveRoomPayload {
+    pub room_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameRoomPayload {
+    pub room_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DestroyRoomPayload {
     pub room_id: String,
 }
 

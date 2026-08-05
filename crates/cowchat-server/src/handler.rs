@@ -12,6 +12,97 @@ fn truncate_for_log(s: &str, max: usize) -> String {
 }
 
 use crate::broker::Broker;
+use crate::connection::{can_access_room, matches_room_owner};
+use crate::reconnect::ReconnectManager;
+
+fn normalize_room_name(req_id: Option<&str>, name: &str) -> Result<String, Frame> {
+    crate::store::normalize_room_name(name).map_err(|message| {
+        Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InvalidPayload, message),
+        )
+    })
+}
+
+fn room_name_conflicts(
+    name: &str,
+    excluded_room_id: Option<&str>,
+    store: &Store,
+    ephemeral_rooms: &dashmap::DashMap<String, Room>,
+) -> Result<bool, crate::store::StoreError> {
+    if store
+        .get_room_by_name(name)?
+        .is_some_and(|room| Some(room.room_id.as_str()) != excluded_room_id)
+    {
+        return Ok(true);
+    }
+    Ok(ephemeral_rooms.iter().any(|entry| {
+        entry.value().name == name && Some(entry.value().room_id.as_str()) != excluded_room_id
+    }))
+}
+
+pub(crate) fn detach_ephemeral_children(
+    ephemeral_rooms: &dashmap::DashMap<String, Room>,
+    parent_id: &str,
+) {
+    for mut child in ephemeral_rooms.iter_mut() {
+        if child.parent_id.as_deref() == Some(parent_id) {
+            child.parent_id = None;
+        }
+    }
+}
+
+/// Commit all durable side-state cleanup before removing an ephemeral room
+/// from memory. Callers hold both the room-mutation guard and the broker's
+/// lifecycle lock, making the map removal and child detachment an invariant
+/// after the transaction commits.
+pub(crate) fn remove_ephemeral_room_after_durable_cleanup(
+    store: &Store,
+    ephemeral_rooms: &dashmap::DashMap<String, Room>,
+    room_id: &str,
+) -> Result<Option<Room>, crate::store::StoreError> {
+    if !ephemeral_rooms.contains_key(room_id) {
+        return Ok(None);
+    }
+    store.prepare_ephemeral_room_destruction(room_id)?;
+    let removed = ephemeral_rooms.remove(room_id).map(|(_, room)| room);
+    if removed.is_some() {
+        detach_ephemeral_children(ephemeral_rooms, room_id);
+    }
+    Ok(removed)
+}
+
+fn broadcast_visible_room_event(
+    broker: &Broker,
+    reconnect_mgr: &ReconnectManager,
+    room: &Room,
+    no_auth: bool,
+    event: &Frame,
+) {
+    // Buffer first and return the exact claimed/stashed identities that won
+    // that routing race. Live delivery then skips those IDs, so a reconnect
+    // transition receives each metadata event through exactly one path.
+    let buffered = reconnect_mgr.buffer_visible_room_event(
+        &room.visibility,
+        room.owner_key.as_deref(),
+        no_auth,
+        event,
+    );
+    for entry in broker.agents.iter() {
+        if !buffered.contains(entry.key()) && can_access_room(room, &entry.value().api_key, no_auth)
+        {
+            broker.send_to_agent(entry.key(), event.clone());
+        }
+    }
+}
+
+pub(crate) fn broadcast_room_destroyed(broker: &Broker, room: &Room, no_auth: bool, event: &Frame) {
+    for entry in broker.agents.iter() {
+        if can_access_room(room, &entry.value().api_key, no_auth) {
+            broker.send_to_agent(entry.key(), event.clone());
+        }
+    }
+}
 
 /// Whether `room_id` is an end-to-end encrypted room, checking ephemeral rooms
 /// (in-memory) then persistent rooms (SQLite). Unknown rooms are not encrypted.
@@ -97,9 +188,7 @@ fn authorize_room(
                 ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
             )
         })?;
-    let allowed =
-        no_auth || room.visibility == "public" || room.owner_key.as_deref() == Some(agent_api_key);
-    if !allowed {
+    if !can_access_room(&room, agent_api_key, no_auth) {
         return Err(Frame::error(
             req_id,
             ErrorPayload::new(ErrorCode::AccessDenied, "This room is private"),
@@ -145,6 +234,7 @@ pub async fn handle_frame(
     no_auth: bool,
     task_mgr: &Arc<TaskManager>,
     webhook_mgr: &Arc<crate::webhooks::WebhookManager>,
+    reconnect_mgr: &Arc<ReconnectManager>,
 ) -> Frame {
     let req_id = frame.id.as_deref();
 
@@ -162,6 +252,7 @@ pub async fn handle_frame(
                 agent_api_key,
                 rate_limiter,
                 no_auth,
+                reconnect_mgr,
             )
             .await
         }
@@ -185,7 +276,43 @@ pub async fn handle_frame(
                 frame.payload,
                 agent_id,
                 broker,
+                store,
                 ephemeral_rooms,
+                vote_mgr,
+                task_mgr,
+                reconnect_mgr,
+                rate_limiter,
+                no_auth,
+            )
+            .await
+        }
+        FrameType::RenameRoom => {
+            handle_rename_room(
+                req_id,
+                frame.payload,
+                agent_id,
+                broker,
+                store,
+                ephemeral_rooms,
+                reconnect_mgr,
+                agent_api_key,
+                no_auth,
+            )
+            .await
+        }
+        FrameType::DestroyRoom => {
+            handle_destroy_room(
+                req_id,
+                frame.payload,
+                agent_id,
+                broker,
+                store,
+                ephemeral_rooms,
+                vote_mgr,
+                task_mgr,
+                reconnect_mgr,
+                agent_api_key,
+                rate_limiter,
                 no_auth,
             )
             .await
@@ -368,6 +495,7 @@ pub async fn handle_frame(
             handle_subscribe(
                 req_id,
                 frame.payload,
+                broker,
                 store,
                 ephemeral_rooms,
                 agent_api_key,
@@ -424,6 +552,7 @@ async fn handle_create_room(
     agent_api_key: &str,
     rate_limiter: &Arc<RateLimiter>,
     no_auth: bool,
+    reconnect_mgr: &Arc<ReconnectManager>,
 ) -> Frame {
     let p: CreateRoomPayload = match serde_json::from_value(payload) {
         Ok(p) => p,
@@ -433,6 +562,10 @@ async fn handle_create_room(
                 ErrorPayload::new(ErrorCode::InvalidPayload, e.to_string()),
             )
         }
+    };
+    let room_name = match normalize_room_name(req_id, &p.name) {
+        Ok(name) => name,
+        Err(error) => return error,
     };
 
     // Check room limit (skip in no_auth mode)
@@ -452,13 +585,53 @@ async fn handle_create_room(
         }
     }
 
+    // Persistent and ephemeral names are stored separately, and parent
+    // destruction spans both stores. Serialize the authoritative parent
+    // check, insert, and RoomCreated publication with rename/destruction.
+    let _room_guard = broker.lock_room_mutation();
+
+    // Parent authorization must be checked under the mutation guard. A check
+    // before waiting on destruction could otherwise insert an orphan child
+    // after the parent was removed.
+    if let Some(ref parent_id) = p.parent_id {
+        if let Err(error) = authorize_room(
+            req_id,
+            parent_id,
+            agent_api_key,
+            no_auth,
+            store,
+            ephemeral_rooms,
+        ) {
+            return error;
+        }
+    }
+
+    match room_name_conflicts(&room_name, None, store, ephemeral_rooms) {
+        Ok(false) => {}
+        Ok(true) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::RoomNameTaken,
+                    format!("Room name '{}' already taken", room_name),
+                ),
+            )
+        }
+        Err(error) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+            )
+        }
+    }
+
     let room_id = uuid::Uuid::new_v4().to_string();
     let visibility = if p.public { "public" } else { "private" };
 
     if p.ephemeral {
         let room = Room {
             room_id: room_id.clone(),
-            name: p.name.clone(),
+            name: room_name.clone(),
             description: p.description,
             parent_id: p.parent_id,
             ephemeral: true,
@@ -481,25 +654,11 @@ async fn handle_create_room(
             rate_limiter.add_room(agent_api_key);
         }
 
-        // Private room metadata is visible only to connections using the owner key.
         let event = Frame::event(FrameType::RoomCreated, serde_json::to_value(&room).unwrap());
-        for entry in broker.agents.iter() {
-            if no_auth || room.visibility == "public" || entry.value().api_key == agent_api_key {
-                broker.send_to_agent(entry.key(), event.clone());
-            }
-        }
+        broadcast_visible_room_event(broker, reconnect_mgr, &room, no_auth, &event);
 
         Frame::ok(req_id, serde_json::to_value(&room).unwrap())
     } else {
-        // Validate parent exists if specified
-        if let Some(ref pid) = p.parent_id {
-            if let Err(error) =
-                authorize_room(req_id, pid, agent_api_key, no_auth, store, ephemeral_rooms)
-            {
-                return error;
-            }
-        }
-
         let owner_key = if agent_api_key.is_empty() {
             None
         } else {
@@ -508,7 +667,7 @@ async fn handle_create_room(
 
         match store.create_room_with_visibility(
             &room_id,
-            &p.name,
+            &room_name,
             p.description.as_deref(),
             p.parent_id.as_deref(),
             Some(agent_id),
@@ -524,14 +683,7 @@ async fn handle_create_room(
 
                 let event =
                     Frame::event(FrameType::RoomCreated, serde_json::to_value(&room).unwrap());
-                for entry in broker.agents.iter() {
-                    if no_auth
-                        || room.visibility == "public"
-                        || entry.value().api_key == agent_api_key
-                    {
-                        broker.send_to_agent(entry.key(), event.clone());
-                    }
-                }
+                broadcast_visible_room_event(broker, reconnect_mgr, &room, no_auth, &event);
                 Frame::ok(req_id, serde_json::to_value(&room).unwrap())
             }
             Err(crate::store::StoreError::RoomNameTaken(name)) => Frame::error(
@@ -541,12 +693,203 @@ async fn handle_create_room(
                     format!("Room name '{}' already taken", name),
                 ),
             ),
+            Err(crate::store::StoreError::InvalidRoomName(message)) => Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, message),
+            ),
             Err(e) => Frame::error(
                 req_id,
                 ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
             ),
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_rename_room(
+    req_id: Option<&str>,
+    payload: serde_json::Value,
+    agent_id: &str,
+    broker: &Arc<Broker>,
+    store: &Arc<Store>,
+    ephemeral_rooms: &Arc<dashmap::DashMap<String, Room>>,
+    reconnect_mgr: &Arc<ReconnectManager>,
+    agent_api_key: &str,
+    no_auth: bool,
+) -> Frame {
+    let payload: RenameRoomPayload = match serde_json::from_value(payload) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, error.to_string()),
+            )
+        }
+    };
+    let name = match normalize_room_name(req_id, &payload.name) {
+        Ok(name) => name,
+        Err(error) => return error,
+    };
+
+    // Authorize before checking the requested name for conflicts so an
+    // unauthorized caller cannot use rename as a room-name existence oracle.
+    let target = if let Some(room) = ephemeral_rooms
+        .get(&payload.room_id)
+        .map(|room| room.clone())
+    {
+        room
+    } else {
+        match store.get_room(&payload.room_id) {
+            Ok(Some(room)) => room,
+            Ok(None) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+                )
+            }
+            Err(error) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+                )
+            }
+        }
+    };
+    if target.room_id == "lobby" || target.created_by.is_none() {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::AccessDenied, "System rooms cannot be renamed"),
+        );
+    }
+    if target.created_by.as_deref() != Some(agent_id)
+        || !matches_room_owner(target.owner_key.as_deref(), agent_api_key, no_auth)
+    {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(
+                ErrorCode::AccessDenied,
+                "Creator agent_id does not match within this room's API-key ownership boundary",
+            ),
+        );
+    }
+
+    // Hold through the RoomUpdated publication. Explicit and automatic room
+    // destruction use this same guard, so a stale update can never overtake a
+    // RoomDestroyed event in either live or reconnect delivery.
+    let _room_guard = broker.lock_room_mutation();
+    match room_name_conflicts(
+        &name,
+        Some(payload.room_id.as_str()),
+        store,
+        ephemeral_rooms,
+    ) {
+        Ok(false) => {}
+        Ok(true) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::RoomNameTaken,
+                    format!("Room name '{}' already taken", name),
+                ),
+            )
+        }
+        Err(error) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+            )
+        }
+    }
+
+    let updated = if target.ephemeral {
+        match ephemeral_rooms.get_mut(&payload.room_id) {
+            Some(mut room) => {
+                // Recheck authority on the live value under its map lock.
+                if room.created_by.as_deref() != Some(agent_id)
+                    || !matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth)
+                {
+                    return Frame::error(
+                        req_id,
+                        ErrorPayload::new(
+                            ErrorCode::AccessDenied,
+                            "Creator agent_id does not match within this room's API-key ownership boundary",
+                        ),
+                    );
+                }
+                room.name = name;
+                room.clone()
+            }
+            None => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+                )
+            }
+        }
+    } else {
+        match store.rename_room_authorized(
+            &payload.room_id,
+            agent_id,
+            agent_api_key,
+            no_auth,
+            &name,
+        ) {
+            Ok(room) => room,
+            Err(crate::store::RenameRoomError::NotFound) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+                )
+            }
+            Err(crate::store::RenameRoomError::AccessDenied) => return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::AccessDenied,
+                    "Creator agent_id does not match within this room's API-key ownership boundary",
+                ),
+            ),
+            Err(crate::store::RenameRoomError::ProtectedRoom) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::AccessDenied, "System rooms cannot be renamed"),
+                )
+            }
+            Err(crate::store::RenameRoomError::InvalidName(message)) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InvalidPayload, message),
+                )
+            }
+            Err(crate::store::RenameRoomError::NameTaken(name)) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(
+                        ErrorCode::RoomNameTaken,
+                        format!("Room name '{}' already taken", name),
+                    ),
+                )
+            }
+            Err(crate::store::RenameRoomError::Db(error)) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+                )
+            }
+        }
+    };
+
+    let event = Frame::event(
+        FrameType::RoomUpdated,
+        serde_json::to_value(&updated).unwrap(),
+    );
+    broadcast_visible_room_event(broker, reconnect_mgr, &updated, no_auth, &event);
+    log::info!(
+        "Room {} renamed to {:?} by {}",
+        updated.room_id,
+        updated.name,
+        agent_id
+    );
+    Frame::ok(req_id, serde_json::to_value(&updated).unwrap())
 }
 
 async fn handle_join_room(
@@ -570,36 +913,15 @@ async fn handle_join_room(
         }
     };
 
-    // Check room exists and get visibility info
-    let (room_exists, room_visibility, room_owner_key) = {
-        if let Some(room) = ephemeral_rooms.get(&p.room_id) {
-            (true, room.visibility.clone(), room.owner_key.clone())
-        } else if let Ok(Some(room)) = store.get_room(&p.room_id) {
-            (true, room.visibility.clone(), room.owner_key.clone())
-        } else {
-            (false, String::new(), None)
-        }
-    };
-
-    if !room_exists {
-        return Frame::error(
-            req_id,
-            ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
-        );
-    }
-
-    // Check visibility: private rooms require matching API key
-    if !no_auth && room_visibility == "private" {
-        let can_access = match &room_owner_key {
-            Some(owner) => owner == agent_api_key,
-            None => true, // System rooms (no owner) are accessible to all
-        };
-        if !can_access {
-            return Frame::error(
-                req_id,
-                ErrorPayload::new(ErrorCode::AccessDenied, "This room is private"),
-            );
-        }
+    if let Err(error) = authorize_room(
+        req_id,
+        &p.room_id,
+        agent_api_key,
+        no_auth,
+        store,
+        ephemeral_rooms,
+    ) {
+        return error;
     }
 
     if broker.is_agent_in_room(agent_id, &p.room_id) {
@@ -609,12 +931,18 @@ async fn handle_join_room(
         return Frame::ok(req_id, serde_json::json!({"room_id": p.room_id}));
     }
 
-    let join_outcome = broker.join_room(agent_id, &p.room_id);
-
-    // Track room in agent connection
-    if let Some(mut agent) = broker.agents.get_mut(agent_id) {
-        agent.rooms.insert(p.room_id.clone());
-    }
+    let join_outcome = match broker.join_room(agent_id, &p.room_id, || {
+        ephemeral_rooms.contains_key(&p.room_id)
+            || store.get_room(&p.room_id).ok().flatten().is_some()
+    }) {
+        Ok(outcome) => outcome,
+        Err(crate::broker::JoinRoomError::Destroyed) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+            )
+        }
+    };
 
     // Broadcast join to other room members
     let event = Frame::event(
@@ -636,12 +964,154 @@ async fn handle_join_room(
     Frame::ok(req_id, serde_json::json!({"room_id": p.room_id}))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn handle_destroy_room(
+    req_id: Option<&str>,
+    payload: serde_json::Value,
+    agent_id: &str,
+    broker: &Arc<Broker>,
+    store: &Arc<Store>,
+    ephemeral_rooms: &Arc<dashmap::DashMap<String, Room>>,
+    vote_mgr: &Arc<VoteManager>,
+    task_mgr: &Arc<TaskManager>,
+    reconnect_mgr: &Arc<ReconnectManager>,
+    agent_api_key: &str,
+    rate_limiter: &Arc<RateLimiter>,
+    no_auth: bool,
+) -> Frame {
+    let p: DestroyRoomPayload = match serde_json::from_value(payload) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, error.to_string()),
+            )
+        }
+    };
+
+    // Serialize the authoritative mutation and RoomDestroyed publication with
+    // rename/create and automatic ephemeral destruction.
+    let _room_guard = broker.lock_room_mutation();
+
+    let ephemeral_target = ephemeral_rooms.get(&p.room_id).map(|room| room.clone());
+    if let Some(room) = &ephemeral_target {
+        if room.room_id == "lobby" || room.created_by.is_none() {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::AccessDenied, "System rooms cannot be destroyed"),
+            );
+        }
+        if room.created_by.as_deref() != Some(agent_id)
+            || !matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth)
+        {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::AccessDenied,
+                    "Creator agent_id does not match within this room's API-key ownership boundary",
+                ),
+            );
+        }
+    }
+
+    let destruction = if ephemeral_target.is_some() {
+        broker
+            .destroy_room_with(&p.room_id, || {
+                let current = ephemeral_rooms
+                    .get(&p.room_id)
+                    .map(|room| room.clone())
+                    .ok_or(crate::store::DestroyRoomError::NotFound)?;
+                if current.room_id == "lobby" || current.created_by.is_none() {
+                    return Err(crate::store::DestroyRoomError::ProtectedRoom);
+                }
+                if current.created_by.as_deref() != Some(agent_id)
+                    || !matches_room_owner(current.owner_key.as_deref(), agent_api_key, no_auth)
+                {
+                    return Err(crate::store::DestroyRoomError::AccessDenied);
+                }
+
+                // Commit durable cleanup and persistent-child detachment before
+                // removing metadata or installing a lifecycle tombstone. A
+                // failed transaction leaves the room fully retryable.
+                remove_ephemeral_room_after_durable_cleanup(store, ephemeral_rooms, &p.room_id)?
+                    .ok_or(crate::store::DestroyRoomError::NotFound)
+            })
+            .map(|(room, _members)| (room, true))
+    } else {
+        broker
+            .destroy_room_with(&p.room_id, || {
+                let room =
+                    store.destroy_room_authorized(&p.room_id, agent_id, agent_api_key, no_auth)?;
+                detach_ephemeral_children(ephemeral_rooms, &p.room_id);
+                Ok(room)
+            })
+            .map(|(room, _members)| (room, false))
+    };
+
+    let (room, _was_ephemeral) =
+        match destruction {
+            Ok(destroyed) => destroyed,
+            Err(crate::store::DestroyRoomError::NotFound) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+                )
+            }
+            Err(crate::store::DestroyRoomError::AccessDenied) => return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::AccessDenied,
+                    "Creator agent_id does not match within this room's API-key ownership boundary",
+                ),
+            ),
+            Err(crate::store::DestroyRoomError::ProtectedRoom) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::AccessDenied, "System rooms cannot be destroyed"),
+                )
+            }
+            Err(crate::store::DestroyRoomError::Db(error)) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+                )
+            }
+            Err(crate::store::DestroyRoomError::Cleanup(error)) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+                )
+            }
+        };
+
+    vote_mgr.forget_room(&room.room_id);
+    task_mgr.forget_room(&room.room_id);
+    reconnect_mgr.forget_room(&room.room_id);
+    if let Some(owner_key) = room.owner_key.as_deref() {
+        rate_limiter.remove_room(owner_key);
+    }
+
+    let event = Frame::event(
+        FrameType::RoomDestroyed,
+        serde_json::json!({"room_id": room.room_id}),
+    );
+    broadcast_room_destroyed(broker, &room, no_auth, &event);
+
+    log::info!("Room {} explicitly destroyed by {}", room.room_id, agent_id);
+    Frame::ok(req_id, serde_json::json!({"room_id": room.room_id}))
+}
+
 async fn handle_leave_room(
     req_id: Option<&str>,
     payload: serde_json::Value,
     agent_id: &str,
     broker: &Arc<Broker>,
+    store: &Arc<Store>,
     ephemeral_rooms: &Arc<dashmap::DashMap<String, Room>>,
+    vote_mgr: &Arc<VoteManager>,
+    task_mgr: &Arc<TaskManager>,
+    reconnect_mgr: &Arc<ReconnectManager>,
+    rate_limiter: &Arc<RateLimiter>,
     no_auth: bool,
 ) -> Frame {
     let p: LeaveRoomPayload = match serde_json::from_value(payload) {
@@ -671,11 +1141,27 @@ async fn handle_leave_room(
     );
     broker.broadcast_to_room(&p.room_id, agent_id, &event);
 
-    let leave_outcome = broker.leave_room(agent_id, &p.room_id);
+    let _room_guard = broker.lock_room_mutation();
+    let mut artifact_cleanup_error = None;
+    let (leave_outcome, removed_ephemeral_room) =
+        broker.leave_room_and_destroy_if_empty(agent_id, &p.room_id, || {
+            match remove_ephemeral_room_after_durable_cleanup(store, ephemeral_rooms, &p.room_id) {
+                Ok(removed) => removed,
+                Err(error) => {
+                    artifact_cleanup_error = Some(error);
+                    None
+                }
+            }
+        });
 
-    // Track in agent connection
-    if let Some(mut agent) = broker.agents.get_mut(agent_id) {
-        agent.rooms.remove(&p.room_id);
+    if let Some(error) = artifact_cleanup_error {
+        // Fail closed: the room metadata remains available and untombstoned,
+        // so a subsequent explicit destroy or join/leave can retry cleanup.
+        log::error!(
+            "Ephemeral room {} cleanup failed; leaving it retryable: {}",
+            p.room_id,
+            error
+        );
     }
 
     // Notify remaining members of the turn change before we potentially destroy the room.
@@ -684,22 +1170,19 @@ async fn handle_leave_room(
     }
 
     // Destroy ephemeral room if empty
-    if leave_outcome.now_empty {
-        if let Some((_, room)) = ephemeral_rooms.remove(&p.room_id) {
-            broker.remove_room(&p.room_id);
-            broker.forget_ephemeral_seq(&p.room_id);
+    if leave_outcome.room_destroyed {
+        if let Some(room) = removed_ephemeral_room {
+            vote_mgr.forget_room(&p.room_id);
+            task_mgr.forget_room(&p.room_id);
+            reconnect_mgr.forget_room(&p.room_id);
+            if let Some(owner_key) = room.owner_key.as_deref() {
+                rate_limiter.remove_room(owner_key);
+            }
             let destroy_event = Frame::event(
                 FrameType::RoomDestroyed,
                 serde_json::json!({"room_id": p.room_id}),
             );
-            for entry in broker.agents.iter() {
-                if no_auth
-                    || room.visibility == "public"
-                    || entry.value().api_key.as_str() == room.owner_key.as_deref().unwrap_or("")
-                {
-                    broker.send_to_agent(entry.key(), destroy_event.clone());
-                }
-            }
+            broadcast_room_destroyed(broker, &room, no_auth, &destroy_event);
             log::info!("Ephemeral room {} destroyed (empty)", p.room_id);
         }
     }
@@ -778,7 +1261,17 @@ async fn handle_send_message(
             reply_to_message: p.reply_to,
             metadata: p.metadata,
             timestamp: chrono::Utc::now(),
-            seq: broker.next_ephemeral_seq(&p.room_id),
+            seq: match broker
+                .next_ephemeral_seq(&p.room_id, || ephemeral_rooms.contains_key(&p.room_id))
+            {
+                Some(seq) => seq,
+                None => {
+                    return Frame::error(
+                        req_id,
+                        ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+                    )
+                }
+            },
         }
     } else {
         // Permanent rooms: persist to SQLite
@@ -919,7 +1412,17 @@ async fn handle_thinking(
             reply_to_message: None,
             metadata,
             timestamp: chrono::Utc::now(),
-            seq: broker.next_ephemeral_seq(&p.room_id),
+            seq: match broker
+                .next_ephemeral_seq(&p.room_id, || ephemeral_rooms.contains_key(&p.room_id))
+            {
+                Some(seq) => seq,
+                None => {
+                    return Frame::error(
+                        req_id,
+                        ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+                    )
+                }
+            },
         }
     } else {
         match store.insert_message(
@@ -1086,31 +1589,16 @@ async fn handle_list_rooms(
     let p: ListRoomsPayload =
         serde_json::from_value(payload).unwrap_or(ListRoomsPayload { parent_id: None });
 
-    // In no_auth mode, show all rooms. In cloud mode, show public + owned by this key.
-    let mut rooms = if no_auth {
-        match store.list_rooms(p.parent_id.as_deref()) {
-            Ok(r) => r,
-            Err(e) => {
-                return Frame::error(
-                    req_id,
-                    ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
-                )
-            }
+    let mut rooms = match store.list_rooms(p.parent_id.as_deref()) {
+        Ok(mut rooms) => {
+            rooms.retain(|room| can_access_room(room, agent_api_key, no_auth));
+            rooms
         }
-    } else {
-        let key = if agent_api_key.is_empty() {
-            None
-        } else {
-            Some(agent_api_key)
-        };
-        match store.list_rooms_for_key(key, p.parent_id.as_deref()) {
-            Ok(r) => r,
-            Err(e) => {
-                return Frame::error(
-                    req_id,
-                    ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
-                )
-            }
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+            )
         }
     };
 
@@ -1125,15 +1613,8 @@ async fn handle_list_rooms(
             continue;
         }
 
-        if no_auth {
+        if can_access_room(room, agent_api_key, no_auth) {
             rooms.push(room.clone());
-        } else {
-            // In cloud mode, only show public ephemeral rooms or rooms owned by this key
-            let visible =
-                room.visibility == "public" || room.owner_key.as_deref() == Some(agent_api_key);
-            if visible {
-                rooms.push(room.clone());
-            }
         }
     }
 
@@ -1250,9 +1731,7 @@ async fn handle_room_info(
             sub_rooms.push(entry.value().clone());
         }
     }
-    sub_rooms.retain(|child| {
-        no_auth || child.visibility == "public" || child.owner_key.as_deref() == Some(agent_api_key)
-    });
+    sub_rooms.retain(|child| can_access_room(child, agent_api_key, no_auth));
 
     Frame {
         id: Some(uuid::Uuid::new_v4().to_string()),
@@ -1345,6 +1824,18 @@ async fn handle_create_vote(
         broker.clone(),
         store.clone(),
     );
+
+    // A destruction can race the membership check and vote persistence. The
+    // lifecycle tombstone is authoritative: remove both active and durable
+    // state if destruction won before this operation finished.
+    if broker.is_room_destroyed(&p.room_id) {
+        vote_mgr.forget_room(&p.room_id);
+        let _ = store.delete_room_artifacts(&p.room_id);
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+        );
+    }
 
     let info = VoteInfo {
         vote_id: vote.vote_id.clone(),
@@ -1792,6 +2283,13 @@ async fn handle_elect_leader(
 
     match vote_mgr.start_election(&p.room_id, candidates.clone(), agent_id, broker.clone()) {
         Ok(()) => {
+            if broker.is_room_destroyed(&p.room_id) {
+                vote_mgr.forget_room(&p.room_id);
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+                );
+            }
             // Broadcast ElectionStarted to room
             let event = Frame::event(
                 FrameType::ElectionStarted,
@@ -2026,7 +2524,7 @@ async fn handle_set_presence(
     }
 
     // Update agent presence fields
-    let rooms = {
+    {
         let mut agent = match broker.agents.get_mut(agent_id) {
             Some(a) => a,
             None => {
@@ -2040,8 +2538,8 @@ async fn handle_set_presence(
         agent.info.status_detail = p.status_detail.clone();
         agent.info.progress = p.progress;
         agent.info.last_active = Some(chrono::Utc::now());
-        agent.rooms.clone()
-    };
+    }
+    let rooms = broker.rooms_for_agent(agent_id);
 
     // Broadcast PresenceUpdate to all rooms the agent is in
     let event = Frame::event(
@@ -2215,6 +2713,7 @@ async fn handle_list_tasks(
 async fn handle_subscribe(
     req_id: Option<&str>,
     payload: serde_json::Value,
+    broker: &Arc<Broker>,
     store: &Arc<Store>,
     ephemeral_rooms: &Arc<dashmap::DashMap<String, Room>>,
     agent_api_key: &str,
@@ -2280,6 +2779,17 @@ async fn handle_subscribe(
             )
         }
     };
+
+    // Destruction may race the URL validation/database insert. If the room was
+    // tombstoned after authorization, remove the just-created credentialed
+    // webhook rather than leaving an orphan that can receive future data.
+    if broker.is_room_destroyed(&p.room_id) {
+        let _ = store.delete_subscription(&sub.subscription_id, owner_key);
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+        );
+    }
 
     // Backfill: enqueue every chat message with seq > since_seq that matches.
     // Only walk the persisted room — ephemeral rooms don't have seek history
@@ -2448,4 +2958,429 @@ async fn handle_enable_subscription(
         req_id,
         serde_json::json!({"subscription_id": sub.subscription_id, "status": "active"}),
     )
+}
+
+#[cfg(test)]
+mod room_lifecycle_tests {
+    use super::*;
+    use crate::broker::Broker;
+    use crate::store::{DestroyRoomError, RenameRoomError};
+    use dashmap::DashMap;
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    fn ephemeral_room(room_id: &str, name: &str, parent_id: Option<&str>) -> Room {
+        Room {
+            room_id: room_id.to_string(),
+            name: name.to_string(),
+            description: None,
+            parent_id: parent_id.map(str::to_string),
+            ephemeral: true,
+            created_at: chrono::Utc::now(),
+            created_by: Some("creator".to_string()),
+            visibility: "private".to_string(),
+            owner_key: Some("owner-key".to_string()),
+            last_activity: None,
+            member_count: None,
+            encrypted: false,
+        }
+    }
+
+    #[test]
+    fn failed_automatic_cleanup_leaves_ephemeral_room_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("automatic-cleanup.db");
+        let store = Store::open(&path).unwrap();
+        store
+            .create_subscription(
+                "sub",
+                "ephemeral",
+                "owner-key",
+                "https://example.com/hook",
+                "secret",
+                &[],
+                None,
+                None,
+                false,
+                0,
+            )
+            .unwrap();
+        let trigger_conn = rusqlite::Connection::open(&path).unwrap();
+        trigger_conn
+            .execute_batch(
+                "CREATE TRIGGER fail_cleanup BEFORE DELETE ON subscriptions
+                 WHEN OLD.room_id = 'ephemeral'
+                 BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END;",
+            )
+            .unwrap();
+
+        let rooms = DashMap::new();
+        rooms.insert(
+            "ephemeral".to_string(),
+            ephemeral_room("ephemeral", "Ephemeral", None),
+        );
+        rooms.insert(
+            "child".to_string(),
+            ephemeral_room("child", "Child", Some("ephemeral")),
+        );
+        let broker = Broker::new(Arc::new(DashMap::new()), Arc::new(DashMap::new()));
+        broker.join_room("last", "ephemeral", || true).unwrap();
+
+        let mut cleanup_error = None;
+        let (failed, removed) = broker.leave_room_and_destroy_if_empty("last", "ephemeral", || {
+            match remove_ephemeral_room_after_durable_cleanup(&store, &rooms, "ephemeral") {
+                Ok(removed) => removed,
+                Err(error) => {
+                    cleanup_error = Some(error);
+                    None
+                }
+            }
+        });
+        assert!(cleanup_error.is_some());
+        assert!(!failed.room_destroyed);
+        assert!(removed.is_none());
+        assert!(rooms.contains_key("ephemeral"));
+        assert_eq!(
+            rooms.get("child").unwrap().parent_id.as_deref(),
+            Some("ephemeral")
+        );
+        assert!(!broker.is_room_destroyed("ephemeral"));
+
+        trigger_conn
+            .execute_batch("DROP TRIGGER fail_cleanup;")
+            .unwrap();
+        let (retried, removed) =
+            broker.leave_room_and_destroy_if_empty("last", "ephemeral", || {
+                remove_ephemeral_room_after_durable_cleanup(&store, &rooms, "ephemeral").unwrap()
+            });
+        assert!(retried.room_destroyed);
+        assert!(removed.is_some());
+        assert!(!rooms.contains_key("ephemeral"));
+        assert_eq!(rooms.get("child").unwrap().parent_id, None);
+        assert!(broker.is_room_destroyed("ephemeral"));
+        assert!(store.get_subscription("sub").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_explicit_cleanup_returns_error_without_tombstoning_and_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("explicit-cleanup.db");
+        let store = Arc::new(Store::open(&path).unwrap());
+        store
+            .create_subscription(
+                "sub",
+                "ephemeral",
+                "owner-key",
+                "https://example.com/hook",
+                "secret",
+                &[],
+                None,
+                None,
+                false,
+                0,
+            )
+            .unwrap();
+        let trigger_conn = rusqlite::Connection::open(&path).unwrap();
+        trigger_conn
+            .execute_batch(
+                "CREATE TRIGGER fail_cleanup BEFORE DELETE ON subscriptions
+                 WHEN OLD.room_id = 'ephemeral'
+                 BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END;",
+            )
+            .unwrap();
+
+        let rooms = Arc::new(DashMap::new());
+        rooms.insert(
+            "ephemeral".to_string(),
+            ephemeral_room("ephemeral", "Ephemeral", None),
+        );
+        let broker = Arc::new(Broker::new(
+            Arc::new(DashMap::new()),
+            Arc::new(DashMap::new()),
+        ));
+        let vote_mgr = Arc::new(VoteManager::new(store.clone(), broker.clone()));
+        let task_mgr = Arc::new(TaskManager::new(store.clone()));
+        let reconnect_mgr = Arc::new(ReconnectManager::new());
+        let rate_limiter = Arc::new(RateLimiter::new());
+
+        let failed = handle_destroy_room(
+            Some("destroy-failed"),
+            serde_json::json!({"room_id": "ephemeral"}),
+            "creator",
+            &broker,
+            &store,
+            &rooms,
+            &vote_mgr,
+            &task_mgr,
+            &reconnect_mgr,
+            "owner-key",
+            &rate_limiter,
+            false,
+        )
+        .await;
+        assert_eq!(failed.frame_type, FrameType::Error);
+        assert!(rooms.contains_key("ephemeral"));
+        assert!(!broker.is_room_destroyed("ephemeral"));
+        assert!(store.get_subscription("sub").unwrap().is_some());
+
+        trigger_conn
+            .execute_batch("DROP TRIGGER fail_cleanup;")
+            .unwrap();
+        let retried = handle_destroy_room(
+            Some("destroy-retried"),
+            serde_json::json!({"room_id": "ephemeral"}),
+            "creator",
+            &broker,
+            &store,
+            &rooms,
+            &vote_mgr,
+            &task_mgr,
+            &reconnect_mgr,
+            "owner-key",
+            &rate_limiter,
+            false,
+        )
+        .await;
+        assert_eq!(retried.frame_type, FrameType::Ok);
+        assert!(!rooms.contains_key("ephemeral"));
+        assert!(broker.is_room_destroyed("ephemeral"));
+        assert!(store.get_subscription("sub").unwrap().is_none());
+    }
+
+    #[test]
+    fn persistent_rename_publication_finishes_before_waiting_destroy() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        store
+            .create_room_with_visibility(
+                "persistent",
+                "Persistent",
+                None,
+                None,
+                Some("creator"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        let broker = Arc::new(Broker::new(
+            Arc::new(DashMap::new()),
+            Arc::new(DashMap::new()),
+        ));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (renamed_tx, renamed_rx) = mpsc::channel();
+        let (publish_tx, publish_rx) = mpsc::channel();
+
+        let rename_store = store.clone();
+        let rename_broker = broker.clone();
+        let rename_events = events.clone();
+        let rename = std::thread::spawn(move || {
+            let _guard = rename_broker.lock_room_mutation();
+            rename_store
+                .rename_room_authorized("persistent", "creator", "owner-key", false, "Renamed")
+                .unwrap();
+            renamed_tx.send(()).unwrap();
+            publish_rx.recv().unwrap();
+            rename_events.lock().unwrap().push(FrameType::RoomUpdated);
+        });
+        renamed_rx.recv().unwrap();
+
+        let destroy_store = store.clone();
+        let destroy_broker = broker.clone();
+        let destroy_events = events.clone();
+        let (destroy_entered_tx, destroy_entered_rx) = mpsc::channel();
+        let destroy = std::thread::spawn(move || {
+            let _guard = destroy_broker.lock_room_mutation();
+            destroy_entered_tx.send(()).unwrap();
+            destroy_broker
+                .destroy_room_with("persistent", || {
+                    destroy_store.destroy_room_authorized(
+                        "persistent",
+                        "creator",
+                        "owner-key",
+                        false,
+                    )
+                })
+                .unwrap();
+            destroy_events
+                .lock()
+                .unwrap()
+                .push(FrameType::RoomDestroyed);
+        });
+        assert!(destroy_entered_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+        publish_tx.send(()).unwrap();
+        rename.join().unwrap();
+        destroy.join().unwrap();
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![FrameType::RoomUpdated, FrameType::RoomDestroyed]
+        );
+        assert!(matches!(
+            store.rename_room_authorized("persistent", "creator", "owner-key", false, "Stale"),
+            Err(RenameRoomError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn ephemeral_parent_destroy_detaches_both_child_stores_and_beats_late_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ephemeral-parent-race.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE rooms (
+                    room_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                    description TEXT, parent_id TEXT, created_by TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    visibility TEXT NOT NULL DEFAULT 'private', owner_key TEXT,
+                    encrypted INTEGER NOT NULL DEFAULT 0
+                 );",
+            )
+            .unwrap();
+        }
+        let store = Arc::new(Store::open(&path).unwrap());
+        store
+            .create_room_with_visibility(
+                "persistent-child",
+                "Persistent Child",
+                None,
+                Some("parent"),
+                Some("creator"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        let rooms = Arc::new(DashMap::new());
+        rooms.insert("parent".into(), ephemeral_room("parent", "Parent", None));
+        rooms.insert(
+            "ephemeral-child".into(),
+            ephemeral_room("ephemeral-child", "Ephemeral Child", Some("parent")),
+        );
+        let broker = Arc::new(Broker::new(
+            Arc::new(DashMap::new()),
+            Arc::new(DashMap::new()),
+        ));
+        let (cleanup_entered_tx, cleanup_entered_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+
+        let destroy_broker = broker.clone();
+        let destroy_store = store.clone();
+        let destroy_rooms = rooms.clone();
+        let destroy = std::thread::spawn(move || {
+            let _guard = destroy_broker.lock_room_mutation();
+            destroy_broker
+                .destroy_room_with("parent", || {
+                    cleanup_entered_tx.send(()).unwrap();
+                    continue_rx.recv().unwrap();
+                    remove_ephemeral_room_after_durable_cleanup(
+                        &destroy_store,
+                        &destroy_rooms,
+                        "parent",
+                    )?
+                    .ok_or(DestroyRoomError::NotFound)
+                })
+                .unwrap();
+        });
+        cleanup_entered_rx.recv().unwrap();
+
+        let create_broker = broker.clone();
+        let create_rooms = rooms.clone();
+        let (create_entered_tx, create_entered_rx) = mpsc::channel();
+        let create = std::thread::spawn(move || {
+            let _guard = create_broker.lock_room_mutation();
+            create_entered_tx.send(()).unwrap();
+            if create_rooms.contains_key("parent") {
+                create_rooms.insert(
+                    "late-child".into(),
+                    ephemeral_room("late-child", "Late Child", Some("parent")),
+                );
+            }
+        });
+        assert!(create_entered_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+        continue_tx.send(()).unwrap();
+        destroy.join().unwrap();
+        create.join().unwrap();
+
+        assert!(!rooms.contains_key("parent"));
+        assert!(!rooms.contains_key("late-child"));
+        assert_eq!(rooms.get("ephemeral-child").unwrap().parent_id, None);
+        assert_eq!(
+            store
+                .get_room("persistent-child")
+                .unwrap()
+                .unwrap()
+                .parent_id,
+            None
+        );
+    }
+
+    #[test]
+    fn ephemeral_rename_publication_finishes_before_waiting_destroy() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let rooms = Arc::new(DashMap::new());
+        rooms.insert(
+            "ephemeral".into(),
+            ephemeral_room("ephemeral", "Ephemeral", None),
+        );
+        let broker = Arc::new(Broker::new(
+            Arc::new(DashMap::new()),
+            Arc::new(DashMap::new()),
+        ));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (renamed_tx, renamed_rx) = mpsc::channel();
+        let (publish_tx, publish_rx) = mpsc::channel();
+
+        let rename_broker = broker.clone();
+        let rename_rooms = rooms.clone();
+        let rename_events = events.clone();
+        let rename = std::thread::spawn(move || {
+            let _guard = rename_broker.lock_room_mutation();
+            rename_rooms.get_mut("ephemeral").unwrap().name = "Renamed".into();
+            renamed_tx.send(()).unwrap();
+            publish_rx.recv().unwrap();
+            rename_events.lock().unwrap().push(FrameType::RoomUpdated);
+        });
+        renamed_rx.recv().unwrap();
+
+        let destroy_broker = broker.clone();
+        let destroy_rooms = rooms.clone();
+        let destroy_store = store.clone();
+        let destroy_events = events.clone();
+        let (destroy_entered_tx, destroy_entered_rx) = mpsc::channel();
+        let destroy = std::thread::spawn(move || {
+            let _guard = destroy_broker.lock_room_mutation();
+            destroy_entered_tx.send(()).unwrap();
+            destroy_broker
+                .destroy_room_with("ephemeral", || {
+                    remove_ephemeral_room_after_durable_cleanup(
+                        &destroy_store,
+                        &destroy_rooms,
+                        "ephemeral",
+                    )?
+                    .ok_or(DestroyRoomError::NotFound)
+                })
+                .unwrap();
+            destroy_events
+                .lock()
+                .unwrap()
+                .push(FrameType::RoomDestroyed);
+        });
+        assert!(destroy_entered_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+        publish_tx.send(()).unwrap();
+        rename.join().unwrap();
+        destroy.join().unwrap();
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![FrameType::RoomUpdated, FrameType::RoomDestroyed]
+        );
+        assert!(rooms.get_mut("ephemeral").is_none());
+    }
 }

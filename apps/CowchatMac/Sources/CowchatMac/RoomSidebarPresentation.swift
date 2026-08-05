@@ -5,32 +5,110 @@ struct RoomSidebarGroup: Equatable {
     let rooms: [Room]
 }
 
+enum LobbyPresentation {
+    static func availableAgentCount(
+        from members: [AgentPresence],
+        excluding currentAgentID: String
+    ) -> Int {
+        Set(members.lazy.filter { $0.id != currentAgentID }.map(\.id)).count
+    }
+}
+
+enum ChatPresencePresentation {
+    static func summary(
+        members: [AgentPresence],
+        currentAgentID: String,
+        fallbackMemberCount: Int?,
+        isConnected: Bool
+    ) -> String {
+        let collaborators = members.filter { $0.id != currentAgentID }
+        let active = collaborators.filter {
+            guard let status = $0.status?.lowercased() else { return false }
+            return status == "working" || status == "thinking"
+        }
+        if !active.isEmpty {
+            let names = active.prefix(2).map(\.name).joined(separator: " · ")
+            return "\(names) active"
+        }
+
+        let count: Int
+        if !members.isEmpty {
+            count = Set(collaborators.map(\.id)).count
+        } else {
+            count = max((fallbackMemberCount ?? 0) - (isConnected ? 1 : 0), 0)
+        }
+        switch count {
+        case 0: return "No collaborators"
+        case 1: return "1 collaborator"
+        default: return "\(count) collaborators"
+        }
+    }
+}
+
 enum RoomSidebarPresentation {
-    static func pinnedRooms(from rooms: [Room], limit: Int = 3) -> [Room] {
-        let lobby = rooms.first { $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame }
-        let remaining = rooms.filter { $0.id != lobby?.id }
-        return Array(([lobby].compactMap { $0 } + remaining).prefix(limit))
+    static func pinnedRooms(
+        from rooms: [Room],
+        pinnedRoomIDs: Set<String>,
+        limit: Int = 3
+    ) -> [Room] {
+        Array(rooms.filter { pinnedRoomIDs.contains($0.id) }.prefix(limit))
     }
 
-    static func activeRooms(from rooms: [Room]) -> [Room] {
-        rooms.filter { ($0.memberCount ?? 0) > 0 }
+    static func activeRooms(
+        from rooms: [Room],
+        excludingCurrentClientFrom selectedRoomID: String? = nil
+    ) -> [Room] {
+        rooms.filter { room in
+            let currentClientCount = room.id == selectedRoomID ? 1 : 0
+            return (room.memberCount ?? 0) - currentClientCount > 0
+        }
     }
 
-    static func filteredRooms(from rooms: [Room], query: String) -> [Room] {
+    static func filteredRooms(
+        from rooms: [Room],
+        query: String,
+        matchingMessageRoomIDs: Set<String> = []
+    ) -> [Room] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return rooms }
         return rooms.filter {
             $0.name.localizedCaseInsensitiveContains(query)
                 || ($0.description?.localizedCaseInsensitiveContains(query) ?? false)
+                || matchingMessageRoomIDs.contains($0.id)
         }
     }
 
     static func visiblePinnedRooms(
         from allRooms: [Room],
         among visibleRooms: [Room],
+        pinnedRoomIDs: Set<String>,
         limit: Int = 3
     ) -> [Room] {
-        let pinnedIDs = Set(pinnedRooms(from: allRooms, limit: limit).map(\.id))
+        let pinnedIDs = Set(
+            pinnedRooms(
+                from: allRooms,
+                pinnedRoomIDs: pinnedRoomIDs,
+                limit: limit
+            ).map(\.id)
+        )
         return visibleRooms.filter { pinnedIDs.contains($0.id) }
+    }
+
+    static func roomsForRecencyGroups(
+        from visibleRooms: [Room],
+        allRooms: [Room],
+        pinnedRoomIDs: Set<String>,
+        pinnedLimit: Int = 3
+    ) -> [Room] {
+        let displayedPinnedIDs = Set(
+            visiblePinnedRooms(
+                from: allRooms,
+                among: visibleRooms,
+                pinnedRoomIDs: pinnedRoomIDs,
+                limit: pinnedLimit
+            ).map(\.id)
+        )
+        return visibleRooms.filter { !displayedPinnedIDs.contains($0.id) }
     }
 
     static func groups(

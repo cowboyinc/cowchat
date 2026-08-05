@@ -7,7 +7,9 @@
 	<key>CFBundleExecutable</key>
 	<string>Cowchat</string>
 	<key>CFBundleIconFile</key>
-	<string>CowchatIcon.icns</string>
+	<string>Cowchat.icns</string>
+	<key>CFBundleIconName</key>
+	<string>Cowchat</string>
 	<key>CFBundleIdentifier</key>
 	<string>inc.cowboy.cowchat</string>
 	<key>CFBundleName</key>

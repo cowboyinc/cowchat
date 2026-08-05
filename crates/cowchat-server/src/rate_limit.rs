@@ -192,4 +192,17 @@ mod tests {
         // A different IP has its own budget.
         assert!(rl.try_register_signup("5.6.7.8"));
     }
+
+    #[test]
+    fn destroyed_room_releases_room_quota() {
+        let rl = RateLimiter::new();
+        let limits = TierLimits {
+            max_rooms: 1,
+            ..TierLimits::free()
+        };
+        rl.add_room("key");
+        assert!(!rl.check_room_limit("key", &limits));
+        rl.remove_room("key");
+        assert!(rl.check_room_limit("key", &limits));
+    }
 }

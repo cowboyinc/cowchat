@@ -27,15 +27,33 @@ protocol CowchatConnectionProtocol: AnyObject {
     var onEvent: ((String, [String: Any]) -> Void)? { get set }
     var onStatusChange: ((ConnectionStatus) -> Void)? { get set }
     func connect() async throws
-    func register(name: String, agentID: String) async throws -> String
+    func register(name: String, agentID: String) async throws -> CowchatRegistration
     func listRooms() async throws -> [Room]
     func listAgents(roomID: String) async throws -> [AgentPresence]
-    func createRoom(name: String, description: String?, ephemeral: Bool, isPublic: Bool) async throws -> Room
+    func createRoom(
+        name: String,
+        description: String?,
+        parentID: String?,
+        ephemeral: Bool,
+        isPublic: Bool
+    ) async throws -> Room
+    func rename(roomID: String, name: String) async throws -> Room
+    func destroy(roomID: String) async throws
     func join(roomID: String) async throws
     func leave(roomID: String) async throws
-    func history(roomID: String, limit: Int) async throws -> [ChatMessage]
+    func history(
+        roomID: String,
+        limit: Int,
+        before: String?
+    ) async throws -> [ChatMessage]
     func send(roomID: String, content: String) async throws -> ChatMessage
     func disconnect()
+}
+
+extension CowchatConnectionProtocol {
+    func history(roomID: String, limit: Int) async throws -> [ChatMessage] {
+        try await history(roomID: roomID, limit: limit, before: nil)
+    }
 }
 
 @MainActor
@@ -47,11 +65,18 @@ final class CowchatConnection: CowchatConnectionProtocol {
     var onStatusChange: ((ConnectionStatus) -> Void)?
 
     private let queue = DispatchQueue(label: "inc.cowboy.cowchat.network")
+    private let host: NWEndpoint.Host
+    private let port: NWEndpoint.Port
     private var connection: NWConnection?
     private var buffer = Data()
     private var readyContinuation: CheckedContinuation<Void, Error>?
     private var pending: [String: CheckedContinuation<Payload, Error>] = [:]
     private var connectAttempt: UUID?
+
+    init(host: String = "127.0.0.1", port: UInt16 = 9229) {
+        self.host = NWEndpoint.Host(host)
+        self.port = NWEndpoint.Port(rawValue: port)!
+    }
 
     func connect() async throws {
         disconnect()
@@ -59,7 +84,7 @@ final class CowchatConnection: CowchatConnectionProtocol {
 
         let attempt = UUID()
         connectAttempt = attempt
-        let connection = NWConnection(host: "127.0.0.1", port: 9229, using: .tcp)
+        let connection = NWConnection(host: host, port: port, using: .tcp)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let connection else { return }
@@ -78,19 +103,22 @@ final class CowchatConnection: CowchatConnectionProtocol {
         }
     }
 
-    func register(name: String, agentID: String) async throws -> String {
+    func register(name: String, agentID: String) async throws -> CowchatRegistration {
         let payload = try await request(type: "register", payload: [
             "key": "",
             "name": name,
             "agent_id": agentID,
             "reconnect": true,
             "capabilities": ["macos-ui"],
-            "protocol_version": 1,
+            "protocol_version": CowchatWireProtocol.currentVersion,
         ])
         guard let agentID = payload["agent_id"] as? String else {
             throw CowchatConnectionError.invalidResponse
         }
-        return agentID
+        return CowchatRegistration(
+            agentID: agentID,
+            restoredRoomIDs: Set(payload["rooms"] as? [String] ?? [])
+        )
     }
 
     func listRooms() async throws -> [Room] {
@@ -103,7 +131,13 @@ final class CowchatConnection: CowchatConnectionProtocol {
         return try decode([AgentPresence].self, from: payload["agents"] ?? [])
     }
 
-    func createRoom(name: String, description: String?, ephemeral: Bool, isPublic: Bool) async throws -> Room {
+    func createRoom(
+        name: String,
+        description: String?,
+        parentID: String?,
+        ephemeral: Bool,
+        isPublic: Bool
+    ) async throws -> Room {
         var payload: Payload = [
             "name": name,
             "ephemeral": ephemeral,
@@ -111,7 +145,20 @@ final class CowchatConnection: CowchatConnectionProtocol {
             "encrypted": false,
         ]
         if let description, !description.isEmpty { payload["description"] = description }
+        if let parentID, !parentID.isEmpty { payload["parent_id"] = parentID }
         let response = try await request(type: "create_room", payload: payload)
+        return try decode(Room.self, from: response)
+    }
+
+    func destroy(roomID: String) async throws {
+        _ = try await request(type: "destroy_room", payload: ["room_id": roomID])
+    }
+
+    func rename(roomID: String, name: String) async throws -> Room {
+        let response = try await request(type: "rename_room", payload: [
+            "room_id": roomID,
+            "name": name,
+        ])
         return try decode(Room.self, from: response)
     }
 
@@ -123,11 +170,17 @@ final class CowchatConnection: CowchatConnectionProtocol {
         _ = try await request(type: "leave_room", payload: ["room_id": roomID])
     }
 
-    func history(roomID: String, limit: Int = 100) async throws -> [ChatMessage] {
-        let payload = try await request(type: "get_history", payload: [
+    func history(
+        roomID: String,
+        limit: Int = 100,
+        before: String? = nil
+    ) async throws -> [ChatMessage] {
+        var requestPayload: Payload = [
             "room_id": roomID,
             "limit": limit,
-        ])
+        ]
+        if let before { requestPayload["before"] = before }
+        let payload = try await request(type: "get_history", payload: requestPayload)
         return try decode([ChatMessage].self, from: payload["messages"] ?? [])
     }
 

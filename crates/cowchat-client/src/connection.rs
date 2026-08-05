@@ -88,6 +88,50 @@ mod tests {
         .unwrap();
         server.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn v2_client_is_rejected_promptly_by_v1_server_semantics() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut reader = BufReader::new(read_half);
+            let register = read_frame_line(&mut reader).await.unwrap().unwrap();
+            let register = Frame::from_line(&register).unwrap();
+            assert_eq!(
+                register.payload["protocol_version"],
+                serde_json::json!(2),
+                "the current client must negotiate protocol v2"
+            );
+            let error = Frame::error(
+                register.id.as_deref(),
+                ErrorPayload::new(
+                    ErrorCode::UnsupportedProtocol,
+                    "Client protocol v2 is newer than this server (v1); the server needs an upgrade",
+                ),
+            );
+            write_half
+                .write_all(error.to_line().unwrap().as_bytes())
+                .await
+                .unwrap();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            CowchatClient::connect_tcp(&addr.to_string(), "test-key", "v2-client", None, vec![]),
+        )
+        .await
+        .expect("protocol mismatch must fail during registration");
+        match result {
+            Err(ClientError::Server { code, .. }) => {
+                assert_eq!(code, ErrorCode::UnsupportedProtocol)
+            }
+            Ok(_) => panic!("a v1 server must reject a v2 client"),
+            Err(other) => panic!("expected UnsupportedProtocol, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -568,6 +612,40 @@ impl CowchatClient {
         self.request(
             FrameType::LeaveRoom,
             serde_json::json!({"room_id": room_id}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Rename a room created by this exact registered agent.
+    ///
+    /// The server trims and validates `name`, rejects collisions, and returns
+    /// the complete updated room object.
+    pub async fn rename_room(&self, room_id: &str, name: &str) -> Result<Room, ClientError> {
+        let response = self
+            .request(
+                FrameType::RenameRoom,
+                serde_json::to_value(RenameRoomPayload {
+                    room_id: room_id.to_string(),
+                    name: name.to_string(),
+                })
+                .unwrap(),
+            )
+            .await?;
+        Ok(serde_json::from_value(response.payload).unwrap())
+    }
+
+    /// Irreversibly remove a room from Cowchat's active application state.
+    /// The server rejects system rooms and callers registered under a different
+    /// agent ID. This does not promise forensic erasure from storage snapshots
+    /// or backups. Room UUIDs are lifecycle tombstones and are never reused.
+    pub async fn destroy_room(&self, room_id: &str) -> Result<(), ClientError> {
+        self.request(
+            FrameType::DestroyRoom,
+            serde_json::to_value(DestroyRoomPayload {
+                room_id: room_id.to_string(),
+            })
+            .unwrap(),
         )
         .await?;
         Ok(())

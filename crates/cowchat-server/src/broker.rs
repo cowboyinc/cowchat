@@ -1,20 +1,69 @@
 use cowchat_core::{ChatMessage, Frame, FrameType};
 use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::connection::AgentConnection;
 
 /// Result of a join: caller uses `new_holder` to decide whether to broadcast `turn_changed`.
+#[derive(Debug)]
 pub struct JoinOutcome {
     /// Set when the holder changed (i.e. room was empty and this agent became the holder).
     pub new_holder: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinRoomError {
+    Destroyed,
+}
+
+const ROOM_TOMBSTONE_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_ROOM_TOMBSTONES: usize = 4096;
+
+struct RoomLifecycleState {
+    tombstones: HashMap<String, Instant>,
+}
+
+impl RoomLifecycleState {
+    fn new() -> Self {
+        Self {
+            tombstones: HashMap::new(),
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        self.tombstones
+            .retain(|_, destroyed_at| now.duration_since(*destroyed_at) < ROOM_TOMBSTONE_TTL);
+        while self.tombstones.len() > MAX_ROOM_TOMBSTONES {
+            let Some(oldest) = self
+                .tombstones
+                .iter()
+                .min_by_key(|(_, destroyed_at)| **destroyed_at)
+                .map(|(room_id, _)| room_id.clone())
+            else {
+                break;
+            };
+            self.tombstones.remove(&oldest);
+        }
+    }
+
+    fn tombstone(&mut self, room_id: &str) {
+        let now = Instant::now();
+        self.prune(now);
+        self.tombstones.insert(room_id.to_string(), now);
+        self.prune(now);
+    }
+}
+
 /// Result of a leave: caller uses these to decide whether to clean up and what to broadcast.
 pub struct LeaveOutcome {
     pub now_empty: bool,
+    /// The room metadata was removed and its lifecycle was tombstoned as part
+    /// of this leave operation.
+    pub room_destroyed: bool,
     /// Set when this leave caused the holder to change. None means holder is unchanged
     /// OR the room is now empty (check `now_empty` to disambiguate).
     pub new_holder: Option<String>,
@@ -27,6 +76,16 @@ pub struct LeaveOutcome {
 /// — this is the basis for the round-robin turn token. The token holder for each room is
 /// tracked in `turn_holders`; absence means the room is currently empty.
 pub struct Broker {
+    /// Serializes room metadata mutations and their corresponding lifecycle
+    /// events. Keeping this separate from `room_lifecycle` lets handlers
+    /// publish without holding the admission/tombstone lock while still
+    /// guaranteeing that create/rename/destroy events cannot overtake one
+    /// another.
+    room_mutation: Mutex<()>,
+    /// Serializes same-identity registration/takeover with disconnect cleanup.
+    /// This is deliberately separate from room lifecycle state so no agent-map
+    /// shard is ever nested with room admission/destruction.
+    agent_lifecycle: Mutex<()>,
     /// All connected agents: agent_id -> AgentConnection
     pub agents: Arc<DashMap<String, AgentConnection>>,
     /// Room membership in join order: room_id -> [agent_id, ...]
@@ -36,6 +95,10 @@ pub struct Broker {
     turn_holders: DashMap<String, String>,
     /// Per-room monotonic seq counter for ephemeral rooms (permanent rooms use SQLite).
     ephemeral_seqs: DashMap<String, AtomicI64>,
+    /// UUIDs are never reused. A lifecycle tombstone closes the race where a
+    /// join/reconnect observes a room immediately before its durable deletion
+    /// and would otherwise recreate phantom in-memory membership afterwards.
+    room_lifecycle: Mutex<RoomLifecycleState>,
 }
 
 impl Broker {
@@ -44,20 +107,41 @@ impl Broker {
         room_members: Arc<DashMap<String, Vec<String>>>,
     ) -> Self {
         Self {
+            room_mutation: Mutex::new(()),
+            agent_lifecycle: Mutex::new(()),
             agents,
             room_members,
             turn_holders: DashMap::new(),
             ephemeral_seqs: DashMap::new(),
+            room_lifecycle: Mutex::new(RoomLifecycleState::new()),
         }
     }
 
+    pub fn lock_agent_lifecycle(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.agent_lifecycle.lock().unwrap()
+    }
+
+    pub fn lock_room_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.room_mutation.lock().unwrap()
+    }
+
     /// Allocate the next seq for an ephemeral room. Starts at 1.
-    pub fn next_ephemeral_seq(&self, room_id: &str) -> i64 {
+    pub fn next_ephemeral_seq<F>(&self, room_id: &str, room_exists: F) -> Option<i64>
+    where
+        F: FnOnce() -> bool,
+    {
+        let mut lifecycle = self.room_lifecycle.lock().unwrap();
+        lifecycle.prune(Instant::now());
+        if lifecycle.tombstones.contains_key(room_id) || !room_exists() {
+            return None;
+        }
         let entry = self
             .ephemeral_seqs
             .entry(room_id.to_string())
             .or_insert_with(|| AtomicI64::new(0));
-        entry.fetch_add(1, Ordering::Relaxed) + 1
+        let next = entry.fetch_add(1, Ordering::Relaxed) + 1;
+        drop(lifecycle);
+        Some(next)
     }
 
     /// Read the current seq for an ephemeral room without advancing it.
@@ -66,11 +150,6 @@ impl Broker {
             .get(room_id)
             .map(|c| c.load(Ordering::Relaxed))
             .unwrap_or(0)
-    }
-
-    /// Drop the seq counter for a room (e.g. when an ephemeral room is destroyed).
-    pub fn forget_ephemeral_seq(&self, room_id: &str) {
-        self.ephemeral_seqs.remove(room_id);
     }
 
     /// Broadcast a message to all members of a room, except the sender.
@@ -139,7 +218,24 @@ impl Broker {
     ///
     /// If the room was empty (no holder), the joining agent becomes the holder; the caller
     /// should broadcast `turn_changed`. Otherwise the holder is unchanged.
-    pub fn join_room(&self, agent_id: &str, room_id: &str) -> JoinOutcome {
+    pub fn join_room<F>(
+        &self,
+        agent_id: &str,
+        room_id: &str,
+        room_exists: F,
+    ) -> Result<JoinOutcome, JoinRoomError>
+    where
+        F: FnOnce() -> bool,
+    {
+        // Existence validation and admission share the lifecycle lock with
+        // persistent destruction and last-leave ephemeral destruction. UUIDs
+        // are never reused, so a failed authoritative lookup cannot later
+        // become the same room again.
+        let mut lifecycle = self.room_lifecycle.lock().unwrap();
+        lifecycle.prune(Instant::now());
+        if lifecycle.tombstones.contains_key(room_id) || !room_exists() {
+            return Err(JoinRoomError::Destroyed);
+        }
         let mut entry = self.room_members.entry(room_id.to_string()).or_default();
         if !entry.iter().any(|m| m == agent_id) {
             entry.push(agent_id.to_string());
@@ -153,11 +249,31 @@ impl Broker {
         } else {
             None
         };
-        JoinOutcome { new_holder }
+        drop(lifecycle);
+        Ok(JoinOutcome { new_holder })
     }
 
     /// Remove an agent from a room and update turn-token state.
     pub fn leave_room(&self, agent_id: &str, room_id: &str) -> LeaveOutcome {
+        self.leave_room_and_destroy_if_empty(agent_id, room_id, || None::<()>)
+            .0
+    }
+
+    /// Remove an agent and, if it was the last member, atomically remove
+    /// ephemeral metadata supplied by the caller and tombstone the room. The
+    /// callback runs while the same lifecycle lock used by `join_room` is held,
+    /// so a join either commits before the empty check or fails afterwards.
+    pub fn leave_room_and_destroy_if_empty<T, F>(
+        &self,
+        agent_id: &str,
+        room_id: &str,
+        remove_ephemeral_room: F,
+    ) -> (LeaveOutcome, Option<T>)
+    where
+        F: FnOnce() -> Option<T>,
+    {
+        let mut lifecycle = self.room_lifecycle.lock().unwrap();
+        lifecycle.prune(Instant::now());
         let (now_empty, was_holder) = {
             let was_holder = self
                 .turn_holders
@@ -172,6 +288,18 @@ impl Broker {
             }
             (now_empty, was_holder)
         };
+
+        let removed_room = if now_empty {
+            remove_ephemeral_room()
+        } else {
+            None
+        };
+        let room_destroyed = removed_room.is_some();
+        if room_destroyed {
+            lifecycle.tombstone(room_id);
+            self.room_members.remove(room_id);
+            self.ephemeral_seqs.remove(room_id);
+        }
 
         let (new_holder, holder_changed) = if was_holder {
             if now_empty {
@@ -193,11 +321,16 @@ impl Broker {
             (None, false)
         };
 
-        LeaveOutcome {
-            now_empty,
-            new_holder,
-            holder_changed,
-        }
+        drop(lifecycle);
+        (
+            LeaveOutcome {
+                now_empty,
+                room_destroyed,
+                new_holder,
+                holder_changed,
+            },
+            removed_room,
+        )
     }
 
     /// Remove an agent from all rooms. Returns one outcome per affected room.
@@ -215,6 +348,16 @@ impl Broker {
                 let outcome = self.leave_room(agent_id, &room_id);
                 (room_id, outcome)
             })
+            .collect()
+    }
+
+    /// Derive membership from its authoritative map. AgentConnection no longer
+    /// carries a second, racy room cache.
+    pub fn rooms_for_agent(&self, agent_id: &str) -> Vec<String> {
+        self.room_members
+            .iter()
+            .filter(|entry| entry.value().iter().any(|member| member == agent_id))
+            .map(|entry| entry.key().clone())
             .collect()
     }
 
@@ -255,10 +398,52 @@ impl Broker {
         Some(next)
     }
 
-    /// Remove the membership entry for a room entirely.
-    pub fn remove_room(&self, room_id: &str) {
-        self.room_members.remove(room_id);
+    /// Run authoritative deletion and remove every in-memory reference under
+    /// the same lifecycle lock used by admission. The potentially blocking
+    /// store callback runs before any broker map cleanup, but no agent-map lock
+    /// is ever nested under this lifecycle lock.
+    pub fn destroy_room_with<T, E, F>(
+        &self,
+        room_id: &str,
+        delete_room: F,
+    ) -> Result<(T, Vec<String>), E>
+    where
+        F: FnOnce() -> Result<T, E>,
+    {
+        let mut lifecycle = self.room_lifecycle.lock().unwrap();
+        lifecycle.prune(Instant::now());
+        let deleted = delete_room()?;
+        lifecycle.tombstone(room_id);
+        let members = self
+            .room_members
+            .remove(room_id)
+            .map(|(_, members)| members)
+            .unwrap_or_default();
         self.turn_holders.remove(room_id);
+        self.ephemeral_seqs.remove(room_id);
+        drop(lifecycle);
+        Ok((deleted, members))
+    }
+
+    /// Tombstone broker-only state when the authoritative metadata was already
+    /// removed by an atomic lifecycle operation.
+    pub fn destroy_room(&self, room_id: &str) -> Vec<String> {
+        self.destroy_room_with(room_id, || Ok::<(), std::convert::Infallible>(()))
+            .expect("infallible room cleanup")
+            .1
+    }
+
+    pub fn is_room_destroyed(&self, room_id: &str) -> bool {
+        let mut lifecycle = self.room_lifecycle.lock().unwrap();
+        lifecycle.prune(Instant::now());
+        lifecycle.tombstones.contains_key(room_id)
+    }
+
+    #[cfg(test)]
+    fn tombstone_count(&self) -> usize {
+        let mut lifecycle = self.room_lifecycle.lock().unwrap();
+        lifecycle.prune(Instant::now());
+        lifecycle.tombstones.len()
     }
 
     /// Get sender channel for a new agent connection.
@@ -306,5 +491,164 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_millis(100), disconnect.notified())
             .await
             .expect("queue saturation must signal disconnect");
+    }
+
+    #[test]
+    fn destruction_tombstone_wins_against_concurrent_joins() {
+        let broker = Arc::new(Broker::new(
+            Arc::new(DashMap::new()),
+            Arc::new(DashMap::new()),
+        ));
+        let barrier = Arc::new(std::sync::Barrier::new(17));
+        let mut joins = Vec::new();
+        for index in 0..16 {
+            let broker = broker.clone();
+            let barrier = barrier.clone();
+            joins.push(std::thread::spawn(move || {
+                barrier.wait();
+                let _ = broker.join_room(&format!("agent-{index}"), "doomed", || true);
+            }));
+        }
+
+        barrier.wait();
+        broker.destroy_room("doomed");
+        for join in joins {
+            join.join().unwrap();
+        }
+
+        assert!(broker.is_room_destroyed("doomed"));
+        assert!(broker.get_room_members("doomed").is_empty());
+        assert_eq!(
+            broker.join_room("late", "doomed", || true).unwrap_err(),
+            JoinRoomError::Destroyed
+        );
+        assert_eq!(broker.next_ephemeral_seq("doomed", || true), None);
+    }
+
+    #[test]
+    fn last_leave_tombstone_serializes_a_waiting_join() {
+        let broker = Arc::new(Broker::new(
+            Arc::new(DashMap::new()),
+            Arc::new(DashMap::new()),
+        ));
+        broker.join_room("last", "ephemeral", || true).unwrap();
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let leave_broker = broker.clone();
+        let leave = std::thread::spawn(move || {
+            leave_broker.leave_room_and_destroy_if_empty("last", "ephemeral", || {
+                entered_tx.send(()).unwrap();
+                continue_rx.recv().unwrap();
+                Some(())
+            })
+        });
+        entered_rx.recv().unwrap();
+
+        let join_broker = broker.clone();
+        let join = std::thread::spawn(move || join_broker.join_room("new", "ephemeral", || true));
+        continue_tx.send(()).unwrap();
+
+        let (outcome, removed) = leave.join().unwrap();
+        assert!(outcome.room_destroyed);
+        assert_eq!(removed, Some(()));
+        assert_eq!(join.join().unwrap().unwrap_err(), JoinRoomError::Destroyed);
+        assert!(broker.get_room_members("ephemeral").is_empty());
+    }
+
+    #[test]
+    fn persistent_destroy_commit_serializes_a_waiting_join() {
+        let broker = Arc::new(Broker::new(
+            Arc::new(DashMap::new()),
+            Arc::new(DashMap::new()),
+        ));
+        broker.join_room("member", "persistent", || true).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+        let destroy_broker = broker.clone();
+        let destroy = std::thread::spawn(move || {
+            destroy_broker.destroy_room_with("persistent", || {
+                entered_tx.send(()).unwrap();
+                commit_rx.recv().unwrap();
+                Ok::<_, ()>(())
+            })
+        });
+        entered_rx.recv().unwrap();
+        let join_broker = broker.clone();
+        let join = std::thread::spawn(move || join_broker.join_room("late", "persistent", || true));
+        commit_tx.send(()).unwrap();
+
+        destroy.join().unwrap().unwrap();
+        assert_eq!(join.join().unwrap().unwrap_err(), JoinRoomError::Destroyed);
+        assert!(broker.get_room_members("persistent").is_empty());
+    }
+
+    #[test]
+    fn join_linearized_before_leave_prevents_ephemeral_destruction() {
+        let broker = Broker::new(Arc::new(DashMap::new()), Arc::new(DashMap::new()));
+        broker.join_room("last", "ephemeral", || true).unwrap();
+        broker.join_room("new", "ephemeral", || true).unwrap();
+
+        let (outcome, removed) =
+            broker.leave_room_and_destroy_if_empty("last", "ephemeral", || Some("must-not-run"));
+        assert!(!outcome.now_empty);
+        assert!(!outcome.room_destroyed);
+        assert_eq!(removed, None);
+        assert_eq!(broker.get_room_members("ephemeral"), vec!["new"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn destruction_does_not_hold_lifecycle_lock_while_waiting_on_agents() {
+        let agents = Arc::new(DashMap::new());
+        let broker = Arc::new(Broker::new(agents.clone(), Arc::new(DashMap::new())));
+        let (sender, _receiver) = mpsc::channel(1);
+        agents.insert(
+            "same".into(),
+            AgentConnection::new(
+                AgentInfo {
+                    agent_id: "same".into(),
+                    name: "same".into(),
+                    capabilities: vec![],
+                    connected_at: None,
+                    last_active: None,
+                    status: None,
+                    status_detail: None,
+                    progress: None,
+                },
+                "session".into(),
+                sender,
+                tokio::spawn(async {}),
+                tokio::spawn(async {}),
+                Arc::new(Notify::new()),
+                "key".into(),
+            ),
+        );
+        let _agent_guard = agents.get_mut("same").unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let destroy_broker = broker.clone();
+        std::thread::spawn(move || {
+            destroy_broker.destroy_room("doomed");
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("destroy must not wait on an agent shard while holding lifecycle state");
+        assert!(broker.is_room_destroyed("doomed"));
+    }
+
+    #[test]
+    fn lifecycle_tombstones_are_bounded_under_churn() {
+        let broker = Broker::new(Arc::new(DashMap::new()), Arc::new(DashMap::new()));
+        for index in 0..(MAX_ROOM_TOMBSTONES * 2) {
+            broker.destroy_room(&format!("destroyed-{index}"));
+        }
+        assert!(broker.tombstone_count() <= MAX_ROOM_TOMBSTONES);
+        assert_eq!(
+            broker
+                .join_room("late", "destroyed-0", || false)
+                .unwrap_err(),
+            JoinRoomError::Destroyed,
+            "authoritative absence still rejects admission after cache eviction"
+        );
     }
 }

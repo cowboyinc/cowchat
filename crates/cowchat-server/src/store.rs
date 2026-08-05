@@ -4,8 +4,32 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::connection::{matches_room_owner, LEGACY_UNOWNED_OWNER_KEY};
+
 pub struct Store {
     conn: Mutex<Connection>,
+}
+
+pub(crate) const MAX_ROOM_NAME_CHARS: usize = 100;
+
+/// Canonicalize and validate a room name at the server boundary.
+///
+/// Names are identifiers in CLI resolution and SQLite's uniqueness constraint,
+/// so every creation and rename must use the same canonical form.
+pub(crate) fn normalize_room_name(name: &str) -> Result<String, String> {
+    let normalized = name.trim();
+    if normalized.is_empty() {
+        return Err("Room name cannot be empty".to_string());
+    }
+    if normalized.chars().any(char::is_control) {
+        return Err("Room name cannot contain control characters".to_string());
+    }
+    if normalized.chars().count() > MAX_ROOM_NAME_CHARS {
+        return Err(format!(
+            "Room name cannot exceed {MAX_ROOM_NAME_CHARS} Unicode scalar values"
+        ));
+    }
+    Ok(normalized.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -345,13 +369,18 @@ impl Store {
         owner_key: Option<&str>,
         encrypted: bool,
     ) -> Result<Room, StoreError> {
+        let name = normalize_room_name(name).map_err(StoreError::InvalidRoomName)?;
+        // SQL NULL predates durable ownership metadata and must remain
+        // fail-closed. An empty string is the durable, distinguishable marker
+        // for a room explicitly created by a keyless local connection.
+        let persisted_owner_key = owner_key.unwrap_or("");
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO rooms (room_id, name, description, parent_id, created_by, visibility, owner_key, encrypted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![room_id, name, description, parent_id, created_by, visibility, owner_key, encrypted],
+            params![room_id, &name, description, parent_id, created_by, visibility, persisted_owner_key, encrypted],
         ).map_err(|e| match e {
             rusqlite::Error::SqliteFailure(err, _) if err.extended_code == 2067 => {
-                StoreError::RoomNameTaken(name.to_string())
+                StoreError::RoomNameTaken(name.clone())
             }
             other => StoreError::Db(other),
         })?;
@@ -409,10 +438,133 @@ impl Store {
         Ok(rooms)
     }
 
-    pub fn delete_room(&self, room_id: &str) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
-        let affected = conn.execute("DELETE FROM rooms WHERE room_id = ?1", params![room_id])?;
-        Ok(affected > 0)
+    /// Authorize and persist a room rename in one immediate transaction.
+    /// The owning bearer principal and its recorded creator attribution are
+    /// both required.
+    pub fn rename_room_authorized(
+        &self,
+        room_id: &str,
+        agent_id: &str,
+        agent_api_key: &str,
+        no_auth: bool,
+        name: &str,
+    ) -> Result<Room, RenameRoomError> {
+        let name = normalize_room_name(name).map_err(RenameRoomError::InvalidName)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut room = match tx.query_row(
+            "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted
+             FROM rooms WHERE room_id = ?1",
+            params![room_id],
+            map_room_row,
+        ) {
+            Ok(room) => room,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(RenameRoomError::NotFound),
+            Err(error) => return Err(RenameRoomError::Db(error)),
+        };
+
+        if room.room_id == "lobby" || room.created_by.is_none() {
+            return Err(RenameRoomError::ProtectedRoom);
+        }
+        if room.created_by.as_deref() != Some(agent_id)
+            || !matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth)
+        {
+            return Err(RenameRoomError::AccessDenied);
+        }
+
+        if room.name != name {
+            tx.execute(
+                "UPDATE rooms SET name = ?1 WHERE room_id = ?2",
+                params![&name, room_id],
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::SqliteFailure(error, _) if error.extended_code == 2067 => {
+                    RenameRoomError::NameTaken(name.clone())
+                }
+                other => RenameRoomError::Db(other),
+            })?;
+            room.name = name;
+        }
+        tx.commit()?;
+        Ok(room)
+    }
+
+    /// Authorize and irreversibly remove a persisted room from active Cowchat
+    /// state in one immediate transaction. Keeping the room lookup,
+    /// creator/key checks, and deletes under the same SQLite write lock avoids
+    /// a check/delete TOCTOU gap. This is not a forensic-erasure guarantee.
+    pub fn destroy_room_authorized(
+        &self,
+        room_id: &str,
+        agent_id: &str,
+        agent_api_key: &str,
+        no_auth: bool,
+    ) -> Result<Room, DestroyRoomError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let room = match tx.query_row(
+            "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted
+             FROM rooms WHERE room_id = ?1",
+            params![room_id],
+            map_room_row,
+        ) {
+            Ok(room) => room,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(DestroyRoomError::NotFound),
+            Err(error) => return Err(DestroyRoomError::Db(error)),
+        };
+
+        // Lobby and any other server-created/legacy system room have no
+        // creator and are intentionally immutable through the public protocol.
+        if room.room_id == "lobby" || room.created_by.is_none() {
+            return Err(DestroyRoomError::ProtectedRoom);
+        }
+
+        // The API key (or local keyless boundary) is the bearer authority. The
+        // exact creator ID is an attribution guard within that boundary, not a
+        // separate unforgeable principal; reconnect semantics deliberately let
+        // the bearer assume IDs owned by it. Public visibility never weakens
+        // this mutation check.
+        if room.created_by.as_deref() != Some(agent_id)
+            || !matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth)
+        {
+            return Err(DestroyRoomError::AccessDenied);
+        }
+
+        // Delete every room-scoped durable row explicitly. Several older
+        // schemas predate room foreign keys on votes/subscriptions, so relying
+        // only on ON DELETE CASCADE would leave credentialed webhooks or active
+        // coordination state behind after an upgrade.
+        detach_children_and_delete_room_artifacts(&tx, room_id)?;
+        let affected = tx.execute("DELETE FROM rooms WHERE room_id = ?1", params![room_id])?;
+        if affected != 1 {
+            return Err(DestroyRoomError::NotFound);
+        }
+        tx.commit()?;
+        Ok(room)
+    }
+
+    /// Delete durable side-state for an in-memory (ephemeral) room. Webhook
+    /// subscriptions are persisted even when room chat history is not, and
+    /// legacy schemas may contain other room-scoped rows without foreign keys.
+    pub fn delete_room_artifacts(&self, room_id: &str) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        delete_room_artifacts_in_transaction(&tx, room_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Atomically prepare an in-memory room for destruction. Persistent
+    /// children are detached in the same transaction that removes all durable
+    /// room-scoped artifacts. Callers must complete in-memory removal only
+    /// after this commits; on error the transaction rolls back and destruction
+    /// can be retried without stranded subscriptions, tasks, or child links.
+    pub fn prepare_ephemeral_room_destruction(&self, room_id: &str) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        detach_children_and_delete_room_artifacts(&tx, room_id)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Delete persisted messages older than `age_modifier` (a SQLite datetime
@@ -1347,6 +1499,55 @@ fn map_subscription_row(
 
 // --- Internal helpers that take an already-locked connection ---
 
+fn delete_room_artifacts_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    room_id: &str,
+) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "DELETE FROM subscription_deliveries
+         WHERE subscription_id IN (
+             SELECT subscription_id FROM subscriptions WHERE room_id = ?1
+         )",
+        params![room_id],
+    )?;
+    tx.execute(
+        "DELETE FROM subscriptions WHERE room_id = ?1",
+        params![room_id],
+    )?;
+    tx.execute(
+        "DELETE FROM vote_ballots
+         WHERE vote_id IN (SELECT vote_id FROM votes WHERE room_id = ?1)",
+        params![room_id],
+    )?;
+    tx.execute(
+        "DELETE FROM vote_eligible_agents
+         WHERE vote_id IN (SELECT vote_id FROM votes WHERE room_id = ?1)",
+        params![room_id],
+    )?;
+    tx.execute("DELETE FROM votes WHERE room_id = ?1", params![room_id])?;
+    tx.execute(
+        "DELETE FROM room_tasks WHERE room_id = ?1",
+        params![room_id],
+    )?;
+    tx.execute("DELETE FROM messages WHERE room_id = ?1", params![room_id])?;
+    tx.execute(
+        "DELETE FROM room_sequences WHERE room_id = ?1",
+        params![room_id],
+    )?;
+    Ok(())
+}
+
+fn detach_children_and_delete_room_artifacts(
+    tx: &rusqlite::Transaction<'_>,
+    room_id: &str,
+) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "UPDATE rooms SET parent_id = NULL WHERE parent_id = ?1",
+        params![room_id],
+    )?;
+    delete_room_artifacts_in_transaction(tx, room_id)
+}
+
 fn query_room_by_id(conn: &Connection, room_id: &str) -> Result<Option<Room>, StoreError> {
     let mut stmt = conn.prepare(
         "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted FROM rooms WHERE room_id = ?1",
@@ -1388,6 +1589,12 @@ fn ensure_column_exists(
 }
 
 fn map_room_row(row: &rusqlite::Row) -> rusqlite::Result<Room> {
+    let persisted_owner_key: Option<String> = row.get(7)?;
+    let owner_key = match persisted_owner_key {
+        Some(key) if key.is_empty() => None,
+        Some(key) => Some(key),
+        None => Some(LEGACY_UNOWNED_OWNER_KEY.to_string()),
+    };
     Ok(Room {
         room_id: row.get(0)?,
         name: row.get(1)?,
@@ -1399,7 +1606,7 @@ fn map_room_row(row: &rusqlite::Row) -> rusqlite::Result<Room> {
         visibility: row
             .get::<_, String>(6)
             .unwrap_or_else(|_| "private".to_string()),
-        owner_key: row.get(7)?,
+        owner_key,
         last_activity: None,
         member_count: None,
         encrypted: row.get::<_, bool>(8).unwrap_or(false),
@@ -1480,12 +1687,54 @@ fn parse_timestamp(s: &str) -> DateTime<Utc> {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum DestroyRoomError {
+    #[error("room not found")]
+    NotFound,
+
+    #[error("access denied")]
+    AccessDenied,
+
+    #[error("system room cannot be destroyed")]
+    ProtectedRoom,
+
+    #[error("database error: {0}")]
+    Db(#[from] rusqlite::Error),
+
+    #[error("durable room cleanup failed: {0}")]
+    Cleanup(#[from] StoreError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RenameRoomError {
+    #[error("room not found")]
+    NotFound,
+
+    #[error("access denied")]
+    AccessDenied,
+
+    #[error("system room cannot be renamed")]
+    ProtectedRoom,
+
+    #[error("invalid room name: {0}")]
+    InvalidName(String),
+
+    #[error("room name already taken: {0}")]
+    NameTaken(String),
+
+    #[error("database error: {0}")]
+    Db(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
 
     #[error("room name already taken: {0}")]
     RoomNameTaken(String),
+
+    #[error("invalid room name: {0}")]
+    InvalidRoomName(String),
 
     #[error("vote not found")]
     VoteNotFound,
@@ -1536,6 +1785,456 @@ mod tests {
             .unwrap();
         let result = store.create_room("r2", "same-name", None, None, None);
         assert!(matches!(result, Err(StoreError::RoomNameTaken(_))));
+    }
+
+    #[test]
+    fn room_name_validation_is_canonical_for_creation() {
+        let store = Store::open_in_memory().unwrap();
+        let room = store
+            .create_room("trimmed", "  Project Room  ", None, None, Some("creator"))
+            .unwrap();
+        assert_eq!(room.name, "Project Room");
+
+        for (room_id, name) in [
+            ("empty", "   ".to_string()),
+            ("control", "bad\nname".to_string()),
+            ("too-long", "🦀".repeat(MAX_ROOM_NAME_CHARS + 1)),
+        ] {
+            assert!(matches!(
+                store.create_room(room_id, &name, None, None, Some("creator")),
+                Err(StoreError::InvalidRoomName(_))
+            ));
+        }
+        let longest_valid = "é".repeat(MAX_ROOM_NAME_CHARS);
+        assert_eq!(
+            store
+                .create_room("longest-valid", &longest_valid, None, None, Some("creator"))
+                .unwrap()
+                .name,
+            longest_valid
+        );
+    }
+
+    #[test]
+    fn rename_room_is_creator_and_key_authorized_persistent_and_unique() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room_with_visibility(
+                "target",
+                "Old Name",
+                None,
+                None,
+                Some("creator"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        store
+            .create_room("conflict", "Existing Name", None, None, Some("other"))
+            .unwrap();
+
+        assert!(matches!(
+            store.rename_room_authorized("target", "other", "owner-key", false, "New Name"),
+            Err(RenameRoomError::AccessDenied)
+        ));
+        assert!(matches!(
+            store.rename_room_authorized("target", "creator", "wrong-key", false, "New Name"),
+            Err(RenameRoomError::AccessDenied)
+        ));
+        assert!(matches!(
+            store.rename_room_authorized("target", "creator", "owner-key", false, "Existing Name"),
+            Err(RenameRoomError::NameTaken(_))
+        ));
+        assert!(matches!(
+            store.rename_room_authorized("lobby", "creator", "owner-key", false, "New Lobby"),
+            Err(RenameRoomError::ProtectedRoom)
+        ));
+        assert!(matches!(
+            store.rename_room_authorized("target", "creator", "owner-key", false, "\n"),
+            Err(RenameRoomError::InvalidName(_))
+        ));
+
+        let renamed = store
+            .rename_room_authorized("target", "creator", "owner-key", false, "  New Name  ")
+            .unwrap();
+        assert_eq!(renamed.name, "New Name");
+        assert_eq!(store.get_room("target").unwrap().unwrap().name, "New Name");
+    }
+
+    #[test]
+    fn destroy_room_is_creator_authorized_transactional_and_complete() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room_with_visibility(
+                "doomed",
+                "doomed",
+                None,
+                None,
+                Some("creator"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        store
+            .insert_message(
+                "message",
+                "doomed",
+                "creator",
+                "Creator",
+                "secret",
+                None,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO votes
+                 (vote_id, room_id, title, options, created_by, eligible_voters)
+                 VALUES ('vote', 'doomed', 'Vote', '[\"yes\",\"no\"]', 'creator', 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO vote_eligible_agents (vote_id, agent_id)
+                 VALUES ('vote', 'creator')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO vote_ballots (vote_id, agent_id, agent_name, option_index)
+                 VALUES ('vote', 'creator', 'Creator', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO room_tasks
+                 (task_id, room_id, title, status, created_by, created_at)
+                 VALUES ('task', 'doomed', 'Task', 'pending', 'creator',
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                [],
+            )
+            .unwrap();
+        }
+        store
+            .create_subscription(
+                "subscription",
+                "doomed",
+                "owner-key",
+                "https://example.com/hook",
+                "secret",
+                &[],
+                None,
+                None,
+                false,
+                0,
+            )
+            .unwrap();
+        store
+            .enqueue_delivery("delivery", "subscription", 1, "message", chrono::Utc::now())
+            .unwrap();
+
+        assert!(matches!(
+            store.destroy_room_authorized("doomed", "other-agent", "owner-key", false),
+            Err(DestroyRoomError::AccessDenied)
+        ));
+        assert!(store.get_room("doomed").unwrap().is_some());
+        assert!(matches!(
+            store.destroy_room_authorized("lobby", "creator", "owner-key", false),
+            Err(DestroyRoomError::ProtectedRoom)
+        ));
+
+        let destroyed = store
+            .destroy_room_authorized("doomed", "creator", "owner-key", false)
+            .unwrap();
+        assert_eq!(destroyed.owner_key.as_deref(), Some("owner-key"));
+
+        let conn = store.conn.lock().unwrap();
+        for (table, predicate) in [
+            ("rooms", "room_id = 'doomed'"),
+            ("messages", "room_id = 'doomed'"),
+            ("room_sequences", "room_id = 'doomed'"),
+            ("votes", "room_id = 'doomed'"),
+            ("vote_ballots", "vote_id = 'vote'"),
+            ("vote_eligible_agents", "vote_id = 'vote'"),
+            ("room_tasks", "room_id = 'doomed'"),
+            ("subscriptions", "room_id = 'doomed'"),
+            (
+                "subscription_deliveries",
+                "subscription_id = 'subscription'",
+            ),
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {predicate}"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "{table} must be cleaned");
+        }
+    }
+
+    #[test]
+    fn explicitly_keyless_rooms_use_a_durable_marker_and_remain_mutable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("explicit-keyless.db");
+        let store = Store::open(&path).unwrap();
+        store
+            .create_room_with_visibility(
+                "keyless-room",
+                "Keyless Room",
+                None,
+                None,
+                Some("creator"),
+                "private",
+                None,
+                false,
+            )
+            .unwrap();
+
+        let persisted_owner: Option<String> = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT owner_key FROM rooms WHERE room_id = 'keyless-room'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted_owner.as_deref(), Some(""));
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.get_room("keyless-room").unwrap().unwrap().owner_key,
+            None
+        );
+
+        assert!(matches!(
+            store.rename_room_authorized(
+                "keyless-room",
+                "creator",
+                "authenticated-key",
+                false,
+                "Denied"
+            ),
+            Err(RenameRoomError::AccessDenied)
+        ));
+        store
+            .rename_room_authorized("keyless-room", "creator", "", false, "Renamed")
+            .unwrap();
+        store
+            .destroy_room_authorized("keyless-room", "creator", "", false)
+            .unwrap();
+    }
+
+    #[test]
+    fn legacy_null_owner_room_cannot_be_claimed_by_keyless_creator_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-null-owner.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE rooms (
+                    room_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                    description TEXT, parent_id TEXT, created_by TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    visibility TEXT NOT NULL DEFAULT 'private', owner_key TEXT,
+                    encrypted INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO rooms
+                    (room_id, name, created_by, visibility, owner_key)
+                 VALUES ('legacy-private', 'Legacy Private', 'spoofable-id', 'private', NULL);",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let legacy = store.get_room("legacy-private").unwrap().unwrap();
+        assert_eq!(legacy.owner_key.as_deref(), Some(LEGACY_UNOWNED_OWNER_KEY));
+        assert!(matches!(
+            store.rename_room_authorized("legacy-private", "spoofable-id", "", false, "Claimed"),
+            Err(RenameRoomError::AccessDenied)
+        ));
+        assert!(matches!(
+            store.destroy_room_authorized("legacy-private", "spoofable-id", "", false),
+            Err(DestroyRoomError::AccessDenied)
+        ));
+        assert!(matches!(
+            store.destroy_room_authorized("legacy-private", "spoofable-id", "", true),
+            Err(DestroyRoomError::AccessDenied)
+        ));
+        assert!(store.get_room("legacy-private").unwrap().is_some());
+    }
+
+    #[test]
+    fn public_visibility_does_not_grant_room_mutation_authority() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room_with_visibility(
+                "public-owned",
+                "Public Owned",
+                None,
+                None,
+                Some("creator"),
+                "public",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.rename_room_authorized("public-owned", "creator", "other-key", false, "Denied"),
+            Err(RenameRoomError::AccessDenied)
+        ));
+        assert!(matches!(
+            store.destroy_room_authorized("public-owned", "creator", "other-key", false),
+            Err(DestroyRoomError::AccessDenied)
+        ));
+    }
+
+    #[test]
+    fn destroy_nulls_child_parent_in_legacy_schema_without_foreign_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-parent.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE rooms (
+                    room_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                    description TEXT, parent_id TEXT, created_by TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    visibility TEXT NOT NULL DEFAULT 'private', owner_key TEXT,
+                    encrypted INTEGER NOT NULL DEFAULT 0
+                 );",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        store
+            .create_room_with_visibility(
+                "parent",
+                "Parent",
+                None,
+                None,
+                Some("creator"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        store
+            .create_room_with_visibility(
+                "child",
+                "Child",
+                None,
+                Some("parent"),
+                Some("creator"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        store
+            .destroy_room_authorized("parent", "creator", "owner-key", false)
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.get_room("child").unwrap().unwrap().parent_id, None);
+    }
+
+    #[test]
+    fn ephemeral_cleanup_failure_rolls_back_children_and_artifacts_then_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ephemeral-cleanup-retry.db");
+        {
+            // A legacy rooms table without a parent foreign key can contain a
+            // durable child of an in-memory parent. This is exactly the state
+            // destruction must repair safely after an upgrade.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE rooms (
+                    room_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                    description TEXT, parent_id TEXT, created_by TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    visibility TEXT NOT NULL DEFAULT 'private', owner_key TEXT,
+                    encrypted INTEGER NOT NULL DEFAULT 0
+                 );",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        store
+            .create_room_with_visibility(
+                "durable-child",
+                "Durable Child",
+                None,
+                Some("ephemeral-parent"),
+                Some("creator"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        store
+            .create_subscription(
+                "ephemeral-sub",
+                "ephemeral-parent",
+                "owner-key",
+                "https://example.com/hook",
+                "secret",
+                &[],
+                None,
+                None,
+                false,
+                0,
+            )
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_ephemeral_cleanup
+                 BEFORE DELETE ON subscriptions
+                 WHEN OLD.room_id = 'ephemeral-parent'
+                 BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END;",
+            )
+            .unwrap();
+
+        assert!(store
+            .prepare_ephemeral_room_destruction("ephemeral-parent")
+            .is_err());
+        assert_eq!(
+            store
+                .get_room("durable-child")
+                .unwrap()
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some("ephemeral-parent"),
+            "child detachment must roll back with artifact cleanup"
+        );
+        assert!(store.get_subscription("ephemeral-sub").unwrap().is_some());
+
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_ephemeral_cleanup;")
+            .unwrap();
+        store
+            .prepare_ephemeral_room_destruction("ephemeral-parent")
+            .unwrap();
+        assert_eq!(
+            store.get_room("durable-child").unwrap().unwrap().parent_id,
+            None
+        );
+        assert!(store.get_subscription("ephemeral-sub").unwrap().is_none());
     }
 
     #[test]

@@ -2,7 +2,7 @@ import XCTest
 @testable import CowchatMac
 
 final class RoomSidebarPresentationTests: XCTestCase {
-    func testPinnedRoomsPreferLobbyAndRespectLimit() throws {
+    func testPinnedRoomsUseExplicitLocalPreferenceAndRespectLimit() throws {
         let rooms = try [
             room(id: "recent", name: "Recent", activity: "2026-08-04T15:00:00Z"),
             room(id: "lobby", name: "Lobby", activity: "2026-08-03T15:00:00Z"),
@@ -11,8 +11,11 @@ final class RoomSidebarPresentationTests: XCTestCase {
         ]
 
         XCTAssertEqual(
-            RoomSidebarPresentation.pinnedRooms(from: rooms).map(\.id),
-            ["lobby", "recent", "assistant"]
+            RoomSidebarPresentation.pinnedRooms(
+                from: rooms,
+                pinnedRoomIDs: ["lobby", "assistant", "demo"]
+            ).map(\.id),
+            ["lobby", "assistant", "demo"]
         )
     }
 
@@ -44,6 +47,19 @@ final class RoomSidebarPresentationTests: XCTestCase {
         )
     }
 
+    func testActiveRoomsDoNotCountThisMacClientInSelectedRoom() throws {
+        let selected = try room(id: "selected", name: "Selected", memberCount: 1)
+        let collaborator = try room(id: "other", name: "Other", memberCount: 1)
+
+        XCTAssertEqual(
+            RoomSidebarPresentation.activeRooms(
+                from: [selected, collaborator],
+                excludingCurrentClientFrom: selected.id
+            ).map(\.id),
+            ["other"]
+        )
+    }
+
     func testVisiblePinnedRoomsRespectSearchAndScopeResults() throws {
         let lobby = try room(id: "lobby", name: "Lobby", memberCount: 0)
         let design = try room(id: "design", name: "Design", memberCount: 2)
@@ -56,8 +72,98 @@ final class RoomSidebarPresentationTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            RoomSidebarPresentation.visiblePinnedRooms(from: allRooms, among: visibleRooms).map(\.id),
+            RoomSidebarPresentation.visiblePinnedRooms(
+                from: allRooms,
+                among: visibleRooms,
+                pinnedRoomIDs: ["lobby", "design", "release"]
+            ).map(\.id),
             ["design"]
+        )
+    }
+
+    func testFourthPinnedRoomRemainsInRecencyGroups() throws {
+        let rooms = try [
+            room(id: "one", name: "One"),
+            room(id: "two", name: "Two"),
+            room(id: "three", name: "Three"),
+            room(id: "four", name: "Four"),
+        ]
+
+        XCTAssertEqual(
+            RoomSidebarPresentation.roomsForRecencyGroups(
+                from: rooms,
+                allRooms: rooms,
+                pinnedRoomIDs: Set(rooms.map(\.id))
+            ).map(\.id),
+            ["four"]
+        )
+    }
+
+    func testMessageMatchesCanSurfaceRoomWithoutNameMatch() throws {
+        let design = try room(id: "design", name: "Design")
+        let release = try room(id: "release", name: "Release")
+
+        XCTAssertEqual(
+            RoomSidebarPresentation.filteredRooms(
+                from: [design, release],
+                query: "  deployment  ",
+                matchingMessageRoomIDs: ["release"]
+            ).map(\.id),
+            ["release"]
+        )
+    }
+
+    func testLobbyAvailableAgentCountExcludesThisMacClientAndDeduplicates() throws {
+        func agent(_ id: String) throws -> AgentPresence {
+            try JSONDecoder().decode(
+                AgentPresence.self,
+                from: Data(#"{"agent_id":"\#(id)","name":"Agent","capabilities":[]}"#.utf8)
+            )
+        }
+        let members = try [agent("cowchat-mac"), agent("bot-a"), agent("bot-a"), agent("bot-b")]
+
+        XCTAssertEqual(
+            LobbyPresentation.availableAgentCount(from: members, excluding: "cowchat-mac"),
+            2
+        )
+    }
+
+    func testChatPresenceNamesOnlyActiveCollaboratorsAndNeverThisMacClient() throws {
+        func agent(_ id: String, name: String, status: String?) throws -> AgentPresence {
+            var json: [String: Any] = [
+                "agent_id": id,
+                "name": name,
+                "capabilities": [],
+            ]
+            if let status { json["status"] = status }
+            return try JSONDecoder().decode(
+                AgentPresence.self,
+                from: JSONSerialization.data(withJSONObject: json)
+            )
+        }
+        let members = try [
+            agent("cowchat-mac", name: "Cowchat Mac", status: "working"),
+            agent("claude", name: "Claude", status: "thinking"),
+            agent("codex", name: "Codex", status: nil),
+        ]
+
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: members,
+                currentAgentID: "cowchat-mac",
+                fallbackMemberCount: 99,
+                isConnected: true
+            ),
+            "Claude active"
+        )
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: [members[0]],
+                currentAgentID: "cowchat-mac",
+                fallbackMemberCount: 1,
+                isConnected: true
+            ),
+            "No collaborators"
         )
     }
 

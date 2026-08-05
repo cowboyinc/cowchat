@@ -224,6 +224,11 @@ impl VoteManager {
         let room_id = room_id.to_string();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;
+            if broker.is_room_destroyed(&room_id) {
+                active_elections.remove(&room_id);
+                room_leaders.remove(&room_id);
+                return;
+            }
             if let Some((_, election)) = active_elections.remove(&room_id) {
                 let remaining: Vec<&String> = election
                     .candidates
@@ -252,6 +257,10 @@ impl VoteManager {
                     .map(|a| a.info.name.clone())
                     .unwrap_or_else(|| winner_id.clone());
 
+                if broker.is_room_destroyed(&room_id) {
+                    room_leaders.remove(&room_id);
+                    return;
+                }
                 room_leaders.insert(room_id.clone(), winner_id.clone());
 
                 let event = Frame::event(
@@ -322,6 +331,16 @@ impl VoteManager {
             self.clear_leader(&room_id, broker);
         }
     }
+
+    /// Remove every active coordination object belonging to a destroyed room.
+    /// Deadline/election tasks share these maps, so once entries are removed
+    /// their delayed callbacks become no-ops and cannot publish late events.
+    pub fn forget_room(&self, room_id: &str) {
+        self.active_votes
+            .retain(|_, vote| vote.room_id.as_str() != room_id);
+        self.active_elections.remove(room_id);
+        self.room_leaders.remove(room_id);
+    }
 }
 
 /// Close a vote and broadcast the results to the room.
@@ -380,4 +399,49 @@ async fn close_and_broadcast_vote(vote: ActiveVote, broker: &Arc<Broker>, store:
         vote.room_id,
         vote.ballots.len()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn destroyed_room_coordination_state_is_removed() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let broker = Arc::new(Broker::new(
+            Arc::new(DashMap::new()),
+            Arc::new(DashMap::new()),
+        ));
+        let manager = VoteManager::new(store.clone(), broker.clone());
+        manager.create_vote(
+            "vote".into(),
+            "doomed".into(),
+            "Vote".into(),
+            None,
+            vec!["yes".into(), "no".into()],
+            "creator".into(),
+            None,
+            vec!["creator".into()],
+            true,
+            broker,
+            store,
+        );
+        manager.active_elections.insert(
+            "doomed".into(),
+            ActiveElection {
+                room_id: "doomed".into(),
+                candidates: vec!["creator".into()],
+                declined: HashSet::new(),
+                started_by: "creator".into(),
+            },
+        );
+        manager
+            .room_leaders
+            .insert("doomed".into(), "creator".into());
+
+        manager.forget_room("doomed");
+        assert!(manager.active_votes.is_empty());
+        assert!(!manager.active_elections.contains_key("doomed"));
+        assert!(!manager.room_leaders.contains_key("doomed"));
+    }
 }

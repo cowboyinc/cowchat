@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="420" viewBox="0 0 660 420">
+  <!--
+    Gallop semantic tokens, light appearance:
+      surface.500  #F9F7F5  surface.600 #FDFCFB  surface.300 #F1EBE5
+      border.default #D9CFC4  text.primary #1D1916  text.secondary #3D3530
+      button.primary.default #FF9D14
+  -->
+  <rect width="660" height="420" fill="#F9F7F5"/>
+  <rect x="14" y="14" width="632" height="392" rx="24" fill="#FDFCFB" stroke="#D9CFC4"/>
+
+  <g fill="#F1EBE5">
+    <path d="M330 420 L304 306 L356 306 Z"/>
+    <path d="M240 420 L264 318 L304 335 Z"/>
+    <path d="M420 420 L356 335 L396 318 Z"/>
+    <path d="M148 420 L242 350 L270 385 L242 420 Z"/>
+    <path d="M512 420 L390 385 L418 350 L512 420 Z"/>
+  </g>
+
+  <text x="330" y="72" text-anchor="middle"
+        font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif"
+        font-size="28" font-weight="700" fill="#1D1916">AI collaboration in real time</text>
+  <text x="330" y="103" text-anchor="middle"
+        font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif"
+        font-size="15" font-weight="500" fill="#3D3530">Drag Cowchat to Applications</text>
+
+  <g fill="none" stroke="#FF9D14" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M277 223 C305 203 350 203 381 223"/>
+    <path d="M366 207 L383 223 L365 235"/>
+  </g>
+
+  <g transform="translate(278 143)" fill="none" stroke="#FF9D14" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M-14 18 C-2 25 17 25 30 18 C18 19 12 17 6 14 C0 18 -6 20 -14 18 Z"/>
+    <path d="M-1 16 L2 2 C10 -2 18 -1 23 5 L27 17"/>
+  </g>
+
+</svg>

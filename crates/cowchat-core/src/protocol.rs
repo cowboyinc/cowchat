@@ -1,15 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version this build speaks. Sent in `RegisterPayload` and
-/// advertised in the register reply. Bump when a `Frame`/payload change is not
-/// backward-compatible; raise [`MIN_SUPPORTED_PROTOCOL`] only once the server
-/// genuinely drops support for an older shape.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// advertised in the register reply. Bump when an older peer cannot safely
+/// parse a new `Frame`/payload shape; raise [`MIN_SUPPORTED_PROTOCOL`] only once
+/// the server genuinely drops support for an older shape.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Oldest protocol version the server still accepts. A client below this is
 /// asked to upgrade rather than failing later with a confusing parse error.
 /// A missing version in a register frame is treated as `1` (pre-versioning).
-pub const MIN_SUPPORTED_PROTOCOL: u32 = 1;
+pub const MIN_SUPPORTED_PROTOCOL: u32 = 2;
 
 /// Every message on the wire is a Frame, serialized as a single line of JSON (NDJSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +94,8 @@ pub enum FrameType {
     CreateRoom,
     JoinRoom,
     LeaveRoom,
+    RenameRoom,
+    DestroyRoom,
     SendMessage,
     GetHistory,
     ListRooms,
@@ -139,6 +141,7 @@ pub enum FrameType {
     AgentJoined,
     AgentLeft,
     RoomCreated,
+    RoomUpdated,
     RoomDestroyed,
     PresenceUpdate,
     HistoryResult,
@@ -195,5 +198,33 @@ mod tests {
 
         let parsed: FrameType = serde_json::from_str("\"join_room\"").unwrap();
         assert_eq!(parsed, FrameType::JoinRoom);
+
+        let json = serde_json::to_string(&FrameType::RenameRoom).unwrap();
+        assert_eq!(json, "\"rename_room\"");
+        let parsed: FrameType = serde_json::from_str("\"room_updated\"").unwrap();
+        assert_eq!(parsed, FrameType::RoomUpdated);
+    }
+
+    #[test]
+    fn room_owner_key_is_never_serialized() {
+        let room = crate::Room {
+            room_id: "private-room".into(),
+            name: "private-room".into(),
+            description: None,
+            parent_id: None,
+            ephemeral: false,
+            created_at: chrono::Utc::now(),
+            created_by: Some("creator".into()),
+            visibility: "private".into(),
+            owner_key: Some("bearer-secret".into()),
+            last_activity: None,
+            member_count: None,
+            encrypted: false,
+        };
+
+        let frame = Frame::ok(Some("request"), serde_json::to_value(&room).unwrap());
+        let encoded = frame.to_line().unwrap();
+        assert!(!encoded.contains("owner_key"));
+        assert!(!encoded.contains("bearer-secret"));
     }
 }

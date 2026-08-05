@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 private typealias GallopColor = GallopTheme.ColorToken
@@ -28,9 +29,14 @@ private enum AppAppearance: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject private var store: ChatStore
+    let onShowOnboarding: () -> Void
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
     @State private var isSidebarVisible = true
     @State private var isSettingsPresented = false
+
+    init(onShowOnboarding: @escaping () -> Void = {}) {
+        self.onShowOnboarding = onShowOnboarding
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -49,8 +55,16 @@ struct ContentView: View {
 
             Group {
                 if let room = store.selectedRoom {
-                    ChatRoomView(room: room, isSidebarVisible: $isSidebarVisible)
-                        .id(room.id)
+                    if room.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame {
+                        LobbyDashboardView(room: room, isSidebarVisible: $isSidebarVisible)
+                            .id("lobby-\(room.id)")
+                    } else if store.roomSetupScreenIDs.contains(room.id) {
+                        RoomSetupView(room: room, isSidebarVisible: $isSidebarVisible)
+                            .id("setup-\(room.id)")
+                    } else {
+                        ChatRoomView(room: room, isSidebarVisible: $isSidebarVisible)
+                            .id(room.id)
+                    }
                 } else {
                     EmptyChatView(isSidebarVisible: $isSidebarVisible)
                 }
@@ -68,12 +82,22 @@ struct ContentView: View {
         .ignoresSafeArea(.container, edges: .top)
         .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
         .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
-        .sheet(isPresented: $store.isCreateRoomPresented) {
+        .sheet(
+            isPresented: $store.isCreateRoomPresented,
+            onDismiss: { store.createRoomParentID = nil }
+        ) {
             CreateRoomView()
                 .environmentObject(store)
         }
+        .sheet(item: $store.roomBeingRenamed) { room in
+            RenameRoomView(room: room)
+                .environmentObject(store)
+        }
         .sheet(isPresented: $isSettingsPresented) {
-            SettingsView(isPresented: $isSettingsPresented)
+            SettingsView(
+                isPresented: $isSettingsPresented,
+                onShowOnboarding: onShowOnboarding
+            )
                 .environmentObject(store)
         }
         .alert("Cowchat", isPresented: Binding(
@@ -84,7 +108,15 @@ struct ContentView: View {
         } message: {
             Text(store.errorMessage ?? "")
         }
-        .task { store.start() }
+        .overlay(alignment: .bottomTrailing) {
+            if let room = store.roomReadyNotice {
+                RoomReadyNotice(room: room)
+                    .environmentObject(store)
+                    .padding(18)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: store.roomReadyNotice?.id)
     }
 }
 
@@ -121,7 +153,7 @@ private struct SidebarView: View {
             TimelineView(.periodic(from: .now, by: 60)) { timeline in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        if baseRooms.isEmpty {
+                        if baseRooms.isEmpty && archivedRooms(at: timeline.date).isEmpty {
                             emptyRoomsState
                         } else {
                             pinnedRooms
@@ -129,9 +161,9 @@ private struct SidebarView: View {
                             ForEach(visibleGroups(at: timeline.date), id: \.title) { group in
                                 roomGroup(group, now: timeline.date)
                             }
-
-                            archiveSection(at: timeline.date)
                         }
+
+                        archiveSection(at: timeline.date)
                     }
                     .padding(.horizontal, 8)
                     .padding(.bottom, 12)
@@ -146,24 +178,52 @@ private struct SidebarView: View {
 
     private var baseRooms: [Room] {
         let rooms = scope == .all
-            ? store.rooms
-            : RoomSidebarPresentation.activeRooms(from: store.rooms)
-        return RoomSidebarPresentation.filteredRooms(from: rooms, query: store.searchText)
+            ? store.unarchivedRooms
+            : RoomSidebarPresentation.activeRooms(
+                from: store.unarchivedRooms,
+                excludingCurrentClientFrom: store.connectionStatus.isConnected
+                    ? store.selectedRoomID
+                    : nil
+            )
+        return RoomSidebarPresentation.filteredRooms(
+            from: rooms,
+            query: store.searchText,
+            matchingMessageRoomIDs: store.messageSearchRoomIDs
+        )
     }
 
     private func visibleGroups(at now: Date) -> [RoomSidebarGroup] {
-        RoomSidebarPresentation.groups(from: baseRooms, now: now)
-            .filter { $0.title != "Earlier" }
+        let rooms = RoomSidebarPresentation.roomsForRecencyGroups(
+            from: baseRooms,
+            allRooms: store.unarchivedRooms,
+            pinnedRoomIDs: store.pinnedRoomIDs
+        )
+        return RoomSidebarPresentation.groups(from: rooms, now: now)
     }
 
     private func archivedRooms(at now: Date) -> [Room] {
-        RoomSidebarPresentation.groups(from: baseRooms, now: now)
-            .first { $0.title == "Earlier" }?
-            .rooms ?? []
+        let rooms = scope == .all
+            ? store.archivedRooms
+            : RoomSidebarPresentation.activeRooms(
+                from: store.archivedRooms,
+                excludingCurrentClientFrom: store.connectionStatus.isConnected
+                    ? store.selectedRoomID
+                    : nil
+            )
+        return RoomSidebarPresentation.filteredRooms(
+            from: rooms,
+            query: store.searchText,
+            matchingMessageRoomIDs: store.messageSearchRoomIDs
+        )
     }
 
     private var activeCount: Int {
-        RoomSidebarPresentation.activeRooms(from: store.rooms).count
+        RoomSidebarPresentation.activeRooms(
+            from: store.unarchivedRooms,
+            excludingCurrentClientFrom: store.connectionStatus.isConnected
+                ? store.selectedRoomID
+                : nil
+        ).count
     }
 
     private var sidebarChrome: some View {
@@ -180,7 +240,7 @@ private struct SidebarView: View {
             CircleIconButton(
                 systemName: "square.and.pencil",
                 help: "Create room",
-                action: { store.isCreateRoomPresented = true }
+                action: { store.presentCreateRoom() }
             )
             .keyboardShortcut("n", modifiers: .command)
         }
@@ -197,7 +257,7 @@ private struct SidebarView: View {
                     HStack(spacing: 6) {
                         Text(item.rawValue)
                             .gallopText(.bodySStrong)
-                        Text("\(item == .all ? store.rooms.count : activeCount)")
+                        Text("\(item == .all ? store.unarchivedRooms.count : activeCount)")
                             .gallopText(.caption)
                             .opacity(0.72)
                     }
@@ -217,7 +277,7 @@ private struct SidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .macAccessibleAction(
-                    label: "\(item.rawValue), \(item == .all ? store.rooms.count : activeCount)",
+                    label: "\(item.rawValue), \(item == .all ? store.unarchivedRooms.count : activeCount)",
                     value: item == scope ? "selected" : nil
                 ) {
                     scope = item
@@ -236,11 +296,11 @@ private struct SidebarView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(GallopColor.iconTertiary.color)
-            TextField("Search rooms", text: $store.searchText)
+            TextField("Search rooms or messages", text: $store.searchText)
                 .textFieldStyle(.plain)
                 .gallopText(.bodyM, color: .textPrimary)
                 .focused($isSearchFocused)
-                .accessibilityLabel("Search rooms")
+                .accessibilityLabel("Search rooms or messages")
             if !store.searchText.isEmpty {
                 Button { store.searchText = "" } label: {
                     Label("Clear room search", systemImage: "xmark.circle.fill")
@@ -262,8 +322,9 @@ private struct SidebarView: View {
     @ViewBuilder
     private var pinnedRooms: some View {
         let rooms = RoomSidebarPresentation.visiblePinnedRooms(
-            from: store.rooms,
-            among: baseRooms
+            from: store.unarchivedRooms,
+            among: baseRooms,
+            pinnedRoomIDs: store.pinnedRoomIDs
         )
         if !rooms.isEmpty {
             Text("Pinned")
@@ -289,6 +350,7 @@ private struct SidebarView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .contextMenu { roomContextMenu(for: room) }
                     .frame(maxWidth: .infinity)
                     .macAccessibleAction(
                         label: "Open \(room.name)",
@@ -314,10 +376,16 @@ private struct SidebarView: View {
                 Button {
                     Task { await store.select(room: room) }
                 } label: {
-                    RoomRow(room: room, isSelected: store.selectedRoomID == room.id, now: now)
+                    RoomRow(
+                        room: room,
+                        messagePreview: store.roomMessagePreviews[room.id],
+                        isSelected: store.selectedRoomID == room.id,
+                        now: now
+                    )
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .contextMenu { roomContextMenu(for: room) }
                 .macAccessibleAction(
                     label: "Open \(room.name)",
                     value: store.selectedRoomID == room.id ? "selected" : nil
@@ -371,10 +439,18 @@ private struct SidebarView: View {
                         Button {
                             Task { await store.select(room: room) }
                         } label: {
-                            RoomRow(room: room, isSelected: store.selectedRoomID == room.id, now: now)
+                            RoomRow(
+                                room: room,
+                                messagePreview: store.roomMessagePreviews[room.id],
+                                isSelected: store.selectedRoomID == room.id,
+                                now: now
+                            )
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .contextMenu {
+                            Button("Unarchive") { store.unarchive(room) }
+                        }
                         .macAccessibleAction(
                             label: "Open \(room.name)",
                             value: store.selectedRoomID == room.id ? "selected" : nil
@@ -389,13 +465,18 @@ private struct SidebarView: View {
 
     private var emptyRoomsState: some View {
         VStack(spacing: 8) {
-            Image(systemName: store.searchText.isEmpty ? "person.2.slash" : "magnifyingglass")
-                .font(.system(size: 20, weight: .medium))
-                .foregroundStyle(GallopColor.iconTertiary.color)
+            if store.isSearchingMessages {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: store.searchText.isEmpty ? "person.2.slash" : "magnifyingglass")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(GallopColor.iconTertiary.color)
+            }
             Text(emptyRoomsTitle)
                 .gallopText(.bodyMStrong, color: .textSecondary)
             if !store.searchText.isEmpty {
-                Text("Try another room name or description.")
+                Text("Try another room, message, or agent name.")
                     .gallopText(.caption, color: .textTertiary)
                     .multilineTextAlignment(.center)
             }
@@ -406,7 +487,8 @@ private struct SidebarView: View {
     }
 
     private var emptyRoomsTitle: String {
-        if !store.searchText.isEmpty { return "No rooms found" }
+        if store.isSearchingMessages { return "Searching messages…" }
+        if !store.searchText.isEmpty { return "No rooms or messages found" }
         return scope == .active ? "No active rooms" : "No rooms available"
     }
 
@@ -465,10 +547,25 @@ private struct SidebarView: View {
         case .disconnected, .failed: return GallopColor.textError.color
         }
     }
+
+    @ViewBuilder
+    private func roomContextMenu(for room: Room) -> some View {
+        Button("Rename") { store.presentRename(room) }
+            .disabled(!store.canRename(room))
+        Button(store.isPinned(room) ? "Unpin room" : "Pin room") {
+            store.togglePinned(room)
+        }
+        if room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame {
+            Button("Archive") {
+                Task { await store.archive(room) }
+            }
+        }
+    }
 }
 
 private struct RoomRow: View {
     let room: Room
+    let messagePreview: String?
     let isSelected: Bool
     let now: Date
 
@@ -513,8 +610,342 @@ private struct RoomRow: View {
     }
 
     private var roomSummary: String {
+        if let messagePreview, !messagePreview.isEmpty { return messagePreview }
         if let description = room.description, !description.isEmpty { return description }
         return room.ephemeral ? "Temporary room" : "Open conversation"
+    }
+}
+
+private struct LobbyDashboardView: View {
+    @EnvironmentObject private var store: ChatStore
+    let room: Room
+    @Binding var isSidebarVisible: Bool
+
+    private var dashboardRooms: [Room] {
+        store.unarchivedRooms.filter {
+            $0.id != room.id && !store.setupRoomIDs.contains($0.id)
+        }
+    }
+
+    private var availableAgentCount: Int {
+        LobbyPresentation.availableAgentCount(
+            from: store.roomMembers,
+            excluding: store.agentID
+        )
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                if !isSidebarVisible {
+                    CircleIconButton(
+                        systemName: "rectangle.split.1x2",
+                        help: "Show sidebar",
+                        action: { isSidebarVisible = true }
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Lobby")
+                        .gallopText(.bodyMStrong, color: .textPrimary)
+                    Text("\(availableAgentCount) available agents · \(store.pinnedRoomIDs.count) pinned rooms")
+                        .gallopText(.caption, color: .textTertiary)
+                }
+
+                Spacer()
+                CircleIconButton(
+                    systemName: "plus",
+                    help: "Create room",
+                    action: { store.presentCreateRoom() }
+                )
+            }
+            .padding(.leading, isSidebarVisible ? 18 : 104)
+            .padding(.trailing, 14)
+            .frame(height: 58)
+            .background(GallopColor.surface600.color)
+
+            Rectangle().fill(GallopColor.borderDefault.color).frame(height: 1)
+
+            ScrollView {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 210, maximum: 280), spacing: 14)],
+                    alignment: .leading,
+                    spacing: 14
+                ) {
+                    ForEach(dashboardRooms) { dashboardRoom in
+                        DashboardRoomCard(room: dashboardRoom)
+                    }
+
+                    Button {
+                        store.presentCreateRoom()
+                    } label: {
+                        VStack(alignment: .leading, spacing: 18) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(GallopColor.buttonSecondaryIconDefault.color)
+                                .frame(width: 34, height: 34)
+                                .background(GallopColor.buttonSecondaryDefault.color, in: Circle())
+                            Spacer(minLength: 12)
+                            Text("New Room")
+                                .gallopText(.bodyMStrong, color: .textPrimary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
+                        .padding(16)
+                        .background(
+                            GallopColor.surface600.color,
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .macAccessibleAction(label: "Create room") {
+                        store.presentCreateRoom()
+                    }
+                }
+                .padding(20)
+            }
+            .scrollIndicators(.hidden)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .background(GallopColor.surface500.color)
+    }
+}
+
+private struct DashboardRoomCard: View {
+    @EnvironmentObject private var store: ChatStore
+    let room: Room
+
+    private var parentRoom: Room? {
+        guard let parentID = room.parentID else { return nil }
+        return store.rooms.first { $0.id == parentID }
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Button {
+                Task { await store.select(room: room) }
+            } label: {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        RoomAvatar(name: room.name, size: 38, accented: false)
+                        if room.encrypted {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(GallopColor.iconTertiary.color)
+                        }
+                        Spacer()
+                    }
+
+                    Spacer(minLength: 8)
+                    if let parentRoom {
+                        Text("in \(parentRoom.name)")
+                            .gallopText(.dataLabel, color: .textTertiary)
+                            .lineLimit(1)
+                    }
+                    Text(room.name)
+                        .gallopText(.bodyMStrong, color: .textPrimary)
+                        .lineLimit(1)
+                    Text(
+                        store.roomMessagePreviews[room.id]
+                            ?? room.description
+                            ?? (room.ephemeral ? "Temporary room" : "Open conversation")
+                    )
+                        .gallopText(.caption, color: .textTertiary)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
+                .padding(16)
+                .background(
+                    GallopColor.surface600.color,
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .macAccessibleAction(label: "Open \(room.name)") {
+                Task { await store.select(room: room) }
+            }
+
+            Menu {
+                Button("Rename") { store.presentRename(room) }
+                    .disabled(!store.canRename(room))
+                Button(store.isPinned(room) ? "Unpin room" : "Pin room") {
+                    store.togglePinned(room)
+                }
+                Button("Archive") {
+                    Task { await store.archive(room) }
+                }
+            } label: {
+                Label("Room actions", systemImage: "ellipsis")
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(GallopColor.iconTertiary.color)
+                    .frame(width: 28, height: 28)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("Actions for \(room.name)")
+            .padding(12)
+        }
+    }
+}
+
+private struct RoomSetupView: View {
+    @EnvironmentObject private var store: ChatStore
+    let room: Room
+    @Binding var isSidebarVisible: Bool
+    @State private var hasCopiedPrompt = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                if !isSidebarVisible {
+                    CircleIconButton(
+                        systemName: "rectangle.split.1x2",
+                        help: "Show sidebar",
+                        action: { isSidebarVisible = true }
+                    )
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(room.name)
+                        .gallopText(.bodyMStrong, color: .textPrimary)
+                    Text("Waiting for your first collaborator")
+                        .gallopText(.caption, color: .textTertiary)
+                }
+                Spacer()
+            }
+            .padding(.leading, isSidebarVisible ? 18 : 104)
+            .padding(.trailing, 14)
+            .frame(height: 58)
+            .background(GallopColor.surface600.color)
+
+            Rectangle().fill(GallopColor.borderDefault.color).frame(height: 1)
+
+            VStack(spacing: 22) {
+                HStack(spacing: 14) {
+                    Image(systemName: "list.bullet.rectangle")
+                    Image(systemName: "arrow.right")
+                    Image(systemName: "sparkles")
+                }
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(GallopColor.iconPrimary.color)
+
+                Text("Paste this prompt into one AI chatbot")
+                    .gallopText(.h5, color: .textPrimary)
+
+                HStack(alignment: .bottom, spacing: 14) {
+                    Text(roomPrompt)
+                        .textSelection(.enabled)
+                        .gallopText(.bodyMStrong, color: .textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Button(hasCopiedPrompt ? "Copied" : "Copy") { copyPrompt() }
+                        .buttonStyle(.plain)
+                        .gallopText(.bodyMStrong, color: .buttonPrimaryTextDefault)
+                        .padding(.horizontal, 18)
+                        .frame(height: 38)
+                        .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+                        .macAccessibleAction(label: "Copy setup prompt", action: copyPrompt)
+                }
+                .padding(18)
+                .frame(maxWidth: 620)
+                .background(
+                    GallopColor.surface600.color,
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                }
+
+                Button("Continue") {
+                    Task { await store.completeRoomSetup(room) }
+                }
+                .buttonStyle(.plain)
+                .gallopText(.bodyMStrong, color: .buttonSecondaryTextDefault)
+                .padding(.horizontal, 18)
+                .frame(height: 38)
+                .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+                .overlay {
+                    Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+                }
+                .macAccessibleAction(label: "Finish room setup") {
+                    Task { await store.completeRoomSetup(room) }
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(GallopColor.surface500.color)
+    }
+
+    private var roomPrompt: String {
+        """
+        You're going to collaborate with another AI chatbot in real time over Cowchat. Read the Cowchat skill, connect to the local server, join the exact room “\(room.name)”, and start listening right away. https://cowchat.cowboy.inc/skills.txt
+        """
+    }
+
+    private func copyPrompt() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(roomPrompt, forType: .string)
+        hasCopiedPrompt = true
+    }
+}
+
+private struct RoomReadyNotice: View {
+    @EnvironmentObject private var store: ChatStore
+    let room: Room
+
+    var body: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(room.name) is ready")
+                    .gallopText(.bodyMStrong, color: .textPrimary)
+                Text("You can now begin chatting with your collaborator.")
+                    .gallopText(.caption, color: .textTertiary)
+            }
+            Button("Open Room") {
+                Task { await store.openRoomReadyNotice() }
+            }
+            .buttonStyle(.plain)
+            .gallopText(.bodySStrong, color: .buttonPrimaryTextDefault)
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+            .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+            .macAccessibleAction(label: "Open \(room.name)") {
+                Task { await store.openRoomReadyNotice() }
+            }
+            Button {
+                store.roomReadyNotice = nil
+            } label: {
+                Label("Dismiss", systemImage: "xmark")
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(GallopColor.iconTertiary.color)
+            }
+            .buttonStyle(.plain)
+            .macAccessibleAction(label: "Dismiss room notice") {
+                store.roomReadyNotice = nil
+            }
+        }
+        .padding(14)
+        .background(
+            GallopColor.surface600.color,
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+        }
+        .shadow(color: GallopColor.surfaceGlassBorderShadow.color, radius: 18, y: 8)
     }
 }
 
@@ -523,6 +954,15 @@ private struct ChatRoomView: View {
     let room: Room
     @Binding var isSidebarVisible: Bool
     @State private var isComposerExpanded = false
+    @State private var isDestroyConfirmationPresented = false
+    @State private var isDestroyingRoom = false
+    @State private var isMessageListNearBottom = true
+    @State private var newMessageCount = 0
+
+    private var parentRoom: Room? {
+        guard let parentID = room.parentID else { return nil }
+        return store.rooms.first { $0.id == parentID }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -537,6 +977,18 @@ private struct ChatRoomView: View {
             }
         }
         .background(GallopColor.surface500.color)
+        .alert("Destroy \(room.name)?", isPresented: $isDestroyConfirmationPresented) {
+            Button("Cancel", role: .cancel) {}
+            Button("Destroy Room", role: .destructive) {
+                isDestroyingRoom = true
+                Task {
+                    _ = await store.destroy(room)
+                    isDestroyingRoom = false
+                }
+            }
+        } message: {
+            Text("This irreversibly removes the room, its messages, tasks, votes, and subscriptions from Cowchat's active server state. This cannot be undone in Cowchat; storage snapshots or backups may retain copies.")
+        }
     }
 
     private var chatHeader: some View {
@@ -551,6 +1003,20 @@ private struct ChatRoomView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
+                    if let parentRoom {
+                        Button(parentRoom.name) {
+                            Task { await store.select(room: parentRoom) }
+                        }
+                        .buttonStyle(.plain)
+                        .gallopText(.bodySStrong, color: .textTertiary)
+                        .lineLimit(1)
+                        .macAccessibleAction(label: "Open parent room \(parentRoom.name)") {
+                            Task { await store.select(room: parentRoom) }
+                        }
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(GallopColor.iconSubtle.color)
+                    }
                     Text(room.name)
                         .gallopText(.bodyMStrong, color: .textPrimary)
                     if room.encrypted {
@@ -566,25 +1032,74 @@ private struct ChatRoomView: View {
 
             Spacer()
 
-            Menu {
-                Button("Create room") { store.isCreateRoomPresented = true }
-                if !store.connectionStatus.isConnected {
-                    Button("Reconnect") { store.start() }
+            HStack(spacing: 0) {
+                Menu {
+                    Button("Rename room") { store.presentRename(room) }
+                        .disabled(!store.canRename(room))
+                    Button(store.isPinned(room) ? "Unpin room" : "Pin room") {
+                        store.togglePinned(room)
+                    }
+                    Button("Archive room") {
+                        Task { await store.archive(room) }
+                    }
+                    Divider()
+                    Button("Create sub-room") {
+                        store.presentCreateRoom(parentID: room.id)
+                    }
+                    if !store.connectionStatus.isConnected {
+                        Button("Reconnect") { store.start() }
+                    }
+                    Divider()
+                    Text(room.ephemeral ? "Temporary room" : "Persistent room")
+                    Text(room.visibility.capitalized)
+                } label: {
+                    Label("Room actions", systemImage: "ellipsis")
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(GallopColor.iconSecondary.color)
+                        .frame(width: 34, height: 32)
                 }
-                Divider()
-                Text(room.ephemeral ? "Temporary room" : "Persistent room")
-                Text(room.visibility.capitalized)
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(GallopColor.iconSecondary.color)
-                    .frame(width: 32, height: 32)
-                    .background(GallopColor.buttonSecondaryDefault.color, in: Circle())
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel("Room actions")
+
+                Rectangle()
+                    .fill(GallopColor.borderDefault.color)
+                    .frame(width: 1, height: 18)
+
+                Button {
+                    isDestroyConfirmationPresented = true
+                } label: {
+                    Label("Destroy room", systemImage: "trash")
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(
+                            store.canDestroy(room)
+                                ? GallopColor.textError.color
+                                : GallopColor.iconSubtle.color
+                        )
+                        .frame(width: 34, height: 32)
+                }
+                .buttonStyle(.plain)
+                .disabled(!store.canDestroy(room) || isDestroyingRoom)
+                .help(
+                    store.canDestroy(room)
+                        ? "Irreversibly remove this room from Cowchat"
+                        : "Only the room creator can destroy it"
+                )
+                .macAccessibleAction(
+                    label: "Destroy \(room.name)",
+                    isEnabled: store.canDestroy(room) && !isDestroyingRoom
+                ) {
+                    isDestroyConfirmationPresented = true
+                }
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .accessibilityLabel("Room actions")
+            .padding(.horizontal, 2)
+            .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+            .overlay {
+                Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+            }
         }
         .padding(.leading, isSidebarVisible ? 18 : 104)
         .padding(.trailing, 14)
@@ -592,28 +1107,21 @@ private struct ChatRoomView: View {
         .background(GallopColor.surface600.color)
     }
 
-    private var displayedMemberCount: Int {
-        if !store.roomMembers.isEmpty { return store.roomMembers.count }
-        return max(room.memberCount ?? 0, store.connectionStatus.isConnected ? 1 : 0)
-    }
-
     private var presenceSummary: String {
-        let activeMembers = store.roomMembers.filter {
-            ($0.status ?? "").localizedCaseInsensitiveCompare("idle") != .orderedSame
-        }
-        if !activeMembers.isEmpty {
-            let names = activeMembers.prefix(2).map(\.name).joined(separator: " · ")
-            return "\(names) active"
-        }
-        let count = displayedMemberCount
-        return count == 1 ? "1 member" : "\(count) members"
+        ChatPresencePresentation.summary(
+            members: store.roomMembers,
+            currentAgentID: store.agentID,
+            fallbackMemberCount: room.memberCount,
+            isConnected: store.connectionStatus.isConnected
+        )
     }
 
     private var messageList: some View {
         TimelineView(.periodic(from: .now, by: 60)) { timeline in
             ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 22) {
+                ZStack(alignment: .bottom) {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 22) {
                         if store.isLoadingMessages {
                             ProgressView()
                                 .controlSize(.small)
@@ -632,29 +1140,60 @@ private struct ChatRoomView: View {
                             .id(message.id)
                         }
 
-                        if let thinkingText {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.mini)
-                                Text(thinkingText)
-                                    .gallopText(.caption, color: .textTertiary)
+                            if let thinkingText {
+                                HStack(spacing: 8) {
+                                    ProgressView().controlSize(.mini)
+                                    Text(thinkingText)
+                                        .gallopText(.caption, color: .textTertiary)
+                                }
+                                .id("thinking-indicator")
                             }
-                            .id("thinking-indicator")
+
+                            Color.clear
+                                .frame(height: 1)
+                                .id("message-list-bottom")
+                                .onAppear {
+                                    isMessageListNearBottom = true
+                                    newMessageCount = 0
+                                }
+                                .onDisappear { isMessageListNearBottom = false }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 18)
+                        .padding(.bottom, isComposerExpanded ? 86 : 72)
+                    }
+                    .scrollIndicators(.hidden)
+
+                    if newMessageCount > 0 {
+                        Button(newMessageCount == 1 ? "1 new message" : "\(newMessageCount) new messages") {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                proxy.scrollTo("message-list-bottom", anchor: .bottom)
+                            }
+                            newMessageCount = 0
+                        }
+                        .buttonStyle(.plain)
+                        .gallopText(.bodySStrong, color: .buttonPrimaryTextDefault)
+                        .padding(.horizontal, 14)
+                        .frame(height: 34)
+                        .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+                        .padding(.bottom, isComposerExpanded ? 92 : 78)
+                        .macAccessibleAction(label: "Show new messages") {
+                            proxy.scrollTo("message-list-bottom", anchor: .bottom)
+                            newMessageCount = 0
                         }
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 18)
-                    .padding(.bottom, isComposerExpanded ? 86 : 72)
                 }
-                .scrollIndicators(.hidden)
-                .onChange(of: store.messages.count) { _ in
-                    if let last = store.messages.last {
+                .onChange(of: MessageArrivalIdentity.latest(in: store.messages)) { _ in
+                    if isMessageListNearBottom {
                         withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
+                            proxy.scrollTo("message-list-bottom", anchor: .bottom)
                         }
+                    } else {
+                        newMessageCount += 1
                     }
                 }
                 .onAppear {
-                    if let last = store.messages.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                    proxy.scrollTo("message-list-bottom", anchor: .bottom)
                 }
             }
         }
@@ -727,9 +1266,9 @@ private struct ChatRoomView: View {
                 CircleIconButton(
                     systemName: "plus",
                     help: "Attachments are coming soon",
+                    isEnabled: false,
                     action: {}
                 )
-                .disabled(true)
 
                 ComposerTextField(
                     text: $store.draft,
@@ -880,10 +1419,32 @@ private struct ExpandableMessageText: View {
                 }
             }
 
-            Text(displayedContent)
-                .textSelection(.enabled)
-                .gallopText(.bodyL, color: .textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            ForEach(MessageContentParser.segments(in: displayedContent)) { segment in
+                switch segment.kind {
+                case .prose:
+                    Text(markdown(segment.text))
+                        .textSelection(.enabled)
+                        .gallopText(.bodyL, color: .textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .code:
+                    ScrollView(.horizontal) {
+                        Text(segment.text)
+                            .textSelection(.enabled)
+                            .gallopText(.code, color: .textSecondary)
+                            .fixedSize(horizontal: true, vertical: true)
+                            .padding(12)
+                    }
+                    .scrollIndicators(.hidden)
+                    .background(
+                        GallopColor.surface400.color,
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                    }
+                }
+            }
         }
     }
 
@@ -893,6 +1454,10 @@ private struct ExpandableMessageText: View {
 
     private var displayedContent: String {
         isExpanded ? content : MessagePreview.collapsedContent(for: content)
+    }
+
+    private func markdown(_ source: String) -> AttributedString {
+        (try? AttributedString(markdown: source)) ?? AttributedString(source)
     }
 }
 
@@ -904,15 +1469,42 @@ private struct AgentAvatar: View {
         RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
             .fill(GallopColor.surfaceGlassOnDefault.color)
             .overlay {
-                Text(initial)
-                    .font(.system(size: size * 0.42, weight: .bold, design: .rounded))
-                    .foregroundStyle(GallopColor.surfaceGlassOnTextDefault.color)
+                if let appIcon {
+                    Image(nsImage: appIcon)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(size * 0.06)
+                } else {
+                    Text(initial)
+                        .font(.system(size: size * 0.42, weight: .bold, design: .rounded))
+                        .foregroundStyle(GallopColor.surfaceGlassOnTextDefault.color)
+                }
             }
             .overlay {
                 RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
                     .stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
             }
             .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+
+    private var appIcon: NSImage? {
+        let normalizedName = name.lowercased()
+        let bundleID: String?
+        if normalizedName.contains("claude") {
+            bundleID = "com.anthropic.claudefordesktop"
+        } else if normalizedName.contains("codex") {
+            bundleID = "com.openai.codex"
+        } else if normalizedName.contains("chatgpt") || normalizedName.contains("openai") {
+            bundleID = "com.openai.chat"
+        } else {
+            bundleID = nil
+        }
+        guard let bundleID,
+              let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return nil
+        }
+        return NSWorkspace.shared.icon(forFile: appURL.path)
     }
 
     private var initial: String {
@@ -968,6 +1560,7 @@ private struct CircleIconButton: View {
     let systemName: String
     let help: String
     var isActive = false
+    var isEnabled = true
     let action: () -> Void
 
     var body: some View {
@@ -976,7 +1569,9 @@ private struct CircleIconButton: View {
                 .labelStyle(.iconOnly)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(
-                    isActive
+                    !isEnabled
+                        ? GallopColor.iconSubtle.color
+                        : isActive
                         ? GallopColor.surfaceGlassOnTextDefault.color
                         : GallopColor.buttonSecondaryIconDefault.color
                 )
@@ -992,8 +1587,9 @@ private struct CircleIconButton: View {
                 }
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled)
         .help(help)
-        .macAccessibleAction(label: help, action: action)
+        .macAccessibleAction(label: help, isEnabled: isEnabled, action: action)
     }
 }
 
@@ -1017,7 +1613,7 @@ private struct EmptyChatView: View {
                 CircleIconButton(
                     systemName: "square.and.pencil",
                     help: "Create room",
-                    action: { store.isCreateRoomPresented = true }
+                    action: { store.presentCreateRoom() }
                 )
             }
             .padding(.leading, isSidebarVisible ? 14 : 104)
@@ -1081,8 +1677,8 @@ private struct EmptyChatView: View {
 }
 
 private struct SettingsView: View {
-    @EnvironmentObject private var store: ChatStore
     @Binding var isPresented: Bool
+    let onShowOnboarding: () -> Void
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
 
     var body: some View {
@@ -1094,28 +1690,7 @@ private struct SettingsView: View {
                     .padding(.top, 20)
                     .padding(.bottom, 8)
                 settingsRow("Theme", systemName: "circle.lefthalf.filled", selected: true)
-
-                Text("Rooms")
-                    .gallopText(.caption, color: .textTertiary)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 22)
-                    .padding(.bottom, 8)
-                ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(store.rooms.prefix(10)) { room in
-                            settingsRow(room.name, systemName: "number", selected: false)
-                        }
-                    }
-                }
-                .scrollIndicators(.hidden)
-
                 Spacer()
-                Text("Cowchat")
-                    .gallopText(.caption, color: .textTertiary)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 8)
-                settingsRow("About", systemName: "info.circle", selected: false)
-                    .padding(.bottom, 14)
             }
             .frame(width: 230)
             .background(GallopColor.surface400.color)
@@ -1157,6 +1732,23 @@ private struct SettingsView: View {
                     themePreview(title: "Dark", dark: true)
                 }
 
+                Button("Show onboarding again") {
+                    isPresented = false
+                    onShowOnboarding()
+                }
+                .buttonStyle(.plain)
+                .gallopText(.bodyMStrong, color: .buttonSecondaryTextDefault)
+                .padding(.horizontal, 16)
+                .frame(height: 38)
+                .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+                .overlay {
+                    Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+                }
+                .macAccessibleAction(label: "Show onboarding again") {
+                    isPresented = false
+                    onShowOnboarding()
+                }
+
                 Spacer()
             }
             .padding(28)
@@ -1194,10 +1786,10 @@ private struct SettingsView: View {
     private func themePreview(title: String, dark: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             RoundedRectangle(cornerRadius: 9)
-                .fill(dark ? Color(red: 0.11, green: 0.09, blue: 0.08) : Color(red: 0.98, green: 0.97, blue: 0.96))
+                .fill(themePreviewColor(.surface500, dark: dark))
                 .overlay(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 7)
-                        .fill(dark ? Color(red: 0.18, green: 0.15, blue: 0.13) : Color.white)
+                        .fill(themePreviewColor(.surface700, dark: dark))
                         .frame(width: 42)
                         .padding(6)
                 }
@@ -1211,6 +1803,124 @@ private struct SettingsView: View {
         }
         .frame(maxWidth: 190)
     }
+
+    private func themePreviewColor(_ token: GallopColor, dark: Bool) -> Color {
+        Color(nsColor: token.rgba(for: dark ? .dark : .light).nsColor)
+    }
+}
+
+private struct RenameRoomView: View {
+    @EnvironmentObject private var store: ChatStore
+    @Environment(\.dismiss) private var dismiss
+    let room: Room
+    @State private var name: String
+    @State private var isRenaming = false
+
+    init(room: Room) {
+        self.room = room
+        _name = State(initialValue: room.name)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Rename room")
+                        .gallopText(.h4, color: .textPrimary)
+                    Text("The new name is shared with everyone who can see this room.")
+                        .gallopText(.bodyM, color: .textTertiary)
+                }
+                Spacer()
+                CircleIconButton(systemName: "xmark", help: "Close", action: cancel)
+            }
+
+            TextField("Room name", text: $name)
+                .textFieldStyle(.plain)
+                .gallopText(.bodyM, color: .textPrimary)
+                .padding(.horizontal, 14)
+                .frame(height: 42)
+                .background(GallopColor.textfieldDefault.color, in: Capsule())
+                .overlay {
+                    Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                }
+                .onSubmit(renameRoom)
+
+            if let validationMessage {
+                Text(validationMessage)
+                    .gallopText(.caption, color: .textError)
+            }
+
+            Spacer()
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.plain)
+                    .gallopText(.bodyMStrong, color: .textSecondary)
+                    .padding(.horizontal, 16)
+                    .frame(height: 38)
+                    .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+                    .macAccessibleAction(label: "Cancel", action: cancel)
+
+                Button(isRenaming ? "Renaming…" : "Rename", action: renameRoom)
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.plain)
+                    .gallopText(.bodyMStrong, color: .buttonPrimaryTextDefault)
+                    .padding(.horizontal, 18)
+                    .frame(height: 38)
+                    .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+                    .disabled(!canRename)
+                    .opacity(canRename ? 1 : 0.45)
+                    .macAccessibleAction(
+                        label: "Rename room",
+                        isEnabled: canRename,
+                        action: renameRoom
+                    )
+            }
+        }
+        .padding(26)
+        .frame(width: 480, height: 260)
+        .background(GallopColor.surface600.color)
+        .interactiveDismissDisabled(isRenaming)
+    }
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canRename: Bool {
+        validationMessage == nil
+            && trimmedName != room.name
+            && !isRenaming
+            && store.connectionStatus.isConnected
+    }
+
+    private var validationMessage: String? {
+        if trimmedName.isEmpty { return "Enter a room name." }
+        if trimmedName.unicodeScalars.count > 100 {
+            return "Room names can contain at most 100 characters."
+        }
+        if trimmedName.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
+            return "Room names cannot contain control characters."
+        }
+        return nil
+    }
+
+    private func renameRoom() {
+        guard canRename else { return }
+        isRenaming = true
+        Task {
+            if await store.rename(room, to: trimmedName) { dismiss() }
+            isRenaming = false
+        }
+    }
+
+    private func cancel() {
+        guard !isRenaming else { return }
+        store.roomBeingRenamed = nil
+        dismiss()
+    }
 }
 
 private struct CreateRoomView: View {
@@ -1222,25 +1932,39 @@ private struct CreateRoomView: View {
     @State private var isPublic = false
     @State private var isCreating = false
 
+    private var parentRoom: Room? {
+        guard let parentID = store.createRoomParentID else { return nil }
+        return store.rooms.first { $0.id == parentID }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("New room")
+                    Text(parentRoom == nil ? "New room" : "New sub-room")
                         .gallopText(.h4, color: .textPrimary)
-                    Text("Create a conversation on your local Cowchat server.")
+                    Text(
+                        parentRoom.map { "Create a conversation inside \($0.name)." }
+                            ?? "Create a conversation on your local Cowchat server."
+                    )
                         .gallopText(.bodyM, color: .textTertiary)
                 }
                 Spacer()
                 CircleIconButton(
                     systemName: "xmark",
                     help: "Close",
-                    action: { dismiss() }
+                    action: cancel
                 )
             }
 
             VStack(spacing: 12) {
                 styledField("Room name", text: $name)
+                if !name.isEmpty, let nameValidationMessage {
+                    Text(nameValidationMessage)
+                        .gallopText(.caption, color: .textError)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
+                }
                 styledField("Description (optional)", text: $description)
 
                 Toggle("Temporary room", isOn: $ephemeral)
@@ -1253,16 +1977,16 @@ private struct CreateRoomView: View {
 
             HStack(spacing: 10) {
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel", action: cancel)
                     .keyboardShortcut(.cancelAction)
                     .buttonStyle(.plain)
                     .gallopText(.bodyMStrong, color: .textSecondary)
                     .padding(.horizontal, 16)
                     .frame(height: 38)
                     .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
-                    .macAccessibleAction(label: "Cancel") { dismiss() }
+                    .macAccessibleAction(label: "Cancel", action: cancel)
 
-                Button("Create") {
+                Button(createButtonTitle) {
                     createRoom()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -1298,7 +2022,26 @@ private struct CreateRoomView: View {
     }
 
     private var canCreate: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isCreating
+        nameValidationMessage == nil
+            && !isCreating
+            && store.connectionStatus.isConnected
+    }
+
+    private var nameValidationMessage: String? {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.isEmpty { return "Enter a room name." }
+        if trimmedName.unicodeScalars.count > 100 {
+            return "Room names can contain at most 100 characters."
+        }
+        if trimmedName.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
+            return "Room names cannot contain control characters."
+        }
+        return nil
+    }
+
+    private var createButtonTitle: String {
+        if isCreating { return "Creating…" }
+        return store.connectionStatus.isConnected ? "Create" : "Connecting…"
     }
 
     private func createRoom() {
@@ -1313,5 +2056,10 @@ private struct CreateRoomView: View {
             )
             isCreating = false
         }
+    }
+
+    private func cancel() {
+        store.createRoomParentID = nil
+        dismiss()
     }
 }

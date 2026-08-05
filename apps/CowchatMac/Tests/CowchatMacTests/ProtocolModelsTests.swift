@@ -2,6 +2,10 @@ import XCTest
 @testable import CowchatMac
 
 final class ProtocolModelsTests: XCTestCase {
+    func testMacClientAdvertisesLifecycleCapableProtocolVersion() {
+        XCTAssertEqual(CowchatWireProtocol.currentVersion, 2)
+    }
+
     func testRoomDecodesServerPayloadAndDefaultsEncryption() throws {
         let data = Data(#"""
         {
@@ -38,6 +42,76 @@ final class ProtocolModelsTests: XCTestCase {
         XCTAssertEqual(message.content, "hello")
         XCTAssertEqual(message.seq, 42)
         XCTAssertNil(message.replyToMessage)
+        XCTAssertFalse(message.isThinking)
+    }
+
+    func testMessageToleratesArbitraryMetadataShapes() throws {
+        let metadataValues: [Any] = [42, ["custom", true], ["type": 1]]
+
+        for (index, metadata) in metadataValues.enumerated() {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "message_id": "message-\(index)",
+                "room_id": "lobby",
+                "agent_id": "agent-1",
+                "agent_name": "Codex",
+                "content": "still visible",
+                "metadata": metadata,
+                "timestamp": "2026-07-11T12:00:00.123Z",
+                "seq": index + 1,
+            ])
+
+            let message = try JSONDecoder().decode(ChatMessage.self, from: data)
+            XCTAssertEqual(message.content, "still visible")
+            XCTAssertFalse(message.isThinking)
+        }
+    }
+
+    func testMessageArrivalIdentityChangesWhenTheCappedWindowAdvances() throws {
+        func message(_ sequence: Int) throws -> ChatMessage {
+            try JSONDecoder().decode(
+                ChatMessage.self,
+                from: JSONSerialization.data(withJSONObject: [
+                    "message_id": "message-\(sequence)",
+                    "room_id": "lobby",
+                    "agent_id": "agent-1",
+                    "agent_name": "Codex",
+                    "content": "message \(sequence)",
+                    "timestamp": "2026-07-11T12:00:00.123Z",
+                    "seq": sequence,
+                ])
+            )
+        }
+
+        let before = try (1...200).map(message)
+        let after = try (2...201).map(message)
+
+        XCTAssertEqual(before.count, after.count)
+        XCTAssertNotEqual(
+            MessageArrivalIdentity.latest(in: before),
+            MessageArrivalIdentity.latest(in: after)
+        )
+        XCTAssertEqual(MessageArrivalIdentity.latest(in: after)?.sequence, 201)
+    }
+
+    @MainActor
+    func testThinkingHistoryRowsAreIdentifiedAndFilteredFromChat() throws {
+        let data = Data(#"""
+        {
+          "message_id":"thinking-1",
+          "room_id":"lobby",
+          "agent_id":"agent-1",
+          "agent_name":"Codex",
+          "content":"private reasoning pulse",
+          "metadata":{"type":"thinking"},
+          "timestamp":"2026-07-11T12:00:00.123Z",
+          "seq":42
+        }
+        """#.utf8)
+
+        let message = try JSONDecoder().decode(ChatMessage.self, from: data)
+
+        XCTAssertTrue(message.isThinking)
+        XCTAssertTrue(ChatStore.visibleMessages(in: [message]).isEmpty)
     }
 
     func testAgentPresenceDecodesThinkingStatus() throws {

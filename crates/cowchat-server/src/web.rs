@@ -180,6 +180,7 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
             vote_mgr,
             api_key,
             no_auth,
+            false,
             rate_limiter,
             reconnect_mgr,
             task_mgr,

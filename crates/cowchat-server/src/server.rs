@@ -6,10 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::auth;
 use crate::broker::Broker;
+use crate::connection::can_access_room;
 use crate::connection::AgentConnection;
 use crate::handler;
 use crate::rate_limit::{RateLimiter, TierLimits};
@@ -28,12 +29,8 @@ const REGISTER_TIMEOUT_SECS: u64 = 10;
 /// How often the background task purges messages past their tier's retention.
 const PURGE_INTERVAL: Duration = Duration::from_secs(3600);
 
-fn tcp_connection_uses_no_auth(
-    no_auth: bool,
-    allow_keyless_local: bool,
-    peer_ip: std::net::IpAddr,
-) -> bool {
-    no_auth || (allow_keyless_local && peer_ip.is_loopback())
+fn tcp_connection_allows_keyless(allow_keyless_local: bool, peer_ip: std::net::IpAddr) -> bool {
+    allow_keyless_local && peer_ip.is_loopback()
 }
 
 async fn read_frame_line<R: AsyncBufRead + Unpin>(
@@ -56,6 +53,34 @@ async fn read_frame_line<R: AsyncBufRead + Unpin>(
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn frame_room_id(frame: &Frame) -> Option<&str> {
+    frame
+        .payload
+        .get("room_id")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            frame
+                .payload
+                .get("message")
+                .and_then(|value| value.get("room_id"))
+                .and_then(|value| value.as_str())
+        })
+}
+
+fn accessible_room(
+    room_id: &str,
+    api_key: &str,
+    no_auth: bool,
+    store: &Store,
+    ephemeral_rooms: &DashMap<String, Room>,
+) -> Option<Room> {
+    ephemeral_rooms
+        .get(room_id)
+        .map(|room| room.clone())
+        .or_else(|| store.get_room(room_id).ok().flatten())
+        .filter(|room| can_access_room(room, api_key, no_auth))
 }
 
 pub struct ServerConfig {
@@ -147,7 +172,8 @@ impl CowchatServer {
         let uds_ephemeral = self.ephemeral_rooms.clone();
         let uds_vote_mgr = self.vote_mgr.clone();
         let uds_api_key = self.api_key.clone();
-        let uds_no_auth = self.config.no_auth || self.config.allow_keyless_local;
+        let uds_no_auth = self.config.no_auth;
+        let uds_allow_keyless = self.config.allow_keyless_local;
         let uds_rate_limiter = self.rate_limiter.clone();
         let uds_reconnect_mgr = self.reconnect_mgr.clone();
         let uds_task_mgr = self.task_mgr.clone();
@@ -176,6 +202,7 @@ impl CowchatServer {
                                 vote_mgr,
                                 api_key,
                                 uds_no_auth,
+                                uds_allow_keyless,
                                 rate_limiter,
                                 reconnect_mgr,
                                 task_mgr,
@@ -214,11 +241,8 @@ impl CowchatServer {
                             log::info!("TCP connection from {}", addr);
                             // The peer address, not the bind address or a
                             // caller-supplied header, defines this trust edge.
-                            let connection_no_auth = tcp_connection_uses_no_auth(
-                                tcp_no_auth,
-                                tcp_allow_keyless_local,
-                                addr.ip(),
-                            );
+                            let connection_allows_keyless =
+                                tcp_connection_allows_keyless(tcp_allow_keyless_local, addr.ip());
                             let (read_half, write_half) = tokio::io::split(stream);
                             let broker = tcp_broker.clone();
                             let store = tcp_store.clone();
@@ -238,7 +262,8 @@ impl CowchatServer {
                                     ephemeral,
                                     vote_mgr,
                                     api_key,
-                                    connection_no_auth,
+                                    tcp_no_auth,
+                                    connection_allows_keyless,
                                     rate_limiter,
                                     reconnect_mgr,
                                     task_mgr,
@@ -381,7 +406,12 @@ pub async fn connection_loop<R, W>(
     ephemeral_rooms: Arc<DashMap<String, Room>>,
     vote_mgr: Arc<VoteManager>,
     api_key: String,
+    // Server-wide `--no-auth`; unlike `allow_keyless`, this intentionally
+    // bypasses room ownership boundaries.
     no_auth: bool,
+    // This transport is local and may register with an empty key. Supplying a
+    // non-empty key still requires normal validation.
+    allow_keyless: bool,
     rate_limiter: Arc<RateLimiter>,
     reconnect_mgr: Arc<ReconnectManager>,
     task_mgr: Arc<TaskManager>,
@@ -401,6 +431,10 @@ where
         agent_api_key,
         reconnected_rooms,
         takeover_rooms,
+        register_reply_to,
+        mut missed_messages,
+        reclaim_lease,
+        agent_lifecycle_guard,
     ) = loop {
         let line = tokio::time::timeout(
             Duration::from_secs(REGISTER_TIMEOUT_SECS),
@@ -480,8 +514,10 @@ where
 
         // Validate API key
         let authenticated_key = if no_auth
-            || payload.key == api_key
-            || store.validate_api_key(&payload.key).unwrap_or(false)
+            || (allow_keyless && payload.key.is_empty())
+            || (!payload.key.is_empty()
+                && (payload.key == api_key
+                    || store.validate_api_key(&payload.key).unwrap_or(false)))
         {
             payload.key.clone()
         } else {
@@ -517,7 +553,7 @@ where
             .agent_id
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        if !no_auth && stable_identity_requested {
+        if !no_auth && !authenticated_key.is_empty() && stable_identity_requested {
             match store.claim_agent_identity(&agent_id, &authenticated_key) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -542,20 +578,58 @@ where
             }
         }
 
+        // Same-ID takeover decisions and live installation are serialized
+        // against disconnect cleanup. Without this guard, an old session can
+        // pass its ownership check immediately before a new session installs,
+        // then erase the new session's membership during cleanup.
+        let agent_lifecycle_guard = broker.lock_agent_lifecycle();
+
         // === Reconnect logic ===
-        // If the agent requests reconnect and we have stashed state, reclaim it.
+        // Claim a stash without removing it. It remains bufferable until the
+        // live connection is installed and room membership is restored.
         let mut reconnected_rooms: Option<HashSet<String>> = None;
         let mut takeover_rooms: Option<HashSet<String>> = None;
         let mut missed_messages: Vec<Frame> = Vec::new();
+        let mut reclaim_lease = None;
 
-        if payload.reconnect && reconnect_mgr.is_stashed(&agent_id) {
-            match reconnect_mgr.reclaim(&agent_id, &authenticated_key, no_auth) {
-                Ok(Some(stashed)) => {
-                    reconnected_rooms = Some(stashed.rooms);
+        if payload.reconnect {
+            match reconnect_mgr.begin_reclaim(&agent_id, &authenticated_key, no_auth) {
+                Ok(Some(lease)) => {
+                    let stashed = lease
+                        .snapshot()
+                        .expect("a newly acquired reconnect lease has a stash");
+                    let mut rooms = stashed.rooms;
+                    rooms.retain(|room_id| {
+                        accessible_room(
+                            room_id,
+                            &authenticated_key,
+                            no_auth,
+                            &store,
+                            &ephemeral_rooms,
+                        )
+                        .is_some()
+                    });
+                    reconnected_rooms = Some(rooms);
                     missed_messages = stashed.missed_messages;
+                    missed_messages.retain(|frame| {
+                        frame_room_id(frame)
+                            .map(|room_id| {
+                                accessible_room(
+                                    room_id,
+                                    &authenticated_key,
+                                    no_auth,
+                                    &store,
+                                    &ephemeral_rooms,
+                                )
+                                .is_some()
+                            })
+                            .unwrap_or(true)
+                    });
+                    reclaim_lease = Some(lease);
                 }
                 Ok(None) => {}
                 Err(crate::reconnect::ReclaimError::CredentialMismatch) => {
+                    drop(agent_lifecycle_guard);
                     let err = Frame::error(
                         frame.id.as_deref(),
                         ErrorPayload::new(
@@ -566,63 +640,71 @@ where
                     write_half.write_all(err.to_line()?.as_bytes()).await?;
                     continue;
                 }
+                Err(crate::reconnect::ReclaimError::AlreadyClaimed) => {
+                    drop(agent_lifecycle_guard);
+                    let err = Frame::error(
+                        frame.id.as_deref(),
+                        ErrorPayload::new(
+                            ErrorCode::AgentIdTaken,
+                            "Reconnect already in progress for this agent ID",
+                        ),
+                    );
+                    write_half.write_all(err.to_line()?.as_bytes()).await?;
+                    continue;
+                }
             }
-        } else if let Some(existing) = broker.agents.get(&agent_id) {
-            if payload.reconnect {
-                if !no_auth && existing.api_key != authenticated_key {
+        }
+
+        if reclaim_lease.is_none() {
+            if let Some(existing) = broker.agents.get(&agent_id) {
+                if payload.reconnect {
+                    if !no_auth && existing.api_key != authenticated_key {
+                        drop(existing);
+                        drop(agent_lifecycle_guard);
+                        let err = Frame::error(
+                            frame.id.as_deref(),
+                            ErrorPayload::new(
+                                ErrorCode::AgentIdTaken,
+                                "Agent ID belongs to a different API key",
+                            ),
+                        );
+                        write_half.write_all(err.to_line()?.as_bytes()).await?;
+                        continue;
+                    }
+                    // Take over a still-live connection with the same agent_id. Covers
+                    // the race where a prior one-shot call's disconnect hasn't been
+                    // processed yet — the newest connection wins. We inherit the old
+                    // connection's rooms; replacing its broker entry below drops the
+                    // old sender (ending its send task), and the old reader's later
+                    // cleanup is a no-op because it checks session ownership.
                     drop(existing);
+                    takeover_rooms = Some(
+                        broker
+                            .rooms_for_agent(&agent_id)
+                            .into_iter()
+                            .filter(|room_id| {
+                                accessible_room(
+                                    room_id,
+                                    &authenticated_key,
+                                    no_auth,
+                                    &store,
+                                    &ephemeral_rooms,
+                                )
+                                .is_some()
+                            })
+                            .collect(),
+                    );
+                } else {
+                    // Still "connected" and not a reconnect — reject.
+                    drop(existing);
+                    drop(agent_lifecycle_guard);
                     let err = Frame::error(
                         frame.id.as_deref(),
-                        ErrorPayload::new(
-                            ErrorCode::AgentIdTaken,
-                            "Agent ID belongs to a different API key",
-                        ),
+                        ErrorPayload::new(ErrorCode::AgentIdTaken, "Agent ID already in use"),
                     );
                     write_half.write_all(err.to_line()?.as_bytes()).await?;
                     continue;
                 }
-                // Take over a still-live connection with the same agent_id. Covers
-                // the race where a prior one-shot call's disconnect hasn't been
-                // processed yet — the newest connection wins. We inherit the old
-                // connection's rooms; replacing its broker entry below drops the
-                // old sender (ending its send task), and the old reader's later
-                // cleanup is a no-op because it checks session ownership.
-                let rooms = existing.rooms.clone();
-                drop(existing);
-                takeover_rooms = Some(rooms);
-            } else {
-                // Still "connected" and not a reconnect — reject.
-                drop(existing);
-                let err = Frame::error(
-                    frame.id.as_deref(),
-                    ErrorPayload::new(ErrorCode::AgentIdTaken, "Agent ID already in use"),
-                );
-                write_half.write_all(err.to_line()?.as_bytes()).await?;
-                continue;
-            }
-        }
-
-        // Build the OK response
-        let mut ok_payload = serde_json::json!({
-            "agent_id": agent_id,
-            "name": payload.name,
-            "protocol_version": PROTOCOL_VERSION,
-        });
-
-        if let Some(ref rooms) = reconnected_rooms {
-            let room_list: Vec<&String> = rooms.iter().collect();
-            ok_payload["reconnected"] = serde_json::json!(true);
-            ok_payload["rooms"] = serde_json::json!(room_list);
-            ok_payload["missed_messages"] = serde_json::json!(missed_messages.len());
-        }
-
-        let ok = Frame::ok(frame.id.as_deref(), ok_payload);
-        write_half.write_all(ok.to_line()?.as_bytes()).await?;
-
-        // Replay missed messages directly to the socket (before channel setup)
-        for msg in &missed_messages {
-            if let Ok(msg_line) = msg.to_line() {
-                write_half.write_all(msg_line.as_bytes()).await?;
             }
         }
 
@@ -660,15 +742,39 @@ where
             authenticated_key,
             reconnected_rooms,
             takeover_rooms,
+            frame.id,
+            missed_messages,
+            reclaim_lease,
+            agent_lifecycle_guard,
         );
     };
 
     // Phase 2: Set up channel + task pair
     let (tx, mut rx) = mpsc::channel::<Frame>(OUTBOUND_QUEUE_CAPACITY);
+    let (initial_tx, initial_rx) = oneshot::channel::<(Vec<Frame>, oneshot::Sender<bool>)>();
     let disconnect = Arc::new(tokio::sync::Notify::new());
 
-    // Send task: drains channel -> writes to socket
+    // The connection becomes live before registration is acknowledged. Events
+    // produced in that window queue in `rx`, while this gate guarantees the OK
+    // response and reconnect replay are written first.
     let send_task = tokio::spawn(async move {
+        let Ok((initial_frames, initial_ack)) = initial_rx.await else {
+            return;
+        };
+        let mut initial_write_ok = true;
+        for frame in initial_frames {
+            let Ok(line) = frame.to_line() else {
+                continue;
+            };
+            if write_half.write_all(line.as_bytes()).await.is_err() {
+                initial_write_ok = false;
+                break;
+            }
+        }
+        let _ = initial_ack.send(initial_write_ok);
+        if !initial_write_ok {
+            return;
+        }
         while let Some(frame) = rx.recv().await {
             match frame.to_line() {
                 Ok(line) => {
@@ -705,6 +811,8 @@ where
         agent_api_key.clone(),
     );
     broker.agents.insert(agent_id.clone(), conn);
+    let was_reconnected = reconnected_rooms.is_some();
+    let mut restored_rooms = HashSet::new();
 
     // If we took over a still-live connection, the agent is still in its rooms
     // (we never left them). Restore its room set on the new connection and
@@ -712,19 +820,24 @@ where
     // never saw it leave.
     if let Some(rooms) = takeover_rooms {
         for room_id in &rooms {
-            broker.join_room(&agent_id, room_id);
-        }
-        if let Some(mut agent) = broker.agents.get_mut(&agent_id) {
-            agent.rooms = rooms;
+            let _ = broker.join_room(&agent_id, room_id, || {
+                accessible_room(room_id, &agent_api_key, no_auth, &store, &ephemeral_rooms)
+                    .is_some()
+            });
         }
     }
 
     // Restore room memberships if reconnecting
     if let Some(rooms) = reconnected_rooms {
         for room_id in &rooms {
-            broker.join_room(&agent_id, room_id);
-            if let Some(mut agent) = broker.agents.get_mut(&agent_id) {
-                agent.rooms.insert(room_id.clone());
+            if broker
+                .join_room(&agent_id, room_id, || {
+                    accessible_room(room_id, &agent_api_key, no_auth, &store, &ephemeral_rooms)
+                        .is_some()
+                })
+                .is_err()
+            {
+                continue;
             }
 
             // Broadcast rejoin event
@@ -740,6 +853,143 @@ where
                 }),
             );
             broker.broadcast_to_room(room_id, &agent_id, &event);
+            restored_rooms.insert(room_id.clone());
+        }
+    }
+    drop(agent_lifecycle_guard);
+
+    // Refresh the pre-ack snapshot while the reclaim lease remains active.
+    // Any events that arrive during the actual write are collected as a tail
+    // after the write succeeds; a failed write drops the lease and preserves
+    // the stash for another reconnect attempt.
+    if let Some(lease) = reclaim_lease.as_ref() {
+        if let Some(stashed) = lease.snapshot() {
+            missed_messages = stashed.missed_messages;
+        }
+    }
+    missed_messages.retain(|frame| {
+        frame_room_id(frame)
+            .map(|room_id| {
+                accessible_room(room_id, &agent_api_key, no_auth, &store, &ephemeral_rooms)
+                    .is_some()
+            })
+            .unwrap_or(true)
+    });
+    restored_rooms.retain(|room_id| {
+        broker.is_agent_in_room(&agent_id, room_id)
+            && accessible_room(room_id, &agent_api_key, no_auth, &store, &ephemeral_rooms).is_some()
+    });
+
+    let mut ok_payload = serde_json::json!({
+        "agent_id": agent_id,
+        "name": agent_name,
+        "protocol_version": PROTOCOL_VERSION,
+    });
+    if was_reconnected {
+        let mut room_list: Vec<String> = restored_rooms.into_iter().collect();
+        room_list.sort();
+        ok_payload["reconnected"] = serde_json::json!(true);
+        ok_payload["rooms"] = serde_json::json!(room_list);
+        ok_payload["missed_messages"] = serde_json::json!(missed_messages.len());
+    }
+    let mut initial_frames = Vec::with_capacity(missed_messages.len() + 1);
+    initial_frames.push(Frame::ok(register_reply_to.as_deref(), ok_payload));
+    let replayed_ids: HashSet<String> = missed_messages
+        .iter()
+        .filter_map(|frame| frame.id.clone())
+        .collect();
+    initial_frames.extend(missed_messages.iter().cloned());
+    let (initial_ack_tx, initial_ack_rx) = oneshot::channel();
+    let initial_queued = initial_tx.send((initial_frames, initial_ack_tx)).is_ok();
+    let initial_written = if initial_queued {
+        matches!(
+            tokio::time::timeout(Duration::from_secs(5), initial_ack_rx).await,
+            Ok(Ok(true))
+        )
+    } else {
+        false
+    };
+    if !initial_written {
+        log::warn!("Registration writer ended before acknowledging {agent_id}");
+        let failed_registration_guard = broker.lock_agent_lifecycle();
+        let removed_own_connection = broker
+            .agents
+            .remove_if(&agent_id, |_, connection| {
+                connection.session_id == session_id
+            })
+            .is_some();
+        if removed_own_connection {
+            for room_id in broker.rooms_for_agent(&agent_id) {
+                let _room_guard = broker.lock_room_mutation();
+                let mut artifact_cleanup_error = None;
+                let (outcome, removed_room) =
+                    broker.leave_room_and_destroy_if_empty(&agent_id, &room_id, || {
+                        match crate::handler::remove_ephemeral_room_after_durable_cleanup(
+                            &store,
+                            &ephemeral_rooms,
+                            &room_id,
+                        ) {
+                            Ok(removed) => removed,
+                            Err(error) => {
+                                artifact_cleanup_error = Some(error);
+                                None
+                            }
+                        }
+                    });
+                if let Some(error) = artifact_cleanup_error {
+                    log::error!(
+                        "Ephemeral room {} cleanup failed; leaving it retryable: {}",
+                        room_id,
+                        error
+                    );
+                }
+                if outcome.room_destroyed {
+                    if let Some(room) = removed_room {
+                        vote_mgr.forget_room(&room_id);
+                        task_mgr.forget_room(&room_id);
+                        reconnect_mgr.forget_room(&room_id);
+                        if let Some(owner_key) = room.owner_key.as_deref() {
+                            rate_limiter.remove_room(owner_key);
+                        }
+                        let destroyed = Frame::event(
+                            FrameType::RoomDestroyed,
+                            serde_json::json!({"room_id": room_id}),
+                        );
+                        crate::handler::broadcast_room_destroyed(
+                            &broker, &room, no_auth, &destroyed,
+                        );
+                    }
+                }
+            }
+        }
+        drop(failed_registration_guard);
+        if !agent_api_key.is_empty() {
+            rate_limiter.remove_agent(&agent_api_key);
+        }
+        let _ = store.record_session_end(&session_id);
+        return Ok(());
+    }
+
+    if let Some(lease) = reclaim_lease {
+        if let Some(stashed) = lease.commit() {
+            for frame in stashed.missed_messages {
+                if frame
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| replayed_ids.contains(id))
+                {
+                    continue;
+                }
+                if frame_room_id(&frame).is_some_and(|room_id| {
+                    accessible_room(room_id, &agent_api_key, no_auth, &store, &ephemeral_rooms)
+                        .is_none()
+                }) {
+                    continue;
+                }
+                if tx.send(frame).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 
@@ -818,6 +1068,7 @@ where
                     no_auth,
                     &task_mgr,
                     &webhook_mgr,
+                    &reconnect_mgr,
                 )
                 .await;
                 if !matches!(
@@ -861,6 +1112,8 @@ where
         rate_limiter.remove_agent(&agent_api_key);
     }
 
+    let cleanup_lifecycle_guard = broker.lock_agent_lifecycle();
+
     // If a newer connection took over this agent_id (take-over / reconnect race),
     // it now owns the rooms and registry entry — don't tear them down. Just end
     // our own session record and exit.
@@ -870,16 +1123,13 @@ where
         .map(|c| c.session_id == session_id)
         .unwrap_or(false);
     if !still_mine {
+        drop(cleanup_lifecycle_guard);
         let _ = store.record_session_end(&session_id);
         return Ok(());
     }
 
     // Collect room memberships BEFORE leaving them (for stash)
-    let agent_rooms: HashSet<String> = broker
-        .agents
-        .get(&agent_id)
-        .map(|a| a.rooms.clone())
-        .unwrap_or_default();
+    let agent_rooms: HashSet<String> = broker.rooms_for_agent(&agent_id).into_iter().collect();
 
     // Stash for reconnect (only for permanent rooms — don't stash ephemeral-only agents)
     let has_permanent_rooms = agent_rooms.iter().any(|r| !ephemeral_rooms.contains_key(r));
@@ -892,9 +1142,34 @@ where
         );
     }
 
-    // Leave all rooms and clean up ephemeral rooms
-    let left_rooms = broker.leave_all_rooms(&agent_id);
-    for (room_id, outcome) in &left_rooms {
+    // Leave all rooms and clean up ephemeral rooms. Each metadata mutation and
+    // its lifecycle event share the room guard with rename/explicit destroy,
+    // so reconnect and live clients observe one consistent order.
+    for room_id in &agent_rooms {
+        let _room_guard = broker.lock_room_mutation();
+        let mut artifact_cleanup_error = None;
+        let (outcome, removed_room) =
+            broker.leave_room_and_destroy_if_empty(&agent_id, room_id, || {
+                match crate::handler::remove_ephemeral_room_after_durable_cleanup(
+                    &store,
+                    &ephemeral_rooms,
+                    room_id,
+                ) {
+                    Ok(removed) => removed,
+                    Err(error) => {
+                        artifact_cleanup_error = Some(error);
+                        None
+                    }
+                }
+            });
+        if let Some(error) = artifact_cleanup_error {
+            log::error!(
+                "Ephemeral room {} cleanup failed; leaving it retryable: {}",
+                room_id,
+                error
+            );
+        }
+
         // Broadcast leave event
         let event = Frame::event(
             FrameType::AgentLeft,
@@ -919,22 +1194,19 @@ where
         }
 
         // Destroy empty ephemeral rooms
-        if outcome.now_empty {
-            if let Some((_, room)) = ephemeral_rooms.remove(room_id) {
-                broker.remove_room(room_id);
-                broker.forget_ephemeral_seq(room_id);
+        if outcome.room_destroyed {
+            if let Some(room) = &removed_room {
+                vote_mgr.forget_room(room_id);
+                task_mgr.forget_room(room_id);
+                reconnect_mgr.forget_room(room_id);
+                if let Some(owner_key) = room.owner_key.as_deref() {
+                    rate_limiter.remove_room(owner_key);
+                }
                 let destroy = Frame::event(
                     FrameType::RoomDestroyed,
                     serde_json::json!({"room_id": room_id}),
                 );
-                for entry in broker.agents.iter() {
-                    if no_auth
-                        || room.visibility == "public"
-                        || entry.value().api_key.as_str() == room.owner_key.as_deref().unwrap_or("")
-                    {
-                        broker.send_to_agent(entry.key(), destroy.clone());
-                    }
-                }
+                crate::handler::broadcast_room_destroyed(&broker, room, no_auth, &destroy);
                 log::info!("Ephemeral room {} destroyed (agent disconnected)", room_id);
             }
         }
@@ -944,7 +1216,10 @@ where
     vote_mgr.clear_leader_if_agent(&agent_id, &broker);
 
     // Remove agent connection
-    broker.agents.remove(&agent_id);
+    broker.agents.remove_if(&agent_id, |_, connection| {
+        connection.session_id == session_id
+    });
+    drop(cleanup_lifecycle_guard);
 
     // Record session end
     let _ = store.record_session_end(&session_id);
@@ -954,34 +1229,144 @@ where
 
 #[cfg(test)]
 mod local_auth_tests {
-    use super::tcp_connection_uses_no_auth;
+    use super::*;
 
     #[test]
     fn keyless_local_never_covers_non_loopback_tcp() {
-        assert!(tcp_connection_uses_no_auth(
-            false,
+        assert!(tcp_connection_allows_keyless(
             true,
             "127.0.0.1".parse().unwrap()
         ));
-        assert!(tcp_connection_uses_no_auth(
-            false,
-            true,
-            "::1".parse().unwrap()
-        ));
-        assert!(!tcp_connection_uses_no_auth(
-            false,
+        assert!(tcp_connection_allows_keyless(true, "::1".parse().unwrap()));
+        assert!(!tcp_connection_allows_keyless(
             true,
             "192.0.2.10".parse().unwrap()
         ));
-        assert!(!tcp_connection_uses_no_auth(
-            false,
+        assert!(!tcp_connection_allows_keyless(
             false,
             "127.0.0.1".parse().unwrap()
         ));
-        assert!(tcp_connection_uses_no_auth(
-            true,
-            false,
-            "192.0.2.10".parse().unwrap()
-        ));
+    }
+
+    #[tokio::test]
+    async fn destroy_during_pending_registration_is_not_silently_reported_restored() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        store
+            .create_room_with_visibility(
+                "pending-room",
+                "Pending Room",
+                None,
+                None,
+                Some("stable"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        let agents = Arc::new(DashMap::new());
+        let broker = Arc::new(Broker::new(agents.clone(), Arc::new(DashMap::new())));
+        let (sender, mut events) = mpsc::channel(4);
+        agents.insert(
+            "stable".into(),
+            AgentConnection::new(
+                AgentInfo {
+                    agent_id: "stable".into(),
+                    name: "Stable".into(),
+                    capabilities: vec![],
+                    connected_at: None,
+                    last_active: None,
+                    status: None,
+                    status_detail: None,
+                    progress: None,
+                },
+                "pending-session".into(),
+                sender,
+                tokio::spawn(async {}),
+                tokio::spawn(async {}),
+                Arc::new(tokio::sync::Notify::new()),
+                "owner-key".into(),
+            ),
+        );
+        broker
+            .join_room("stable", "pending-room", || {
+                store.get_room("pending-room").unwrap().is_some()
+            })
+            .unwrap();
+
+        let (room, _) = broker
+            .destroy_room_with("pending-room", || {
+                store.destroy_room_authorized("pending-room", "stable", "owner-key", false)
+            })
+            .unwrap();
+        let destroyed = Frame::event(
+            FrameType::RoomDestroyed,
+            serde_json::json!({"room_id": "pending-room"}),
+        );
+        crate::handler::broadcast_room_destroyed(&broker, &room, false, &destroyed);
+
+        let would_report_restored = broker.is_agent_in_room("stable", "pending-room")
+            && accessible_room("pending-room", "owner-key", false, &store, &DashMap::new())
+                .is_some();
+        assert!(!would_report_restored);
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.frame_type, FrameType::RoomDestroyed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disconnect_cleanup_cannot_remove_a_newer_takeover_session() {
+        fn connection(session_id: &str) -> AgentConnection {
+            let (sender, _receiver) = mpsc::channel(1);
+            AgentConnection::new(
+                AgentInfo {
+                    agent_id: "stable".into(),
+                    name: "Stable".into(),
+                    capabilities: vec![],
+                    connected_at: None,
+                    last_active: None,
+                    status: None,
+                    status_detail: None,
+                    progress: None,
+                },
+                session_id.into(),
+                sender,
+                tokio::spawn(async {}),
+                tokio::spawn(async {}),
+                Arc::new(tokio::sync::Notify::new()),
+                "owner-key".into(),
+            )
+        }
+
+        let agents = Arc::new(DashMap::new());
+        let broker = Arc::new(Broker::new(agents.clone(), Arc::new(DashMap::new())));
+        agents.insert("stable".into(), connection("old-session"));
+        let newer = connection("new-session");
+
+        // Old cleanup wins the serialization gate first. The takeover cannot
+        // install until that removal finishes, so it cannot be erased by a
+        // stale post-check cleanup.
+        let cleanup_guard = broker.lock_agent_lifecycle();
+        let takeover_broker = broker.clone();
+        let takeover_agents = agents.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _takeover_guard = takeover_broker.lock_agent_lifecycle();
+            takeover_agents.insert("stable".into(), newer);
+            done_tx.send(()).unwrap();
+        });
+        assert!(agents
+            .remove_if("stable", |_, connection| {
+                connection.session_id == "old-session"
+            })
+            .is_some());
+        drop(cleanup_guard);
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            agents.get("stable").unwrap().session_id,
+            "new-session",
+            "newer takeover must survive old-session cleanup"
+        );
     }
 }

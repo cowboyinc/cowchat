@@ -547,8 +547,8 @@ enum RoomAction {
         #[arg(long)]
         ephemeral: bool,
         /// Create as public: visible and joinable by any API key on the server.
-        /// Default is private (only your key can see or resolve it by name) —
-        /// use this so agents with different keys can find the room.
+        /// Default is private (only your API-key or keyless-local boundary can
+        /// resolve it by name) — use this so other principals can find the room.
         #[arg(long)]
         public: bool,
         /// Create as end-to-end encrypted. Members must share a room key
@@ -566,6 +566,21 @@ enum RoomAction {
     Tip {
         /// Room ID or exact name
         room: String,
+    },
+    /// Rename a room using its owning principal and recorded creator ID.
+    Rename {
+        /// Room ID or exact name
+        room: String,
+        /// New room name
+        name: String,
+    },
+    /// Irreversibly remove a room from Cowchat using its owning principal and creator ID.
+    Destroy {
+        /// Room ID or exact name
+        room: String,
+        /// Confirm the irreversible deletion.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -1421,7 +1436,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if room.visibility == "public" {
                             "public (any key can find & join)"
                         } else {
-                            "private (only your key)"
+                            "private (owning key or keyless-local boundary)"
                         }
                     );
                     if room.encrypted {
@@ -1442,6 +1457,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let room_id = resolve_room_id(&client, room).await?;
                     let seq = client.room_tip(&room_id).await?;
                     println!("{}", seq);
+                }
+                RoomAction::Rename { room, name } => {
+                    let room_id = resolve_room_id(&client, room).await?;
+                    let updated = client.rename_room(&room_id, name).await?;
+                    println!("Renamed room: {} ({})", updated.name, updated.room_id);
+                }
+                RoomAction::Destroy { room, yes } => {
+                    if !yes {
+                        return Err(
+                            "room destruction is irreversible; re-run with --yes to confirm".into(),
+                        );
+                    }
+                    let room_id = resolve_room_id(&client, room).await?;
+                    client.destroy_room(&room_id).await?;
+                    println!("Destroyed room: {}", room_id);
                 }
             }
         }
@@ -2748,6 +2778,19 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
             let tag = if ephemeral { " (ephemeral)" } else { "" };
             println!("[room+] created #{}{}", name, tag);
         }
+        FrameType::RoomUpdated => {
+            let room = frame
+                .payload
+                .get("room_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let name = frame
+                .payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            println!("[room~] renamed #{} to #{}", room, name);
+        }
         FrameType::RoomDestroyed => {
             let room = frame
                 .payload
@@ -2926,7 +2969,8 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
 
 #[cfg(test)]
 mod room_key_tests {
-    use super::resolve_room_key;
+    use super::{resolve_room_key, Cli, Commands, RoomAction};
+    use clap::Parser;
 
     #[test]
     fn room_key_resolution_precedence() {
@@ -2945,5 +2989,51 @@ mod room_key_tests {
         );
 
         std::env::remove_var("COWCHAT_ROOM_KEY");
+    }
+
+    #[test]
+    fn destroy_command_parses_explicit_confirmation() {
+        let cli = Cli::try_parse_from([
+            "cowchat",
+            "--agent-id",
+            "creator",
+            "rooms",
+            "destroy",
+            "room-id",
+            "--yes",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Rooms {
+                action: RoomAction::Destroy { room, yes },
+            } => {
+                assert_eq!(room, "room-id");
+                assert!(yes);
+            }
+            _ => panic!("expected rooms destroy"),
+        }
+    }
+
+    #[test]
+    fn rename_command_parses_room_and_name() {
+        let cli = Cli::try_parse_from([
+            "cowchat",
+            "--agent-id",
+            "creator",
+            "rooms",
+            "rename",
+            "old-name",
+            "New Room",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Rooms {
+                action: RoomAction::Rename { room, name },
+            } => {
+                assert_eq!(room, "old-name");
+                assert_eq!(name, "New Room");
+            }
+            _ => panic!("expected rooms rename"),
+        }
     }
 }

@@ -10,7 +10,7 @@ const copyButtons = document.querySelectorAll("[data-copy-target]");
 const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const ndjsonFrames = [
-  '{"id":"req-1","type":"register","payload":{"key":"***","name":"backend-dev","capabilities":["coordination","content"]}}',
+  '{"id":"req-1","type":"register","payload":{"key":"***","name":"backend-dev","capabilities":["coordination","content"],"protocol_version":2}}',
   '{"id":"req-2","type":"join_room","payload":{"room_id":"build-frontend"}}',
   '{"id":"req-3","type":"send_message","payload":{"room_id":"build-frontend","content":"backend content blocks complete"}}',
   '{"id":"req-4","type":"create_vote","payload":{"room_id":"build-frontend","title":"Hero headline","options":["Your Agents, Connected.","AI Agents That Talk to Each Other","Coordination for the Agentic Era"]}}',

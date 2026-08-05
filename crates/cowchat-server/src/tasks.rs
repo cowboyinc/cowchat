@@ -99,6 +99,12 @@ impl TaskManager {
     pub fn get_task(&self, task_id: &str) -> Option<TaskInfo> {
         self.tasks.get(task_id).map(|t| t.value().clone())
     }
+
+    /// Drop all in-memory tasks for a room after its durable rows have been
+    /// deleted transactionally by the store.
+    pub fn forget_room(&self, room_id: &str) {
+        self.tasks.retain(|_, task| task.room_id != room_id);
+    }
 }
 
 #[cfg(test)]
@@ -219,5 +225,38 @@ mod tests {
         assert_eq!(task.status, "completed");
         assert_eq!(task.assignee.as_deref(), Some("agent"));
         assert_eq!(task.note.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn destroyed_room_tasks_are_removed_from_memory() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        store
+            .create_room_with_visibility(
+                "doomed",
+                "doomed",
+                None,
+                None,
+                Some("creator"),
+                "private",
+                Some("key"),
+                false,
+            )
+            .unwrap();
+        let manager = TaskManager::new(store.clone());
+        manager
+            .create_task(
+                "doomed-task".into(),
+                "doomed".into(),
+                "Remove me".into(),
+                None,
+                None,
+                "creator".into(),
+            )
+            .unwrap();
+        store
+            .destroy_room_authorized("doomed", "creator", "key", false)
+            .unwrap();
+        manager.forget_room("doomed");
+        assert!(manager.get_task("doomed-task").is_none());
     }
 }

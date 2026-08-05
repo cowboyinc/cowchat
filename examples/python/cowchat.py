@@ -32,7 +32,7 @@ from typing import Optional
 # Wire protocol version this client speaks; sent in the register frame so the
 # server can reject an incompatible build cleanly. Keep in sync with the Rust
 # core's PROTOCOL_VERSION.
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 def read_api_key() -> str:

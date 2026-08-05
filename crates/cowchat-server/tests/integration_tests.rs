@@ -66,6 +66,32 @@ async fn connect_agent(addr: &str, key: &str, name: &str) -> CowchatClient {
         .unwrap()
 }
 
+async fn receives_room_event(
+    events: &mut tokio::sync::broadcast::Receiver<cowchat_client::Event>,
+    frame_type: FrameType,
+    room_id: &str,
+    timeout: Duration,
+) -> bool {
+    tokio::time::timeout(timeout, async {
+        loop {
+            if let Ok(event) = events.recv().await {
+                if event.frame.frame_type == frame_type
+                    && event
+                        .frame
+                        .payload
+                        .get("room_id")
+                        .and_then(|value| value.as_str())
+                        == Some(room_id)
+                {
+                    return true;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Connect an agent tagged with a model capability (read from COWCHAT_MODEL env, default claude-opus-4.6).
 async fn connect_agent_with_model(addr: &str, key: &str, name: &str) -> CowchatClient {
     let model = std::env::var("COWCHAT_MODEL").unwrap_or_else(|_| "claude-opus-4.6".to_string());
@@ -96,8 +122,7 @@ async fn register_then_trigger_read_error(addr: &str, key: &str, name: &str) {
                 name,
                 capabilities: vec![],
                 reconnect: false,
-                // None exercises the pre-versioning (legacy) path: server treats absent as v1.
-                protocol_version: None,
+                protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
             })
             .unwrap(),
         };
@@ -142,6 +167,181 @@ async fn test_loopback_client_can_connect_without_key_when_enabled() {
         .await
         .expect("a trusted loopback client should not need an API key");
     client.ping().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_keyless_local_rejects_invalid_nonempty_key() {
+    let (_handle, addr, _key, _tmp) = start_test_server_with_keyless_local(true).await;
+    let result = CowchatClient::connect_tcp(
+        &addr,
+        "invalid-but-nonempty",
+        "invalid-local-agent",
+        None,
+        vec![],
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "local trust permits an empty key, not an arbitrary credential"
+    );
+}
+
+#[tokio::test]
+async fn test_keyless_local_and_authenticated_private_rooms_are_isolated() {
+    let (_handle, addr, key, _tmp) = start_test_server_with_keyless_local(true).await;
+    let keyless_owner =
+        CowchatClient::connect_tcp(&addr, "", "keyless-owner", Some("keyless-owner"), vec![])
+            .await
+            .unwrap();
+    let keyless_observer = CowchatClient::connect_tcp(
+        &addr,
+        "",
+        "keyless-observer",
+        Some("keyless-observer"),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let authenticated =
+        CowchatClient::connect_tcp(&addr, &key, "authenticated", Some("authenticated"), vec![])
+            .await
+            .unwrap();
+    let mut keyless_events = keyless_observer.subscribe();
+    let mut authenticated_events = authenticated.subscribe();
+
+    let keyless_room = keyless_owner
+        .create_room("keyless-private", None, None, false)
+        .await
+        .unwrap();
+    assert!(
+        receives_room_event(
+            &mut keyless_events,
+            FrameType::RoomCreated,
+            &keyless_room.room_id,
+            Duration::from_secs(2),
+        )
+        .await
+    );
+    assert!(
+        !receives_room_event(
+            &mut authenticated_events,
+            FrameType::RoomCreated,
+            &keyless_room.room_id,
+            Duration::from_millis(150),
+        )
+        .await
+    );
+    assert!(keyless_observer
+        .room_info(&keyless_room.room_id)
+        .await
+        .is_ok());
+    keyless_observer
+        .join_room(&keyless_room.room_id)
+        .await
+        .unwrap();
+    assert!(authenticated
+        .room_info(&keyless_room.room_id)
+        .await
+        .is_err());
+    assert!(authenticated
+        .join_room(&keyless_room.room_id)
+        .await
+        .is_err());
+    assert!(authenticated
+        .destroy_room(&keyless_room.room_id)
+        .await
+        .is_err());
+    assert!(!authenticated
+        .list_rooms(None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|room| room.room_id == keyless_room.room_id));
+
+    keyless_owner
+        .rename_room(&keyless_room.room_id, "keyless-renamed")
+        .await
+        .unwrap();
+    assert!(
+        receives_room_event(
+            &mut keyless_events,
+            FrameType::RoomUpdated,
+            &keyless_room.room_id,
+            Duration::from_secs(2),
+        )
+        .await
+    );
+    keyless_owner
+        .destroy_room(&keyless_room.room_id)
+        .await
+        .unwrap();
+    assert!(
+        receives_room_event(
+            &mut keyless_events,
+            FrameType::RoomDestroyed,
+            &keyless_room.room_id,
+            Duration::from_secs(2),
+        )
+        .await
+    );
+    assert!(
+        !receives_room_event(
+            &mut authenticated_events,
+            FrameType::RoomDestroyed,
+            &keyless_room.room_id,
+            Duration::from_millis(150),
+        )
+        .await
+    );
+
+    let authenticated_room = authenticated
+        .create_room("authenticated-private", None, None, false)
+        .await
+        .unwrap();
+    assert!(
+        !receives_room_event(
+            &mut keyless_events,
+            FrameType::RoomCreated,
+            &authenticated_room.room_id,
+            Duration::from_millis(150),
+        )
+        .await
+    );
+    assert!(keyless_observer
+        .room_info(&authenticated_room.room_id)
+        .await
+        .is_err());
+    assert!(keyless_observer
+        .join_room(&authenticated_room.room_id)
+        .await
+        .is_err());
+    assert!(keyless_observer
+        .destroy_room(&authenticated_room.room_id)
+        .await
+        .is_err());
+    assert!(!keyless_observer
+        .list_rooms(None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|room| room.room_id == authenticated_room.room_id));
+
+    let ephemeral = keyless_owner
+        .create_room("keyless-ephemeral", None, None, true)
+        .await
+        .unwrap();
+    keyless_owner.join_room(&ephemeral.room_id).await.unwrap();
+    keyless_owner.leave_room(&ephemeral.room_id).await.unwrap();
+    assert!(
+        receives_room_event(
+            &mut keyless_events,
+            FrameType::RoomDestroyed,
+            &ephemeral.room_id,
+            Duration::from_secs(2),
+        )
+        .await
+    );
+    assert!(authenticated.room_info(&ephemeral.room_id).await.is_err());
 }
 
 #[tokio::test]
@@ -2885,6 +3085,550 @@ async fn test_private_room_reads_and_creation_events_are_key_scoped() {
 }
 
 #[tokio::test]
+async fn test_persistent_room_rename_is_authorized_scoped_and_reconnect_visible() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (_handle, addr, key_a, tmp) = start_test_server().await;
+    let key_b = "rename-outsider-key";
+    rusqlite::Connection::open(tmp.path().join("test.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO api_keys (api_key, label) VALUES (?1, 'rename outsider')",
+            [key_b],
+        )
+        .unwrap();
+
+    let owner = CowchatClient::connect_tcp(&addr, &key_a, "owner", Some("rename-owner"), vec![])
+        .await
+        .unwrap();
+    let same_key_peer = CowchatClient::connect_tcp(
+        &addr,
+        &key_a,
+        "same-key-peer",
+        Some("rename-same-key-peer"),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let outsider =
+        CowchatClient::connect_tcp(&addr, key_b, "outsider", Some("rename-outsider"), vec![])
+            .await
+            .unwrap();
+    let stashed =
+        CowchatClient::connect_tcp(&addr, &key_a, "stashed", Some("rename-stashed"), vec![])
+            .await
+            .unwrap();
+
+    let room = owner
+        .create_room("Persistent Old", None, None, false)
+        .await
+        .unwrap();
+    stashed.join_room(&room.room_id).await.unwrap();
+    drop(stashed);
+    for _ in 0..30 {
+        if !owner
+            .list_agents(None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|agent| agent.agent_id == "rename-stashed")
+        {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    let denied = same_key_peer
+        .rename_room(&room.room_id, "Peer Attempt")
+        .await
+        .unwrap_err();
+    match denied {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::AccessDenied)
+        }
+        other => panic!("expected access_denied, got {other:?}"),
+    }
+    let denied = outsider
+        .rename_room(&room.room_id, "Outsider Attempt")
+        .await
+        .unwrap_err();
+    match denied {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::AccessDenied)
+        }
+        other => panic!("expected access_denied, got {other:?}"),
+    }
+    let denied = owner.rename_room("lobby", "New Lobby").await.unwrap_err();
+    match denied {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::AccessDenied)
+        }
+        other => panic!("expected access_denied, got {other:?}"),
+    }
+
+    let mut owner_events = owner.subscribe();
+    let mut peer_events = same_key_peer.subscribe();
+    let mut outsider_events = outsider.subscribe();
+    let updated = owner
+        .rename_room(&room.room_id, "  Persistent Renamed  ")
+        .await
+        .unwrap();
+    assert_eq!(updated.room_id, room.room_id);
+    assert_eq!(updated.name, "Persistent Renamed");
+    assert!(
+        updated.owner_key.is_none(),
+        "owner key must stay off the wire"
+    );
+
+    for events in [&mut owner_events, &mut peer_events] {
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event.frame.frame_type == FrameType::RoomUpdated
+                    && event.frame.payload["room_id"] == room.room_id
+                {
+                    break event.frame;
+                }
+            }
+        })
+        .await
+        .expect("authorized clients receive room_updated");
+        assert_eq!(event.payload["name"], "Persistent Renamed");
+        assert!(event.payload.get("owner_key").is_none());
+    }
+    let leaked = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            let event = outsider_events.recv().await.unwrap();
+            if event.frame.frame_type == FrameType::RoomUpdated
+                && event.frame.payload["room_id"] == room.room_id
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        leaked.is_err(),
+        "private room_updated must not cross API keys"
+    );
+
+    let persisted = rusqlite::Connection::open(tmp.path().join("test.db"))
+        .unwrap()
+        .query_row(
+            "SELECT name FROM rooms WHERE room_id = ?1",
+            [&room.room_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_eq!(persisted, "Persistent Renamed");
+    assert_eq!(
+        owner.room_info(&room.room_id).await.unwrap()["room"]["name"],
+        "Persistent Renamed",
+    );
+
+    // A disconnected authorized client receives the metadata event before its
+    // membership is restored, so a reconnecting UI cannot retain the old name.
+    let stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let register = Frame {
+        id: Some("rename-reconnect".into()),
+        reply_to: None,
+        frame_type: FrameType::Register,
+        payload: serde_json::to_value(RegisterPayload {
+            key: key_a.clone(),
+            agent_id: Some("rename-stashed".into()),
+            name: "stashed".into(),
+            capabilities: vec![],
+            reconnect: true,
+            protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+        })
+        .unwrap(),
+    };
+    write_half
+        .write_all(register.to_line().unwrap().as_bytes())
+        .await
+        .unwrap();
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    assert_eq!(Frame::from_line(&line).unwrap().frame_type, FrameType::Ok);
+    line.clear();
+    tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+        .await
+        .expect("replayed room_updated after register")
+        .unwrap();
+    let replayed = Frame::from_line(&line).unwrap();
+    assert_eq!(replayed.frame_type, FrameType::RoomUpdated);
+    assert_eq!(replayed.payload["room_id"], room.room_id);
+    assert_eq!(replayed.payload["name"], "Persistent Renamed");
+}
+
+#[tokio::test]
+async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
+    let (_handle, addr, key_a, tmp) = start_test_server().await;
+    let key_b = "rename-public-observer-key";
+    rusqlite::Connection::open(tmp.path().join("test.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO api_keys (api_key, label) VALUES (?1, 'public observer')",
+            [key_b],
+        )
+        .unwrap();
+    let owner =
+        CowchatClient::connect_tcp(&addr, &key_a, "owner", Some("ephemeral-renamer"), vec![])
+            .await
+            .unwrap();
+    let observer = CowchatClient::connect_tcp(
+        &addr,
+        key_b,
+        "observer",
+        Some("rename-public-observer"),
+        vec![],
+    )
+    .await
+    .unwrap();
+
+    let persistent = owner
+        .create_room("Persistent Conflict", None, None, false)
+        .await
+        .unwrap();
+    let denied_child = observer
+        .create_room_with_options(
+            "Unauthorized Ephemeral Child",
+            None,
+            Some(&persistent.room_id),
+            true,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+    match denied_child {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::AccessDenied)
+        }
+        other => panic!("expected access_denied, got {other:?}"),
+    }
+    let missing_parent = owner
+        .create_room_with_options(
+            "Dangling Ephemeral Child",
+            None,
+            Some("missing-parent"),
+            true,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+    match missing_parent {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::RoomNotFound)
+        }
+        other => panic!("expected room_not_found, got {other:?}"),
+    }
+    let ephemeral = owner
+        .create_room_with_options("  Ephemeral Old  ", None, None, true, true, false)
+        .await
+        .unwrap();
+    assert_eq!(ephemeral.name, "Ephemeral Old");
+
+    let duplicate = owner
+        .create_room("Ephemeral Old", None, None, false)
+        .await
+        .unwrap_err();
+    match duplicate {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::RoomNameTaken)
+        }
+        other => panic!("expected room_name_taken, got {other:?}"),
+    }
+    let duplicate = owner
+        .create_room("Persistent Conflict", None, None, true)
+        .await
+        .unwrap_err();
+    match duplicate {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::RoomNameTaken)
+        }
+        other => panic!("expected room_name_taken, got {other:?}"),
+    }
+
+    for invalid in ["   ".to_string(), "bad\nname".to_string(), "🦀".repeat(101)] {
+        let error = owner
+            .rename_room(&ephemeral.room_id, &invalid)
+            .await
+            .unwrap_err();
+        match error {
+            cowchat_client::ClientError::Server { code, .. } => {
+                assert_eq!(code, cowchat_core::ErrorCode::InvalidPayload)
+            }
+            other => panic!("expected invalid_payload, got {other:?}"),
+        }
+    }
+    let conflict = owner
+        .rename_room(&ephemeral.room_id, &persistent.name)
+        .await
+        .unwrap_err();
+    match conflict {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::RoomNameTaken)
+        }
+        other => panic!("expected room_name_taken, got {other:?}"),
+    }
+
+    let mut observer_events = observer.subscribe();
+    let updated = owner
+        .rename_room(&ephemeral.room_id, "  Ephemeral Renamed  ")
+        .await
+        .unwrap();
+    assert!(updated.ephemeral);
+    assert_eq!(updated.name, "Ephemeral Renamed");
+    let event = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = observer_events.recv().await.unwrap();
+            if event.frame.frame_type == FrameType::RoomUpdated
+                && event.frame.payload["room_id"] == ephemeral.room_id
+            {
+                break event.frame;
+            }
+        }
+    })
+    .await
+    .expect("public room_updated reaches another API key");
+    assert_eq!(event.payload["name"], "Ephemeral Renamed");
+    assert!(owner
+        .list_rooms(None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|room| room.room_id == ephemeral.room_id && room.name == "Ephemeral Renamed"));
+
+    for (index, invalid) in ["".to_string(), "bad\tname".to_string(), "界".repeat(101)]
+        .into_iter()
+        .enumerate()
+    {
+        let error = owner
+            .create_room(&invalid, None, None, index % 2 == 0)
+            .await
+            .unwrap_err();
+        match error {
+            cowchat_client::ClientError::Server { code, .. } => {
+                assert_eq!(code, cowchat_core::ErrorCode::InvalidPayload)
+            }
+            other => panic!("expected invalid_payload, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_explicit_room_destruction_is_creator_only_scoped_and_complete() {
+    let (_handle, addr, key_a, tmp) = start_test_server().await;
+    let key_b = "destroy-outsider-key";
+    rusqlite::Connection::open(tmp.path().join("test.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO api_keys (api_key, label) VALUES (?1, 'outsider')",
+            [key_b],
+        )
+        .unwrap();
+
+    let owner = CowchatClient::connect_tcp(&addr, &key_a, "owner", Some("destroy-owner"), vec![])
+        .await
+        .unwrap();
+    let same_key_peer = CowchatClient::connect_tcp(
+        &addr,
+        &key_a,
+        "same-key-peer",
+        Some("same-key-peer"),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let outsider =
+        CowchatClient::connect_tcp(&addr, key_b, "outsider", Some("destroy-outsider"), vec![])
+            .await
+            .unwrap();
+
+    let room = owner
+        .create_room("explicit-destroy", None, None, false)
+        .await
+        .unwrap();
+    assert_eq!(room.created_by.as_deref(), Some("destroy-owner"));
+    assert!(
+        room.owner_key.is_none(),
+        "the bearer API key must be redacted from create_room responses"
+    );
+    let info = owner.room_info(&room.room_id).await.unwrap();
+    let encoded_info = serde_json::to_string(&info).unwrap();
+    assert!(!encoded_info.contains("owner_key"));
+    assert!(!encoded_info.contains(&key_a));
+
+    let denied = same_key_peer.destroy_room(&room.room_id).await.unwrap_err();
+    match denied {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::AccessDenied)
+        }
+        other => panic!("expected access_denied, got {other:?}"),
+    }
+    let lobby_denied = owner.destroy_room("lobby").await.unwrap_err();
+    match lobby_denied {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::AccessDenied)
+        }
+        other => panic!("expected access_denied, got {other:?}"),
+    }
+
+    owner.join_room(&room.room_id).await.unwrap();
+    owner
+        .send_message(&room.room_id, "delete me", None, vec![])
+        .await
+        .unwrap();
+    let vote = owner
+        .create_vote(
+            &room.room_id,
+            "delete vote",
+            None,
+            vec!["yes".into(), "no".into()],
+            None,
+        )
+        .await
+        .unwrap();
+    owner
+        .create_subscription(
+            &room.room_id,
+            "http://127.0.0.1:9/hook",
+            "webhook-secret",
+            vec![],
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut owner_events = owner.subscribe();
+    let mut peer_events = same_key_peer.subscribe();
+    let mut outsider_events = outsider.subscribe();
+    owner.destroy_room(&room.room_id).await.unwrap();
+
+    for events in [&mut owner_events, &mut peer_events] {
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event.frame.frame_type == FrameType::RoomDestroyed
+                    && event
+                        .frame
+                        .payload
+                        .get("room_id")
+                        .and_then(|value| value.as_str())
+                        == Some(room.room_id.as_str())
+                {
+                    break true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(observed, "authorized clients must receive room_destroyed");
+    }
+
+    let leaked = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            if let Ok(event) = outsider_events.recv().await {
+                if event.frame.frame_type == FrameType::RoomDestroyed
+                    && event
+                        .frame
+                        .payload
+                        .get("room_id")
+                        .and_then(|value| value.as_str())
+                        == Some(room.room_id.as_str())
+                {
+                    break true;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(!leaked, "private destruction must not leak across API keys");
+
+    assert!(owner.room_info(&room.room_id).await.is_err());
+    assert!(owner.get_history(&room.room_id, 10, None).await.is_err());
+    assert!(owner.get_vote_status(&vote.vote_id).await.is_err());
+    let missing = owner.destroy_room(&room.room_id).await.unwrap_err();
+    match missing {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::RoomNotFound)
+        }
+        other => panic!("expected room_not_found, got {other:?}"),
+    }
+    assert!(owner
+        .list_subscriptions(Some(&room.room_id))
+        .await
+        .unwrap()
+        .is_empty());
+
+    let conn = rusqlite::Connection::open(tmp.path().join("test.db")).unwrap();
+    for (table, predicate) in [
+        ("rooms", "room_id = ?1"),
+        ("messages", "room_id = ?1"),
+        ("room_sequences", "room_id = ?1"),
+        ("votes", "room_id = ?1"),
+        ("room_tasks", "room_id = ?1"),
+        ("subscriptions", "room_id = ?1"),
+    ] {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {predicate}"),
+                [&room.room_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table} must be empty after destruction");
+    }
+}
+
+#[tokio::test]
+async fn test_explicit_ephemeral_destruction_cleans_durable_subscriptions() {
+    let (_handle, addr, key, _tmp) = start_test_server().await;
+    let owner = CowchatClient::connect_tcp(
+        &addr,
+        &key,
+        "ephemeral-owner",
+        Some("ephemeral-destroy-owner"),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let room = owner
+        .create_room("explicit-ephemeral-destroy", None, None, true)
+        .await
+        .unwrap();
+    owner
+        .create_subscription(
+            &room.room_id,
+            "http://127.0.0.1:9/hook",
+            "secret",
+            vec![],
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    owner.destroy_room(&room.room_id).await.unwrap();
+    assert!(owner.join_room(&room.room_id).await.is_err());
+    assert!(owner
+        .list_subscriptions(Some(&room.room_id))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn test_legacy_ownerless_private_room_fails_closed() {
     let (_handle, addr, key, tmp) = start_test_server().await;
     rusqlite::Connection::open(tmp.path().join("test.db"))
@@ -2904,6 +3648,16 @@ async fn test_legacy_ownerless_private_room_fails_closed() {
         client.room_info("lobby").await.is_ok(),
         "the public lobby must remain accessible"
     );
+    let rename = client
+        .rename_room("legacy-private", "claimed-system-room")
+        .await
+        .unwrap_err();
+    match rename {
+        cowchat_client::ClientError::Server { code, .. } => {
+            assert_eq!(code, cowchat_core::ErrorCode::AccessDenied)
+        }
+        other => panic!("expected access_denied, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -3012,20 +3766,29 @@ async fn test_protocol_version_gate() {
         "a future protocol version must be rejected"
     );
 
-    // A pre-versioning client (no protocol_version field) is treated as v1 and
-    // accepted; the OK reply advertises the server's protocol version.
-    let reply = raw_register(&addr, serde_json::json!({ "key": key, "name": "legacy" })).await;
-    assert_ne!(
-        reply.frame_type,
-        FrameType::Error,
-        "a pre-versioning (legacy) client must still be accepted"
-    );
+    // A pre-versioning client (no protocol_version field) and an explicit v1
+    // client cannot safely consume v2-only RoomUpdated events and fail closed.
+    for payload in [
+        serde_json::json!({ "key": key, "name": "legacy-absent" }),
+        serde_json::json!({ "key": key, "name": "legacy-v1", "protocol_version": 1 }),
+    ] {
+        let reply = raw_register(&addr, payload).await;
+        assert_eq!(reply.frame_type, FrameType::Error);
+        let err: cowchat_core::ErrorPayload = serde_json::from_value(reply.payload).unwrap();
+        assert_eq!(err.code, cowchat_core::ErrorCode::UnsupportedProtocol);
+    }
+
+    let reply = raw_register(
+        &addr,
+        serde_json::json!({ "key": key, "name": "current-v2", "protocol_version": 2 }),
+    )
+    .await;
+    assert_eq!(reply.frame_type, FrameType::Ok);
     assert_eq!(
         reply
             .payload
             .get("protocol_version")
-            .and_then(|v| v.as_u64()),
-        Some(cowchat_core::PROTOCOL_VERSION as u64),
-        "the register reply must advertise the server's protocol version"
+            .and_then(|value| value.as_u64()),
+        Some(2)
     );
 }

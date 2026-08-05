@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
     private var screenObserver: NSObjectProtocol?
 
@@ -11,7 +12,11 @@ final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    static func applicationIcon() -> NSImage? {
+    nonisolated static func applicationIcon() -> NSImage? {
+        if let iconURL = Bundle.main.url(forResource: "Cowchat", withExtension: "icns") {
+            return NSImage(contentsOf: iconURL)
+        }
+
         if let iconURL = Bundle.main.url(forResource: "CowchatIcon", withExtension: "png") {
             return NSImage(contentsOf: iconURL)
         }
@@ -31,7 +36,9 @@ final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.restoreWindowsToVisibleScreens()
+            Task { @MainActor [weak self] in
+                self?.restoreWindowsToVisibleScreens()
+            }
         }
         DispatchQueue.main.async {
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -56,7 +63,7 @@ final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    static func recoveredFrame(_ frame: CGRect, visibleFrames: [CGRect]) -> CGRect {
+    nonisolated static func recoveredFrame(_ frame: CGRect, visibleFrames: [CGRect]) -> CGRect {
         guard let target = visibleFrames.first(where: { $0.intersects(frame) }) ?? visibleFrames.first else {
             return frame
         }
@@ -81,19 +88,35 @@ final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
 struct CowchatMacApp: App {
     @NSApplicationDelegateAdaptor(CowchatAppDelegate.self) private var appDelegate
     @StateObject private var store = ChatStore()
+    @AppStorage(CowchatOnboarding.completedVersionKey) private var completedOnboardingVersion = 0
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(store)
-                .tint(GallopTheme.ColorToken.buttonPrimaryDefault.color)
+            Group {
+                if completedOnboardingVersion < CowchatOnboarding.currentVersion {
+                    CowchatOnboardingView {
+                        completedOnboardingVersion = CowchatOnboarding.currentVersion
+                        DispatchQueue.main.async {
+                            store.presentCreateRoom()
+                        }
+                    }
+                } else {
+                    ContentView {
+                        completedOnboardingVersion = 0
+                    }
+                }
+            }
+            .environmentObject(store)
+            .tint(GallopTheme.ColorToken.buttonPrimaryDefault.color)
+            .task { store.start() }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1080, height: 740)
         .commands {
             CommandGroup(after: .newItem) {
-                Button("New Room") { store.isCreateRoomPresented = true }
+                Button("New Room") { store.presentCreateRoom() }
                     .keyboardShortcut("n", modifiers: .command)
+                    .disabled(completedOnboardingVersion < CowchatOnboarding.currentVersion)
             }
         }
     }
