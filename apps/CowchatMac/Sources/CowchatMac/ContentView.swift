@@ -176,12 +176,12 @@ private struct SidebarView: View {
             if let lobby = lobbyRoom {
                 lobbyNavRow(lobby)
                     .padding(.horizontal, 12)
-                    .padding(.bottom, 6)
+                    .padding(.bottom, 10)
             }
 
             searchField
                 .padding(.horizontal, 12)
-                .padding(.bottom, 12)
+                .padding(.bottom, 14)
 
             TimelineView(.periodic(from: .now, by: store.lastThinkingAt.isEmpty ? 60 : 10)) { timeline in
                 ScrollView {
@@ -235,7 +235,7 @@ private struct SidebarView: View {
 
             sidebarFooter
         }
-        .padding(.top, 12)
+        .padding(.top, 14)
         .onAppear {
             // The pinned search field is the window's first focusable view, so
             // AppKit hands it first-responder at launch and stray keystrokes
