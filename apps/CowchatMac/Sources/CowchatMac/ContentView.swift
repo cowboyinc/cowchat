@@ -1405,21 +1405,8 @@ private struct AgentAvatar: View {
     }
 
     private var appIcon: NSImage? {
-        let normalizedName = name.lowercased()
-        let bundleID: String?
-        if normalizedName.contains("claude") {
-            bundleID = "com.anthropic.claudefordesktop"
-        } else if normalizedName.contains("codex") {
-            bundleID = "com.openai.codex"
-        } else if normalizedName.contains("chatgpt") || normalizedName.contains("openai") {
-            bundleID = "com.openai.chat"
-        } else {
-            bundleID = nil
-        }
-        guard let bundleID,
-              let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-            return nil
-        }
+        guard let app = AgentAppResolver.resolvedApp(forAgentNamed: name),
+              let appURL = AgentAppResolver.applicationURL(for: app) else { return nil }
         return NSWorkspace.shared.icon(forFile: appURL.path)
     }
 
