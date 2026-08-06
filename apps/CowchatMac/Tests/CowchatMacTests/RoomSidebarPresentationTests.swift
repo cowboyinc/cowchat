@@ -84,6 +84,15 @@ final class RoomSidebarPresentationTests: XCTestCase {
         )
     }
 
+    func testWorkingPredicateHonorsWindow() {
+        let now = Date()
+        XCTAssertFalse(RoomSidebarPresentation.isWorking(lastThinkingAt: nil, now: now, window: 120))
+        XCTAssertTrue(RoomSidebarPresentation.isWorking(
+            lastThinkingAt: now.addingTimeInterval(-30), now: now, window: 120))
+        XCTAssertFalse(RoomSidebarPresentation.isWorking(
+            lastThinkingAt: now.addingTimeInterval(-121), now: now, window: 120))
+    }
+
     private func makeRoom(
         id: String? = nil,
         name: String,

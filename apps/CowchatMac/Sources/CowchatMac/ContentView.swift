@@ -162,7 +162,7 @@ private struct SidebarView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            TimelineView(.periodic(from: .now, by: 60)) { timeline in
+            TimelineView(.periodic(from: .now, by: store.lastThinkingAt.isEmpty ? 60 : 10)) { timeline in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         if baseRooms.isEmpty && archivedRooms(at: timeline.date).isEmpty {
@@ -178,6 +178,7 @@ private struct SidebarView: View {
                                             messagePreview: store.roomMessagePreviews[room.id],
                                             isSelected: store.selectedRoomID == room.id,
                                             isUnread: store.isUnread(room),
+                                            isWorking: store.isWorking(room, at: timeline.date),
                                             now: timeline.date
                                         )
                                             .contentShape(Rectangle())
@@ -186,7 +187,7 @@ private struct SidebarView: View {
                                     .contextMenu { roomContextMenu(for: room) }
                                     .macAccessibleAction(
                                         label: "Open \(room.name)",
-                                        value: roomAccessibilityValue(for: room)
+                                        value: roomAccessibilityValue(for: room, now: timeline.date)
                                     ) {
                                         Task { await store.select(room: room) }
                                     }
@@ -303,6 +304,7 @@ private struct SidebarView: View {
                                 messagePreview: store.roomMessagePreviews[room.id],
                                 isSelected: store.selectedRoomID == room.id,
                                 isUnread: store.isUnread(room),
+                                isWorking: store.isWorking(room, at: now),
                                 now: now
                             )
                                 .contentShape(Rectangle())
@@ -313,7 +315,7 @@ private struct SidebarView: View {
                         }
                         .macAccessibleAction(
                             label: "Open \(room.name)",
-                            value: roomAccessibilityValue(for: room)
+                            value: roomAccessibilityValue(for: room, now: now)
                         ) {
                             Task { await store.select(room: room) }
                         }
@@ -464,8 +466,9 @@ private struct SidebarView: View {
     /// Value announced by the AccessibleActionOverlay for a room row (see
     /// macAccessibleAction) — RoomRow's own accessibility subtree is hidden,
     /// so unread/selected state must be composed here to be announced at all.
-    private func roomAccessibilityValue(for room: Room) -> String? {
+    private func roomAccessibilityValue(for room: Room, now: Date) -> String? {
         let parts = [
+            store.isWorking(room, at: now) ? "Agents working" : nil,
             store.isUnread(room) ? "Unread" : nil,
             store.selectedRoomID == room.id ? "selected" : nil,
         ].compactMap { $0 }
@@ -505,6 +508,7 @@ private struct RoomRow: View {
     let messagePreview: String?
     let isSelected: Bool
     let isUnread: Bool
+    let isWorking: Bool
     let now: Date
     @State private var isHovering = false
 
@@ -525,6 +529,11 @@ private struct RoomRow: View {
                             .foregroundStyle(SemanticColor.textPrimary)
                     }
                     Spacer(minLength: 6)
+                    if isWorking {
+                        GallopIconView(icon: .thinking, fallbackSystemName: "arrow.triangle.2.circlepath", size: 12)
+                            .foregroundStyle(SemanticColor.buttonPrimaryDefault)
+                            .accessibilityLabel("Agents working")
+                    }
                     Text(
                         (room.lastActivity ?? room.createdAt)
                             .cowchatRelativeTime(relativeTo: now)
@@ -935,7 +944,7 @@ private struct ChatRoomView: View {
                     }
                 }
                 Text(presenceSummary)
-                    .gallopText(.caption, color: SemanticColor.textTertiary)
+                    .gallopText(.caption, color: presenceSummary.contains("active") ? SemanticColor.warning : SemanticColor.textTertiary)
                     .lineLimit(1)
             }
 
@@ -1048,9 +1057,10 @@ private struct ChatRoomView: View {
 
                             if let thinkingText {
                                 HStack(spacing: 8) {
-                                    ProgressView().controlSize(.mini)
+                                    GallopIconView(icon: .thinking, fallbackSystemName: "arrow.triangle.2.circlepath", size: 16)
+                                        .foregroundStyle(SemanticColor.buttonPrimaryDefault)
                                     Text(thinkingText)
-                                        .gallopText(.caption, color: SemanticColor.textTertiary)
+                                        .gallopText(.bodyL, color: SemanticColor.textTertiary)
                                 }
                                 .id("thinking-indicator")
                             }

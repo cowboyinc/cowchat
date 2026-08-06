@@ -27,6 +27,7 @@ final class ChatStore: ObservableObject {
     @Published private(set) var readState = RoomReadState()
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
+    @Published private(set) var lastThinkingAt: [String: Date] = [:]
     @Published var roomReadyNotice: Room?
     @Published var roomBeingRenamed: Room?
     @Published var connectionStatus: ConnectionStatus = .disconnected
@@ -511,6 +512,7 @@ final class ChatStore: ObservableObject {
         messageSearchRoomIDs = []
         isSearchingMessages = false
         roomMessagePreviews = [:]
+        lastThinkingAt = [:]
         roomReadyNotice = nil
         roomBeingRenamed = nil
         isLoadingMessages = false
@@ -727,6 +729,10 @@ final class ChatStore: ObservableObject {
         readState.isUnread(room, selectedRoomID: selectedRoomID)
     }
 
+    func isWorking(_ room: Room, at now: Date = Date()) -> Bool {
+        RoomSidebarPresentation.isWorking(lastThinkingAt: lastThinkingAt[room.id], now: now)
+    }
+
     func archive(_ room: Room) async {
         guard room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
             errorMessage = "The lobby cannot be archived."
@@ -907,6 +913,12 @@ final class ChatStore: ObservableObject {
         switch type {
         case "message_received":
             if let message = try? decode(ChatMessage.self, payload) {
+                if message.isThinking {
+                    lastThinkingAt[message.roomID] = message.timestamp.cowchatDate ?? Date()
+                } else {
+                    // A completed turn clears the working indicator immediately.
+                    lastThinkingAt.removeValue(forKey: message.roomID)
+                }
                 if message.isThinking {
                     updateRoomActivity(from: message)
                     break
@@ -1299,6 +1311,7 @@ final class ChatStore: ObservableObject {
         messageSearchRoomIDs.remove(roomID)
         roomMessagePreviews.removeValue(forKey: roomID)
         previewActivityByRoomID.removeValue(forKey: roomID)
+        lastThinkingAt.removeValue(forKey: roomID)
         if roomReadyNotice?.id == roomID { roomReadyNotice = nil }
         if roomBeingRenamed?.id == roomID { roomBeingRenamed = nil }
         if createRoomParentID == roomID {

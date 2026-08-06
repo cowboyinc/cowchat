@@ -68,6 +68,14 @@ enum RoomSidebarPresentation {
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
     }
+
+    /// Sidebar working signal: presence is selected-room-only and unattributable
+    /// per-room (presence_update has no room_id), so background rooms light up on
+    /// thinking-message recency instead — see the spec's §4 validation notes.
+    static func isWorking(lastThinkingAt: Date?, now: Date, window: TimeInterval = 120) -> Bool {
+        guard let lastThinkingAt else { return false }
+        return now.timeIntervalSince(lastThinkingAt) < window
+    }
 }
 
 extension Room {
