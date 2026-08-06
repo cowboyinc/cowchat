@@ -43,12 +43,8 @@ struct ContentView: View {
                     isSidebarVisible: $isSidebarVisible,
                     isSettingsPresented: $isSettingsPresented
                 )
-                .frame(width: 300)
+                .frame(width: 280)
                 .transition(.move(edge: .leading).combined(with: .opacity))
-
-                Rectangle()
-                    .fill(SemanticColor.borderDefault)
-                    .frame(width: 1)
             }
 
             Group {
@@ -70,14 +66,43 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(SemanticColor.surface500)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(SemanticColor.borderDefault, lineWidth: 1)
-                .allowsHitTesting(false)
+        .navigationTitle(store.selectedRoom?.name ?? "Cowchat")
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
+                } label: {
+                    GallopIconView(icon: .sidebar, fallbackSystemName: "sidebar.left", size: 17)
+                        .foregroundStyle(SemanticColor.iconTertiary)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(SemanticColor.surface700))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .help(isSidebarVisible ? "Hide sidebar" : "Show sidebar")
+                .macAccessibleAction(label: "Toggle sidebar") {
+                    withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    store.presentCreateRoom()
+                } label: {
+                    GallopIconView(icon: .edit, fallbackSystemName: "square.and.pencil", size: 17)
+                        .foregroundStyle(SemanticColor.iconSecondary)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("New room (⌘N)")
+                .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .cowchatToggleSidebar)) { _ in
+            withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
         }
         .frame(minWidth: 900, minHeight: 600)
-        .ignoresSafeArea(.container, edges: .top)
         .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
         .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
         .sheet(
@@ -136,7 +161,6 @@ private struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            sidebarChrome
             scopePicker
                 .padding(.horizontal, 12)
                 .padding(.bottom, 12)
@@ -171,7 +195,8 @@ private struct SidebarView: View {
 
             sidebarFooter
         }
-        .background(SemanticColor.surfaceGlass500)
+        .padding(.top, 12)
+        .background(SemanticColor.surface500)
     }
 
     private var baseRooms: [Room] {
@@ -222,28 +247,6 @@ private struct SidebarView: View {
                 ? store.selectedRoomID
                 : nil
         ).count
-    }
-
-    private var sidebarChrome: some View {
-        HStack(spacing: 8) {
-            Spacer(minLength: 70)
-            CircleIconButton(
-                systemName: "rectangle.split.1x2",
-                help: "Hide sidebar",
-                action: {
-                    store.searchText = ""
-                    isSidebarVisible = false
-                }
-            )
-            CircleIconButton(
-                systemName: "square.and.pencil",
-                help: "Create room",
-                action: { store.presentCreateRoom() }
-            )
-            .keyboardShortcut("n", modifiers: .command)
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 52)
     }
 
     private var scopePicker: some View {
@@ -675,14 +678,6 @@ private struct LobbyDashboardView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                if !isSidebarVisible {
-                    CircleIconButton(
-                        systemName: "rectangle.split.1x2",
-                        help: "Show sidebar",
-                        action: { isSidebarVisible = true }
-                    )
-                }
-
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Lobby")
                         .gallopText(.h4, color: SemanticColor.textPrimary)
@@ -697,7 +692,7 @@ private struct LobbyDashboardView: View {
                     action: { store.presentCreateRoom() }
                 )
             }
-            .padding(.leading, isSidebarVisible ? 18 : 104)
+            .padding(.leading, 18)
             .padding(.trailing, 14)
             .frame(height: 58)
             .background(SemanticColor.surface600)
@@ -844,13 +839,6 @@ private struct RoomSetupView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                if !isSidebarVisible {
-                    CircleIconButton(
-                        systemName: "rectangle.split.1x2",
-                        help: "Show sidebar",
-                        action: { isSidebarVisible = true }
-                    )
-                }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(room.name)
                         .gallopText(.h4, color: SemanticColor.textPrimary)
@@ -859,7 +847,7 @@ private struct RoomSetupView: View {
                 }
                 Spacer()
             }
-            .padding(.leading, isSidebarVisible ? 18 : 104)
+            .padding(.leading, 18)
             .padding(.trailing, 14)
             .frame(height: 58)
             .background(SemanticColor.surface600)
@@ -1031,14 +1019,6 @@ private struct ChatRoomView: View {
 
     private var chatHeader: some View {
         HStack(spacing: 10) {
-            if !isSidebarVisible {
-                CircleIconButton(
-                    systemName: "rectangle.split.1x2",
-                    help: "Show sidebar",
-                    action: { isSidebarVisible = true }
-                )
-            }
-
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     if let parentRoom {
@@ -1139,7 +1119,7 @@ private struct ChatRoomView: View {
                 Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
             }
         }
-        .padding(.leading, isSidebarVisible ? 18 : 104)
+        .padding(.leading, 18)
         .padding(.trailing, 14)
         .frame(height: 58)
         .background(SemanticColor.surface600)
@@ -1638,13 +1618,6 @@ private struct EmptyChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                if !isSidebarVisible {
-                    CircleIconButton(
-                        systemName: "rectangle.split.1x2",
-                        help: "Show sidebar",
-                        action: { isSidebarVisible = true }
-                    )
-                }
                 Text("Cowchat")
                     .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                 Spacer()
@@ -1654,7 +1627,7 @@ private struct EmptyChatView: View {
                     action: { store.presentCreateRoom() }
                 )
             }
-            .padding(.leading, isSidebarVisible ? 14 : 104)
+            .padding(.leading, 14)
             .padding(.trailing, 14)
             .frame(height: 58)
             .background(SemanticColor.surface600)

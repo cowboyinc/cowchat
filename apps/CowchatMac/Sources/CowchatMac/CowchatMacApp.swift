@@ -142,7 +142,6 @@ struct CowchatMacApp: App {
                 store.start()
             }
         }
-        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1080, height: 740)
         .commands {
             CommandGroup(after: .newItem) {
@@ -150,6 +149,18 @@ struct CowchatMacApp: App {
                     .keyboardShortcut("n", modifiers: .command)
                     .disabled(completedOnboardingVersion < CowchatOnboarding.currentVersion)
             }
+            CommandGroup(after: .sidebar) {
+                Button("Toggle Sidebar") {
+                    NotificationCenter.default.post(name: .cowchatToggleSidebar, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.control, .command])
+            }
         }
     }
+}
+
+extension Notification.Name {
+    /// ⌃⌘S — macOS reserves this for sidebar toggling; nothing binds it once
+    /// the shell owns its own fixed column (cowboy-app pattern).
+    static let cowchatToggleSidebar = Notification.Name("CowchatMac.toggleSidebar")
 }
