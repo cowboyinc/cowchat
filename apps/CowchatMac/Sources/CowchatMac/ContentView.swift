@@ -166,6 +166,8 @@ private struct SidebarView: View {
     @State private var isArchiveExpanded = false
     @FocusState private var isSearchFocused: Bool
     @State private var isLobbyHovering = false
+    /// Once per process: the launch-focus clear must not repeat on sidebar re-mounts.
+    private static var didClearLaunchFocus = false
 
     private var lobbyRoom: Room? {
         store.rooms.first { $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame }
@@ -239,7 +241,11 @@ private struct SidebarView: View {
         .onAppear {
             // The pinned search field is the window's first focusable view, so
             // AppKit hands it first-responder at launch and stray keystrokes
-            // land in the filter. Start unfocused; focus is click/tab-driven.
+            // land in the filter. Clear it ONCE per process — running on every
+            // sidebar re-mount would blur whatever the user is typing in
+            // (e.g. the composer) each time the sidebar reopens.
+            guard !Self.didClearLaunchFocus else { return }
+            Self.didClearLaunchFocus = true
             DispatchQueue.main.async {
                 if isSearchFocused == false {
                     NSApp.keyWindow?.makeFirstResponder(nil)
@@ -249,10 +255,16 @@ private struct SidebarView: View {
     }
 
     private var baseRooms: [Room] {
-        RoomSidebarPresentation.filteredRooms(
-            from: store.unarchivedRooms.filter {
+        // Lobby lives in its own nav row, so the idle table excludes it — but
+        // an active search must still surface Lobby name/message hits.
+        let searching = !store.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let source = searching
+            ? store.unarchivedRooms
+            : store.unarchivedRooms.filter {
                 $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
-            },
+            }
+        return RoomSidebarPresentation.filteredRooms(
+            from: source,
             query: store.searchText,
             matchingMessageRoomIDs: store.messageSearchRoomIDs
         )
