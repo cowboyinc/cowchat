@@ -3,6 +3,11 @@ import SwiftUI
 
 /// A native macOS text field for the chat composer. Using AppKit here avoids
 /// SwiftUI focus regressions inside a NavigationSplitView detail column.
+///
+/// Built on `NSTextView` rather than `NSTextField`: the field-editor caret
+/// always spans the full line box, which reads as oversized against Season's
+/// proportions — a text view lets the insertion point be drawn at text
+/// height instead.
 struct ComposerTextField: NSViewRepresentable {
     @Binding var text: String
     let placeholder: String
@@ -11,7 +16,7 @@ struct ComposerTextField: NSViewRepresentable {
     var onCancel: (() -> Void)?
 
     /// The font's real line height. Framing the field shorter than this makes
-    /// the field editor draw a cramped, mis-centered insertion caret.
+    /// the layout draw a cramped, mis-centered insertion caret.
     static let naturalHeight: CGFloat = {
         let font = SeasonFontProvider().nativeFont(for: .bodyL)
         return ceil(font.ascender - font.descender + font.leading)
@@ -21,56 +26,69 @@ struct ComposerTextField: NSViewRepresentable {
         Coordinator(text: $text, onSubmit: onSubmit, onCancel: onCancel)
     }
 
-    func makeNSView(context: Context) -> NSTextField {
-        let field = InitiallyFocusedTextField()
-        field.isBordered = false
-        field.isBezeled = false
-        field.drawsBackground = false
-        field.focusRingType = .none
-        field.font = SeasonFontProvider().nativeFont(for: .bodyL)
-        field.textColor = SemanticColor.AppKitColor.textPrimary
-        field.isEditable = true
-        field.isSelectable = true
-        field.usesSingleLineMode = true
-        field.lineBreakMode = .byTruncatingTail
-        field.delegate = context.coordinator
-        field.setAccessibilityLabel(placeholder)
-        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return field
+    func makeNSView(context: Context) -> NSScrollView {
+        let font = SeasonFontProvider().nativeFont(for: .bodyL)
+
+        let textView = ComposerTextView()
+        textView.font = font
+        textView.textColor = SemanticColor.AppKitColor.textPrimary
+        textView.insertionPointColor = SemanticColor.AppKitColor.textPrimary
+        textView.focusRingType = .none
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.usesFontPanel = false
+        textView.usesFindPanel = false
+        textView.allowsUndo = true
+        textView.isVerticallyResizable = false
+        textView.isHorizontallyResizable = true
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: Self.naturalHeight
+        )
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: Self.naturalHeight
+        )
+        textView.delegate = context.coordinator
+
+        // Borderless clip container so long drafts scroll horizontally and
+        // the caret stays in view; never shows scrollers.
+        let scrollView = NSScrollView()
+        scrollView.documentView = textView
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.horizontalScrollElasticity = .none
+        scrollView.verticalScrollElasticity = .none
+        scrollView.focusRingType = .none
+        scrollView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return scrollView
     }
 
-    private final class InitiallyFocusedTextField: NSTextField {
-        private var hasRequestedFocus = false
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            guard window != nil, !hasRequestedFocus else { return }
-            hasRequestedFocus = true
-            DispatchQueue.main.async { [weak self] in
-                guard let self, let window = self.window, self.isEnabled else { return }
-                window.makeFirstResponder(self)
-            }
-        }
-    }
-
-    func updateNSView(_ field: NSTextField, context: Context) {
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? ComposerTextView else { return }
         context.coordinator.text = $text
         context.coordinator.onSubmit = onSubmit
         context.coordinator.onCancel = onCancel
-        field.placeholderAttributedString = NSAttributedString(
+        textView.placeholderString = NSAttributedString(
             string: placeholder,
             attributes: [
                 .foregroundColor: SemanticColor.AppKitColor.textTertiary,
                 .font: SeasonFontProvider().nativeFont(for: .bodyL),
             ]
         )
-        field.textColor = SemanticColor.AppKitColor.textPrimary
-        field.isEnabled = isEnabled
-        field.setAccessibilityLabel(placeholder)
-        if field.stringValue != text { field.stringValue = text }
+        textView.textColor = SemanticColor.AppKitColor.textPrimary
+        textView.isEditable = isEnabled
+        textView.isSelectable = isEnabled
+        textView.setAccessibilityLabel(placeholder)
+        if textView.string != text { textView.string = text }
     }
 
-    final class Coordinator: NSObject, NSTextFieldDelegate {
+    final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
         var onSubmit: () -> Void
         var onCancel: (() -> Void)?
@@ -81,25 +99,84 @@ struct ComposerTextField: NSViewRepresentable {
             self.onCancel = onCancel
         }
 
-        func controlTextDidChange(_ notification: Notification) {
-            guard let field = notification.object as? NSTextField else { return }
-            text.wrappedValue = field.stringValue
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            // Single-line composer: flatten pasted newlines.
+            if textView.string.contains(where: \.isNewline) {
+                textView.string = textView.string
+                    .components(separatedBy: .newlines)
+                    .joined(separator: " ")
+            }
+            text.wrappedValue = textView.string
         }
 
-        func control(
-            _ control: NSControl,
-            textView: NSTextView,
+        func textView(
+            _ textView: NSTextView,
             doCommandBy commandSelector: Selector
         ) -> Bool {
             if commandSelector == #selector(NSResponder.cancelOperation(_:)), let onCancel {
                 onCancel()
                 return true
             }
-            guard commandSelector == #selector(NSResponder.insertNewline(_:)),
-                  let field = control as? NSTextField else { return false }
-            text.wrappedValue = field.stringValue
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+            text.wrappedValue = textView.string
             onSubmit()
             return true
         }
+    }
+}
+
+/// Draws the placeholder itself (`NSTextView` has none) and trims the
+/// insertion caret from the full line box down to text height — cap top to
+/// just under the baseline — so it hugs the glyphs the way web inputs do.
+final class ComposerTextView: NSTextView {
+    var placeholderString: NSAttributedString? {
+        didSet { needsDisplay = true }
+    }
+
+    private var hasRequestedFocus = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, !hasRequestedFocus else { return }
+        hasRequestedFocus = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window, self.isEditable else { return }
+            window.makeFirstResponder(self)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, let placeholderString, placeholderString.length > 0 else { return }
+        // Drop the placeholder onto the layout manager's baseline (it rounds
+        // ascent up) so the first typed character replaces it without a jump.
+        var origin = textContainerOrigin
+        if let font = placeholderString.attribute(.font, at: 0, effectiveRange: nil) as? NSFont,
+           let layoutManager {
+            origin.y += layoutManager.defaultBaselineOffset(for: font) - font.ascender
+        }
+        placeholderString.draw(at: origin)
+    }
+
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        super.drawInsertionPoint(in: caretRect(for: rect), color: color, turnedOn: flag)
+    }
+
+    override func setNeedsDisplay(_ rect: NSRect, avoidAdditionalLayout flag: Bool) {
+        // The system invalidates the caret using the untrimmed line-box rect;
+        // widen it so blink-off erases the trimmed caret cleanly.
+        super.setNeedsDisplay(rect.union(caretRect(for: rect)), avoidAdditionalLayout: flag)
+    }
+
+    private func caretRect(for rect: NSRect) -> NSRect {
+        guard let font = (typingAttributes[.font] as? NSFont) ?? self.font,
+              let layoutManager
+        else { return rect }
+        let baseline = rect.minY + layoutManager.defaultBaselineOffset(for: font)
+        var caret = rect
+        caret.origin.y = baseline - font.capHeight - 2
+        caret.size.height = font.capHeight + 5
+        return caret
     }
 }
