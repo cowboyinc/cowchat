@@ -22,7 +22,6 @@ final class ChatStore: ObservableObject {
     }
     @Published private(set) var messageSearchRoomIDs: Set<String> = []
     @Published private(set) var archivedRoomIDs: Set<String> = []
-    @Published private(set) var pinnedRoomIDs: Set<String> = []
     @Published private(set) var setupRoomIDs: Set<String> = []
     @Published private(set) var roomSetupScreenIDs: Set<String> = []
     @Published private(set) var isSearchingMessages = false
@@ -167,7 +166,6 @@ final class ChatStore: ObservableObject {
         )
         localPreferences = Self.roomPreferences(defaults: defaults, profile: connectionProfile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
-        pinnedRoomIDs = localPreferences.pinnedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         roomSetupScreenIDs = localPreferences.pendingSetupScreenRoomIDs
         connection.onEvent = { [weak self] type, payload in
@@ -530,7 +528,6 @@ final class ChatStore: ObservableObject {
 
         localPreferences = Self.roomPreferences(defaults: defaults, profile: profile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
-        pinnedRoomIDs = localPreferences.pinnedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         roomSetupScreenIDs = localPreferences.pendingSetupScreenRoomIDs
         connectionStatus = .disconnected
@@ -712,30 +709,13 @@ final class ChatStore: ObservableObject {
         archivedRoomIDs.contains(room.id)
     }
 
-    func isPinned(_ room: Room) -> Bool {
-        pinnedRoomIDs.contains(room.id)
-    }
-
-    func togglePinned(_ room: Room) {
-        if pinnedRoomIDs.contains(room.id) {
-            pinnedRoomIDs.remove(room.id)
-        } else {
-            pinnedRoomIDs.insert(room.id)
-            archivedRoomIDs.remove(room.id)
-            localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
-        }
-        localPreferences.savePinnedRoomIDs(pinnedRoomIDs)
-    }
-
     func archive(_ room: Room) async {
         guard room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
             errorMessage = "The lobby cannot be archived."
             return
         }
         archivedRoomIDs.insert(room.id)
-        pinnedRoomIDs.remove(room.id)
         localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
-        localPreferences.savePinnedRoomIDs(pinnedRoomIDs)
 
         guard selectedRoomID == room.id else { return }
         await selectFallbackRoom(excluding: room.id)
@@ -1259,11 +1239,6 @@ final class ChatStore: ObservableObject {
             archivedRoomIDs = archived
             localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
         }
-        let pinned = pinnedRoomIDs.intersection(validRoomIDs)
-        if pinned != pinnedRoomIDs {
-            pinnedRoomIDs = pinned
-            localPreferences.savePinnedRoomIDs(pinnedRoomIDs)
-        }
         let pendingSetup = setupRoomIDs.intersection(validRoomIDs)
         if pendingSetup != setupRoomIDs {
             setupRoomIDs = pendingSetup
@@ -1283,21 +1258,12 @@ final class ChatStore: ObservableObject {
             self.createRoomParentID = nil
             isCreateRoomPresented = false
         }
-
-        if !localPreferences.hasInitializedPinnedRooms,
-           let lobby = rooms.first(where: {
-               $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame
-           }) {
-            pinnedRoomIDs = [lobby.id]
-            localPreferences.savePinnedRoomIDs(pinnedRoomIDs)
-        }
     }
 
     private func removeRoom(roomID: String) {
         destroyedRoomIDs.insert(roomID)
         rooms.removeAll { $0.roomID == roomID }
         archivedRoomIDs.remove(roomID)
-        pinnedRoomIDs.remove(roomID)
         setupRoomIDs.remove(roomID)
         localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
         roomSetupScreenIDs.remove(roomID)
@@ -1314,7 +1280,6 @@ final class ChatStore: ObservableObject {
             isCreateRoomPresented = false
         }
         localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
-        localPreferences.savePinnedRoomIDs(pinnedRoomIDs)
         recordRoomMutation(roomID: roomID)
 
         if joinedRoomID == roomID { joinedRoomID = nil }

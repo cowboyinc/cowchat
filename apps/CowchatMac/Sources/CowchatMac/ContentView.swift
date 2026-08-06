@@ -143,28 +143,16 @@ struct ContentView: View {
     }
 }
 
-private enum SidebarScope: String, CaseIterable, Identifiable {
-    case all = "All rooms"
-    case active = "Active"
-
-    var id: String { rawValue }
-}
-
 private struct SidebarView: View {
     @EnvironmentObject private var store: ChatStore
     @Binding var isSidebarVisible: Bool
     @Binding var isSettingsPresented: Bool
-    @State private var scope = SidebarScope.all
     @State private var isSearchVisible = false
     @State private var isArchiveExpanded = false
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
-            scopePicker
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
-
             if isSearchVisible {
                 searchField
                     .padding(.horizontal, 12)
@@ -178,8 +166,6 @@ private struct SidebarView: View {
                         if baseRooms.isEmpty && archivedRooms(at: timeline.date).isEmpty {
                             emptyRoomsState
                         } else {
-                            pinnedRooms
-
                             ForEach(visibleGroups(at: timeline.date), id: \.title) { group in
                                 roomGroup(group, now: timeline.date)
                             }
@@ -200,96 +186,23 @@ private struct SidebarView: View {
     }
 
     private var baseRooms: [Room] {
-        let rooms = scope == .all
-            ? store.unarchivedRooms
-            : RoomSidebarPresentation.activeRooms(
-                from: store.unarchivedRooms,
-                excludingCurrentClientFrom: store.connectionStatus.isConnected
-                    ? store.selectedRoomID
-                    : nil
-            )
-        return RoomSidebarPresentation.filteredRooms(
-            from: rooms,
+        RoomSidebarPresentation.filteredRooms(
+            from: store.unarchivedRooms,
             query: store.searchText,
             matchingMessageRoomIDs: store.messageSearchRoomIDs
         )
     }
 
     private func visibleGroups(at now: Date) -> [RoomSidebarGroup] {
-        let rooms = RoomSidebarPresentation.roomsForRecencyGroups(
-            from: baseRooms,
-            allRooms: store.unarchivedRooms,
-            pinnedRoomIDs: store.pinnedRoomIDs
-        )
-        return RoomSidebarPresentation.groups(from: rooms, now: now)
+        RoomSidebarPresentation.groups(from: baseRooms, now: now)
     }
 
     private func archivedRooms(at now: Date) -> [Room] {
-        let rooms = scope == .all
-            ? store.archivedRooms
-            : RoomSidebarPresentation.activeRooms(
-                from: store.archivedRooms,
-                excludingCurrentClientFrom: store.connectionStatus.isConnected
-                    ? store.selectedRoomID
-                    : nil
-            )
-        return RoomSidebarPresentation.filteredRooms(
-            from: rooms,
+        RoomSidebarPresentation.filteredRooms(
+            from: store.archivedRooms,
             query: store.searchText,
             matchingMessageRoomIDs: store.messageSearchRoomIDs
         )
-    }
-
-    private var activeCount: Int {
-        RoomSidebarPresentation.activeRooms(
-            from: store.unarchivedRooms,
-            excludingCurrentClientFrom: store.connectionStatus.isConnected
-                ? store.selectedRoomID
-                : nil
-        ).count
-    }
-
-    private var scopePicker: some View {
-        HStack(spacing: 0) {
-            ForEach(SidebarScope.allCases) { item in
-                Button {
-                    scope = item
-                } label: {
-                    HStack(spacing: 6) {
-                        Text(item.rawValue)
-                            .gallopText(.bodySStrong)
-                        Text("\(item == .all ? store.unarchivedRooms.count : activeCount)")
-                            .gallopText(.caption)
-                            .opacity(0.72)
-                    }
-                    .foregroundStyle(
-                        item == scope
-                            ? SemanticColor.surfaceGlassOnTextDefault
-                            : SemanticColor.surfaceGlassOffTextDefault
-                    )
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 34)
-                    .background(
-                        item == scope
-                            ? SemanticColor.surfaceGlassOnDefault
-                            : Color.clear,
-                        in: Capsule()
-                    )
-                }
-                .buttonStyle(.plain)
-                .macAccessibleAction(
-                    label: "\(item.rawValue), \(item == .all ? store.unarchivedRooms.count : activeCount)",
-                    value: item == scope ? "selected" : nil
-                ) {
-                    scope = item
-                }
-            }
-        }
-        .padding(3)
-        .background(SemanticColor.surface400, in: Capsule())
-        .overlay {
-            Capsule().stroke(SemanticColor.borderDefault.opacity(0.7), lineWidth: 0.5)
-        }
     }
 
     private var searchField: some View {
@@ -317,52 +230,6 @@ private struct SidebarView: View {
         .background(SemanticColor.textfieldDefault, in: Capsule())
         .overlay {
             Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
-        }
-    }
-
-    @ViewBuilder
-    private var pinnedRooms: some View {
-        let rooms = RoomSidebarPresentation.visiblePinnedRooms(
-            from: store.unarchivedRooms,
-            among: baseRooms,
-            pinnedRoomIDs: store.pinnedRoomIDs
-        )
-        if !rooms.isEmpty {
-            Text("Pinned")
-                .gallopText(.caption, color: SemanticColor.textTertiary)
-                .padding(.horizontal, 8)
-                .padding(.bottom, 8)
-
-            HStack(alignment: .top, spacing: 8) {
-                ForEach(rooms) { room in
-                    Button {
-                        Task { await store.select(room: room) }
-                    } label: {
-                        VStack(spacing: 6) {
-                            RoomAvatar(
-                                name: room.name,
-                                size: 38,
-                                accented: store.selectedRoomID == room.id
-                            )
-                            Text(room.name)
-                                .gallopText(.dataLabel, color: SemanticColor.textSecondary)
-                                .lineLimit(1)
-                                .frame(maxWidth: .infinity)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu { roomContextMenu(for: room) }
-                    .frame(maxWidth: .infinity)
-                    .macAccessibleAction(
-                        label: "Open \(room.name)",
-                        value: store.selectedRoomID == room.id ? "selected" : nil
-                    ) {
-                        Task { await store.select(room: room) }
-                    }
-                }
-            }
-            .padding(.horizontal, 4)
-            .padding(.bottom, 16)
         }
     }
 
@@ -490,7 +357,7 @@ private struct SidebarView: View {
     private var emptyRoomsTitle: String {
         if store.isSearchingMessages { return "Searching messages…" }
         if !store.searchText.isEmpty { return "No rooms or messages found" }
-        return scope == .active ? "No active rooms" : "No rooms available"
+        return "No rooms available"
     }
 
     private var isArchiveVisible: Bool {
@@ -593,9 +460,6 @@ private struct SidebarView: View {
     private func roomContextMenu(for room: Room) -> some View {
         Button("Rename") { store.presentRename(room) }
             .disabled(!store.canRename(room))
-        Button(store.isPinned(room) ? "Unpin room" : "Pin room") {
-            store.togglePinned(room)
-        }
         if room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame {
             Button("Archive") {
                 Task { await store.archive(room) }
@@ -681,7 +545,7 @@ private struct LobbyDashboardView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Lobby")
                         .gallopText(.h4, color: SemanticColor.textPrimary)
-                    Text("\(availableAgentCount) available agents · \(store.pinnedRoomIDs.count) pinned rooms")
+                    Text("\(availableAgentCount) available agents")
                         .gallopText(.caption, color: SemanticColor.textTertiary)
                 }
 
@@ -808,9 +672,6 @@ private struct DashboardRoomCard: View {
             Menu {
                 Button("Rename") { store.presentRename(room) }
                     .disabled(!store.canRename(room))
-                Button(store.isPinned(room) ? "Unpin room" : "Pin room") {
-                    store.togglePinned(room)
-                }
                 Button("Archive") {
                     Task { await store.archive(room) }
                 }
@@ -1054,9 +915,6 @@ private struct ChatRoomView: View {
                 Menu {
                     Button("Rename room") { store.presentRename(room) }
                         .disabled(!store.canRename(room))
-                    Button(store.isPinned(room) ? "Unpin room" : "Pin room") {
-                        store.togglePinned(room)
-                    }
                     Button("Archive room") {
                         Task { await store.archive(room) }
                     }

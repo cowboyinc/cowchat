@@ -2,8 +2,9 @@ import Foundation
 
 struct RoomLocalPreferences {
     static let archivedRoomIDsKey = "CowchatMac.archivedRoomIDs"
-    static let pinnedRoomIDsKey = "CowchatMac.pinnedRoomIDs"
-    static let pinnedRoomsInitializedKey = "CowchatMac.pinnedRoomsInitialized"
+    // Older builds also wrote per-scope UserDefaults entries for a since-removed
+    // pin-state feature (key names dropped here); those entries are intentionally
+    // left orphaned, not migrated or cleared.
     static let pendingSetupRoomIDsKey = "CowchatMac.pendingSetupRoomIDs"
     static let pendingSetupScreenRoomIDsKey = "CowchatMac.pendingSetupScreenRoomIDs"
 
@@ -19,14 +20,6 @@ struct RoomLocalPreferences {
         loadIDs(forKey: Self.archivedRoomIDsKey)
     }
 
-    var pinnedRoomIDs: Set<String> {
-        loadIDs(forKey: Self.pinnedRoomIDsKey)
-    }
-
-    var hasInitializedPinnedRooms: Bool {
-        defaults.bool(forKey: scopedKey(Self.pinnedRoomsInitializedKey))
-    }
-
     var pendingSetupRoomIDs: Set<String> {
         loadIDs(forKey: Self.pendingSetupRoomIDsKey)
     }
@@ -37,11 +30,6 @@ struct RoomLocalPreferences {
 
     func saveArchivedRoomIDs(_ roomIDs: Set<String>) {
         save(roomIDs, forKey: Self.archivedRoomIDsKey)
-    }
-
-    func savePinnedRoomIDs(_ roomIDs: Set<String>) {
-        save(roomIDs, forKey: Self.pinnedRoomIDsKey)
-        defaults.set(true, forKey: scopedKey(Self.pinnedRoomsInitializedKey))
     }
 
     func savePendingSetupRoomIDs(_ roomIDs: Set<String>) {

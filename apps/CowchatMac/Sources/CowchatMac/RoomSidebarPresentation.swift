@@ -46,24 +46,6 @@ enum ChatPresencePresentation {
 }
 
 enum RoomSidebarPresentation {
-    static func pinnedRooms(
-        from rooms: [Room],
-        pinnedRoomIDs: Set<String>,
-        limit: Int = 3
-    ) -> [Room] {
-        Array(rooms.filter { pinnedRoomIDs.contains($0.id) }.prefix(limit))
-    }
-
-    static func activeRooms(
-        from rooms: [Room],
-        excludingCurrentClientFrom selectedRoomID: String? = nil
-    ) -> [Room] {
-        rooms.filter { room in
-            let currentClientCount = room.id == selectedRoomID ? 1 : 0
-            return (room.memberCount ?? 0) - currentClientCount > 0
-        }
-    }
-
     static func filteredRooms(
         from rooms: [Room],
         query: String,
@@ -76,39 +58,6 @@ enum RoomSidebarPresentation {
                 || ($0.description?.localizedCaseInsensitiveContains(query) ?? false)
                 || matchingMessageRoomIDs.contains($0.id)
         }
-    }
-
-    static func visiblePinnedRooms(
-        from allRooms: [Room],
-        among visibleRooms: [Room],
-        pinnedRoomIDs: Set<String>,
-        limit: Int = 3
-    ) -> [Room] {
-        let pinnedIDs = Set(
-            pinnedRooms(
-                from: allRooms,
-                pinnedRoomIDs: pinnedRoomIDs,
-                limit: limit
-            ).map(\.id)
-        )
-        return visibleRooms.filter { pinnedIDs.contains($0.id) }
-    }
-
-    static func roomsForRecencyGroups(
-        from visibleRooms: [Room],
-        allRooms: [Room],
-        pinnedRoomIDs: Set<String>,
-        pinnedLimit: Int = 3
-    ) -> [Room] {
-        let displayedPinnedIDs = Set(
-            visiblePinnedRooms(
-                from: allRooms,
-                among: visibleRooms,
-                pinnedRoomIDs: pinnedRoomIDs,
-                limit: pinnedLimit
-            ).map(\.id)
-        )
-        return visibleRooms.filter { !displayedPinnedIDs.contains($0.id) }
     }
 
     static func groups(

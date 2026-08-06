@@ -884,7 +884,6 @@ final class RoomTransitionTests: XCTestCase {
         await store.select(room: room)
 
         XCTAssertEqual(store.rooms.first?.memberCount, 1)
-        XCTAssertEqual(RoomSidebarPresentation.activeRooms(from: store.rooms).map(\.id), ["room"])
     }
 
     @MainActor
@@ -917,7 +916,6 @@ final class RoomTransitionTests: XCTestCase {
 
         XCTAssertEqual(store.rooms.first(where: { $0.id == "A" })?.memberCount, 0)
         XCTAssertEqual(store.rooms.first(where: { $0.id == "B" })?.memberCount, 1)
-        XCTAssertEqual(RoomSidebarPresentation.activeRooms(from: store.rooms).map(\.id), ["B"])
     }
 
     @MainActor
@@ -1130,7 +1128,7 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
-    func testArchiveAndPinPreferencesPersistWithoutMutatingServer() async throws {
+    func testArchivePreferencesPersistWithoutMutatingServer() async throws {
         let suiteName = "RoomTransitionPreferencesTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
@@ -1140,17 +1138,13 @@ final class RoomTransitionTests: XCTestCase {
         let store = ChatStore(connection: connection, defaults: defaults)
         store.rooms = [room]
 
-        store.togglePinned(room)
-        XCTAssertTrue(store.isPinned(room))
         await store.archive(room)
 
         XCTAssertTrue(store.isArchived(room))
-        XCTAssertFalse(store.isPinned(room))
         XCTAssertTrue(connection.operations.isEmpty)
 
         let reloaded = ChatStore(connection: connection, defaults: defaults)
         XCTAssertTrue(reloaded.isArchived(room))
-        XCTAssertFalse(reloaded.isPinned(room))
     }
 
     @MainActor
