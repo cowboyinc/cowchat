@@ -159,6 +159,8 @@ final class RoomSidebarPresentationTests: XCTestCase {
         XCTAssertNil(updated["stale"])
         XCTAssertNil(updated["mixed"]?["ghost"])
         XCTAssertNotNil(updated["mixed"]?["fresh"])
+        // The unrelated transition must still apply after the prune pass.
+        XCTAssertNotNil(updated["other"]?["claude"])
     }
 
     func testUpdatedThinkingByAgentPrunesRoomWhenLastAgentClears() throws {
