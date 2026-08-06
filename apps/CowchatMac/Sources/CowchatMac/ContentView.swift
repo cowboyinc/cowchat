@@ -225,6 +225,16 @@ private struct SidebarView: View {
             sidebarFooter
         }
         .padding(.top, 12)
+        .onAppear {
+            // The pinned search field is the window's first focusable view, so
+            // AppKit hands it first-responder at launch and stray keystrokes
+            // land in the filter. Start unfocused; focus is click/tab-driven.
+            DispatchQueue.main.async {
+                if isSearchFocused == false {
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                }
+            }
+        }
     }
 
     private var baseRooms: [Room] {
