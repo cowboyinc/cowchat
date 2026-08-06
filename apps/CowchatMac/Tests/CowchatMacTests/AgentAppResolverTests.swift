@@ -9,6 +9,7 @@ final class AgentAppResolverTests: XCTestCase {
         )
         XCTAssertEqual(AgentAppResolver.resolvedApp(forAgentNamed: "codex-cli")?.bundleID, "com.openai.codex")
         XCTAssertEqual(AgentAppResolver.resolvedApp(forAgentNamed: "ChatGPT agent")?.bundleID, "com.openai.chat")
+        XCTAssertEqual(AgentAppResolver.resolvedApp(forAgentNamed: "openai-helper")?.bundleID, "com.openai.chat")
         XCTAssertEqual(AgentAppResolver.resolvedApp(forAgentNamed: "CLAUDE")?.displayName, "Claude")
     }
 

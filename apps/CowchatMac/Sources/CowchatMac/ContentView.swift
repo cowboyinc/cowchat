@@ -620,7 +620,6 @@ private struct RoomRow: View {
                     if isWorking {
                         GallopIconView(icon: .thinking, fallbackSystemName: "arrow.triangle.2.circlepath", size: 12)
                             .foregroundStyle(SemanticColor.buttonPrimaryDefault)
-                            .accessibilityLabel("Agents working")
                     }
                     Text(
                         (room.lastActivity ?? room.createdAt)
@@ -1353,7 +1352,12 @@ private struct MessageFeedRow: View {
               AgentAppResolver.applicationURL(for: app) != nil else { return nil }
         return app
     }
-    private var openInLabel: String? { resolvedApp.map { "Open in \($0.displayName)" } }
+    private var openInLabel: String? {
+        // Keep the specific agent name in the announcement — several
+        // claude-* agents can share a room, and the overlay replaces the
+        // visual name/timestamp pair for VoiceOver users.
+        resolvedApp.map { "\(message.agentName), open in \($0.displayName)" }
+    }
     private func openInApp() { if let resolvedApp { AgentAppResolver.open(resolvedApp) } }
 }
 

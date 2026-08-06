@@ -143,6 +143,24 @@ final class RoomSidebarPresentationTests: XCTestCase {
         XCTAssertNotNil(updated["design"]?["codex"])
     }
 
+    func testUpdatedThinkingByAgentPrunesLongExpiredEntries() throws {
+        let now = Date()
+        let existing: [String: [String: Date]] = [
+            "stale": ["ghost": now.addingTimeInterval(-700)],
+            "mixed": [
+                "ghost": now.addingTimeInterval(-700),
+                "fresh": now.addingTimeInterval(-10),
+            ],
+        ]
+        let message = try makeMessage(roomID: "other", agentID: "claude", isThinking: true)
+
+        let updated = RoomSidebarPresentation.updatedThinkingByAgent(existing, message: message, now: now)
+
+        XCTAssertNil(updated["stale"])
+        XCTAssertNil(updated["mixed"]?["ghost"])
+        XCTAssertNotNil(updated["mixed"]?["fresh"])
+    }
+
     func testUpdatedThinkingByAgentPrunesRoomWhenLastAgentClears() throws {
         let now = Date()
         let existing: [String: [String: Date]] = [

@@ -1273,8 +1273,13 @@ final class ChatStore: ObservableObject {
     private func markSelectedRoomRead() {
         guard let selectedRoomID,
               let room = rooms.first(where: { $0.id == selectedRoomID }) else { return }
+        let before = readState.entries[selectedRoomID]
         readState.markRead(roomID: selectedRoomID, activityDate: room.activityDate)
-        localPreferences.saveRoomReadState(readState)
+        // Persist only on real change — this runs on every refresh tick while
+        // a room stays selected.
+        if readState.entries[selectedRoomID] != before {
+            localPreferences.saveRoomReadState(readState)
+        }
     }
 
     private func reconcileLocalRoomPreferences() {
@@ -1424,6 +1429,10 @@ final class ChatStore: ObservableObject {
         return try JSONDecoder().decode(type, from: data)
     }
 
+    /// Lobby-first ordering for the dashboard grid and fallback selection.
+    /// Deliberately NOT shared with RoomSidebarPresentation.sortedByRecency:
+    /// the sidebar excludes Lobby (it lives in its own nav row) and sorts by
+    /// parsed recency alone.
     private func roomSort(_ lhs: Room, _ rhs: Room) -> Bool {
         guard lhs.id != rhs.id else { return false }
         let lhsIsLobby = lhs.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame

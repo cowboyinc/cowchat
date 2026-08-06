@@ -87,6 +87,17 @@ enum RoomSidebarPresentation {
         now: Date
     ) -> [String: [String: Date]] {
         var updated = current
+        // Opportunistic prune: entries far past the working window would
+        // otherwise linger forever (an agent that pulses once and vanishes),
+        // pinning the sidebar's fast refresh cadence indefinitely.
+        for (roomID, agents) in updated {
+            let live = agents.filter { now.timeIntervalSince($0.value) < 600 }
+            if live.isEmpty {
+                updated.removeValue(forKey: roomID)
+            } else if live.count != agents.count {
+                updated[roomID] = live
+            }
+        }
         if message.isThinking {
             updated[message.roomID, default: [:]][message.agentID] = message.timestamp.cowchatDate ?? now
         } else {
