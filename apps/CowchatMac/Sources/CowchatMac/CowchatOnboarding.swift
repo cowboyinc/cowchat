@@ -50,18 +50,14 @@ struct CowchatOnboardingView: View {
 
                 promptCard
 
-                Button(hasCopiedPrompt ? "Continue" : "Skip for now") {
+                Button {
                     onComplete()
+                } label: {
+                    Text(hasCopiedPrompt ? "Continue" : "Skip for now")
+                        .gallopText(.bodyMStrong)
                 }
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.plain)
-                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                .padding(.horizontal, 22)
-                .frame(height: 42)
-                .background(
-                    SemanticColor.buttonPrimaryDefault,
-                    in: Capsule()
-                )
+                .buttonStyle(CapsulePillButtonStyle(prominent: true))
                 .macAccessibleAction(
                     label: hasCopiedPrompt ? "Continue to Cowchat" : "Skip onboarding",
                     action: onComplete
@@ -118,14 +114,13 @@ struct CowchatOnboardingView: View {
                 .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button("Copy") {
+            Button {
                 isCopyExplanationPresented = true
+            } label: {
+                Text("Copy")
+                    .gallopText(.bodyMStrong)
             }
-            .buttonStyle(.plain)
-            .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-            .padding(.horizontal, 18)
-            .frame(height: 38)
-            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+            .buttonStyle(CapsulePillButtonStyle(prominent: true))
             .macAccessibleAction(label: "Copy collaboration prompt") {
                 isCopyExplanationPresented = true
             }
@@ -151,34 +146,30 @@ struct CowchatOnboardingView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 10) {
-                Button("Skip") {
+                Button {
                     isCopyExplanationPresented = false
                     onComplete()
+                } label: {
+                    Text("Skip")
+                        .gallopText(.bodyMStrong)
+                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.plain)
-                .gallopText(.bodyMStrong, color: SemanticColor.buttonSecondaryTextDefault)
-                .frame(maxWidth: .infinity)
-                .frame(height: 40)
-                .background(
-                    SemanticColor.buttonSecondaryDefault,
-                    in: Capsule()
-                )
+                .buttonStyle(CapsulePillButtonStyle(prominent: false))
                 .macAccessibleAction(label: "Skip copying and continue") {
                     isCopyExplanationPresented = false
                     onComplete()
                 }
 
-                Button("Copy") { copyPrompt() }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.plain)
-                    .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 40)
-                    .background(
-                        SemanticColor.buttonPrimaryDefault,
-                        in: Capsule()
-                    )
-                    .macAccessibleAction(label: "Copy prompt to clipboard", action: copyPrompt)
+                Button {
+                    copyPrompt()
+                } label: {
+                    Text("Copy")
+                        .gallopText(.bodyMStrong)
+                        .frame(maxWidth: .infinity)
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(CapsulePillButtonStyle(prominent: true))
+                .macAccessibleAction(label: "Copy prompt to clipboard", action: copyPrompt)
             }
         }
         .padding(22)
@@ -193,5 +184,40 @@ struct CowchatOnboardingView: View {
         pasteboard.setString(CowchatOnboarding.collaborationPrompt, forType: .string)
         hasCopiedPrompt = true
         isCopyExplanationPresented = false
+    }
+}
+
+/// Capsule ramp copied from the cowboy `AuthPillButtonStyle` shape (12pt
+/// vertical / 20pt horizontal padding, `prominent` selects the primary vs.
+/// secondary token family). Deliberately trimmed to default/pressed/disabled
+/// — the reference style's hover and focus-ring states need per-callsite
+/// `@State`/`@FocusState` wiring at every one of onboarding's four call
+/// sites; simplification authorized for Task 14 (disclosed in the report).
+private struct CapsulePillButtonStyle: ButtonStyle {
+    let prominent: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.vertical, 12)
+            .padding(.horizontal, 20)
+            .foregroundStyle(labelColor(isPressed: configuration.isPressed))
+            .background(fillColor(isPressed: configuration.isPressed), in: Capsule())
+            .contentShape(Capsule())
+            .opacity(isEnabled ? 1 : 0.5)
+    }
+
+    private func fillColor(isPressed: Bool) -> Color {
+        if prominent {
+            return isPressed ? SemanticColor.buttonPrimaryPressed : SemanticColor.buttonPrimaryDefault
+        }
+        return isPressed ? SemanticColor.buttonSecondaryPressed : SemanticColor.buttonSecondaryDefault
+    }
+
+    private func labelColor(isPressed: Bool) -> Color {
+        if prominent {
+            return isPressed ? SemanticColor.buttonPrimaryTextPressed : SemanticColor.buttonPrimaryTextDefault
+        }
+        return isPressed ? SemanticColor.buttonSecondaryTextPressed : SemanticColor.buttonSecondaryTextDefault
     }
 }

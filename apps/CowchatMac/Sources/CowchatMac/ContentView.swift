@@ -86,7 +86,7 @@ struct ContentView: View {
                     withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
                 }
             }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(placement: .navigation) {
                 Button {
                     store.presentCreateRoom()
                 } label: {
@@ -149,24 +149,22 @@ private struct SidebarView: View {
     @EnvironmentObject private var store: ChatStore
     @Binding var isSidebarVisible: Bool
     @Binding var isSettingsPresented: Bool
-    @State private var isSearchVisible = false
     @State private var isArchiveExpanded = false
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
-            if isSearchVisible {
-                searchField
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
+            searchField
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
 
             TimelineView(.periodic(from: .now, by: store.lastThinkingAt.isEmpty ? 60 : 10)) { timeline in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        if baseRooms.isEmpty && archivedRooms(at: timeline.date).isEmpty {
-                            emptyRoomsState
+                        if baseRooms.isEmpty {
+                            if isSearchActive {
+                                emptyRoomsState
+                            }
                         } else {
                             VStack(spacing: 0) {
                                 ForEach(RoomSidebarPresentation.sortedByRecency(baseRooms)) { room in
@@ -206,9 +204,6 @@ private struct SidebarView: View {
 
             sidebarFooter
         }
-        .onAppear {
-            if !store.searchText.isEmpty { isSearchVisible = true }
-        }
         .padding(.top, 12)
         .background(SemanticColor.surface500)
     }
@@ -221,6 +216,13 @@ private struct SidebarView: View {
         )
     }
 
+    /// Item D (quiet empty state): the sidebar only shows an explicit empty
+    /// message while a search is actually in flight or has text typed. A
+    /// genuinely empty room list (no search) renders nothing above Archive.
+    private var isSearchActive: Bool {
+        store.isSearchingMessages || !store.searchText.isEmpty
+    }
+
     private func archivedRooms(at now: Date) -> [Room] {
         RoomSidebarPresentation.filteredRooms(
             from: store.archivedRooms,
@@ -231,8 +233,7 @@ private struct SidebarView: View {
 
     private var searchField: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 13, weight: .medium))
+            GallopIconView(icon: .search, fallbackSystemName: "magnifyingglass", size: 13)
                 .foregroundStyle(SemanticColor.iconTertiary)
             TextField("Search rooms or messages", text: $store.searchText)
                 .textFieldStyle(.plain)
@@ -241,8 +242,7 @@ private struct SidebarView: View {
                 .accessibilityLabel("Search rooms or messages")
             if !store.searchText.isEmpty {
                 Button { store.searchText = "" } label: {
-                    Label("Clear room search", systemImage: "xmark.circle.fill")
-                        .labelStyle(.iconOnly)
+                    GallopIconView(icon: .dismiss, fallbackSystemName: "xmark.circle.fill", size: 13)
                         .foregroundStyle(SemanticColor.iconSubtle)
                 }
                 .buttonStyle(.plain)
@@ -325,14 +325,16 @@ private struct SidebarView: View {
         }
     }
 
+    /// Only ever shown while `isSearchActive`, so the branch below always has
+    /// search text (or an in-flight search) to react to — never the bare
+    /// "no rooms at all" case, which item D renders as nothing instead.
     private var emptyRoomsState: some View {
         VStack(spacing: 8) {
             if store.isSearchingMessages {
                 ProgressView()
                     .controlSize(.small)
             } else {
-                Image(systemName: store.searchText.isEmpty ? "person.2.slash" : "magnifyingglass")
-                    .font(.system(size: 20, weight: .medium))
+                GallopIconView(icon: .search, fallbackSystemName: "magnifyingglass", size: 20)
                     .foregroundStyle(SemanticColor.iconTertiary)
             }
             Text(emptyRoomsTitle)
@@ -349,9 +351,7 @@ private struct SidebarView: View {
     }
 
     private var emptyRoomsTitle: String {
-        if store.isSearchingMessages { return "Searching messages…" }
-        if !store.searchText.isEmpty { return "No rooms or messages found" }
-        return "No rooms available"
+        store.isSearchingMessages ? "Searching messages…" : "No rooms or messages found"
     }
 
     private var isArchiveVisible: Bool {
@@ -412,23 +412,6 @@ private struct SidebarView: View {
                     action: store.reconnect
                 )
             }
-            CircleIconButton(
-                icon: .search,
-                fallbackSystemName: "magnifyingglass",
-                help: "Search rooms",
-                isActive: isSearchVisible,
-                action: {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        isSearchVisible.toggle()
-                        if isSearchVisible {
-                            DispatchQueue.main.async { isSearchFocused = true }
-                        } else {
-                            isSearchFocused = false
-                            store.searchText = ""
-                        }
-                    }
-                }
-            )
             CircleIconButton(
                 icon: .settings,
                 fallbackSystemName: "gearshape",
@@ -524,8 +507,7 @@ private struct RoomRow: View {
                         .gallopText(isUnread ? .bodySStrong : .bodyS, color: SemanticColor.textPrimary)
                         .lineLimit(1)
                     if room.encrypted {
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 9, weight: .semibold))
+                        GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
                             .foregroundStyle(SemanticColor.textPrimary)
                     }
                     Spacer(minLength: 6)
@@ -626,15 +608,7 @@ private struct LobbyDashboardView: View {
                                 .gallopText(.h4, color: SemanticColor.textPrimary)
                         }
                         .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
-                        .padding(16)
-                        .background(
-                            SemanticColor.surface600,
-                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(SemanticColor.borderDefault, lineWidth: 1)
-                        }
+                        .gallopCard()
                     }
                     .buttonStyle(.plain)
                     .macAccessibleAction(label: "Create room") {
@@ -668,8 +642,7 @@ private struct DashboardRoomCard: View {
                     HStack {
                         RoomAvatar(name: room.name, size: 38, accented: false)
                         if room.encrypted {
-                            Image(systemName: "lock.fill")
-                                .font(.system(size: 10, weight: .semibold))
+                            GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
                                 .foregroundStyle(SemanticColor.iconTertiary)
                         }
                         Spacer()
@@ -693,15 +666,7 @@ private struct DashboardRoomCard: View {
                         .lineLimit(2)
                 }
                 .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
-                .padding(16)
-                .background(
-                    SemanticColor.surface600,
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
-                }
+                .gallopCard()
             }
             .buttonStyle(.plain)
             .macAccessibleAction(label: "Open \(room.name)") {
@@ -850,9 +815,7 @@ private struct RoomReadyNotice: View {
             Button {
                 store.roomReadyNotice = nil
             } label: {
-                Label("Dismiss", systemImage: "xmark")
-                    .labelStyle(.iconOnly)
-                    .font(.system(size: 11, weight: .semibold))
+                GallopIconView(icon: .dismiss, fallbackSystemName: "xmark", size: 11)
                     .foregroundStyle(SemanticColor.iconTertiary)
             }
             .buttonStyle(.plain)
@@ -861,15 +824,23 @@ private struct RoomReadyNotice: View {
             }
         }
         .padding(14)
-        .background(
-            SemanticColor.surface600,
-            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-        )
-        .overlay {
+        .background {
+            // Cowboy AppStatusBar glass recipe, kept at this notice's own
+            // rounded-rectangle shape (it isn't a capsule) per the controller
+            // amendment to Task 14 Step 2.
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(SemanticColor.borderDefault, lineWidth: 1)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(SemanticColor.surfaceGlass500)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(SemanticColor.surfaceGlassBorderHighlight, lineWidth: 1)
+                }
         }
-        .shadow(color: SemanticColor.surfaceGlassBorderShadow, radius: 18, y: 8)
+        .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+        .shadow(color: .black.opacity(0.04), radius: 0, y: 0.5)
     }
 }
 
@@ -960,15 +931,13 @@ private struct ChatRoomView: View {
                         .macAccessibleAction(label: "Open parent room \(parentRoom.name)") {
                             Task { await store.select(room: parentRoom) }
                         }
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 8, weight: .bold))
+                        GallopIconView(icon: .chevronRightExtraSmall, fallbackSystemName: "chevron.right", size: 10)
                             .foregroundStyle(SemanticColor.iconSubtle)
                     }
                     Text(room.name)
                         .gallopText(.h4, color: SemanticColor.textPrimary)
                     if room.encrypted {
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 10, weight: .semibold))
+                        GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
                             .foregroundStyle(SemanticColor.iconTertiary)
                     }
                 }
@@ -1129,9 +1098,13 @@ private struct ChatRoomView: View {
     private var expandedComposer: some View {
         VStack(spacing: 0) {
             if room.encrypted {
-                Label("Encrypted rooms are read-only in the macOS app.", systemImage: "lock.fill")
-                    .gallopText(.caption, color: SemanticColor.textError)
-                    .padding(.bottom, 8)
+                Label {
+                    Text("Encrypted rooms are read-only in the macOS app.")
+                } icon: {
+                    GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
+                }
+                .gallopText(.caption, color: SemanticColor.textError)
+                .padding(.bottom, 8)
             } else if !store.connectionStatus.isConnected {
                 Label("Offline — reconnect before sending.", systemImage: "wifi.slash")
                     .gallopText(.caption, color: SemanticColor.textTertiary)
@@ -1508,7 +1481,6 @@ private struct CircleIconButton: View {
     let icon: GallopIcon?
     let fallbackSystemName: String
     let help: String
-    var isActive = false
     var isEnabled = true
     let action: () -> Void
     @State private var isHovering = false
@@ -1517,14 +1489,12 @@ private struct CircleIconButton: View {
         icon: GallopIcon?,
         fallbackSystemName: String,
         help: String,
-        isActive: Bool = false,
         isEnabled: Bool = true,
         action: @escaping () -> Void
     ) {
         self.icon = icon
         self.fallbackSystemName = fallbackSystemName
         self.help = help
-        self.isActive = isActive
         self.isEnabled = isEnabled
         self.action = action
     }
@@ -1533,7 +1503,6 @@ private struct CircleIconButton: View {
     init(
         systemName: String,
         help: String,
-        isActive: Bool = false,
         isEnabled: Bool = true,
         action: @escaping () -> Void
     ) {
@@ -1541,7 +1510,6 @@ private struct CircleIconButton: View {
             icon: nil,
             fallbackSystemName: systemName,
             help: help,
-            isActive: isActive,
             isEnabled: isEnabled,
             action: action
         )
@@ -1551,11 +1519,9 @@ private struct CircleIconButton: View {
         Button(action: action) {
             iconView
                 .foregroundStyle(
-                    !isEnabled
-                        ? SemanticColor.iconSubtle
-                        : isActive
-                        ? SemanticColor.surfaceGlassOnTextDefault
-                        : SemanticColor.buttonSecondaryIconDefault
+                    isEnabled
+                        ? SemanticColor.buttonSecondaryIconDefault
+                        : SemanticColor.iconSubtle
                 )
                 .frame(width: 32, height: 32)
                 .background(Circle().fill(backgroundFill))
@@ -1570,12 +1536,8 @@ private struct CircleIconButton: View {
         .macAccessibleAction(label: help, isEnabled: isEnabled, action: action)
     }
 
-    /// Active wins over hover — the cowboy app's own dictation-button pattern
-    /// layers a persistent pressed fill under the transient ghost-hover one.
     private var backgroundFill: Color {
-        if isActive { return SemanticColor.buttonGhostPressed }
-        if isHovering { return SemanticColor.buttonGhostHover }
-        return .clear
+        isHovering ? SemanticColor.buttonGhostHover : .clear
     }
 
     @ViewBuilder
@@ -1599,12 +1561,6 @@ private struct EmptyChatView: View {
             HStack {
                 Text("Cowchat")
                     .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-                Spacer()
-                CircleIconButton(
-                    systemName: "square.and.pencil",
-                    help: "Create room",
-                    action: { store.presentCreateRoom() }
-                )
             }
             .padding(.leading, 14)
             .padding(.trailing, 14)
@@ -1850,8 +1806,12 @@ private struct SettingsView: View {
                         Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
                     }
                 HStack {
-                    Label("Stored only in this Mac's Keychain", systemImage: "lock.fill")
-                        .gallopText(.caption, color: SemanticColor.textTertiary)
+                    Label {
+                        Text("Stored only in this Mac's Keychain")
+                    } icon: {
+                        GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
+                    }
+                    .gallopText(.caption, color: SemanticColor.textTertiary)
                     Spacer()
                     Button("Save and connect", action: saveCloudConfiguration)
                         .buttonStyle(.plain)
@@ -2044,7 +2004,7 @@ private struct RenameRoomView: View {
                         .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 }
                 Spacer()
-                CircleIconButton(systemName: "xmark", help: "Close", action: cancel)
+                CircleIconButton(icon: .dismiss, fallbackSystemName: "xmark", help: "Close", action: cancel)
             }
 
             TextField("Room name", text: $name)
@@ -2079,12 +2039,17 @@ private struct RenameRoomView: View {
                 Button(isRenaming ? "Renaming…" : "Rename", action: renameRoom)
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.plain)
-                    .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                    .gallopText(
+                        .bodyMStrong,
+                        color: canRename ? SemanticColor.buttonPrimaryTextDefault : SemanticColor.textDisabled
+                    )
                     .padding(.horizontal, 18)
                     .frame(height: 38)
-                    .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                    .background(
+                        canRename ? SemanticColor.buttonPrimaryDefault : SemanticColor.buttonSecondaryDefault,
+                        in: Capsule()
+                    )
                     .disabled(!canRename)
-                    .opacity(canRename ? 1 : 0.45)
                     .macAccessibleAction(
                         label: "Rename room",
                         isEnabled: canRename,
@@ -2166,7 +2131,8 @@ private struct CreateRoomView: View {
                 }
                 Spacer()
                 CircleIconButton(
-                    systemName: "xmark",
+                    icon: .dismiss,
+                    fallbackSystemName: "xmark",
                     help: "Close",
                     action: cancel
                 )
@@ -2182,10 +2148,27 @@ private struct CreateRoomView: View {
                 }
                 styledField("Description (optional)", text: $description)
 
-                Toggle("Temporary room", isOn: $ephemeral)
-                    .gallopText(.bodyM, color: SemanticColor.textSecondary)
-                Toggle("Public room", isOn: $isPublic)
-                    .gallopText(.bodyM, color: SemanticColor.textSecondary)
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Temporary room", isOn: $ephemeral)
+                            .toggleStyle(.checkbox)
+                            .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
+                        Text("Lives only while agents are connected — the room and its messages vanish when the last agent leaves.")
+                            .gallopText(.caption, color: SemanticColor.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 20)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Public room", isOn: $isPublic)
+                            .toggleStyle(.checkbox)
+                            .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
+                        Text("Discoverable and joinable by any agent on this server, even with a different API key. Unchecked, only your API key can find it.")
+                            .gallopText(.caption, color: SemanticColor.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 20)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Spacer()
@@ -2206,12 +2189,17 @@ private struct CreateRoomView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.plain)
-                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                .gallopText(
+                    .bodyMStrong,
+                    color: canCreate ? SemanticColor.buttonPrimaryTextDefault : SemanticColor.textDisabled
+                )
                 .padding(.horizontal, 18)
                 .frame(height: 38)
-                .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                .background(
+                    canCreate ? SemanticColor.buttonPrimaryDefault : SemanticColor.buttonSecondaryDefault,
+                    in: Capsule()
+                )
                 .disabled(!canCreate)
-                .opacity(canCreate ? 1 : 0.45)
                 .macAccessibleAction(
                     label: "Create room",
                     isEnabled: canCreate,
@@ -2220,7 +2208,11 @@ private struct CreateRoomView: View {
             }
         }
         .padding(26)
-        .frame(width: 480, height: 390)
+        // Height grew from 390 with item E's wrapping-caption checkbox rows
+        // (two-line-plus captions replacing two single-line toggles) —
+        // judgment call pending the controller's own visual pass (skipped
+        // here per Task 14's carried context).
+        .frame(width: 480, height: 480)
         .background(SemanticColor.surface600)
     }
 
@@ -2256,7 +2248,7 @@ private struct CreateRoomView: View {
 
     private var createButtonTitle: String {
         if isCreating { return "Creating…" }
-        return store.connectionStatus.isConnected ? "Create" : "Connecting…"
+        return store.connectionStatus.isConnected ? "Create Room" : "Connecting…"
     }
 
     private func createRoom() {

@@ -143,6 +143,7 @@ struct CowchatMacApp: App {
             }
         }
         .defaultSize(width: 1080, height: 740)
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(after: .newItem) {
                 Button("New Room") { store.presentCreateRoom() }
