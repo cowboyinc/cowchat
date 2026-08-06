@@ -971,6 +971,16 @@ final class ChatStore: ObservableObject {
             }
         case "presence_update":
             updatePresence(from: payload)
+        case "thinking":
+            // Live thinking pulses arrive as this dedicated event, not
+            // message_received, and are excluded from the visible message
+            // feed — so track the working signal only; never bump room
+            // activity for content the user can't see.
+            if let message = try? decode(ChatMessage.self, payload) {
+                lastThinkingAt = RoomSidebarPresentation.updatedThinkingByAgent(
+                    lastThinkingAt, message: message, now: Date()
+                )
+            }
         default:
             break
         }
