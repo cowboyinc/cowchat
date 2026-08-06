@@ -165,9 +165,20 @@ private struct SidebarView: View {
     @Binding var isSettingsPresented: Bool
     @State private var isArchiveExpanded = false
     @FocusState private var isSearchFocused: Bool
+    @State private var isLobbyHovering = false
+
+    private var lobbyRoom: Room? {
+        store.rooms.first { $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
+            if let lobby = lobbyRoom {
+                lobbyNavRow(lobby)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+            }
+
             searchField
                 .padding(.horizontal, 12)
                 .padding(.bottom, 12)
@@ -239,7 +250,9 @@ private struct SidebarView: View {
 
     private var baseRooms: [Room] {
         RoomSidebarPresentation.filteredRooms(
-            from: store.unarchivedRooms,
+            from: store.unarchivedRooms.filter {
+                $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
+            },
             query: store.searchText,
             matchingMessageRoomIDs: store.messageSearchRoomIDs
         )
@@ -258,6 +271,43 @@ private struct SidebarView: View {
             query: store.searchText,
             matchingMessageRoomIDs: store.messageSearchRoomIDs
         )
+    }
+
+    /// Dash-style nav destination: Lobby is Home, above the conversations
+    /// table, not a row inside it (Patrick, 2026-08-06).
+    private func lobbyNavRow(_ lobby: Room) -> some View {
+        let isSelected = store.selectedRoomID == lobby.id
+        return Button {
+            Task { await store.select(room: lobby) }
+        } label: {
+            HStack(spacing: 10) {
+                GallopIconView(icon: .sunrise, fallbackSystemName: "sunrise", size: 18)
+                    .foregroundStyle(
+                        isSelected
+                            ? SemanticColor.surfaceGlassOnIconDefault
+                            : SemanticColor.iconSecondary
+                    )
+                Text("Lobby")
+                    .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 38)
+            .background(
+                SidebarRowBackground(
+                    state: .init(isSelected: isSelected, isHovering: isLobbyHovering)
+                )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isLobbyHovering = $0 }
+        .macAccessibleAction(
+            label: "Open Lobby",
+            value: isSelected ? "selected" : nil
+        ) {
+            Task { await store.select(room: lobby) }
+        }
     }
 
     private var searchField: some View {

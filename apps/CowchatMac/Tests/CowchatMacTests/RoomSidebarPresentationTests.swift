@@ -2,12 +2,13 @@ import XCTest
 @testable import CowchatMac
 
 final class RoomSidebarPresentationTests: XCTestCase {
-    func testSortedByRecencyKeepsLobbyFirstThenRecency() {
+    func testSortedByRecencyOrdersByActivityDescending() {
+        // Lobby gets no special treatment — it lives in its own nav row now.
         let lobby = makeRoom(name: "Lobby", lastActivity: "2026-08-01T00:00:00Z")
         let older = makeRoom(name: "alpha", lastActivity: "2026-08-03T00:00:00Z")
         let newer = makeRoom(name: "zulu", lastActivity: "2026-08-04T00:00:00Z")
         let sorted = RoomSidebarPresentation.sortedByRecency([older, lobby, newer])
-        XCTAssertEqual(sorted.map(\.name), ["Lobby", "zulu", "alpha"])
+        XCTAssertEqual(sorted.map(\.name), ["zulu", "alpha", "Lobby"])
     }
 
     func testSortedByRecencyTiebreaksOnName() {

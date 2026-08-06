@@ -64,6 +64,8 @@ public enum GallopIcon: String, CaseIterable, Sendable {
     case send
     case settings
     case sidebar
+    /// Dash Overview's destination glyph — used for the Lobby home row.
+    case sunrise
     /// Dash Chat's live-task indicator from Figma node `1762:71500`.
     case thinking
     case trash

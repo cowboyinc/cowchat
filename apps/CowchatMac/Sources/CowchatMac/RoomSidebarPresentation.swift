@@ -55,13 +55,10 @@ enum RoomSidebarPresentation {
         }
     }
 
-    /// Flat iMessage-style ordering. Lobby stays first — the existing roomSort
-    /// invariant (ChatStore.roomSort): it is the home surface, not a "pin".
+    /// Flat iMessage-style ordering by recency. Lobby lives in its own nav
+    /// row above the table (Patrick, 2026-08-06), so no special-casing here.
     static func sortedByRecency(_ rooms: [Room]) -> [Room] {
         rooms.sorted { lhs, rhs in
-            let lhsIsLobby = lhs.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame
-            let rhsIsLobby = rhs.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame
-            if lhsIsLobby != rhsIsLobby { return lhsIsLobby }
             let l = lhs.activityDate ?? .distantPast
             let r = rhs.activityDate ?? .distantPast
             if l != r { return l > r }
