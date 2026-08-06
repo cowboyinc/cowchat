@@ -19,7 +19,7 @@ struct ComposerTextField: NSViewRepresentable {
         field.isBezeled = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = SystemFontProvider().nativeFont(for: .bodyL)
+        field.font = SeasonFontProvider().nativeFont(for: .bodyL)
         field.textColor = SemanticColor.AppKitColor.textPrimary
         field.isEditable = true
         field.isSelectable = true
@@ -52,7 +52,7 @@ struct ComposerTextField: NSViewRepresentable {
             string: placeholder,
             attributes: [
                 .foregroundColor: SemanticColor.AppKitColor.textTertiary,
-                .font: SystemFontProvider().nativeFont(for: .bodyL),
+                .font: SeasonFontProvider().nativeFont(for: .bodyL),
             ]
         )
         field.textColor = SemanticColor.AppKitColor.textPrimary

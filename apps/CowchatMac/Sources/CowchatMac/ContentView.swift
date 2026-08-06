@@ -878,6 +878,7 @@ private struct ChatRoomView: View {
     let room: Room
     @Binding var isSidebarVisible: Bool
     @State private var isComposerExpanded = false
+    @State private var isFieldHovering = false
     @State private var isDestroyConfirmationPresented = false
     @State private var isDestroyingRoom = false
     @State private var isMessageListNearBottom = true
@@ -1079,8 +1080,7 @@ private struct ChatRoomView: View {
 
     private var quietRoom: some View {
         VStack(spacing: 10) {
-            Image(systemName: "bubble.left")
-                .font(.system(size: 24, weight: .medium))
+            GallopIconView(icon: .message, fallbackSystemName: "bubble.left", size: 24)
                 .foregroundStyle(SemanticColor.iconTertiary)
             Text("This room is quiet")
                 .gallopText(.h5, color: SemanticColor.textPrimary)
@@ -1108,9 +1108,7 @@ private struct ChatRoomView: View {
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = true }
             } label: {
-                Label("Write a message", systemImage: "pencil")
-                    .labelStyle(.iconOnly)
-                    .font(.system(size: 15, weight: .semibold))
+                GallopIconView(icon: .edit, fallbackSystemName: "pencil", size: 16)
                     .foregroundStyle(SemanticColor.buttonSecondaryIconDefault)
                     .frame(width: 42, height: 42)
                     .background(SemanticColor.buttonSecondaryDefault, in: Circle())
@@ -1142,7 +1140,8 @@ private struct ChatRoomView: View {
 
             HStack(spacing: 8) {
                 CircleIconButton(
-                    systemName: "plus",
+                    icon: .add,
+                    fallbackSystemName: "plus",
                     help: "Attachments are coming soon",
                     isEnabled: false,
                     action: {}
@@ -1155,24 +1154,28 @@ private struct ChatRoomView: View {
                     onSubmit: store.sendDraft
                 )
                 .frame(height: 22)
-                .padding(.horizontal, 13)
-                .frame(height: 42)
-                .background(SemanticColor.textfieldDefault, in: Capsule())
+                .padding(.horizontal, 16)
+                .frame(height: 44)
+                .background(
+                    isFieldHovering ? SemanticColor.textfieldHover : SemanticColor.textfieldDefault,
+                    in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+                )
                 .overlay {
-                    Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(isFieldHovering ? SemanticColor.borderHover : SemanticColor.borderDefault, lineWidth: 1)
                 }
+                .onHover { isFieldHovering = $0 }
 
                 Button { store.sendDraft() } label: {
-                    Label("Send message", systemImage: "paperplane.fill")
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 14, weight: .semibold))
+                    GallopIconView(icon: .send, fallbackSystemName: "paperplane.fill", size: 18)
                         .foregroundStyle(SemanticColor.buttonPrimaryIconDefault)
-                        .frame(width: 38, height: 38)
+                        .frame(width: 36, height: 36)
                         .background(SemanticColor.buttonPrimaryDefault, in: Circle())
+                        .overlay { Circle().stroke(Palette.nugget300, lineWidth: 1) }
                 }
                 .buttonStyle(.plain)
                 .disabled(!canSend)
-                .opacity(canSend ? 1 : 0.42)
+                .opacity(canSend ? 1 : 0.4)
                 .macAccessibleAction(
                     label: "Send message",
                     isEnabled: canSend,
@@ -1182,9 +1185,7 @@ private struct ChatRoomView: View {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
                 } label: {
-                    Label("Close composer", systemImage: "xmark")
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 12, weight: .semibold))
+                    GallopIconView(icon: .dismiss, fallbackSystemName: "xmark", size: 12)
                         .foregroundStyle(SemanticColor.iconTertiary)
                         .frame(width: 24, height: 38)
                 }
@@ -1198,10 +1199,7 @@ private struct ChatRoomView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
-        .background(SemanticColor.surface600)
-        .overlay(alignment: .top) {
-            Rectangle().fill(SemanticColor.borderDefault).frame(height: 1)
-        }
+        .background(SemanticColor.surface500)
     }
 
     private var canSend: Bool {
@@ -1222,24 +1220,30 @@ private struct MessageFeedRow: View {
             HStack(alignment: .bottom) {
                 Spacer(minLength: 120)
                 VStack(alignment: .leading, spacing: 7) {
-                    ExpandableMessageText(content: message.content)
+                    ExpandableMessageText(content: message.content, textColor: SemanticColor.textPrimary)
                     Text(relativeTimestamp)
                         .gallopText(.caption, color: SemanticColor.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 13)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
                     .background(
                         LinearGradient(
                             colors: [SemanticColor.surface300, SemanticColor.surface400],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
-                        in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        in: UnevenRoundedRectangle(
+                            topLeadingRadius: 24, bottomLeadingRadius: 24,
+                            bottomTrailingRadius: 8, topTrailingRadius: 24, style: .continuous
+                        )
                     )
                     .overlay {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .stroke(SemanticColor.borderDefault, lineWidth: 0.5)
+                        UnevenRoundedRectangle(
+                            topLeadingRadius: 24, bottomLeadingRadius: 24,
+                            bottomTrailingRadius: 8, topTrailingRadius: 24, style: .continuous
+                        )
+                        .stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                     }
                     .frame(maxWidth: 720, alignment: .trailing)
             }
@@ -1345,6 +1349,7 @@ private struct OpenInAppAccessibility: ViewModifier {
 
 private struct ExpandableMessageText: View {
     let content: String
+    var textColor: Color = SemanticColor.textSecondary
     @State private var isExpanded = false
 
     var body: some View {
@@ -1358,8 +1363,11 @@ private struct ExpandableMessageText: View {
                             .font(.system(size: 10, weight: .medium))
                         Text(isExpanded ? "Hide full response" : "Show full response")
                             .gallopText(.caption)
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
+                        GallopIconView(
+                            icon: isExpanded ? .chevronDownExtraSmall : .chevronRightExtraSmall,
+                            fallbackSystemName: isExpanded ? "chevron.down" : "chevron.right",
+                            size: 10
+                        )
                     }
                     .foregroundStyle(SemanticColor.textTertiary)
                 }
@@ -1377,7 +1385,7 @@ private struct ExpandableMessageText: View {
                 case .prose:
                     Text(markdown(segment.text))
                         .textSelection(.enabled)
-                        .gallopText(.bodyL, color: SemanticColor.textSecondary)
+                        .gallopText(.bodyL, color: textColor)
                         .fixedSize(horizontal: false, vertical: true)
                 case .code:
                     ScrollView(.horizontal) {

@@ -106,7 +106,10 @@ public struct SeasonFontProvider: GallopFontProvider {
         nativeFont(for: style).gallopNaturalLineHeight
     }
 
-    private func nativeFont(for style: GallopTextStyle) -> NSFont {
+    /// Internal, not private: `ComposerTextField` (AppKit `NSTextField`) needs
+    /// the native `NSFont` directly rather than a SwiftUI `Font`, matching
+    /// `SystemFontProvider.nativeFont(for:)`'s access level.
+    func nativeFont(for style: GallopTextStyle) -> NSFont {
         seasonFont(for: style) ?? fallback.nativeFont(for: style)
     }
 
