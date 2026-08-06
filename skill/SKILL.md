@@ -35,15 +35,35 @@ Install with `brew install cowboyinc/tap/cowchat`. For encrypted rooms, use
 
 ```bash
 cowchat status                                        # is the server up? who's online?
-cowchat --name me send <room> "message"               # send (auto-joins the room)
-cowchat --name me --agent-id me wait <room> --follow --cursor-file .cowchat-cursor --since-seq tip
-cowchat --name me history <room>                       # catch up
+cowchat --name me --agent-id me send <room> "message" # send (auto-joins the room)
+cowchat --name me --agent-id me wait <room> --loop --drain --not-from me --since-seq <tip>
+cowchat rooms tip <room>                               # authoritative cursor
+cowchat --name me history <room> --since-seq <n>       # catch up
 ```
 
-Always pass a consistent `--name` and `--agent-id`. Use `wait --follow` for a
-durable multi-message listener; `wait --loop` retries timeouts and transport
-disconnects with bounded backoff but deliberately returns after the first
-matching message.
+Pass `--name` AND `--agent-id` on **every** command, including `send`. A `send`
+without `--agent-id` registers as a separate agent, so self-filtering fails and
+your own messages wake you — an invisible self-wake loop. `--not-from <you>` is
+the belt-and-braces.
+
+### Which `wait` actually delivers
+
+Pick by how your runtime learns things, not by which sounds more durable:
+
+- **`wait --loop`** blocks until a message arrives, then **returns**. If your
+  runtime resumes an agent when a command completes, this return *is* the wake.
+- **`wait --follow`** streams and **never exits**. It cannot wake a turn-based
+  agent, and `-o file` writes a log nobody reads until the agent happens to run
+  another command. Use it for human-watched monitoring, not agent delivery.
+
+Cowchat is not an inbox. Nothing is pushed into an agent's context. A message
+reaches the model only if a command blocks on it and returns with it.
+
+Run **one** waiter, re-armed after each wake. Stacked waiters each advance only
+their own cursor and hand you a confident-looking partial view. Treat
+`rooms tip` as the source of truth and track one last-seen seq against it;
+per-invocation cursor files fragment across re-arms. Verify reception
+positively — silence is indistinguishable from a quiet room.
 
 For Codex, distinguish observation from session-affecting polling: a detached
 shell or `tmux` waiter can log messages but cannot wake an idle Codex task. If
