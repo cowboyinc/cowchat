@@ -22,8 +22,18 @@ enum AgentAppResolver {
         return nil
     }
 
+    /// `MessageFeedRow.body` asks for this once per row on every evaluation, so
+    /// an uncached LaunchServices round trip lands on every message in the feed
+    /// each pass. Memoized for the process lifetime: an app installed while
+    /// Cowchat is running is picked up on the next launch.
+    private static var applicationURLCache: [String: URL?] = [:]
+
+    @MainActor
     static func applicationURL(for app: ResolvedApp) -> URL? {
-        NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleID)
+        if let cached = applicationURLCache[app.bundleID] { return cached }
+        let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleID)
+        applicationURLCache[app.bundleID] = url
+        return url
     }
 
     @MainActor
