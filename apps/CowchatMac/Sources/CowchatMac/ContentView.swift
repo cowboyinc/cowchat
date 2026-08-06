@@ -166,9 +166,30 @@ private struct SidebarView: View {
                         if baseRooms.isEmpty && archivedRooms(at: timeline.date).isEmpty {
                             emptyRoomsState
                         } else {
-                            ForEach(visibleGroups(at: timeline.date), id: \.title) { group in
-                                roomGroup(group, now: timeline.date)
+                            VStack(spacing: 0) {
+                                ForEach(RoomSidebarPresentation.sortedByRecency(baseRooms)) { room in
+                                    Button {
+                                        Task { await store.select(room: room) }
+                                    } label: {
+                                        RoomRow(
+                                            room: room,
+                                            messagePreview: store.roomMessagePreviews[room.id],
+                                            isSelected: store.selectedRoomID == room.id,
+                                            now: timeline.date
+                                        )
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .contextMenu { roomContextMenu(for: room) }
+                                    .macAccessibleAction(
+                                        label: "Open \(room.name)",
+                                        value: store.selectedRoomID == room.id ? "selected" : nil
+                                    ) {
+                                        Task { await store.select(room: room) }
+                                    }
+                                }
                             }
+                            .padding(.bottom, 10)
                         }
 
                         archiveSection(at: timeline.date)
@@ -191,10 +212,6 @@ private struct SidebarView: View {
             query: store.searchText,
             matchingMessageRoomIDs: store.messageSearchRoomIDs
         )
-    }
-
-    private func visibleGroups(at now: Date) -> [RoomSidebarGroup] {
-        RoomSidebarPresentation.groups(from: baseRooms, now: now)
     }
 
     private func archivedRooms(at now: Date) -> [Room] {
@@ -231,38 +248,6 @@ private struct SidebarView: View {
         .overlay {
             Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
         }
-    }
-
-    private func roomGroup(_ group: RoomSidebarGroup, now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(group.title)
-                .gallopText(.caption, color: SemanticColor.textTertiary)
-                .padding(.horizontal, 8)
-                .padding(.top, 4)
-
-            ForEach(group.rooms) { room in
-                Button {
-                    Task { await store.select(room: room) }
-                } label: {
-                    RoomRow(
-                        room: room,
-                        messagePreview: store.roomMessagePreviews[room.id],
-                        isSelected: store.selectedRoomID == room.id,
-                        now: now
-                    )
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .contextMenu { roomContextMenu(for: room) }
-                .macAccessibleAction(
-                    label: "Open \(room.name)",
-                    value: store.selectedRoomID == room.id ? "selected" : nil
-                ) {
-                    Task { await store.select(room: room) }
-                }
-            }
-        }
-        .padding(.bottom, 10)
     }
 
     private func archiveSection(at now: Date) -> some View {
@@ -419,7 +404,8 @@ private struct SidebarView: View {
                 )
             }
             CircleIconButton(
-                systemName: "magnifyingglass",
+                icon: .search,
+                fallbackSystemName: "magnifyingglass",
                 help: "Search rooms",
                 isActive: isSearchVisible,
                 action: {
@@ -435,7 +421,8 @@ private struct SidebarView: View {
                 }
             )
             CircleIconButton(
-                systemName: "gearshape",
+                icon: .settings,
+                fallbackSystemName: "gearshape",
                 help: "Settings",
                 action: { isSettingsPresented = true }
             )
@@ -468,11 +455,39 @@ private struct SidebarView: View {
     }
 }
 
+enum SidebarRowState {
+    case normal, selected, hover
+    init(isSelected: Bool, isHovering: Bool) {
+        self = isSelected ? .selected : (isHovering ? .hover : .normal)
+    }
+}
+
+/// Cowboy SidebarRowPill recipe at cowchat's row geometry (radius 12 — the
+/// 100pt pill reads as a blob on two-line 54pt rows; divergence logged in spec).
+struct SidebarRowBackground: View {
+    let state: SidebarRowState
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 12, style: .continuous) }
+
+    var body: some View {
+        switch state {
+        case .normal:
+            shape.fill(Color.clear)
+        case .selected:
+            shape.fill(SemanticColor.surface400)
+        case .hover:
+            shape.fill(SemanticColor.surface600)
+                .overlay(shape.strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5))
+                .shadow(color: Color.black.opacity(0.04), radius: 1.5, x: 0, y: 1)
+        }
+    }
+}
+
 private struct RoomRow: View {
     let room: Room
     let messagePreview: String?
     let isSelected: Bool
     let now: Date
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -480,38 +495,30 @@ private struct RoomRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     Text(room.name)
-                        .gallopText(.bodySStrong)
+                        .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
                         .lineLimit(1)
                     if room.encrypted {
                         Image(systemName: "lock.fill")
                             .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(SemanticColor.textPrimary)
                     }
                     Spacer(minLength: 6)
                     Text(
                         (room.lastActivity ?? room.createdAt)
                             .cowchatRelativeTime(relativeTo: now)
                     )
-                        .gallopText(.dataLabel)
-                        .opacity(0.72)
+                        .gallopText(.dataLabel, color: SemanticColor.textTertiary)
                 }
 
                 Text(roomSummary)
-                    .gallopText(.caption)
+                    .gallopText(.caption, color: SemanticColor.textTertiary)
                     .lineLimit(1)
-                    .opacity(0.78)
             }
         }
-        .foregroundStyle(
-            isSelected
-                ? SemanticColor.buttonPrimaryTextDefault
-                : SemanticColor.textSecondary
-        )
         .padding(.horizontal, 8)
         .frame(height: 54)
-        .background(
-            isSelected ? SemanticColor.buttonPrimaryDefault : Color.clear,
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-        )
+        .background(SidebarRowBackground(state: .init(isSelected: isSelected, isHovering: isHovering)))
+        .onHover { isHovering = $0 }
     }
 
     private var roomSummary: String {
@@ -1433,17 +1440,51 @@ private struct RoomAvatar: View {
 }
 
 private struct CircleIconButton: View {
-    let systemName: String
+    let icon: GallopIcon?
+    let fallbackSystemName: String
     let help: String
     var isActive = false
     var isEnabled = true
     let action: () -> Void
+    @State private var isHovering = false
+
+    init(
+        icon: GallopIcon?,
+        fallbackSystemName: String,
+        help: String,
+        isActive: Bool = false,
+        isEnabled: Bool = true,
+        action: @escaping () -> Void
+    ) {
+        self.icon = icon
+        self.fallbackSystemName = fallbackSystemName
+        self.help = help
+        self.isActive = isActive
+        self.isEnabled = isEnabled
+        self.action = action
+    }
+
+    /// Pre-Gallop call sites keep compiling unchanged.
+    init(
+        systemName: String,
+        help: String,
+        isActive: Bool = false,
+        isEnabled: Bool = true,
+        action: @escaping () -> Void
+    ) {
+        self.init(
+            icon: nil,
+            fallbackSystemName: systemName,
+            help: help,
+            isActive: isActive,
+            isEnabled: isEnabled,
+            action: action
+        )
+    }
 
     var body: some View {
         Button(action: action) {
-            Label(help, systemImage: systemName)
-                .labelStyle(.iconOnly)
-                .font(.system(size: 13, weight: .semibold))
+            iconView
                 .foregroundStyle(
                     !isEnabled
                         ? SemanticColor.iconSubtle
@@ -1452,12 +1493,7 @@ private struct CircleIconButton: View {
                         : SemanticColor.buttonSecondaryIconDefault
                 )
                 .frame(width: 32, height: 32)
-                .background(
-                    isActive
-                        ? SemanticColor.surfaceGlassOnDefault
-                        : SemanticColor.buttonSecondaryDefault,
-                    in: Circle()
-                )
+                .background(Circle().fill(isHovering ? SemanticColor.buttonGhostHover : Color.clear))
                 .overlay {
                     Circle().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                 }
@@ -1465,7 +1501,19 @@ private struct CircleIconButton: View {
         .buttonStyle(.plain)
         .disabled(!isEnabled)
         .help(help)
+        .onHover { isHovering = $0 }
         .macAccessibleAction(label: help, isEnabled: isEnabled, action: action)
+    }
+
+    @ViewBuilder
+    private var iconView: some View {
+        if let icon {
+            GallopIconView(icon: icon, fallbackSystemName: fallbackSystemName, size: 15)
+        } else {
+            Label(help, systemImage: fallbackSystemName)
+                .labelStyle(.iconOnly)
+                .font(.system(size: 13, weight: .semibold))
+        }
     }
 }
 

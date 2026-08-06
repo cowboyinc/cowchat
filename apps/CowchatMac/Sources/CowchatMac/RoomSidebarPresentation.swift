@@ -1,10 +1,5 @@
 import Foundation
 
-struct RoomSidebarGroup: Equatable {
-    let title: String
-    let rooms: [Room]
-}
-
 enum LobbyPresentation {
     static func availableAgentCount(
         from members: [AgentPresence],
@@ -60,35 +55,18 @@ enum RoomSidebarPresentation {
         }
     }
 
-    static func groups(
-        from rooms: [Room],
-        now: Date = Date(),
-        calendar: Calendar = .current
-    ) -> [RoomSidebarGroup] {
-        var buckets: [String: [Room]] = [:]
-        for room in rooms {
-            let title = groupTitle(for: room.activityDate, now: now, calendar: calendar)
-            buckets[title, default: []].append(room)
+    /// Flat iMessage-style ordering. Lobby stays first — the existing roomSort
+    /// invariant (ChatStore.roomSort): it is the home surface, not a "pin".
+    static func sortedByRecency(_ rooms: [Room]) -> [Room] {
+        rooms.sorted { lhs, rhs in
+            let lhsIsLobby = lhs.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame
+            let rhsIsLobby = rhs.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame
+            if lhsIsLobby != rhsIsLobby { return lhsIsLobby }
+            let l = lhs.activityDate ?? .distantPast
+            let r = rhs.activityDate ?? .distantPast
+            if l != r { return l > r }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
-
-        let order = ["Today", "Yesterday", "This week", "Earlier"]
-        return order.compactMap { title in
-            guard let rooms = buckets[title], !rooms.isEmpty else { return nil }
-            return RoomSidebarGroup(title: title, rooms: rooms)
-        }
-    }
-
-    private static func groupTitle(for date: Date?, now: Date, calendar: Calendar) -> String {
-        guard let date else { return "Earlier" }
-        if calendar.isDate(date, inSameDayAs: now) { return "Today" }
-        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
-           calendar.isDate(date, inSameDayAs: yesterday) {
-            return "Yesterday"
-        }
-        if let weekAgo = calendar.date(byAdding: .day, value: -7, to: now), date >= weekAgo {
-            return "This week"
-        }
-        return "Earlier"
     }
 }
 

@@ -2,26 +2,23 @@ import XCTest
 @testable import CowchatMac
 
 final class RoomSidebarPresentationTests: XCTestCase {
-    func testGroupsRoomsByCalendarRecency() throws {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
-        let now = try XCTUnwrap("2026-08-04T17:00:00Z".cowchatDate)
-        let rooms = try [
-            room(id: "today", name: "Today", activity: "2026-08-04T12:00:00Z"),
-            room(id: "yesterday", name: "Yesterday", activity: "2026-08-03T12:00:00Z"),
-            room(id: "week", name: "Week", activity: "2026-07-31T12:00:00Z"),
-            room(id: "earlier", name: "Earlier", activity: "2026-07-01T12:00:00Z"),
-        ]
-
-        let groups = RoomSidebarPresentation.groups(from: rooms, now: now, calendar: calendar)
-
-        XCTAssertEqual(groups.map(\.title), ["Today", "Yesterday", "This week", "Earlier"])
-        XCTAssertEqual(groups.flatMap(\.rooms).map(\.id), ["today", "yesterday", "week", "earlier"])
+    func testSortedByRecencyKeepsLobbyFirstThenRecency() {
+        let lobby = makeRoom(name: "Lobby", lastActivity: "2026-08-01T00:00:00Z")
+        let older = makeRoom(name: "alpha", lastActivity: "2026-08-03T00:00:00Z")
+        let newer = makeRoom(name: "zulu", lastActivity: "2026-08-04T00:00:00Z")
+        let sorted = RoomSidebarPresentation.sortedByRecency([older, lobby, newer])
+        XCTAssertEqual(sorted.map(\.name), ["Lobby", "zulu", "alpha"])
     }
 
-    func testMessageMatchesCanSurfaceRoomWithoutNameMatch() throws {
-        let design = try room(id: "design", name: "Design")
-        let release = try room(id: "release", name: "Release")
+    func testSortedByRecencyTiebreaksOnName() {
+        let a = makeRoom(name: "beta", lastActivity: "2026-08-04T00:00:00Z")
+        let b = makeRoom(name: "Alpha", lastActivity: "2026-08-04T00:00:00Z")
+        XCTAssertEqual(RoomSidebarPresentation.sortedByRecency([a, b]).map(\.name), ["Alpha", "beta"])
+    }
+
+    func testMessageMatchesCanSurfaceRoomWithoutNameMatch() {
+        let design = makeRoom(id: "design", name: "Design")
+        let release = makeRoom(id: "release", name: "Release")
 
         XCTAssertEqual(
             RoomSidebarPresentation.filteredRooms(
@@ -87,24 +84,24 @@ final class RoomSidebarPresentationTests: XCTestCase {
         )
     }
 
-    private func room(
-        id: String,
+    private func makeRoom(
+        id: String? = nil,
         name: String,
-        activity: String = "2026-08-04T12:00:00Z",
+        lastActivity: String = "2026-08-04T12:00:00Z",
         memberCount: Int? = 1
-    ) throws -> Room {
-        var json: [String: Any] = [
-            "room_id": id,
-            "name": name,
-            "ephemeral": false,
-            "created_at": activity,
-            "last_activity": activity,
-            "visibility": "public",
-        ]
-        if let memberCount { json["member_count"] = memberCount }
-        return try JSONDecoder().decode(
-            Room.self,
-            from: JSONSerialization.data(withJSONObject: json)
+    ) -> Room {
+        Room(
+            roomID: id ?? name,
+            name: name,
+            description: nil,
+            parentID: nil,
+            ephemeral: false,
+            createdAt: lastActivity,
+            createdBy: nil,
+            visibility: "public",
+            lastActivity: lastActivity,
+            memberCount: memberCount,
+            encrypted: false
         )
     }
 }
