@@ -2,10 +2,12 @@ import Foundation
 
 struct RoomLocalPreferences {
     static let archivedRoomIDsKey = "CowchatMac.archivedRoomIDs"
-    static let pinnedRoomIDsKey = "CowchatMac.pinnedRoomIDs"
-    static let pinnedRoomsInitializedKey = "CowchatMac.pinnedRoomsInitialized"
+    // Older builds also wrote per-scope UserDefaults entries for a since-removed
+    // pin-state feature (key names dropped here); those entries are intentionally
+    // left orphaned, not migrated or cleared.
     static let pendingSetupRoomIDsKey = "CowchatMac.pendingSetupRoomIDs"
     static let pendingSetupScreenRoomIDsKey = "CowchatMac.pendingSetupScreenRoomIDs"
+    static let roomReadStateKey = "CowchatMac.roomReadState"
 
     private let defaults: UserDefaults
     private let scope: String?
@@ -19,14 +21,6 @@ struct RoomLocalPreferences {
         loadIDs(forKey: Self.archivedRoomIDsKey)
     }
 
-    var pinnedRoomIDs: Set<String> {
-        loadIDs(forKey: Self.pinnedRoomIDsKey)
-    }
-
-    var hasInitializedPinnedRooms: Bool {
-        defaults.bool(forKey: scopedKey(Self.pinnedRoomsInitializedKey))
-    }
-
     var pendingSetupRoomIDs: Set<String> {
         loadIDs(forKey: Self.pendingSetupRoomIDsKey)
     }
@@ -35,13 +29,18 @@ struct RoomLocalPreferences {
         loadIDs(forKey: Self.pendingSetupScreenRoomIDsKey)
     }
 
-    func saveArchivedRoomIDs(_ roomIDs: Set<String>) {
-        save(roomIDs, forKey: Self.archivedRoomIDsKey)
+    var roomReadState: RoomReadState? {
+        guard let data = defaults.data(forKey: scopedKey(Self.roomReadStateKey)) else { return nil }
+        return try? JSONDecoder().decode(RoomReadState.self, from: data)
     }
 
-    func savePinnedRoomIDs(_ roomIDs: Set<String>) {
-        save(roomIDs, forKey: Self.pinnedRoomIDsKey)
-        defaults.set(true, forKey: scopedKey(Self.pinnedRoomsInitializedKey))
+    func saveRoomReadState(_ state: RoomReadState) {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        defaults.set(data, forKey: scopedKey(Self.roomReadStateKey))
+    }
+
+    func saveArchivedRoomIDs(_ roomIDs: Set<String>) {
+        save(roomIDs, forKey: Self.archivedRoomIDsKey)
     }
 
     func savePendingSetupRoomIDs(_ roomIDs: Set<String>) {

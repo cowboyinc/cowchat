@@ -2,106 +2,24 @@ import XCTest
 @testable import CowchatMac
 
 final class RoomSidebarPresentationTests: XCTestCase {
-    func testPinnedRoomsUseExplicitLocalPreferenceAndRespectLimit() throws {
-        let rooms = try [
-            room(id: "recent", name: "Recent", activity: "2026-08-04T15:00:00Z"),
-            room(id: "lobby", name: "Lobby", activity: "2026-08-03T15:00:00Z"),
-            room(id: "assistant", name: "Assistant", activity: "2026-08-02T15:00:00Z"),
-            room(id: "demo", name: "Demo", activity: "2026-08-01T15:00:00Z"),
-        ]
-
-        XCTAssertEqual(
-            RoomSidebarPresentation.pinnedRooms(
-                from: rooms,
-                pinnedRoomIDs: ["lobby", "assistant", "demo"]
-            ).map(\.id),
-            ["lobby", "assistant", "demo"]
-        )
+    func testSortedByRecencyOrdersByActivityDescending() {
+        // Lobby gets no special treatment — it lives in its own nav row now.
+        let lobby = makeRoom(name: "Lobby", lastActivity: "2026-08-01T00:00:00Z")
+        let older = makeRoom(name: "alpha", lastActivity: "2026-08-03T00:00:00Z")
+        let newer = makeRoom(name: "zulu", lastActivity: "2026-08-04T00:00:00Z")
+        let sorted = RoomSidebarPresentation.sortedByRecency([older, lobby, newer])
+        XCTAssertEqual(sorted.map(\.name), ["zulu", "alpha", "Lobby"])
     }
 
-    func testGroupsRoomsByCalendarRecency() throws {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
-        let now = try XCTUnwrap("2026-08-04T17:00:00Z".cowchatDate)
-        let rooms = try [
-            room(id: "today", name: "Today", activity: "2026-08-04T12:00:00Z"),
-            room(id: "yesterday", name: "Yesterday", activity: "2026-08-03T12:00:00Z"),
-            room(id: "week", name: "Week", activity: "2026-07-31T12:00:00Z"),
-            room(id: "earlier", name: "Earlier", activity: "2026-07-01T12:00:00Z"),
-        ]
-
-        let groups = RoomSidebarPresentation.groups(from: rooms, now: now, calendar: calendar)
-
-        XCTAssertEqual(groups.map(\.title), ["Today", "Yesterday", "This week", "Earlier"])
-        XCTAssertEqual(groups.flatMap(\.rooms).map(\.id), ["today", "yesterday", "week", "earlier"])
+    func testSortedByRecencyTiebreaksOnName() {
+        let a = makeRoom(name: "beta", lastActivity: "2026-08-04T00:00:00Z")
+        let b = makeRoom(name: "Alpha", lastActivity: "2026-08-04T00:00:00Z")
+        XCTAssertEqual(RoomSidebarPresentation.sortedByRecency([a, b]).map(\.name), ["Alpha", "beta"])
     }
 
-    func testActiveRoomsRequireAtLeastOneReportedMember() throws {
-        let active = try room(id: "active", name: "Active", memberCount: 2)
-        let quiet = try room(id: "quiet", name: "Quiet", memberCount: 0)
-        let unknown = try room(id: "unknown", name: "Unknown", memberCount: nil)
-
-        XCTAssertEqual(
-            RoomSidebarPresentation.activeRooms(from: [active, quiet, unknown]).map(\.id),
-            ["active"]
-        )
-    }
-
-    func testActiveRoomsDoNotCountThisMacClientInSelectedRoom() throws {
-        let selected = try room(id: "selected", name: "Selected", memberCount: 1)
-        let collaborator = try room(id: "other", name: "Other", memberCount: 1)
-
-        XCTAssertEqual(
-            RoomSidebarPresentation.activeRooms(
-                from: [selected, collaborator],
-                excludingCurrentClientFrom: selected.id
-            ).map(\.id),
-            ["other"]
-        )
-    }
-
-    func testVisiblePinnedRoomsRespectSearchAndScopeResults() throws {
-        let lobby = try room(id: "lobby", name: "Lobby", memberCount: 0)
-        let design = try room(id: "design", name: "Design", memberCount: 2)
-        let release = try room(id: "release", name: "Release", memberCount: 1)
-        let support = try room(id: "support", name: "Support", memberCount: 3)
-        let allRooms = [lobby, design, release, support]
-        let visibleRooms = RoomSidebarPresentation.filteredRooms(
-            from: RoomSidebarPresentation.activeRooms(from: allRooms),
-            query: "design"
-        )
-
-        XCTAssertEqual(
-            RoomSidebarPresentation.visiblePinnedRooms(
-                from: allRooms,
-                among: visibleRooms,
-                pinnedRoomIDs: ["lobby", "design", "release"]
-            ).map(\.id),
-            ["design"]
-        )
-    }
-
-    func testFourthPinnedRoomRemainsInRecencyGroups() throws {
-        let rooms = try [
-            room(id: "one", name: "One"),
-            room(id: "two", name: "Two"),
-            room(id: "three", name: "Three"),
-            room(id: "four", name: "Four"),
-        ]
-
-        XCTAssertEqual(
-            RoomSidebarPresentation.roomsForRecencyGroups(
-                from: rooms,
-                allRooms: rooms,
-                pinnedRoomIDs: Set(rooms.map(\.id))
-            ).map(\.id),
-            ["four"]
-        )
-    }
-
-    func testMessageMatchesCanSurfaceRoomWithoutNameMatch() throws {
-        let design = try room(id: "design", name: "Design")
-        let release = try room(id: "release", name: "Release")
+    func testMessageMatchesCanSurfaceRoomWithoutNameMatch() {
+        let design = makeRoom(id: "design", name: "Design")
+        let release = makeRoom(id: "release", name: "Release")
 
         XCTAssertEqual(
             RoomSidebarPresentation.filteredRooms(
@@ -167,24 +85,141 @@ final class RoomSidebarPresentationTests: XCTestCase {
         )
     }
 
-    private func room(
-        id: String,
-        name: String,
-        activity: String = "2026-08-04T12:00:00Z",
-        memberCount: Int? = 1
-    ) throws -> Room {
-        var json: [String: Any] = [
-            "room_id": id,
-            "name": name,
-            "ephemeral": false,
-            "created_at": activity,
-            "last_activity": activity,
-            "visibility": "public",
+    func testWorkingPredicateHonorsWindow() {
+        let now = Date()
+        XCTAssertFalse(RoomSidebarPresentation.isWorking(thinkingByAgent: nil, now: now, window: 120))
+        XCTAssertTrue(RoomSidebarPresentation.isWorking(
+            thinkingByAgent: ["claude": now.addingTimeInterval(-30)], now: now, window: 120))
+        XCTAssertFalse(RoomSidebarPresentation.isWorking(
+            thinkingByAgent: ["claude": now.addingTimeInterval(-121)], now: now, window: 120))
+    }
+
+    func testWorkingPredicateTrueWhenAnyAgentIsFresh() {
+        let now = Date()
+        XCTAssertTrue(RoomSidebarPresentation.isWorking(
+            thinkingByAgent: [
+                "claude": now.addingTimeInterval(-200),
+                "codex": now.addingTimeInterval(-10),
+            ],
+            now: now,
+            window: 120
+        ))
+    }
+
+    func testWorkingPredicateFalseWhenAllAgentsExpired() {
+        let now = Date()
+        XCTAssertFalse(RoomSidebarPresentation.isWorking(
+            thinkingByAgent: [
+                "claude": now.addingTimeInterval(-200),
+                "codex": now.addingTimeInterval(-150),
+            ],
+            now: now,
+            window: 120
+        ))
+    }
+
+    func testUpdatedThinkingByAgentStampsThinkingAgent() throws {
+        let now = Date()
+        let message = try makeMessage(roomID: "design", agentID: "claude", isThinking: true)
+
+        let updated = RoomSidebarPresentation.updatedThinkingByAgent([:], message: message, now: now)
+
+        XCTAssertEqual(updated["design"]?["claude"], message.timestamp.cowchatDate)
+    }
+
+    func testUpdatedThinkingByAgentClearsOnlyThatAgentsEntry() throws {
+        let now = Date()
+        let existing: [String: [String: Date]] = [
+            "design": [
+                "claude": now.addingTimeInterval(-10),
+                "codex": now.addingTimeInterval(-5),
+            ],
         ]
-        if let memberCount { json["member_count"] = memberCount }
+        let message = try makeMessage(roomID: "design", agentID: "claude", isThinking: false)
+
+        let updated = RoomSidebarPresentation.updatedThinkingByAgent(existing, message: message, now: now)
+
+        XCTAssertNil(updated["design"]?["claude"])
+        XCTAssertNotNil(updated["design"]?["codex"])
+    }
+
+    func testUpdatedThinkingByAgentPrunesLongExpiredEntries() throws {
+        let now = Date()
+        let existing: [String: [String: Date]] = [
+            "stale": ["ghost": now.addingTimeInterval(-700)],
+            "mixed": [
+                "ghost": now.addingTimeInterval(-700),
+                "fresh": now.addingTimeInterval(-10),
+            ],
+        ]
+        let message = try makeMessage(roomID: "other", agentID: "claude", isThinking: true)
+
+        let updated = RoomSidebarPresentation.updatedThinkingByAgent(existing, message: message, now: now)
+
+        XCTAssertNil(updated["stale"])
+        XCTAssertNil(updated["mixed"]?["ghost"])
+        XCTAssertNotNil(updated["mixed"]?["fresh"])
+        // The unrelated transition must still apply after the prune pass.
+        XCTAssertNotNil(updated["other"]?["claude"])
+    }
+
+    func testUpdatedThinkingByAgentPrunesRoomWhenLastAgentClears() throws {
+        let now = Date()
+        let existing: [String: [String: Date]] = [
+            "design": ["claude": now.addingTimeInterval(-10)],
+        ]
+        let message = try makeMessage(roomID: "design", agentID: "claude", isThinking: false)
+
+        let updated = RoomSidebarPresentation.updatedThinkingByAgent(existing, message: message, now: now)
+
+        XCTAssertNil(updated["design"])
+    }
+
+    /// `ChatMessage` decodes only (its `init(from:)` suppresses the memberwise
+    /// initializer), so fixtures go through JSONDecoder like the AgentPresence
+    /// helpers above rather than direct construction.
+    private func makeMessage(
+        roomID: String,
+        agentID: String,
+        isThinking: Bool,
+        timestamp: String = "2026-08-04T12:00:00Z"
+    ) throws -> ChatMessage {
+        var json: [String: Any] = [
+            "message_id": UUID().uuidString,
+            "room_id": roomID,
+            "agent_id": agentID,
+            "agent_name": agentID,
+            "content": "hello",
+            "timestamp": timestamp,
+            "seq": 1,
+        ]
+        if isThinking {
+            json["metadata"] = ["type": "thinking"]
+        }
         return try JSONDecoder().decode(
-            Room.self,
+            ChatMessage.self,
             from: JSONSerialization.data(withJSONObject: json)
+        )
+    }
+
+    private func makeRoom(
+        id: String? = nil,
+        name: String,
+        lastActivity: String = "2026-08-04T12:00:00Z",
+        memberCount: Int? = 1
+    ) -> Room {
+        Room(
+            roomID: id ?? name,
+            name: name,
+            description: nil,
+            parentID: nil,
+            ephemeral: false,
+            createdAt: lastActivity,
+            createdBy: nil,
+            visibility: "public",
+            lastActivity: lastActivity,
+            memberCount: memberCount,
+            encrypted: false
         )
     }
 }

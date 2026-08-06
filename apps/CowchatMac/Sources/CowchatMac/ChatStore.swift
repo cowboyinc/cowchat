@@ -22,11 +22,12 @@ final class ChatStore: ObservableObject {
     }
     @Published private(set) var messageSearchRoomIDs: Set<String> = []
     @Published private(set) var archivedRoomIDs: Set<String> = []
-    @Published private(set) var pinnedRoomIDs: Set<String> = []
     @Published private(set) var setupRoomIDs: Set<String> = []
     @Published private(set) var roomSetupScreenIDs: Set<String> = []
+    @Published private(set) var readState = RoomReadState()
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
+    @Published private(set) var lastThinkingAt: [String: [String: Date]] = [:]
     @Published var roomReadyNotice: Room?
     @Published var roomBeingRenamed: Room?
     @Published var connectionStatus: ConnectionStatus = .disconnected
@@ -167,9 +168,9 @@ final class ChatStore: ObservableObject {
         )
         localPreferences = Self.roomPreferences(defaults: defaults, profile: connectionProfile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
-        pinnedRoomIDs = localPreferences.pinnedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         roomSetupScreenIDs = localPreferences.pendingSetupScreenRoomIDs
+        readState = localPreferences.roomReadState ?? RoomReadState()
         connection.onEvent = { [weak self] type, payload in
             self?.handleEvent(type: type, payload: payload)
         }
@@ -511,6 +512,7 @@ final class ChatStore: ObservableObject {
         messageSearchRoomIDs = []
         isSearchingMessages = false
         roomMessagePreviews = [:]
+        lastThinkingAt = [:]
         roomReadyNotice = nil
         roomBeingRenamed = nil
         isLoadingMessages = false
@@ -530,9 +532,9 @@ final class ChatStore: ObservableObject {
 
         localPreferences = Self.roomPreferences(defaults: defaults, profile: profile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
-        pinnedRoomIDs = localPreferences.pinnedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         roomSetupScreenIDs = localPreferences.pendingSetupScreenRoomIDs
+        readState = localPreferences.roomReadState ?? RoomReadState()
         connectionStatus = .disconnected
     }
 
@@ -573,6 +575,16 @@ final class ChatStore: ObservableObject {
         }
         rooms = refreshed.sorted(by: roomSort)
         reconcileLocalRoomPreferences()
+        if !readState.hasSeeded {
+            readState.seed(rooms: rooms)
+            localPreferences.saveRoomReadState(readState)
+        }
+        let readEntryCountBeforeReconcile = readState.entries.count
+        readState.reconcile(validRoomIDs: Set(rooms.map(\.id)))
+        if readState.entries.count != readEntryCountBeforeReconcile {
+            localPreferences.saveRoomReadState(readState)
+        }
+        markSelectedRoomRead()
         if selectFallbackForMissingSelection,
            let selectedRoomID,
            !rooms.contains(where: { $0.id == selectedRoomID }) {
@@ -594,6 +606,7 @@ final class ChatStore: ObservableObject {
         let generation = roomSelectionGeneration
         saveDraft(for: selectedRoomID)
         selectedRoomID = room.roomID
+        markSelectedRoomRead()
         draft = draftsByRoomID[room.roomID] ?? ""
         messages = []
         roomMembers = []
@@ -712,19 +725,12 @@ final class ChatStore: ObservableObject {
         archivedRoomIDs.contains(room.id)
     }
 
-    func isPinned(_ room: Room) -> Bool {
-        pinnedRoomIDs.contains(room.id)
+    func isUnread(_ room: Room) -> Bool {
+        readState.isUnread(room, selectedRoomID: selectedRoomID)
     }
 
-    func togglePinned(_ room: Room) {
-        if pinnedRoomIDs.contains(room.id) {
-            pinnedRoomIDs.remove(room.id)
-        } else {
-            pinnedRoomIDs.insert(room.id)
-            archivedRoomIDs.remove(room.id)
-            localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
-        }
-        localPreferences.savePinnedRoomIDs(pinnedRoomIDs)
+    func isWorking(_ room: Room, at now: Date = Date()) -> Bool {
+        RoomSidebarPresentation.isWorking(thinkingByAgent: lastThinkingAt[room.id], now: now)
     }
 
     func archive(_ room: Room) async {
@@ -733,9 +739,7 @@ final class ChatStore: ObservableObject {
             return
         }
         archivedRoomIDs.insert(room.id)
-        pinnedRoomIDs.remove(room.id)
         localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
-        localPreferences.savePinnedRoomIDs(pinnedRoomIDs)
 
         guard selectedRoomID == room.id else { return }
         await selectFallbackRoom(excluding: room.id)
@@ -909,6 +913,9 @@ final class ChatStore: ObservableObject {
         switch type {
         case "message_received":
             if let message = try? decode(ChatMessage.self, payload) {
+                lastThinkingAt = RoomSidebarPresentation.updatedThinkingByAgent(
+                    lastThinkingAt, message: message, now: Date()
+                )
                 if message.isThinking {
                     updateRoomActivity(from: message)
                     break
@@ -964,6 +971,16 @@ final class ChatStore: ObservableObject {
             }
         case "presence_update":
             updatePresence(from: payload)
+        case "thinking":
+            // Live thinking pulses arrive as this dedicated event, not
+            // message_received, and are excluded from the visible message
+            // feed — so track the working signal only; never bump room
+            // activity for content the user can't see.
+            if let message = try? decode(ChatMessage.self, payload) {
+                lastThinkingAt = RoomSidebarPresentation.updatedThinkingByAgent(
+                    lastThinkingAt, message: message, now: Date()
+                )
+            }
         default:
             break
         }
@@ -1143,6 +1160,7 @@ final class ChatStore: ObservableObject {
         rooms[index] = rooms[index].updating(lastActivity: message.timestamp)
         rooms.sort(by: roomSort)
         recordRoomMutation(roomID: message.roomID)
+        if message.roomID == selectedRoomID { markSelectedRoomRead() }
     }
 
     private func updateRoomPreview(from message: ChatMessage) {
@@ -1252,17 +1270,24 @@ final class ChatStore: ObservableObject {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func markSelectedRoomRead() {
+        guard let selectedRoomID,
+              let room = rooms.first(where: { $0.id == selectedRoomID }) else { return }
+        let before = readState.entries[selectedRoomID]
+        readState.markRead(roomID: selectedRoomID, activityDate: room.activityDate)
+        // Persist only on real change — this runs on every refresh tick while
+        // a room stays selected.
+        if readState.entries[selectedRoomID] != before {
+            localPreferences.saveRoomReadState(readState)
+        }
+    }
+
     private func reconcileLocalRoomPreferences() {
         let validRoomIDs = Set(rooms.map(\.id))
         let archived = archivedRoomIDs.intersection(validRoomIDs)
         if archived != archivedRoomIDs {
             archivedRoomIDs = archived
             localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
-        }
-        let pinned = pinnedRoomIDs.intersection(validRoomIDs)
-        if pinned != pinnedRoomIDs {
-            pinnedRoomIDs = pinned
-            localPreferences.savePinnedRoomIDs(pinnedRoomIDs)
         }
         let pendingSetup = setupRoomIDs.intersection(validRoomIDs)
         if pendingSetup != setupRoomIDs {
@@ -1283,21 +1308,12 @@ final class ChatStore: ObservableObject {
             self.createRoomParentID = nil
             isCreateRoomPresented = false
         }
-
-        if !localPreferences.hasInitializedPinnedRooms,
-           let lobby = rooms.first(where: {
-               $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame
-           }) {
-            pinnedRoomIDs = [lobby.id]
-            localPreferences.savePinnedRoomIDs(pinnedRoomIDs)
-        }
     }
 
     private func removeRoom(roomID: String) {
         destroyedRoomIDs.insert(roomID)
         rooms.removeAll { $0.roomID == roomID }
         archivedRoomIDs.remove(roomID)
-        pinnedRoomIDs.remove(roomID)
         setupRoomIDs.remove(roomID)
         localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
         roomSetupScreenIDs.remove(roomID)
@@ -1307,6 +1323,7 @@ final class ChatStore: ObservableObject {
         messageSearchRoomIDs.remove(roomID)
         roomMessagePreviews.removeValue(forKey: roomID)
         previewActivityByRoomID.removeValue(forKey: roomID)
+        lastThinkingAt.removeValue(forKey: roomID)
         if roomReadyNotice?.id == roomID { roomReadyNotice = nil }
         if roomBeingRenamed?.id == roomID { roomBeingRenamed = nil }
         if createRoomParentID == roomID {
@@ -1314,7 +1331,6 @@ final class ChatStore: ObservableObject {
             isCreateRoomPresented = false
         }
         localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
-        localPreferences.savePinnedRoomIDs(pinnedRoomIDs)
         recordRoomMutation(roomID: roomID)
 
         if joinedRoomID == roomID { joinedRoomID = nil }
@@ -1413,6 +1429,10 @@ final class ChatStore: ObservableObject {
         return try JSONDecoder().decode(type, from: data)
     }
 
+    /// Lobby-first ordering for the dashboard grid and fallback selection.
+    /// Deliberately NOT shared with RoomSidebarPresentation.sortedByRecency:
+    /// the sidebar excludes Lobby (it lives in its own nav row) and sorts by
+    /// parsed recency alone.
     private func roomSort(_ lhs: Room, _ rhs: Room) -> Bool {
         guard lhs.id != rhs.id else { return false }
         let lhsIsLobby = lhs.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame

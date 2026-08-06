@@ -2,7 +2,7 @@ import XCTest
 @testable import CowchatMac
 
 final class RoomLocalPreferencesTests: XCTestCase {
-    func testArchiveAndPinSelectionsRoundTripLocally() {
+    func testArchiveAndPendingSetupSelectionsRoundTripLocally() {
         let suiteName = "RoomLocalPreferencesTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
@@ -10,20 +10,15 @@ final class RoomLocalPreferencesTests: XCTestCase {
         let preferences = RoomLocalPreferences(defaults: defaults)
 
         XCTAssertEqual(preferences.archivedRoomIDs, [])
-        XCTAssertEqual(preferences.pinnedRoomIDs, [])
-        XCTAssertFalse(preferences.hasInitializedPinnedRooms)
         XCTAssertEqual(preferences.pendingSetupRoomIDs, [])
         XCTAssertEqual(preferences.pendingSetupScreenRoomIDs, [])
 
         preferences.saveArchivedRoomIDs(["room-b", "room-a"])
-        preferences.savePinnedRoomIDs(["lobby", "room-a"])
         preferences.savePendingSetupRoomIDs(["room-b"])
         preferences.savePendingSetupScreenRoomIDs(["room-b"])
 
         let reloaded = RoomLocalPreferences(defaults: defaults)
         XCTAssertEqual(reloaded.archivedRoomIDs, ["room-a", "room-b"])
-        XCTAssertEqual(reloaded.pinnedRoomIDs, ["lobby", "room-a"])
-        XCTAssertTrue(reloaded.hasInitializedPinnedRooms)
         XCTAssertEqual(reloaded.pendingSetupRoomIDs, ["room-b"])
         XCTAssertEqual(reloaded.pendingSetupScreenRoomIDs, ["room-b"])
     }
@@ -39,14 +34,9 @@ final class RoomLocalPreferencesTests: XCTestCase {
 
         local.saveArchivedRoomIDs(["lobby"])
         cloudA.saveArchivedRoomIDs(["cloud-room"])
-        cloudA.savePinnedRoomIDs(["lobby"])
 
         XCTAssertEqual(local.archivedRoomIDs, ["lobby"])
         XCTAssertEqual(cloudA.archivedRoomIDs, ["cloud-room"])
-        XCTAssertEqual(cloudA.pinnedRoomIDs, ["lobby"])
-        XCTAssertTrue(cloudA.hasInitializedPinnedRooms)
         XCTAssertEqual(cloudB.archivedRoomIDs, [])
-        XCTAssertEqual(cloudB.pinnedRoomIDs, [])
-        XCTAssertFalse(cloudB.hasInitializedPinnedRooms)
     }
 }

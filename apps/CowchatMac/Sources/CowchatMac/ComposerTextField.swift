@@ -19,8 +19,8 @@ struct ComposerTextField: NSViewRepresentable {
         field.isBezeled = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = GallopTheme.TypeRole.bodyL.nsFont
-        field.textColor = GallopTheme.ColorToken.textPrimary.nsColor
+        field.font = SeasonFontProvider().nativeFont(for: .bodyL)
+        field.textColor = SemanticColor.AppKitColor.textPrimary
         field.isEditable = true
         field.isSelectable = true
         field.usesSingleLineMode = true
@@ -51,11 +51,11 @@ struct ComposerTextField: NSViewRepresentable {
         field.placeholderAttributedString = NSAttributedString(
             string: placeholder,
             attributes: [
-                .foregroundColor: GallopTheme.ColorToken.textTertiary.nsColor,
-                .font: GallopTheme.TypeRole.bodyL.nsFont,
+                .foregroundColor: SemanticColor.AppKitColor.textTertiary,
+                .font: SeasonFontProvider().nativeFont(for: .bodyL),
             ]
         )
-        field.textColor = GallopTheme.ColorToken.textPrimary.nsColor
+        field.textColor = SemanticColor.AppKitColor.textPrimary
         field.isEnabled = isEnabled
         field.setAccessibilityLabel(placeholder)
         if field.stringValue != text { field.stringValue = text }

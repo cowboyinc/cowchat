@@ -884,7 +884,6 @@ final class RoomTransitionTests: XCTestCase {
         await store.select(room: room)
 
         XCTAssertEqual(store.rooms.first?.memberCount, 1)
-        XCTAssertEqual(RoomSidebarPresentation.activeRooms(from: store.rooms).map(\.id), ["room"])
     }
 
     @MainActor
@@ -917,7 +916,6 @@ final class RoomTransitionTests: XCTestCase {
 
         XCTAssertEqual(store.rooms.first(where: { $0.id == "A" })?.memberCount, 0)
         XCTAssertEqual(store.rooms.first(where: { $0.id == "B" })?.memberCount, 1)
-        XCTAssertEqual(RoomSidebarPresentation.activeRooms(from: store.rooms).map(\.id), ["B"])
     }
 
     @MainActor
@@ -978,6 +976,44 @@ final class RoomTransitionTests: XCTestCase {
         XCTAssertTrue(store.messages.isEmpty)
         XCTAssertFalse(store.messageSearchRoomIDs.contains(room.id))
         XCTAssertNil(store.roomMessagePreviews[room.id])
+    }
+
+    /// The server broadcasts thinking pulses as a dedicated `thinking` event
+    /// (not `message_received`) precisely so wait-style listeners don't wake
+    /// on them — see cowchat-server/src/handler.rs. `handleEvent` must still
+    /// route that event type into the working-signal tracking.
+    @MainActor
+    func testLiveThinkingEventUpdatesWorkingSignalWithoutBumpingRoomActivity() throws {
+        let roomData = Data(#"""
+        {
+          "room_id":"room",
+          "name":"room",
+          "ephemeral":false,
+          "created_at":"2026-07-11T12:00:00Z",
+          "visibility":"public",
+          "last_activity":"2026-07-12T12:00:00Z"
+        }
+        """#.utf8)
+        let room = try JSONDecoder().decode(Room.self, from: roomData)
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        store.rooms = [room]
+        let now = Date()
+
+        connection.onEvent?("thinking", [
+            "message_id": "thinking-1",
+            "room_id": room.id,
+            "agent_id": "collaborator",
+            "agent_name": "Collaborator",
+            "content": "still working on it",
+            "metadata": ["type": "thinking"],
+            "timestamp": ISO8601DateFormatter().string(from: now),
+            "seq": 1,
+        ])
+
+        XCTAssertTrue(store.isWorking(room, at: now))
+        XCTAssertTrue(store.messages.isEmpty)
+        XCTAssertEqual(store.rooms.first?.lastActivity, "2026-07-12T12:00:00Z")
     }
 
     @MainActor
@@ -1130,7 +1166,7 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
-    func testArchiveAndPinPreferencesPersistWithoutMutatingServer() async throws {
+    func testArchivePreferencesPersistWithoutMutatingServer() async throws {
         let suiteName = "RoomTransitionPreferencesTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
@@ -1140,17 +1176,13 @@ final class RoomTransitionTests: XCTestCase {
         let store = ChatStore(connection: connection, defaults: defaults)
         store.rooms = [room]
 
-        store.togglePinned(room)
-        XCTAssertTrue(store.isPinned(room))
         await store.archive(room)
 
         XCTAssertTrue(store.isArchived(room))
-        XCTAssertFalse(store.isPinned(room))
         XCTAssertTrue(connection.operations.isEmpty)
 
         let reloaded = ChatStore(connection: connection, defaults: defaults)
         XCTAssertTrue(reloaded.isArchived(room))
-        XCTAssertFalse(reloaded.isPinned(room))
     }
 
     @MainActor

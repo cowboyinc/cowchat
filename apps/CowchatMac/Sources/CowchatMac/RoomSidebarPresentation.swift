@@ -1,10 +1,5 @@
 import Foundation
 
-struct RoomSidebarGroup: Equatable {
-    let title: String
-    let rooms: [Room]
-}
-
 enum LobbyPresentation {
     static func availableAgentCount(
         from members: [AgentPresence],
@@ -46,24 +41,6 @@ enum ChatPresencePresentation {
 }
 
 enum RoomSidebarPresentation {
-    static func pinnedRooms(
-        from rooms: [Room],
-        pinnedRoomIDs: Set<String>,
-        limit: Int = 3
-    ) -> [Room] {
-        Array(rooms.filter { pinnedRoomIDs.contains($0.id) }.prefix(limit))
-    }
-
-    static func activeRooms(
-        from rooms: [Room],
-        excludingCurrentClientFrom selectedRoomID: String? = nil
-    ) -> [Room] {
-        rooms.filter { room in
-            let currentClientCount = room.id == selectedRoomID ? 1 : 0
-            return (room.memberCount ?? 0) - currentClientCount > 0
-        }
-    }
-
     static func filteredRooms(
         from rooms: [Room],
         query: String,
@@ -78,68 +55,58 @@ enum RoomSidebarPresentation {
         }
     }
 
-    static func visiblePinnedRooms(
-        from allRooms: [Room],
-        among visibleRooms: [Room],
-        pinnedRoomIDs: Set<String>,
-        limit: Int = 3
-    ) -> [Room] {
-        let pinnedIDs = Set(
-            pinnedRooms(
-                from: allRooms,
-                pinnedRoomIDs: pinnedRoomIDs,
-                limit: limit
-            ).map(\.id)
-        )
-        return visibleRooms.filter { pinnedIDs.contains($0.id) }
-    }
-
-    static func roomsForRecencyGroups(
-        from visibleRooms: [Room],
-        allRooms: [Room],
-        pinnedRoomIDs: Set<String>,
-        pinnedLimit: Int = 3
-    ) -> [Room] {
-        let displayedPinnedIDs = Set(
-            visiblePinnedRooms(
-                from: allRooms,
-                among: visibleRooms,
-                pinnedRoomIDs: pinnedRoomIDs,
-                limit: pinnedLimit
-            ).map(\.id)
-        )
-        return visibleRooms.filter { !displayedPinnedIDs.contains($0.id) }
-    }
-
-    static func groups(
-        from rooms: [Room],
-        now: Date = Date(),
-        calendar: Calendar = .current
-    ) -> [RoomSidebarGroup] {
-        var buckets: [String: [Room]] = [:]
-        for room in rooms {
-            let title = groupTitle(for: room.activityDate, now: now, calendar: calendar)
-            buckets[title, default: []].append(room)
-        }
-
-        let order = ["Today", "Yesterday", "This week", "Earlier"]
-        return order.compactMap { title in
-            guard let rooms = buckets[title], !rooms.isEmpty else { return nil }
-            return RoomSidebarGroup(title: title, rooms: rooms)
+    /// Flat iMessage-style ordering by recency. Lobby lives in its own nav
+    /// row above the table (Patrick, 2026-08-06), so no special-casing here.
+    static func sortedByRecency(_ rooms: [Room]) -> [Room] {
+        rooms.sorted { lhs, rhs in
+            let l = lhs.activityDate ?? .distantPast
+            let r = rhs.activityDate ?? .distantPast
+            if l != r { return l > r }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
     }
 
-    private static func groupTitle(for date: Date?, now: Date, calendar: Calendar) -> String {
-        guard let date else { return "Earlier" }
-        if calendar.isDate(date, inSameDayAs: now) { return "Today" }
-        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
-           calendar.isDate(date, inSameDayAs: yesterday) {
-            return "Yesterday"
+    /// Sidebar working signal: presence is selected-room-only and unattributable
+    /// per-room (presence_update has no room_id), so background rooms light up on
+    /// thinking-message recency instead — see the spec's §4 validation notes.
+    /// Tracked per agent (not per room) so one agent finishing a turn cannot
+    /// clear the indicator while another agent in the same room is still
+    /// composing.
+    static func isWorking(thinkingByAgent: [String: Date]?, now: Date, window: TimeInterval = 120) -> Bool {
+        guard let thinkingByAgent else { return false }
+        return thinkingByAgent.values.contains { now.timeIntervalSince($0) < window }
+    }
+
+    /// Per-agent thinking tracking: a thinking message stamps that agent's entry;
+    /// a non-thinking message clears ONLY that agent's entry (another agent may
+    /// still be composing). Empty room maps are pruned so `isEmpty` stays a
+    /// cheap "anything working?" check.
+    static func updatedThinkingByAgent(
+        _ current: [String: [String: Date]],
+        message: ChatMessage,
+        now: Date
+    ) -> [String: [String: Date]] {
+        var updated = current
+        // Opportunistic prune: entries far past the working window would
+        // otherwise linger forever (an agent that pulses once and vanishes),
+        // pinning the sidebar's fast refresh cadence indefinitely.
+        for (roomID, agents) in updated {
+            let live = agents.filter { now.timeIntervalSince($0.value) < 600 }
+            if live.isEmpty {
+                updated.removeValue(forKey: roomID)
+            } else if live.count != agents.count {
+                updated[roomID] = live
+            }
         }
-        if let weekAgo = calendar.date(byAdding: .day, value: -7, to: now), date >= weekAgo {
-            return "This week"
+        if message.isThinking {
+            updated[message.roomID, default: [:]][message.agentID] = message.timestamp.cowchatDate ?? now
+        } else {
+            updated[message.roomID]?.removeValue(forKey: message.agentID)
+            if updated[message.roomID]?.isEmpty == true {
+                updated.removeValue(forKey: message.roomID)
+            }
         }
-        return "Earlier"
+        return updated
     }
 }
 
