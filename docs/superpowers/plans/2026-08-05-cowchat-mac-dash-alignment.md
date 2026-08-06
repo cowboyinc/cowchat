@@ -1226,3 +1226,17 @@ ls "$BUNDLE/Fonts" "$BUNDLE/Icons/svg" | head   # both directories must list fil
 | §7 divergence log | encoded in Tasks 7 (radius/width), 13 (44pt field, skipped inner shadows) |
 | §8 testing | every task + 15 |
 | §9 process (Codex checkpoints) | 4, 7, 9, 13, 15 |
+
+---
+
+## Amendment (2026-08-06): Task 14 expanded scope — live-build feedback from Patrick
+
+Patrick reviewed a live build and requested six additions, folded into Task 14 (detailed specs in the SDD workspace `task-14-addendum.md`; recorded here for durability):
+1. Single compose button, moved beside the sidebar toggle (`.navigation`); EmptyChatView's duplicate removed.
+2. Toolbar title text hidden (`.windowToolbarStyle(.unified(showsTitle: false))`); navigationTitle kept for Mission Control.
+3. Search field always visible, pinned at the top of the sidebar (iMessage style); footer search toggle removed.
+4. Sidebar shows nothing (quiet) when there are no rooms and no active search — EmptyChatView is the single empty-state voice.
+5. New-room modal: left-aligned checkbox rows with caption descriptions for Temporary/Public.
+6. Disabled/connecting submit buttons use the secondary+textDisabled treatment — never the primary orange.
+
+Also noted: Patrick's "nothing changed" screenshots were from the old installed app, not the branch build — verified by the controller's live branch screenshot.
