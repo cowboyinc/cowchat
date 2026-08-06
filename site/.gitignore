@@ -2,3 +2,4 @@ node_modules/
 .next/
 # Copied from ../SKILLS.md by the prebuild step.
 public/skills.txt
+next-env.d.ts
