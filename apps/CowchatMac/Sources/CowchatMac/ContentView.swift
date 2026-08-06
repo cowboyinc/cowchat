@@ -177,6 +177,7 @@ private struct SidebarView: View {
                                             room: room,
                                             messagePreview: store.roomMessagePreviews[room.id],
                                             isSelected: store.selectedRoomID == room.id,
+                                            isUnread: store.isUnread(room),
                                             now: timeline.date
                                         )
                                             .contentShape(Rectangle())
@@ -301,6 +302,7 @@ private struct SidebarView: View {
                                 room: room,
                                 messagePreview: store.roomMessagePreviews[room.id],
                                 isSelected: store.selectedRoomID == room.id,
+                                isUnread: store.isUnread(room),
                                 now: now
                             )
                                 .contentShape(Rectangle())
@@ -491,16 +493,20 @@ private struct RoomRow: View {
     let room: Room
     let messagePreview: String?
     let isSelected: Bool
+    let isUnread: Bool
     let now: Date
     @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 10) {
+            Circle()
+                .fill(isUnread ? Palette.nugget500 : Color.clear)
+                .frame(width: 7, height: 7)
             RoomAvatar(name: room.name, size: 40, accented: isSelected)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     Text(room.name)
-                        .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
+                        .gallopText(isUnread ? .bodySStrong : .bodyS, color: SemanticColor.textPrimary)
                         .lineLimit(1)
                     if room.encrypted {
                         Image(systemName: "lock.fill")
@@ -520,10 +526,12 @@ private struct RoomRow: View {
                     .lineLimit(1)
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.trailing, 8)
+        .padding(.leading, 4)
         .frame(height: 54)
         .background(SidebarRowBackground(state: .init(isSelected: isSelected, isHovering: isHovering)))
         .onHover { isHovering = $0 }
+        .accessibilityValue(isUnread ? Text("Unread") : Text(""))
     }
 
     private var roomSummary: String {

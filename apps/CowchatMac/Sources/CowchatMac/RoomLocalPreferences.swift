@@ -7,6 +7,7 @@ struct RoomLocalPreferences {
     // left orphaned, not migrated or cleared.
     static let pendingSetupRoomIDsKey = "CowchatMac.pendingSetupRoomIDs"
     static let pendingSetupScreenRoomIDsKey = "CowchatMac.pendingSetupScreenRoomIDs"
+    static let roomReadStateKey = "CowchatMac.roomReadState"
 
     private let defaults: UserDefaults
     private let scope: String?
@@ -26,6 +27,16 @@ struct RoomLocalPreferences {
 
     var pendingSetupScreenRoomIDs: Set<String> {
         loadIDs(forKey: Self.pendingSetupScreenRoomIDsKey)
+    }
+
+    var roomReadState: RoomReadState? {
+        guard let data = defaults.data(forKey: scopedKey(Self.roomReadStateKey)) else { return nil }
+        return try? JSONDecoder().decode(RoomReadState.self, from: data)
+    }
+
+    func saveRoomReadState(_ state: RoomReadState) {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        defaults.set(data, forKey: scopedKey(Self.roomReadStateKey))
     }
 
     func saveArchivedRoomIDs(_ roomIDs: Set<String>) {

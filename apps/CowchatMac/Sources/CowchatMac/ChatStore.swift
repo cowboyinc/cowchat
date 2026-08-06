@@ -24,6 +24,7 @@ final class ChatStore: ObservableObject {
     @Published private(set) var archivedRoomIDs: Set<String> = []
     @Published private(set) var setupRoomIDs: Set<String> = []
     @Published private(set) var roomSetupScreenIDs: Set<String> = []
+    @Published private(set) var readState = RoomReadState()
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
     @Published var roomReadyNotice: Room?
@@ -168,6 +169,7 @@ final class ChatStore: ObservableObject {
         archivedRoomIDs = localPreferences.archivedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         roomSetupScreenIDs = localPreferences.pendingSetupScreenRoomIDs
+        readState = localPreferences.roomReadState ?? RoomReadState()
         connection.onEvent = { [weak self] type, payload in
             self?.handleEvent(type: type, payload: payload)
         }
@@ -530,6 +532,7 @@ final class ChatStore: ObservableObject {
         archivedRoomIDs = localPreferences.archivedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         roomSetupScreenIDs = localPreferences.pendingSetupScreenRoomIDs
+        readState = localPreferences.roomReadState ?? RoomReadState()
         connectionStatus = .disconnected
     }
 
@@ -570,6 +573,16 @@ final class ChatStore: ObservableObject {
         }
         rooms = refreshed.sorted(by: roomSort)
         reconcileLocalRoomPreferences()
+        if !readState.hasSeeded {
+            readState.seed(rooms: rooms)
+            localPreferences.saveRoomReadState(readState)
+        }
+        let readEntryCountBeforeReconcile = readState.entries.count
+        readState.reconcile(validRoomIDs: Set(rooms.map(\.id)))
+        if readState.entries.count != readEntryCountBeforeReconcile {
+            localPreferences.saveRoomReadState(readState)
+        }
+        markSelectedRoomRead()
         if selectFallbackForMissingSelection,
            let selectedRoomID,
            !rooms.contains(where: { $0.id == selectedRoomID }) {
@@ -591,6 +604,7 @@ final class ChatStore: ObservableObject {
         let generation = roomSelectionGeneration
         saveDraft(for: selectedRoomID)
         selectedRoomID = room.roomID
+        markSelectedRoomRead()
         draft = draftsByRoomID[room.roomID] ?? ""
         messages = []
         roomMembers = []
@@ -707,6 +721,10 @@ final class ChatStore: ObservableObject {
 
     func isArchived(_ room: Room) -> Bool {
         archivedRoomIDs.contains(room.id)
+    }
+
+    func isUnread(_ room: Room) -> Bool {
+        readState.isUnread(room, selectedRoomID: selectedRoomID)
     }
 
     func archive(_ room: Room) async {
@@ -1123,6 +1141,7 @@ final class ChatStore: ObservableObject {
         rooms[index] = rooms[index].updating(lastActivity: message.timestamp)
         rooms.sort(by: roomSort)
         recordRoomMutation(roomID: message.roomID)
+        if message.roomID == selectedRoomID { markSelectedRoomRead() }
     }
 
     private func updateRoomPreview(from message: ChatMessage) {
@@ -1230,6 +1249,13 @@ final class ChatStore: ObservableObject {
 
     private var currentSearchQuery: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func markSelectedRoomRead() {
+        guard let selectedRoomID,
+              let room = rooms.first(where: { $0.id == selectedRoomID }) else { return }
+        readState.markRead(roomID: selectedRoomID, activityDate: room.activityDate)
+        localPreferences.saveRoomReadState(readState)
     }
 
     private func reconcileLocalRoomPreferences() {
