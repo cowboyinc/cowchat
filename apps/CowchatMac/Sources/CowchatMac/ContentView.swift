@@ -1493,7 +1493,7 @@ private struct CircleIconButton: View {
                         : SemanticColor.buttonSecondaryIconDefault
                 )
                 .frame(width: 32, height: 32)
-                .background(Circle().fill(isHovering ? SemanticColor.buttonGhostHover : Color.clear))
+                .background(Circle().fill(backgroundFill))
                 .overlay {
                     Circle().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                 }
@@ -1503,6 +1503,14 @@ private struct CircleIconButton: View {
         .help(help)
         .onHover { isHovering = $0 }
         .macAccessibleAction(label: help, isEnabled: isEnabled, action: action)
+    }
+
+    /// Active wins over hover — the cowboy app's own dictation-button pattern
+    /// layers a persistent pressed fill under the transient ghost-hover one.
+    private var backgroundFill: Color {
+        if isActive { return SemanticColor.buttonGhostPressed }
+        if isHovering { return SemanticColor.buttonGhostHover }
+        return .clear
     }
 
     @ViewBuilder
