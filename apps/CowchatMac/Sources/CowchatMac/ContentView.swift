@@ -715,9 +715,7 @@ private struct DashboardRoomCard: View {
                     Task { await store.archive(room) }
                 }
             } label: {
-                Label("Room actions", systemImage: "ellipsis")
-                    .labelStyle(.iconOnly)
-                    .font(.system(size: 13, weight: .semibold))
+                GallopIconView(icon: .ellipsis, fallbackSystemName: "ellipsis", size: 14)
                     .foregroundStyle(SemanticColor.iconTertiary)
                     .frame(width: 28, height: 28)
             }
@@ -915,6 +913,36 @@ private struct ChatRoomView: View {
         } message: {
             Text("This irreversibly removes the room, its messages, tasks, votes, and subscriptions from Cowchat's active server state. This cannot be undone in Cowchat; storage snapshots or backups may retain copies.")
         }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Rename room") { store.presentRename(room) }
+                        .disabled(!store.canRename(room))
+                    Button("Archive room") { Task { await store.archive(room) } }
+                    Divider()
+                    Button("Create nested room…") { store.presentCreateRoom(parentID: room.id) }
+                    if !store.connectionStatus.isConnected {
+                        Button("Reconnect") { store.start() }
+                    }
+                    Divider()
+                    Text(room.ephemeral ? "Temporary room" : "Persistent room")
+                    Text(room.visibility.capitalized)
+                    Divider()
+                    Button("Destroy room…", role: .destructive) {
+                        isDestroyConfirmationPresented = true
+                    }
+                    .disabled(!store.canDestroy(room) || isDestroyingRoom)
+                } label: {
+                    GallopIconView(icon: .ellipsis, fallbackSystemName: "ellipsis", size: 17)
+                        .foregroundStyle(SemanticColor.iconSecondary)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Circle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .accessibilityLabel("Room actions")
+            }
+        }
     }
 
     private var chatHeader: some View {
@@ -949,72 +977,6 @@ private struct ChatRoomView: View {
             }
 
             Spacer()
-
-            HStack(spacing: 0) {
-                Menu {
-                    Button("Rename room") { store.presentRename(room) }
-                        .disabled(!store.canRename(room))
-                    Button("Archive room") {
-                        Task { await store.archive(room) }
-                    }
-                    Divider()
-                    Button("Create nested room…") {
-                        store.presentCreateRoom(parentID: room.id)
-                    }
-                    if !store.connectionStatus.isConnected {
-                        Button("Reconnect") { store.start() }
-                    }
-                    Divider()
-                    Text(room.ephemeral ? "Temporary room" : "Persistent room")
-                    Text(room.visibility.capitalized)
-                } label: {
-                    Label("Room actions", systemImage: "ellipsis")
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(SemanticColor.iconSecondary)
-                        .frame(width: 34, height: 32)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .accessibilityLabel("Room actions")
-
-                Rectangle()
-                    .fill(SemanticColor.borderDefault)
-                    .frame(width: 1, height: 18)
-
-                Button {
-                    isDestroyConfirmationPresented = true
-                } label: {
-                    Label("Destroy room", systemImage: "trash")
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(
-                            store.canDestroy(room)
-                                ? SemanticColor.textError
-                                : SemanticColor.iconSubtle
-                        )
-                        .frame(width: 34, height: 32)
-                }
-                .buttonStyle(.plain)
-                .disabled(!store.canDestroy(room) || isDestroyingRoom)
-                .help(
-                    store.canDestroy(room)
-                        ? "Irreversibly remove this room from Cowchat"
-                        : "Only the room creator can destroy it"
-                )
-                .macAccessibleAction(
-                    label: "Destroy \(room.name)",
-                    isEnabled: store.canDestroy(room) && !isDestroyingRoom
-                ) {
-                    isDestroyConfirmationPresented = true
-                }
-            }
-            .padding(.horizontal, 2)
-            .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
-            .overlay {
-                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
-            }
         }
         .padding(.leading, 18)
         .padding(.trailing, 14)
