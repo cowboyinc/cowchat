@@ -378,7 +378,10 @@ private struct SidebarView: View {
                         .font(.system(size: 10, weight: .semibold))
                 }
                 .foregroundStyle(SemanticColor.textTertiary)
-                .padding(.horizontal, 10)
+                // Leading 16 matches RoomRow's avatar inset so the archive
+                // glyph joins the same left column as the rows above it.
+                .padding(.leading, 16)
+                .padding(.trailing, 10)
                 .frame(height: 36)
             }
             .buttonStyle(.plain)
@@ -393,7 +396,8 @@ private struct SidebarView: View {
                 if rooms.isEmpty {
                     Text("No rooms archived")
                         .gallopText(.caption, color: SemanticColor.textTertiary)
-                        .padding(.horizontal, 10)
+                        .padding(.leading, 16)
+                        .padding(.trailing, 10)
                         .padding(.bottom, 8)
                 } else {
                     // Bounded: the archive sits OUTSIDE the room-list scroll
