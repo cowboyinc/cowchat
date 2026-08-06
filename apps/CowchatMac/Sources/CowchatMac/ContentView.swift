@@ -832,7 +832,7 @@ private struct RoomSetupView: View {
                 HStack(alignment: .bottom, spacing: 14) {
                     Text(roomPrompt)
                         .textSelection(.enabled)
-                        .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
+                        .gallopText(.bodyM, color: SemanticColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
 
                     Button(hasCopiedPrompt ? "Copied" : "Copy") { copyPrompt() }
@@ -870,16 +870,15 @@ private struct RoomSetupView: View {
                 }
             }
             .padding(28)
+            // Center the unit against the full card, compensating the header
+            // strip above (Patrick, 2026-08-06).
+            .padding(.bottom, 68)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(SemanticColor.surface500)
     }
 
-    private var roomPrompt: String {
-        """
-        You're going to collaborate with another AI chatbot in real time over Cowchat. Read the Cowchat skill, \(store.agentConnectionInstruction), join the exact room “\(room.name)”, and start listening right away. https://cowchat.cowboy.inc/skills.txt
-        """
-    }
+    private var roomPrompt: String { store.connectPrompt(for: room) }
 
     private func copyPrompt() {
         let pasteboard = NSPasteboard.general
@@ -954,6 +953,7 @@ private struct ChatRoomView: View {
     @State private var isDestroyingRoom = false
     @State private var isMessageListNearBottom = true
     @State private var newMessageCount = 0
+    @State private var hasCopiedQuietRoomPrompt = false
     /// Fixed anchor for the message-feed relative-time schedule; see the note
     /// on `SidebarView.clockAnchor`.
     @State private var clockAnchor = Date()
@@ -969,6 +969,10 @@ private struct ChatRoomView: View {
 
             ZStack(alignment: .bottomTrailing) {
                 messageList
+                if !store.isLoadingMessages && store.messages.isEmpty {
+                    quietRoom
+                        .allowsHitTesting(true)
+                }
                 composer
             }
         }
@@ -988,6 +992,8 @@ private struct ChatRoomView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
+                    Button("Copy connect prompt") { copyConnectPrompt() }
+                    Divider()
                     Button("Rename room") { store.presentRename(room) }
                         .disabled(!store.canRename(room))
                     Button("Archive room") { Task { await store.archive(room) } }
@@ -1054,6 +1060,12 @@ private struct ChatRoomView: View {
         .frame(height: 58)
     }
 
+    private func copyConnectPrompt() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(store.connectPrompt(for: room), forType: .string)
+    }
+
     private var presenceSummary: String {
         ChatPresencePresentation.summary(
             members: store.roomMembers,
@@ -1074,8 +1086,6 @@ private struct ChatRoomView: View {
                                 .controlSize(.small)
                                 .frame(maxWidth: .infinity)
                                 .padding(.top, 32)
-                        } else if store.messages.isEmpty {
-                            quietRoom
                         }
 
                         ForEach(store.messages) { message in
@@ -1153,11 +1163,27 @@ private struct ChatRoomView: View {
                 .foregroundStyle(SemanticColor.iconTertiary)
             Text("This room is quiet")
                 .gallopText(.h5, color: SemanticColor.textPrimary)
-            Text("Open the composer and say hello.")
+            Text("Bring an agent in with the connect prompt, or open the composer and say hello.")
                 .gallopText(.bodyM, color: SemanticColor.textTertiary)
+                .multilineTextAlignment(.center)
+
+            Button(hasCopiedQuietRoomPrompt ? "Copied" : "Copy connect prompt") {
+                copyConnectPrompt()
+                hasCopiedQuietRoomPrompt = true
+            }
+            .buttonStyle(.plain)
+            .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+            .padding(.horizontal, 18)
+            .frame(height: 38)
+            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+            .padding(.top, 6)
+            .macAccessibleAction(label: "Copy connect prompt") {
+                copyConnectPrompt()
+                hasCopiedQuietRoomPrompt = true
+            }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var thinkingText: String? {
