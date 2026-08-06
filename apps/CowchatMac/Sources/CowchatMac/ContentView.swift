@@ -1253,6 +1253,7 @@ private struct MessageFeedRow: View {
     let message: ChatMessage
     let isMine: Bool
     let now: Date
+    @State private var isHovering = false
 
     var body: some View {
         if isMine {
@@ -1290,19 +1291,93 @@ private struct MessageFeedRow: View {
                             .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                         Text(relativeTimestamp)
                             .gallopText(.caption, color: SemanticColor.textTertiary)
+                        if let app = AgentAppResolver.resolvedApp(forAgentNamed: message.agentName),
+                           AgentAppResolver.applicationURL(for: app) != nil {
+                            OpenInAgentAppChip(app: app, isVisible: isHovering)
+                        }
                     }
+                    .modifier(OpenInAppAccessibility(label: openInLabel, value: relativeTimestamp, action: openInApp))
                     ExpandableMessageText(content: message.content)
                 }
                 .frame(maxWidth: 760, alignment: .leading)
                 Spacer(minLength: 24)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onHover { isHovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: isHovering)
         }
     }
 
     private var relativeTimestamp: String {
         let value = message.timestamp.cowchatRelativeTime(relativeTo: now)
         return value.isEmpty ? message.timestamp.cowchatTime : value
+    }
+
+    private var resolvedApp: AgentAppResolver.ResolvedApp? {
+        guard !isMine,
+              let app = AgentAppResolver.resolvedApp(forAgentNamed: message.agentName),
+              AgentAppResolver.applicationURL(for: app) != nil else { return nil }
+        return app
+    }
+    private var openInLabel: String? { resolvedApp.map { "Open in \($0.displayName)" } }
+    private func openInApp() { if let resolvedApp { AgentAppResolver.open(resolvedApp) } }
+}
+
+/// Cowboy hover pattern: layout-reserved, opacity-faded, hit-test-gated —
+/// siblings never jump, VoiceOver gets a persistent action instead.
+private struct OpenInAgentAppChip: View {
+    let app: AgentAppResolver.ResolvedApp
+    let isVisible: Bool
+    @State private var isChipHovering = false
+
+    var body: some View {
+        Button {
+            AgentAppResolver.open(app)
+        } label: {
+            HStack(spacing: 4) {
+                Text("Open in \(app.displayName)")
+                    .gallopText(.caption, color: SemanticColor.textSecondary)
+                GallopIconView(icon: .arrowUpRight, fallbackSystemName: "arrow.up.right", size: 10)
+                    .foregroundStyle(SemanticColor.iconSecondary)
+            }
+            .padding(.horizontal, 9)
+            .frame(height: 22)
+            .background(
+                isChipHovering ? SemanticColor.buttonSecondaryHover : SemanticColor.surface600,
+                in: Capsule()
+            )
+            .overlay { Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1) }
+        }
+        .buttonStyle(.plain)
+        .onHover { isChipHovering = $0 }
+        .opacity(isVisible ? 1 : 0)
+        .allowsHitTesting(isVisible)
+        .accessibilityHidden(!isVisible)
+        .help("Open \(app.displayName)")
+    }
+}
+
+/// `.macAccessibleAction` (`AccessibleActionOverlay.swift`) hides its entire
+/// receiver subtree from VoiceOver and substitutes one overlay element, so
+/// it may only wrap the name/timestamp row here — never the outer message
+/// row, which also carries `ExpandableMessageText`'s body text and its own
+/// "Show full response" accessible action. Separately, `isEnabled: false`
+/// does not omit that overlay element (`ActionView.isAccessibilityElement()`
+/// is unconditional — see `AccessibleActionOverlayTests`), so it would still
+/// expose a disabled control with a placeholder label when no app resolves.
+/// Skipping the modifier entirely avoids registering that phantom control.
+private struct OpenInAppAccessibility: ViewModifier {
+    let label: String?
+    var value: String?
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if let label {
+            content.macAccessibleAction(label: label, value: value, action: action)
+        } else {
+            content
+        }
     }
 }
 
