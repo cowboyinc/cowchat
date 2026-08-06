@@ -258,6 +258,11 @@ private struct SidebarView: View {
                 .textFieldStyle(.plain)
                 .gallopText(.bodyM, color: SemanticColor.textPrimary)
                 .focused($isSearchFocused)
+                .onExitCommand {
+                    // Escape clears the filter and returns focus to the list.
+                    store.searchText = ""
+                    isSearchFocused = false
+                }
                 .accessibilityLabel("Search rooms or messages")
             if !store.searchText.isEmpty {
                 Button { store.searchText = "" } label: {
