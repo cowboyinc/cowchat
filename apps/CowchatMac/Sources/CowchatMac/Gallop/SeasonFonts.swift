@@ -1,3 +1,5 @@
+// Vendored from cowboyinc/macos Gallop/SeasonFonts.swift — adapted: resourceBundleName (Task 2) and nativeFont(for:) access (Task 13). Diff against upstream before re-copying.
+
 import AppKit
 import CoreText
 import SwiftUI
@@ -109,6 +111,9 @@ public struct SeasonFontProvider: GallopFontProvider {
     /// Internal, not private: `ComposerTextField` (AppKit `NSTextField`) needs
     /// the native `NSFont` directly rather than a SwiftUI `Font`, matching
     /// `SystemFontProvider.nativeFont(for:)`'s access level.
+    /// COWCHAT DIVERGENCE from the vendored ~/Github/macos source (there:
+    /// private) — re-apply this widening if the file is re-vendored;
+    /// ComposerTextField.swift depends on it.
     func nativeFont(for style: GallopTextStyle) -> NSFont {
         seasonFont(for: style) ?? fallback.nativeFont(for: style)
     }
