@@ -1,8 +1,6 @@
 import AppKit
 import SwiftUI
 
-private typealias GallopColor = GallopTheme.ColorToken
-
 private enum AppAppearance: String, CaseIterable, Identifiable {
     case system
     case light
@@ -49,7 +47,7 @@ struct ContentView: View {
                 .transition(.move(edge: .leading).combined(with: .opacity))
 
                 Rectangle()
-                    .fill(GallopColor.borderDefault.color)
+                    .fill(SemanticColor.borderDefault)
                     .frame(width: 1)
             }
 
@@ -71,11 +69,11 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(GallopColor.surface500.color)
+        .background(SemanticColor.surface500)
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                .stroke(SemanticColor.borderDefault, lineWidth: 1)
                 .allowsHitTesting(false)
         }
         .frame(minWidth: 900, minHeight: 600)
@@ -173,7 +171,7 @@ private struct SidebarView: View {
 
             sidebarFooter
         }
-        .background(GallopColor.surfaceGlass500.color)
+        .background(SemanticColor.surfaceGlass500)
     }
 
     private var baseRooms: [Room] {
@@ -263,14 +261,14 @@ private struct SidebarView: View {
                     }
                     .foregroundStyle(
                         item == scope
-                            ? GallopColor.surfaceGlassOnTextDefault.color
-                            : GallopColor.surfaceGlassOffTextDefault.color
+                            ? SemanticColor.surfaceGlassOnTextDefault
+                            : SemanticColor.surfaceGlassOffTextDefault
                     )
                     .frame(maxWidth: .infinity)
                     .frame(height: 34)
                     .background(
                         item == scope
-                            ? GallopColor.surfaceGlassOnDefault.color
+                            ? SemanticColor.surfaceGlassOnDefault
                             : Color.clear,
                         in: Capsule()
                     )
@@ -285,9 +283,9 @@ private struct SidebarView: View {
             }
         }
         .padding(3)
-        .background(GallopColor.surface400.color, in: Capsule())
+        .background(SemanticColor.surface400, in: Capsule())
         .overlay {
-            Capsule().stroke(GallopColor.borderDefault.color.opacity(0.7), lineWidth: 0.5)
+            Capsule().stroke(SemanticColor.borderDefault.opacity(0.7), lineWidth: 0.5)
         }
     }
 
@@ -295,17 +293,17 @@ private struct SidebarView: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(GallopColor.iconTertiary.color)
+                .foregroundStyle(SemanticColor.iconTertiary)
             TextField("Search rooms or messages", text: $store.searchText)
                 .textFieldStyle(.plain)
-                .gallopText(.bodyM, color: .textPrimary)
+                .gallopText(.bodyM, color: SemanticColor.textPrimary)
                 .focused($isSearchFocused)
                 .accessibilityLabel("Search rooms or messages")
             if !store.searchText.isEmpty {
                 Button { store.searchText = "" } label: {
                     Label("Clear room search", systemImage: "xmark.circle.fill")
                         .labelStyle(.iconOnly)
-                        .foregroundStyle(GallopColor.iconSubtle.color)
+                        .foregroundStyle(SemanticColor.iconSubtle)
                 }
                 .buttonStyle(.plain)
                 .macAccessibleAction(label: "Clear room search") { store.searchText = "" }
@@ -313,9 +311,9 @@ private struct SidebarView: View {
         }
         .padding(.horizontal, 11)
         .frame(height: 36)
-        .background(GallopColor.textfieldDefault.color, in: Capsule())
+        .background(SemanticColor.textfieldDefault, in: Capsule())
         .overlay {
-            Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 1)
+            Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
         }
     }
 
@@ -328,7 +326,7 @@ private struct SidebarView: View {
         )
         if !rooms.isEmpty {
             Text("Pinned")
-                .gallopText(.caption, color: .textTertiary)
+                .gallopText(.caption, color: SemanticColor.textTertiary)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
 
@@ -344,7 +342,7 @@ private struct SidebarView: View {
                                 accented: store.selectedRoomID == room.id
                             )
                             Text(room.name)
-                                .gallopText(.dataLabel, color: .textSecondary)
+                                .gallopText(.dataLabel, color: SemanticColor.textSecondary)
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity)
                         }
@@ -368,7 +366,7 @@ private struct SidebarView: View {
     private func roomGroup(_ group: RoomSidebarGroup, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(group.title)
-                .gallopText(.caption, color: .textTertiary)
+                .gallopText(.caption, color: SemanticColor.textTertiary)
                 .padding(.horizontal, 8)
                 .padding(.top, 4)
 
@@ -416,7 +414,7 @@ private struct SidebarView: View {
                     Image(systemName: isArchiveVisible ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                 }
-                .foregroundStyle(GallopColor.textTertiary.color)
+                .foregroundStyle(SemanticColor.textTertiary)
                 .padding(.horizontal, 10)
                 .frame(height: 36)
             }
@@ -431,7 +429,7 @@ private struct SidebarView: View {
             if isArchiveVisible {
                 if rooms.isEmpty {
                     Text("No rooms archived")
-                        .gallopText(.caption, color: .textTertiary)
+                        .gallopText(.caption, color: SemanticColor.textTertiary)
                         .padding(.horizontal, 10)
                         .padding(.bottom, 8)
                 } else {
@@ -471,13 +469,13 @@ private struct SidebarView: View {
             } else {
                 Image(systemName: store.searchText.isEmpty ? "person.2.slash" : "magnifyingglass")
                     .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(GallopColor.iconTertiary.color)
+                    .foregroundStyle(SemanticColor.iconTertiary)
             }
             Text(emptyRoomsTitle)
-                .gallopText(.bodyMStrong, color: .textSecondary)
+                .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
             if !store.searchText.isEmpty {
                 Text("Try another room, message, or agent name.")
-                    .gallopText(.caption, color: .textTertiary)
+                    .gallopText(.caption, color: SemanticColor.textTertiary)
                     .multilineTextAlignment(.center)
             }
         }
@@ -528,14 +526,14 @@ private struct SidebarView: View {
                         .frame(width: 7, height: 7)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(store.connectionTargetDescription)
-                            .gallopText(.caption, color: .textSecondary)
+                            .gallopText(.caption, color: SemanticColor.textSecondary)
                         Text(store.connectionStatus.label)
-                            .gallopText(.dataLabel, color: .textTertiary)
+                            .gallopText(.dataLabel, color: SemanticColor.textTertiary)
                             .help(store.connectionStatus.failureMessage ?? store.connectionStatus.label)
                     }
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(GallopColor.iconTertiary.color)
+                        .foregroundStyle(SemanticColor.iconTertiary)
                 }
                 .contentShape(Rectangle())
             }
@@ -574,17 +572,17 @@ private struct SidebarView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 58)
-        .background(GallopColor.surface600.color.opacity(0.78))
+        .background(SemanticColor.surface600.opacity(0.78))
         .overlay(alignment: .top) {
-            Rectangle().fill(GallopColor.borderDefault.color).frame(height: 1)
+            Rectangle().fill(SemanticColor.borderDefault).frame(height: 1)
         }
     }
 
     private var statusColor: Color {
         switch store.connectionStatus {
-        case .connected: return GallopColor.success.color
-        case .connecting: return GallopColor.warning.color
-        case .disconnected, .failed: return GallopColor.textError.color
+        case .connected: return SemanticColor.success
+        case .connecting: return SemanticColor.warning
+        case .disconnected, .failed: return SemanticColor.textError
         }
     }
 
@@ -638,13 +636,13 @@ private struct RoomRow: View {
         }
         .foregroundStyle(
             isSelected
-                ? GallopColor.buttonPrimaryTextDefault.color
-                : GallopColor.textSecondary.color
+                ? SemanticColor.buttonPrimaryTextDefault
+                : SemanticColor.textSecondary
         )
         .padding(.horizontal, 8)
         .frame(height: 54)
         .background(
-            isSelected ? GallopColor.buttonPrimaryDefault.color : Color.clear,
+            isSelected ? SemanticColor.buttonPrimaryDefault : Color.clear,
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
     }
@@ -687,9 +685,9 @@ private struct LobbyDashboardView: View {
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Lobby")
-                        .gallopText(.h4, color: .textPrimary)
+                        .gallopText(.h4, color: SemanticColor.textPrimary)
                     Text("\(availableAgentCount) available agents · \(store.pinnedRoomIDs.count) pinned rooms")
-                        .gallopText(.caption, color: .textTertiary)
+                        .gallopText(.caption, color: SemanticColor.textTertiary)
                 }
 
                 Spacer()
@@ -702,9 +700,9 @@ private struct LobbyDashboardView: View {
             .padding(.leading, isSidebarVisible ? 18 : 104)
             .padding(.trailing, 14)
             .frame(height: 58)
-            .background(GallopColor.surface600.color)
+            .background(SemanticColor.surface600)
 
-            Rectangle().fill(GallopColor.borderDefault.color).frame(height: 1)
+            Rectangle().fill(SemanticColor.borderDefault).frame(height: 1)
 
             ScrollView {
                 LazyVGrid(
@@ -722,22 +720,22 @@ private struct LobbyDashboardView: View {
                         VStack(alignment: .leading, spacing: 18) {
                             Image(systemName: "plus")
                                 .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(GallopColor.buttonSecondaryIconDefault.color)
+                                .foregroundStyle(SemanticColor.buttonSecondaryIconDefault)
                                 .frame(width: 34, height: 34)
-                                .background(GallopColor.buttonSecondaryDefault.color, in: Circle())
+                                .background(SemanticColor.buttonSecondaryDefault, in: Circle())
                             Spacer(minLength: 12)
                             Text("New Room")
-                                .gallopText(.h4, color: .textPrimary)
+                                .gallopText(.h4, color: SemanticColor.textPrimary)
                         }
                         .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
                         .padding(16)
                         .background(
-                            GallopColor.surface600.color,
+                            SemanticColor.surface600,
                             in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                         )
                         .overlay {
                             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                                .stroke(SemanticColor.borderDefault, lineWidth: 1)
                         }
                     }
                     .buttonStyle(.plain)
@@ -750,7 +748,7 @@ private struct LobbyDashboardView: View {
             .scrollIndicators(.hidden)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .background(GallopColor.surface500.color)
+        .background(SemanticColor.surface500)
     }
 }
 
@@ -774,7 +772,7 @@ private struct DashboardRoomCard: View {
                         if room.encrypted {
                             Image(systemName: "lock.fill")
                                 .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(GallopColor.iconTertiary.color)
+                                .foregroundStyle(SemanticColor.iconTertiary)
                         }
                         Spacer()
                     }
@@ -782,29 +780,29 @@ private struct DashboardRoomCard: View {
                     Spacer(minLength: 8)
                     if let parentRoom {
                         Text("in \(parentRoom.name)")
-                            .gallopText(.dataLabel, color: .textTertiary)
+                            .gallopText(.dataLabel, color: SemanticColor.textTertiary)
                             .lineLimit(1)
                     }
                     Text(room.name)
-                        .gallopText(.h4, color: .textPrimary)
+                        .gallopText(.h4, color: SemanticColor.textPrimary)
                         .lineLimit(1)
                     Text(
                         store.roomMessagePreviews[room.id]
                             ?? room.description
                             ?? (room.ephemeral ? "Temporary room" : "Open conversation")
                     )
-                        .gallopText(.caption, color: .textTertiary)
+                        .gallopText(.caption, color: SemanticColor.textTertiary)
                         .lineLimit(2)
                 }
                 .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
                 .padding(16)
                 .background(
-                    GallopColor.surface600.color,
+                    SemanticColor.surface600,
                     in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                 )
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
                 }
             }
             .buttonStyle(.plain)
@@ -825,7 +823,7 @@ private struct DashboardRoomCard: View {
                 Label("Room actions", systemImage: "ellipsis")
                     .labelStyle(.iconOnly)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(GallopColor.iconTertiary.color)
+                    .foregroundStyle(SemanticColor.iconTertiary)
                     .frame(width: 28, height: 28)
             }
             .menuStyle(.borderlessButton)
@@ -855,18 +853,18 @@ private struct RoomSetupView: View {
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(room.name)
-                        .gallopText(.h4, color: .textPrimary)
+                        .gallopText(.h4, color: SemanticColor.textPrimary)
                     Text("Waiting for your first collaborator")
-                        .gallopText(.caption, color: .textTertiary)
+                        .gallopText(.caption, color: SemanticColor.textTertiary)
                 }
                 Spacer()
             }
             .padding(.leading, isSidebarVisible ? 18 : 104)
             .padding(.trailing, 14)
             .frame(height: 58)
-            .background(GallopColor.surface600.color)
+            .background(SemanticColor.surface600)
 
-            Rectangle().fill(GallopColor.borderDefault.color).frame(height: 1)
+            Rectangle().fill(SemanticColor.borderDefault).frame(height: 1)
 
             VStack(spacing: 22) {
                 HStack(spacing: 14) {
@@ -875,46 +873,46 @@ private struct RoomSetupView: View {
                     Image(systemName: "sparkles")
                 }
                 .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(GallopColor.iconPrimary.color)
+                .foregroundStyle(SemanticColor.iconPrimary)
 
                 Text("Paste this prompt into one AI chatbot")
-                    .gallopText(.h5, color: .textPrimary)
+                    .gallopText(.h5, color: SemanticColor.textPrimary)
 
                 HStack(alignment: .bottom, spacing: 14) {
                     Text(roomPrompt)
                         .textSelection(.enabled)
-                        .gallopText(.bodyMStrong, color: .textSecondary)
+                        .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
 
                     Button(hasCopiedPrompt ? "Copied" : "Copy") { copyPrompt() }
                         .buttonStyle(.plain)
-                        .gallopText(.bodyMStrong, color: .buttonPrimaryTextDefault)
+                        .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
                         .padding(.horizontal, 18)
                         .frame(height: 38)
-                        .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+                        .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
                         .macAccessibleAction(label: "Copy setup prompt", action: copyPrompt)
                 }
                 .padding(18)
                 .frame(maxWidth: 620)
                 .background(
-                    GallopColor.surface600.color,
+                    SemanticColor.surface600,
                     in: RoundedRectangle(cornerRadius: 16, style: .continuous)
                 )
                 .overlay {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
                 }
 
                 Button("Continue") {
                     Task { await store.completeRoomSetup(room) }
                 }
                 .buttonStyle(.plain)
-                .gallopText(.bodyMStrong, color: .buttonSecondaryTextDefault)
+                .gallopText(.bodyMStrong, color: SemanticColor.buttonSecondaryTextDefault)
                 .padding(.horizontal, 18)
                 .frame(height: 38)
-                .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+                .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
                 .overlay {
-                    Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+                    Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                 }
                 .macAccessibleAction(label: "Finish room setup") {
                     Task { await store.completeRoomSetup(room) }
@@ -923,7 +921,7 @@ private struct RoomSetupView: View {
             .padding(28)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(GallopColor.surface500.color)
+        .background(SemanticColor.surface500)
     }
 
     private var roomPrompt: String {
@@ -948,18 +946,18 @@ private struct RoomReadyNotice: View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(room.name) is ready")
-                    .gallopText(.bodyMStrong, color: .textPrimary)
+                    .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                 Text("You can now begin chatting with your collaborator.")
-                    .gallopText(.caption, color: .textTertiary)
+                    .gallopText(.caption, color: SemanticColor.textTertiary)
             }
             Button("Open Room") {
                 Task { await store.openRoomReadyNotice() }
             }
             .buttonStyle(.plain)
-            .gallopText(.bodySStrong, color: .buttonPrimaryTextDefault)
+            .gallopText(.bodySStrong, color: SemanticColor.buttonPrimaryTextDefault)
             .padding(.horizontal, 14)
             .frame(height: 34)
-            .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
             .macAccessibleAction(label: "Open \(room.name)") {
                 Task { await store.openRoomReadyNotice() }
             }
@@ -969,7 +967,7 @@ private struct RoomReadyNotice: View {
                 Label("Dismiss", systemImage: "xmark")
                     .labelStyle(.iconOnly)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(GallopColor.iconTertiary.color)
+                    .foregroundStyle(SemanticColor.iconTertiary)
             }
             .buttonStyle(.plain)
             .macAccessibleAction(label: "Dismiss room notice") {
@@ -978,14 +976,14 @@ private struct RoomReadyNotice: View {
         }
         .padding(14)
         .background(
-            GallopColor.surface600.color,
+            SemanticColor.surface600,
             in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                .stroke(SemanticColor.borderDefault, lineWidth: 1)
         }
-        .shadow(color: GallopColor.surfaceGlassBorderShadow.color, radius: 18, y: 8)
+        .shadow(color: SemanticColor.surfaceGlassBorderShadow, radius: 18, y: 8)
     }
 }
 
@@ -1008,7 +1006,7 @@ private struct ChatRoomView: View {
         VStack(spacing: 0) {
             chatHeader
             Rectangle()
-                .fill(GallopColor.borderDefault.color)
+                .fill(SemanticColor.borderDefault)
                 .frame(height: 1)
 
             ZStack(alignment: .bottomTrailing) {
@@ -1016,7 +1014,7 @@ private struct ChatRoomView: View {
                 composer
             }
         }
-        .background(GallopColor.surface500.color)
+        .background(SemanticColor.surface500)
         .alert("Destroy \(room.name)?", isPresented: $isDestroyConfirmationPresented) {
             Button("Cancel", role: .cancel) {}
             Button("Destroy Room", role: .destructive) {
@@ -1048,25 +1046,25 @@ private struct ChatRoomView: View {
                             Task { await store.select(room: parentRoom) }
                         }
                         .buttonStyle(.plain)
-                        .gallopText(.bodySStrong, color: .textTertiary)
+                        .gallopText(.bodySStrong, color: SemanticColor.textTertiary)
                         .lineLimit(1)
                         .macAccessibleAction(label: "Open parent room \(parentRoom.name)") {
                             Task { await store.select(room: parentRoom) }
                         }
                         Image(systemName: "chevron.right")
                             .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(GallopColor.iconSubtle.color)
+                            .foregroundStyle(SemanticColor.iconSubtle)
                     }
                     Text(room.name)
-                        .gallopText(.h4, color: .textPrimary)
+                        .gallopText(.h4, color: SemanticColor.textPrimary)
                     if room.encrypted {
                         Image(systemName: "lock.fill")
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(GallopColor.iconTertiary.color)
+                            .foregroundStyle(SemanticColor.iconTertiary)
                     }
                 }
                 Text(presenceSummary)
-                    .gallopText(.caption, color: .textTertiary)
+                    .gallopText(.caption, color: SemanticColor.textTertiary)
                     .lineLimit(1)
             }
 
@@ -1096,7 +1094,7 @@ private struct ChatRoomView: View {
                     Label("Room actions", systemImage: "ellipsis")
                         .labelStyle(.iconOnly)
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(GallopColor.iconSecondary.color)
+                        .foregroundStyle(SemanticColor.iconSecondary)
                         .frame(width: 34, height: 32)
                 }
                 .menuStyle(.borderlessButton)
@@ -1105,7 +1103,7 @@ private struct ChatRoomView: View {
                 .accessibilityLabel("Room actions")
 
                 Rectangle()
-                    .fill(GallopColor.borderDefault.color)
+                    .fill(SemanticColor.borderDefault)
                     .frame(width: 1, height: 18)
 
                 Button {
@@ -1116,8 +1114,8 @@ private struct ChatRoomView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(
                             store.canDestroy(room)
-                                ? GallopColor.textError.color
-                                : GallopColor.iconSubtle.color
+                                ? SemanticColor.textError
+                                : SemanticColor.iconSubtle
                         )
                         .frame(width: 34, height: 32)
                 }
@@ -1136,15 +1134,15 @@ private struct ChatRoomView: View {
                 }
             }
             .padding(.horizontal, 2)
-            .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+            .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
             .overlay {
-                Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
             }
         }
         .padding(.leading, isSidebarVisible ? 18 : 104)
         .padding(.trailing, 14)
         .frame(height: 58)
-        .background(GallopColor.surface600.color)
+        .background(SemanticColor.surface600)
     }
 
     private var presenceSummary: String {
@@ -1184,7 +1182,7 @@ private struct ChatRoomView: View {
                                 HStack(spacing: 8) {
                                     ProgressView().controlSize(.mini)
                                     Text(thinkingText)
-                                        .gallopText(.caption, color: .textTertiary)
+                                        .gallopText(.caption, color: SemanticColor.textTertiary)
                                 }
                                 .id("thinking-indicator")
                             }
@@ -1212,10 +1210,10 @@ private struct ChatRoomView: View {
                             newMessageCount = 0
                         }
                         .buttonStyle(.plain)
-                        .gallopText(.bodySStrong, color: .buttonPrimaryTextDefault)
+                        .gallopText(.bodySStrong, color: SemanticColor.buttonPrimaryTextDefault)
                         .padding(.horizontal, 14)
                         .frame(height: 34)
-                        .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+                        .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
                         .padding(.bottom, isComposerExpanded ? 92 : 78)
                         .macAccessibleAction(label: "Show new messages") {
                             proxy.scrollTo("message-list-bottom", anchor: .bottom)
@@ -1243,11 +1241,11 @@ private struct ChatRoomView: View {
         VStack(spacing: 10) {
             Image(systemName: "bubble.left")
                 .font(.system(size: 24, weight: .medium))
-                .foregroundStyle(GallopColor.iconTertiary.color)
+                .foregroundStyle(SemanticColor.iconTertiary)
             Text("This room is quiet")
-                .gallopText(.h5, color: .textPrimary)
+                .gallopText(.h5, color: SemanticColor.textPrimary)
             Text("Open the composer and say hello.")
-                .gallopText(.bodyM, color: .textTertiary)
+                .gallopText(.bodyM, color: SemanticColor.textTertiary)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 60)
@@ -1273,11 +1271,11 @@ private struct ChatRoomView: View {
                 Label("Write a message", systemImage: "pencil")
                     .labelStyle(.iconOnly)
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(GallopColor.buttonSecondaryIconDefault.color)
+                    .foregroundStyle(SemanticColor.buttonSecondaryIconDefault)
                     .frame(width: 42, height: 42)
-                    .background(GallopColor.buttonSecondaryDefault.color, in: Circle())
+                    .background(SemanticColor.buttonSecondaryDefault, in: Circle())
                     .overlay {
-                        Circle().stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                        Circle().stroke(SemanticColor.borderDefault, lineWidth: 1)
                     }
             }
             .buttonStyle(.plain)
@@ -1294,11 +1292,11 @@ private struct ChatRoomView: View {
         VStack(spacing: 0) {
             if room.encrypted {
                 Label("Encrypted rooms are read-only in the macOS app.", systemImage: "lock.fill")
-                    .gallopText(.caption, color: .textError)
+                    .gallopText(.caption, color: SemanticColor.textError)
                     .padding(.bottom, 8)
             } else if !store.connectionStatus.isConnected {
                 Label("Offline — reconnect before sending.", systemImage: "wifi.slash")
-                    .gallopText(.caption, color: .textTertiary)
+                    .gallopText(.caption, color: SemanticColor.textTertiary)
                     .padding(.bottom, 8)
             }
 
@@ -1319,18 +1317,18 @@ private struct ChatRoomView: View {
                 .frame(height: 22)
                 .padding(.horizontal, 13)
                 .frame(height: 42)
-                .background(GallopColor.textfieldDefault.color, in: Capsule())
+                .background(SemanticColor.textfieldDefault, in: Capsule())
                 .overlay {
-                    Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                    Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
                 }
 
                 Button { store.sendDraft() } label: {
                     Label("Send message", systemImage: "paperplane.fill")
                         .labelStyle(.iconOnly)
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(GallopColor.buttonPrimaryIconDefault.color)
+                        .foregroundStyle(SemanticColor.buttonPrimaryIconDefault)
                         .frame(width: 38, height: 38)
-                        .background(GallopColor.buttonPrimaryDefault.color, in: Circle())
+                        .background(SemanticColor.buttonPrimaryDefault, in: Circle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!canSend)
@@ -1347,7 +1345,7 @@ private struct ChatRoomView: View {
                     Label("Close composer", systemImage: "xmark")
                         .labelStyle(.iconOnly)
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(GallopColor.iconTertiary.color)
+                        .foregroundStyle(SemanticColor.iconTertiary)
                         .frame(width: 24, height: 38)
                 }
                 .buttonStyle(.plain)
@@ -1360,9 +1358,9 @@ private struct ChatRoomView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
-        .background(GallopColor.surface600.color)
+        .background(SemanticColor.surface600)
         .overlay(alignment: .top) {
-            Rectangle().fill(GallopColor.borderDefault.color).frame(height: 1)
+            Rectangle().fill(SemanticColor.borderDefault).frame(height: 1)
         }
     }
 
@@ -1385,14 +1383,14 @@ private struct MessageFeedRow: View {
                 VStack(alignment: .leading, spacing: 7) {
                     ExpandableMessageText(content: message.content)
                     Text(relativeTimestamp)
-                        .gallopText(.caption, color: .textTertiary)
+                        .gallopText(.caption, color: SemanticColor.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
                     .padding(.horizontal, 18)
                     .padding(.vertical, 13)
                     .background(
                         LinearGradient(
-                            colors: [GallopColor.surface300.color, GallopColor.surface400.color],
+                            colors: [SemanticColor.surface300, SemanticColor.surface400],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
@@ -1400,7 +1398,7 @@ private struct MessageFeedRow: View {
                     )
                     .overlay {
                         RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+                            .stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                     }
                     .frame(maxWidth: 720, alignment: .trailing)
             }
@@ -1411,9 +1409,9 @@ private struct MessageFeedRow: View {
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 8) {
                         Text(message.agentName)
-                            .gallopText(.bodyMStrong, color: .textPrimary)
+                            .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                         Text(relativeTimestamp)
-                            .gallopText(.caption, color: .textTertiary)
+                            .gallopText(.caption, color: SemanticColor.textTertiary)
                     }
                     ExpandableMessageText(content: message.content)
                 }
@@ -1448,7 +1446,7 @@ private struct ExpandableMessageText: View {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                             .font(.system(size: 9, weight: .semibold))
                     }
-                    .foregroundStyle(GallopColor.textTertiary.color)
+                    .foregroundStyle(SemanticColor.textTertiary)
                 }
                 .buttonStyle(.plain)
                 .macAccessibleAction(
@@ -1464,24 +1462,24 @@ private struct ExpandableMessageText: View {
                 case .prose:
                     Text(markdown(segment.text))
                         .textSelection(.enabled)
-                        .gallopText(.bodyL, color: .textSecondary)
+                        .gallopText(.bodyL, color: SemanticColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 case .code:
                     ScrollView(.horizontal) {
                         Text(segment.text)
                             .textSelection(.enabled)
-                            .gallopText(.code, color: .textSecondary)
+                            .gallopText(.code, color: SemanticColor.textSecondary)
                             .fixedSize(horizontal: true, vertical: true)
                             .padding(12)
                     }
                     .scrollIndicators(.hidden)
                     .background(
-                        GallopColor.surface400.color,
+                        SemanticColor.surface400,
                         in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                     )
                     .overlay {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                            .stroke(SemanticColor.borderDefault, lineWidth: 1)
                     }
                 }
             }
@@ -1507,7 +1505,7 @@ private struct AgentAvatar: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-            .fill(GallopColor.surfaceGlassOnDefault.color)
+            .fill(SemanticColor.surfaceGlassOnDefault)
             .overlay {
                 if let appIcon {
                     Image(nsImage: appIcon)
@@ -1517,12 +1515,12 @@ private struct AgentAvatar: View {
                 } else {
                     Text(initial)
                         .font(.system(size: size * 0.42, weight: .bold, design: .rounded))
-                        .foregroundStyle(GallopColor.surfaceGlassOnTextDefault.color)
+                        .foregroundStyle(SemanticColor.surfaceGlassOnTextDefault)
                 }
             }
             .overlay {
                 RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                    .stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+                    .stroke(SemanticColor.borderDefault, lineWidth: 0.5)
             }
             .frame(width: size, height: size)
             .accessibilityHidden(true)
@@ -1559,28 +1557,28 @@ private struct RoomAvatar: View {
 
     var body: some View {
         Circle()
-            .fill(accented ? GallopColor.buttonPrimaryDefault.color : avatarFill)
+            .fill(accented ? SemanticColor.buttonPrimaryDefault : avatarFill)
             .overlay {
                 Text(initials)
                     .font(.system(size: size * 0.31, weight: .bold, design: .rounded))
                     .foregroundStyle(
                         accented
-                            ? GallopColor.buttonPrimaryTextDefault.color
-                            : GallopColor.textSecondary.color
+                            ? SemanticColor.buttonPrimaryTextDefault
+                            : SemanticColor.textSecondary
                     )
             }
             .overlay {
-                Circle().stroke(GallopColor.borderDefault.color.opacity(0.8), lineWidth: 0.5)
+                Circle().stroke(SemanticColor.borderDefault.opacity(0.8), lineWidth: 0.5)
             }
             .frame(width: size, height: size)
     }
 
     private var avatarFill: Color {
         let values = [
-            GallopColor.buttonSecondaryDefault.color,
-            GallopColor.surface400.color,
-            GallopColor.surface600.color,
-            GallopColor.surfaceGlassOnDefault.color,
+            SemanticColor.buttonSecondaryDefault,
+            SemanticColor.surface400,
+            SemanticColor.surface600,
+            SemanticColor.surfaceGlassOnDefault,
         ]
         return values[index]
     }
@@ -1610,20 +1608,20 @@ private struct CircleIconButton: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(
                     !isEnabled
-                        ? GallopColor.iconSubtle.color
+                        ? SemanticColor.iconSubtle
                         : isActive
-                        ? GallopColor.surfaceGlassOnTextDefault.color
-                        : GallopColor.buttonSecondaryIconDefault.color
+                        ? SemanticColor.surfaceGlassOnTextDefault
+                        : SemanticColor.buttonSecondaryIconDefault
                 )
                 .frame(width: 32, height: 32)
                 .background(
                     isActive
-                        ? GallopColor.surfaceGlassOnDefault.color
-                        : GallopColor.buttonSecondaryDefault.color,
+                        ? SemanticColor.surfaceGlassOnDefault
+                        : SemanticColor.buttonSecondaryDefault,
                     in: Circle()
                 )
                 .overlay {
-                    Circle().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+                    Circle().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                 }
         }
         .buttonStyle(.plain)
@@ -1648,7 +1646,7 @@ private struct EmptyChatView: View {
                     )
                 }
                 Text("Cowchat")
-                    .gallopText(.bodyMStrong, color: .textPrimary)
+                    .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                 Spacer()
                 CircleIconButton(
                     systemName: "square.and.pencil",
@@ -1659,23 +1657,23 @@ private struct EmptyChatView: View {
             .padding(.leading, isSidebarVisible ? 14 : 104)
             .padding(.trailing, 14)
             .frame(height: 58)
-            .background(GallopColor.surface600.color)
+            .background(SemanticColor.surface600)
 
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Howdy, welcome to Cowchat")
-                        .gallopText(.h4, color: .textPrimary)
+                        .gallopText(.h4, color: SemanticColor.textPrimary)
                     Text("Choose a local room or start a new conversation.")
-                        .gallopText(.bodyM, color: .textTertiary)
+                        .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 }
 
                 if store.rooms.isEmpty {
                     VStack(spacing: 10) {
                         Image(systemName: "bubble.left.and.bubble.right")
                             .font(.system(size: 28, weight: .medium))
-                            .foregroundStyle(GallopColor.iconTertiary.color)
+                            .foregroundStyle(SemanticColor.iconTertiary)
                         Text("No rooms available")
-                            .gallopText(.h5, color: .textPrimary)
+                            .gallopText(.h5, color: SemanticColor.textPrimary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -1687,17 +1685,17 @@ private struct EmptyChatView: View {
                                 VStack(alignment: .leading, spacing: 12) {
                                     RoomAvatar(name: room.name, size: 38, accented: false)
                                     Text(room.name)
-                                        .gallopText(.h4, color: .textPrimary)
+                                        .gallopText(.h4, color: SemanticColor.textPrimary)
                                     Text(room.description ?? "Open conversation")
-                                        .gallopText(.caption, color: .textTertiary)
+                                        .gallopText(.caption, color: SemanticColor.textTertiary)
                                         .lineLimit(2)
                                 }
                                 .frame(maxWidth: .infinity, minHeight: 116, alignment: .topLeading)
                                 .padding(16)
-                                .background(GallopColor.surface600.color, in: RoundedRectangle(cornerRadius: 12))
+                                .background(SemanticColor.surface600, in: RoundedRectangle(cornerRadius: 12))
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 12)
-                                        .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
                                 }
                             }
                             .buttonStyle(.plain)
@@ -1712,7 +1710,7 @@ private struct EmptyChatView: View {
             .padding(24)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .background(GallopColor.surface500.color)
+        .background(SemanticColor.surface500)
     }
 }
 
@@ -1734,7 +1732,7 @@ private struct SettingsView: View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 Text("Preferences")
-                    .gallopText(.caption, color: .textTertiary)
+                    .gallopText(.caption, color: SemanticColor.textTertiary)
                     .padding(.horizontal, 16)
                     .padding(.top, 20)
                     .padding(.bottom, 8)
@@ -1751,9 +1749,9 @@ private struct SettingsView: View {
                 Spacer()
             }
             .frame(width: 230)
-            .background(GallopColor.surface400.color)
+            .background(SemanticColor.surface400)
 
-            Rectangle().fill(GallopColor.borderDefault.color).frame(width: 1)
+            Rectangle().fill(SemanticColor.borderDefault).frame(width: 1)
 
             VStack(alignment: .leading, spacing: 24) {
                 settingsHeader
@@ -1772,13 +1770,13 @@ private struct SettingsView: View {
             }
             .padding(28)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(GallopColor.surface600.color)
+            .background(SemanticColor.surface600)
         }
         .frame(width: 780, height: 580)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                .stroke(SemanticColor.borderDefault, lineWidth: 1)
         }
         .onAppear(perform: loadCloudConfiguration)
     }
@@ -1787,23 +1785,23 @@ private struct SettingsView: View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
                 Text(selectedPage == .connection ? "Connection" : "Theme")
-                    .gallopText(.h4, color: .textPrimary)
+                    .gallopText(.h4, color: SemanticColor.textPrimary)
                 Text(
                     selectedPage == .connection
                         ? "Choose where Cowchat stores and syncs your rooms."
                         : "Choose how Cowchat appears on this Mac."
                 )
-                    .gallopText(.bodyM, color: .textTertiary)
+                    .gallopText(.bodyM, color: SemanticColor.textTertiary)
             }
             Spacer()
             Button("Close") { isPresented = false }
                 .buttonStyle(.plain)
-                .gallopText(.bodySStrong, color: .buttonSecondaryTextDefault)
+                .gallopText(.bodySStrong, color: SemanticColor.buttonSecondaryTextDefault)
                 .padding(.horizontal, 14)
                 .frame(height: 32)
-                .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+                .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
                 .overlay {
-                    Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+                    Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                 }
                 .macAccessibleAction(label: "Close settings") { isPresented = false }
         }
@@ -1835,74 +1833,74 @@ private struct SettingsView: View {
             if let failureMessage = store.connectionStatus.failureMessage {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(GallopColor.warning.color)
+                        .foregroundStyle(SemanticColor.warning)
                     Text(failureMessage)
-                        .gallopText(.bodyS, color: .textSecondary)
+                        .gallopText(.bodyS, color: SemanticColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
                 .padding(12)
-                .background(GallopColor.surfaceGlassOnDefault.color, in: RoundedRectangle(cornerRadius: 12))
+                .background(SemanticColor.surfaceGlassOnDefault, in: RoundedRectangle(cornerRadius: 12))
                 .overlay {
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
                 }
             }
 
             VStack(alignment: .leading, spacing: 12) {
                 Text("Local server")
-                    .gallopText(.bodyMStrong, color: .textPrimary)
+                    .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                 Text("Local is the default. Cowchat starts its bundled server when needed, and your room database stays on this Mac.")
-                    .gallopText(.bodyM, color: .textTertiary)
+                    .gallopText(.bodyM, color: SemanticColor.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(16)
-            .background(GallopColor.surface500.color, in: RoundedRectangle(cornerRadius: 14))
+            .background(SemanticColor.surface500, in: RoundedRectangle(cornerRadius: 14))
             .overlay {
                 RoundedRectangle(cornerRadius: 14)
-                    .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                    .stroke(SemanticColor.borderDefault, lineWidth: 1)
             }
 
             VStack(alignment: .leading, spacing: 12) {
                 Text("Cowchat Cloud")
-                    .gallopText(.bodyMStrong, color: .textPrimary)
+                    .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                 TextField("wss://your-cowchat.example/ws", text: $cloudURL)
                     .textFieldStyle(.plain)
-                    .gallopText(.bodyM, color: .textPrimary)
+                    .gallopText(.bodyM, color: SemanticColor.textPrimary)
                     .padding(.horizontal, 13)
                     .frame(height: 40)
-                    .background(GallopColor.textfieldDefault.color, in: Capsule())
+                    .background(SemanticColor.textfieldDefault, in: Capsule())
                     .overlay {
-                        Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                        Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
                     }
                 SecureField("API key", text: $cloudAPIKey)
                     .textFieldStyle(.plain)
-                    .gallopText(.bodyM, color: .textPrimary)
+                    .gallopText(.bodyM, color: SemanticColor.textPrimary)
                     .padding(.horizontal, 13)
                     .frame(height: 40)
-                    .background(GallopColor.textfieldDefault.color, in: Capsule())
+                    .background(SemanticColor.textfieldDefault, in: Capsule())
                     .overlay {
-                        Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                        Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
                     }
                 HStack {
                     Label("Stored only in this Mac's Keychain", systemImage: "lock.fill")
-                        .gallopText(.caption, color: .textTertiary)
+                        .gallopText(.caption, color: SemanticColor.textTertiary)
                     Spacer()
                     Button("Save and connect", action: saveCloudConfiguration)
                         .buttonStyle(.plain)
-                        .gallopText(.bodyMStrong, color: .buttonPrimaryTextDefault)
+                        .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
                         .padding(.horizontal, 16)
                         .frame(height: 36)
-                        .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+                        .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
                         .disabled(!canSaveCloudConfiguration)
                         .opacity(canSaveCloudConfiguration ? 1 : 0.45)
                 }
             }
             .padding(16)
-            .background(GallopColor.surface500.color, in: RoundedRectangle(cornerRadius: 14))
+            .background(SemanticColor.surface500, in: RoundedRectangle(cornerRadius: 14))
             .overlay {
                 RoundedRectangle(cornerRadius: 14)
-                    .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                    .stroke(SemanticColor.borderDefault, lineWidth: 1)
             }
         }
     }
@@ -1928,12 +1926,12 @@ private struct SettingsView: View {
                 onShowOnboarding()
             }
             .buttonStyle(.plain)
-            .gallopText(.bodyMStrong, color: .buttonSecondaryTextDefault)
+            .gallopText(.bodyMStrong, color: SemanticColor.buttonSecondaryTextDefault)
             .padding(.horizontal, 16)
             .frame(height: 38)
-            .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+            .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
             .overlay {
-                Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 0.5)
+                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
             }
             .macAccessibleAction(label: "Show onboarding again") {
                 isPresented = false
@@ -1959,13 +1957,13 @@ private struct SettingsView: View {
             }
             .foregroundStyle(
                 selectedPage == page
-                    ? GallopColor.textPrimary.color
-                    : GallopColor.textSecondary.color
+                    ? SemanticColor.textPrimary
+                    : SemanticColor.textSecondary
             )
             .padding(.horizontal, 12)
             .frame(height: 36)
             .background(
-                selectedPage == page ? GallopColor.surfaceGlassOnDefault.color : Color.clear,
+                selectedPage == page ? SemanticColor.surfaceGlassOnDefault : Color.clear,
                 in: RoundedRectangle(cornerRadius: 10)
             )
             .padding(.horizontal, 8)
@@ -1992,24 +1990,24 @@ private struct SettingsView: View {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(
                         selected
-                            ? GallopColor.buttonPrimaryDefault.color
-                            : GallopColor.iconSubtle.color
+                            ? SemanticColor.buttonPrimaryDefault
+                            : SemanticColor.iconSubtle
                     )
             }
-            .foregroundStyle(GallopColor.textSecondary.color)
+            .foregroundStyle(SemanticColor.textSecondary)
             .padding(.horizontal, 14)
             .frame(maxWidth: .infinity)
             .frame(height: 64)
             .background(
-                selected ? GallopColor.surfaceGlassOnDefault.color : GallopColor.surface500.color,
+                selected ? SemanticColor.surfaceGlassOnDefault : SemanticColor.surface500,
                 in: RoundedRectangle(cornerRadius: 14)
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 14)
                     .stroke(
                         selected
-                            ? GallopColor.buttonPrimaryDefault.color
-                            : GallopColor.borderDefault.color,
+                            ? SemanticColor.buttonPrimaryDefault
+                            : SemanticColor.borderDefault,
                         lineWidth: 1
                     )
             }
@@ -2038,26 +2036,35 @@ private struct SettingsView: View {
     private func themePreview(title: String, dark: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             RoundedRectangle(cornerRadius: 9)
-                .fill(themePreviewColor(.surface500, dark: dark))
+                .fill(themePreviewColor(SemanticColor.surface500, dark: dark))
                 .overlay(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 7)
-                        .fill(themePreviewColor(.surface700, dark: dark))
+                        .fill(themePreviewColor(SemanticColor.surface700, dark: dark))
                         .frame(width: 42)
                         .padding(6)
                 }
                 .frame(height: 90)
                 .overlay {
                     RoundedRectangle(cornerRadius: 9)
-                        .stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
                 }
             Text(title)
-                .gallopText(.bodySStrong, color: .textSecondary)
+                .gallopText(.bodySStrong, color: SemanticColor.textSecondary)
         }
         .frame(maxWidth: 190)
     }
 
-    private func themePreviewColor(_ token: GallopColor, dark: Bool) -> Color {
-        Color(nsColor: token.rgba(for: dark ? .dark : .light).nsColor)
+    /// Forces `token` — an adaptive SemanticColor — to resolve as if the
+    /// system appearance were light or dark, regardless of which appearance
+    /// is actually active. Needed because these two preview swatches must
+    /// show BOTH themes side by side. Same resolution technique
+    /// GallopTokensParityTests already validates against known hex values.
+    private func themePreviewColor(_ token: Color, dark: Bool) -> Color {
+        var resolved = token
+        NSAppearance(named: dark ? .darkAqua : .aqua)!.performAsCurrentDrawingAppearance {
+            resolved = Color(nsColor: NSColor(token))
+        }
+        return resolved
     }
 }
 
@@ -2078,9 +2085,9 @@ private struct RenameRoomView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Rename room")
-                        .gallopText(.h4, color: .textPrimary)
+                        .gallopText(.h4, color: SemanticColor.textPrimary)
                     Text("The new name is shared with everyone who can see this room.")
-                        .gallopText(.bodyM, color: .textTertiary)
+                        .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 }
                 Spacer()
                 CircleIconButton(systemName: "xmark", help: "Close", action: cancel)
@@ -2088,18 +2095,18 @@ private struct RenameRoomView: View {
 
             TextField("Room name", text: $name)
                 .textFieldStyle(.plain)
-                .gallopText(.bodyM, color: .textPrimary)
+                .gallopText(.bodyM, color: SemanticColor.textPrimary)
                 .padding(.horizontal, 14)
                 .frame(height: 42)
-                .background(GallopColor.textfieldDefault.color, in: Capsule())
+                .background(SemanticColor.textfieldDefault, in: Capsule())
                 .overlay {
-                    Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                    Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
                 }
                 .onSubmit(renameRoom)
 
             if let validationMessage {
                 Text(validationMessage)
-                    .gallopText(.caption, color: .textError)
+                    .gallopText(.caption, color: SemanticColor.textError)
             }
 
             Spacer()
@@ -2109,19 +2116,19 @@ private struct RenameRoomView: View {
                 Button("Cancel", action: cancel)
                     .keyboardShortcut(.cancelAction)
                     .buttonStyle(.plain)
-                    .gallopText(.bodyMStrong, color: .textSecondary)
+                    .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
                     .padding(.horizontal, 16)
                     .frame(height: 38)
-                    .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+                    .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
                     .macAccessibleAction(label: "Cancel", action: cancel)
 
                 Button(isRenaming ? "Renaming…" : "Rename", action: renameRoom)
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.plain)
-                    .gallopText(.bodyMStrong, color: .buttonPrimaryTextDefault)
+                    .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
                     .padding(.horizontal, 18)
                     .frame(height: 38)
-                    .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+                    .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
                     .disabled(!canRename)
                     .opacity(canRename ? 1 : 0.45)
                     .macAccessibleAction(
@@ -2133,7 +2140,7 @@ private struct RenameRoomView: View {
         }
         .padding(26)
         .frame(width: 480, height: 260)
-        .background(GallopColor.surface600.color)
+        .background(SemanticColor.surface600)
         .interactiveDismissDisabled(isRenaming)
     }
 
@@ -2194,14 +2201,14 @@ private struct CreateRoomView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(parentRoom == nil ? "New room" : "New nested room")
-                        .gallopText(.h4, color: .textPrimary)
+                        .gallopText(.h4, color: SemanticColor.textPrimary)
                     Text(
                         parentRoom.map {
                             "Create a separate conversation inside \($0.name). Membership and history stay independent."
                         }
                             ?? "Create a conversation on your local Cowchat server."
                     )
-                        .gallopText(.bodyM, color: .textTertiary)
+                        .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 }
                 Spacer()
                 CircleIconButton(
@@ -2215,16 +2222,16 @@ private struct CreateRoomView: View {
                 styledField("Room name", text: $name)
                 if !name.isEmpty, let nameValidationMessage {
                     Text(nameValidationMessage)
-                        .gallopText(.caption, color: .textError)
+                        .gallopText(.caption, color: SemanticColor.textError)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 4)
                 }
                 styledField("Description (optional)", text: $description)
 
                 Toggle("Temporary room", isOn: $ephemeral)
-                    .gallopText(.bodyM, color: .textSecondary)
+                    .gallopText(.bodyM, color: SemanticColor.textSecondary)
                 Toggle("Public room", isOn: $isPublic)
-                    .gallopText(.bodyM, color: .textSecondary)
+                    .gallopText(.bodyM, color: SemanticColor.textSecondary)
             }
 
             Spacer()
@@ -2234,10 +2241,10 @@ private struct CreateRoomView: View {
                 Button("Cancel", action: cancel)
                     .keyboardShortcut(.cancelAction)
                     .buttonStyle(.plain)
-                    .gallopText(.bodyMStrong, color: .textSecondary)
+                    .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
                     .padding(.horizontal, 16)
                     .frame(height: 38)
-                    .background(GallopColor.buttonSecondaryDefault.color, in: Capsule())
+                    .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
                     .macAccessibleAction(label: "Cancel", action: cancel)
 
                 Button(createButtonTitle) {
@@ -2245,10 +2252,10 @@ private struct CreateRoomView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.plain)
-                .gallopText(.bodyMStrong, color: .buttonPrimaryTextDefault)
+                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
                 .padding(.horizontal, 18)
                 .frame(height: 38)
-                .background(GallopColor.buttonPrimaryDefault.color, in: Capsule())
+                .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
                 .disabled(!canCreate)
                 .opacity(canCreate ? 1 : 0.45)
                 .macAccessibleAction(
@@ -2260,18 +2267,18 @@ private struct CreateRoomView: View {
         }
         .padding(26)
         .frame(width: 480, height: 390)
-        .background(GallopColor.surface600.color)
+        .background(SemanticColor.surface600)
     }
 
     private func styledField(_ placeholder: String, text: Binding<String>) -> some View {
         TextField(placeholder, text: text)
             .textFieldStyle(.plain)
-            .gallopText(.bodyM, color: .textPrimary)
+            .gallopText(.bodyM, color: SemanticColor.textPrimary)
             .padding(.horizontal, 14)
             .frame(height: 42)
-            .background(GallopColor.textfieldDefault.color, in: Capsule())
+            .background(SemanticColor.textfieldDefault, in: Capsule())
             .overlay {
-                Capsule().stroke(GallopColor.borderDefault.color, lineWidth: 1)
+                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
             }
     }
 

@@ -134,7 +134,7 @@ struct CowchatMacApp: App {
                 }
             }
             .environmentObject(store)
-            .tint(GallopTheme.ColorToken.buttonPrimaryDefault.color)
+            .tint(SemanticColor.buttonPrimaryDefault)
             .task {
                 appDelegate.onTerminationRequested = {
                     await store.shutdownOwnedLocalServerForAppTermination()
