@@ -1270,21 +1270,16 @@ private struct ChatRoomView: View {
             }
 
             HStack(spacing: 8) {
-                CircleIconButton(
-                    icon: .add,
-                    fallbackSystemName: "plus",
-                    help: "Attachments are coming soon",
-                    isEnabled: false,
-                    action: {}
-                )
-
                 ComposerTextField(
                     text: $store.draft,
                     placeholder: "Message \(room.name)",
                     isEnabled: !room.encrypted,
-                    onSubmit: store.sendDraft
+                    onSubmit: store.sendDraft,
+                    onCancel: {
+                        withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
+                    }
                 )
-                .frame(height: 22)
+                .frame(height: ComposerTextField.naturalHeight)
                 .padding(.horizontal, 16)
                 .frame(height: 44)
                 .background(
@@ -1312,19 +1307,6 @@ private struct ChatRoomView: View {
                     isEnabled: canSend,
                     action: store.sendDraft
                 )
-
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
-                } label: {
-                    GallopIconView(icon: .dismiss, fallbackSystemName: "xmark", size: 12)
-                        .foregroundStyle(SemanticColor.iconTertiary)
-                        .frame(width: 24, height: 38)
-                }
-                .buttonStyle(.plain)
-                .help("Close composer")
-                .macAccessibleAction(label: "Close composer") {
-                    withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
-                }
             }
         }
         .padding(.horizontal, 14)

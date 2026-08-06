@@ -8,9 +8,17 @@ struct ComposerTextField: NSViewRepresentable {
     let placeholder: String
     let isEnabled: Bool
     let onSubmit: () -> Void
+    var onCancel: (() -> Void)?
+
+    /// The font's real line height. Framing the field shorter than this makes
+    /// the field editor draw a cramped, mis-centered insertion caret.
+    static let naturalHeight: CGFloat = {
+        let font = SeasonFontProvider().nativeFont(for: .bodyL)
+        return ceil(font.ascender - font.descender + font.leading)
+    }()
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, onSubmit: onSubmit)
+        Coordinator(text: $text, onSubmit: onSubmit, onCancel: onCancel)
     }
 
     func makeNSView(context: Context) -> NSTextField {
@@ -48,6 +56,7 @@ struct ComposerTextField: NSViewRepresentable {
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.text = $text
         context.coordinator.onSubmit = onSubmit
+        context.coordinator.onCancel = onCancel
         field.placeholderAttributedString = NSAttributedString(
             string: placeholder,
             attributes: [
@@ -64,10 +73,12 @@ struct ComposerTextField: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var text: Binding<String>
         var onSubmit: () -> Void
+        var onCancel: (() -> Void)?
 
-        init(text: Binding<String>, onSubmit: @escaping () -> Void) {
+        init(text: Binding<String>, onSubmit: @escaping () -> Void, onCancel: (() -> Void)?) {
             self.text = text
             self.onSubmit = onSubmit
+            self.onCancel = onCancel
         }
 
         func controlTextDidChange(_ notification: Notification) {
@@ -80,6 +91,10 @@ struct ComposerTextField: NSViewRepresentable {
             textView: NSTextView,
             doCommandBy commandSelector: Selector
         ) -> Bool {
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)), let onCancel {
+                onCancel()
+                return true
+            }
             guard commandSelector == #selector(NSResponder.insertNewline(_:)),
                   let field = control as? NSTextField else { return false }
             text.wrappedValue = field.stringValue
