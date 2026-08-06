@@ -186,7 +186,7 @@ private struct SidebarView: View {
                                     .contextMenu { roomContextMenu(for: room) }
                                     .macAccessibleAction(
                                         label: "Open \(room.name)",
-                                        value: store.selectedRoomID == room.id ? "selected" : nil
+                                        value: roomAccessibilityValue(for: room)
                                     ) {
                                         Task { await store.select(room: room) }
                                     }
@@ -313,7 +313,7 @@ private struct SidebarView: View {
                         }
                         .macAccessibleAction(
                             label: "Open \(room.name)",
-                            value: store.selectedRoomID == room.id ? "selected" : nil
+                            value: roomAccessibilityValue(for: room)
                         ) {
                             Task { await store.select(room: room) }
                         }
@@ -460,6 +460,17 @@ private struct SidebarView: View {
             }
         }
     }
+
+    /// Value announced by the AccessibleActionOverlay for a room row (see
+    /// macAccessibleAction) — RoomRow's own accessibility subtree is hidden,
+    /// so unread/selected state must be composed here to be announced at all.
+    private func roomAccessibilityValue(for room: Room) -> String? {
+        let parts = [
+            store.isUnread(room) ? "Unread" : nil,
+            store.selectedRoomID == room.id ? "selected" : nil,
+        ].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
 }
 
 enum SidebarRowState {
@@ -531,7 +542,6 @@ private struct RoomRow: View {
         .frame(height: 54)
         .background(SidebarRowBackground(state: .init(isSelected: isSelected, isHovering: isHovering)))
         .onHover { isHovering = $0 }
-        .accessibilityValue(isUnread ? Text("Unread") : Text(""))
     }
 
     private var roomSummary: String {
