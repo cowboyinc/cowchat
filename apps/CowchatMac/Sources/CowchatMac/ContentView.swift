@@ -607,9 +607,6 @@ private struct RoomRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Circle()
-                .fill(isUnread ? Palette.nugget500 : Color.clear)
-                .frame(width: 7, height: 7)
             RoomAvatar(name: room.name, size: 40, accented: isSelected)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
@@ -638,8 +635,19 @@ private struct RoomRow: View {
             }
         }
         .padding(.trailing, 8)
-        .padding(.leading, 4)
+        .padding(.leading, 16)
         .frame(height: 54)
+        // Floats in the leading padding rather than occupying a flow column,
+        // so read rows carry no reserved gutter and content never shifts
+        // when the dot appears.
+        .overlay(alignment: .leading) {
+            if isUnread {
+                Circle()
+                    .fill(Palette.nugget500)
+                    .frame(width: 7, height: 7)
+                    .padding(.leading, 4)
+            }
+        }
         .background(SidebarRowBackground(state: .init(isSelected: isSelected, isHovering: isHovering)))
         .onHover { isHovering = $0 }
     }
