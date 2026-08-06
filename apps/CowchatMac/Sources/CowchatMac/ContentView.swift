@@ -61,12 +61,26 @@ struct ContentView: View {
                             .id(room.id)
                     }
                 } else {
-                    EmptyChatView(isSidebarVisible: $isSidebarVisible)
+                    EmptyChatView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Dash "Page" card: surface500 content panel on the surface400
+            // shell, radius 16, hairline border, 8pt gutter (Figma 4605:27623).
+            .background(SemanticColor.surface500)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(SemanticColor.borderDefault, lineWidth: 0.5)
+                    .allowsHitTesting(false)
+            }
+            .padding([.top, .trailing, .bottom], 8)
+            .padding(.leading, isSidebarVisible ? 0 : 8)
         }
-        .background(SemanticColor.surface500)
+        .background(SemanticColor.surface400)
+        // The unified toolbar otherwise paints its own system strip; tint it
+        // with the same surface400 shell so the nav reads as one tan surface.
+        .toolbarBackground(SemanticColor.surface400, for: .windowToolbar)
         .navigationTitle(store.selectedRoom?.name ?? "Cowchat")
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -194,7 +208,6 @@ private struct SidebarView: View {
                             .padding(.bottom, 10)
                         }
 
-                        archiveSection(at: timeline.date)
                     }
                     .padding(.horizontal, 8)
                     .padding(.bottom, 12)
@@ -202,10 +215,16 @@ private struct SidebarView: View {
                 .scrollIndicators(.hidden)
             }
 
+            // Archive stays pinned above the footer instead of trailing the
+            // room list (which floats it mid-sidebar when the list is short).
+            TimelineView(.periodic(from: .now, by: 60)) { timeline in
+                archiveSection(at: timeline.date)
+                    .padding(.horizontal, 8)
+            }
+
             sidebarFooter
         }
         .padding(.top, 12)
-        .background(SemanticColor.surface500)
     }
 
     private var baseRooms: [Room] {
@@ -407,7 +426,8 @@ private struct SidebarView: View {
             Spacer()
             if !store.connectionStatus.isConnected {
                 CircleIconButton(
-                    systemName: "arrow.clockwise",
+                    icon: .retry,
+                    fallbackSystemName: "arrow.clockwise",
                     help: "Reconnect",
                     action: store.reconnect
                 )
@@ -421,10 +441,6 @@ private struct SidebarView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 58)
-        .background(SemanticColor.surface600.opacity(0.78))
-        .overlay(alignment: .top) {
-            Rectangle().fill(SemanticColor.borderDefault).frame(height: 1)
-        }
     }
 
     private var statusColor: Color {
@@ -477,9 +493,11 @@ struct SidebarRowBackground: View {
         case .normal:
             shape.fill(Color.clear)
         case .selected:
-            shape.fill(SemanticColor.surface400)
-        case .hover:
+            // On the surface400 sidebar shell the lighter surface600 is what
+            // reads as "lifted"; surface400 would vanish into the background.
             shape.fill(SemanticColor.surface600)
+        case .hover:
+            shape.fill(SemanticColor.surface500)
                 .overlay(shape.strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5))
                 .shadow(color: Color.black.opacity(0.04), radius: 1.5, x: 0, y: 1)
         }
@@ -580,9 +598,6 @@ private struct LobbyDashboardView: View {
             .padding(.leading, 18)
             .padding(.trailing, 14)
             .frame(height: 58)
-            .background(SemanticColor.surface600)
-
-            Rectangle().fill(SemanticColor.borderDefault).frame(height: 1)
 
             ScrollView {
                 LazyVGrid(
@@ -713,9 +728,6 @@ private struct RoomSetupView: View {
             .padding(.leading, 18)
             .padding(.trailing, 14)
             .frame(height: 58)
-            .background(SemanticColor.surface600)
-
-            Rectangle().fill(SemanticColor.borderDefault).frame(height: 1)
 
             VStack(spacing: 22) {
                 HStack(spacing: 14) {
@@ -863,9 +875,6 @@ private struct ChatRoomView: View {
     var body: some View {
         VStack(spacing: 0) {
             chatHeader
-            Rectangle()
-                .fill(SemanticColor.borderDefault)
-                .frame(height: 1)
 
             ZStack(alignment: .bottomTrailing) {
                 messageList
@@ -951,7 +960,6 @@ private struct ChatRoomView: View {
         .padding(.leading, 18)
         .padding(.trailing, 14)
         .frame(height: 58)
-        .background(SemanticColor.surface600)
     }
 
     private var presenceSummary: String {
@@ -1554,19 +1562,37 @@ private struct CircleIconButton: View {
 
 private struct EmptyChatView: View {
     @EnvironmentObject private var store: ChatStore
-    @Binding var isSidebarVisible: Bool
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Cowchat")
-                    .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-            }
-            .padding(.leading, 14)
-            .padding(.trailing, 14)
-            .frame(height: 58)
-            .background(SemanticColor.surface600)
+            if store.rooms.isEmpty {
+                // Centered welcome IS the empty state, with a direct path to
+                // the first room (Patrick, 2026-08-06).
+                VStack(spacing: 20) {
+                    VStack(spacing: 4) {
+                        Text("Howdy, welcome to Cowchat")
+                            .gallopText(.h4, color: SemanticColor.textPrimary)
+                        Text("Choose a local room or start a new conversation.")
+                            .gallopText(.bodyM, color: SemanticColor.textTertiary)
+                    }
+                    .multilineTextAlignment(.center)
 
+                    Button {
+                        store.presentCreateRoom()
+                    } label: {
+                        Text("New room")
+                            .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                            .padding(.horizontal, 20)
+                            .frame(height: 38)
+                            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.defaultAction)
+                    .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Howdy, welcome to Cowchat")
@@ -1575,16 +1601,7 @@ private struct EmptyChatView: View {
                         .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 }
 
-                if store.rooms.isEmpty {
-                    VStack(spacing: 10) {
-                        Image(systemName: "bubble.left.and.bubble.right")
-                            .font(.system(size: 28, weight: .medium))
-                            .foregroundStyle(SemanticColor.iconTertiary)
-                        Text("No rooms available")
-                            .gallopText(.h5, color: SemanticColor.textPrimary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
+                if true {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
                         ForEach(store.rooms.prefix(6)) { room in
                             Button {
@@ -1617,6 +1634,7 @@ private struct EmptyChatView: View {
             }
             .padding(24)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
         }
         .background(SemanticColor.surface500)
     }
@@ -2169,6 +2187,7 @@ private struct CreateRoomView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 10)
             }
 
             Spacer()

@@ -58,6 +58,8 @@ public enum GallopIcon: String, CaseIterable, Sendable {
     case folder
     case lock
     case message
+    /// From the gallop web set (Retry.svg) — the mac port has no retry glyph.
+    case retry
     case search
     case send
     case settings
