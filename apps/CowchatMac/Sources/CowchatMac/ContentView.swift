@@ -314,31 +314,41 @@ private struct SidebarView: View {
                         .padding(.horizontal, 10)
                         .padding(.bottom, 8)
                 } else {
-                    ForEach(rooms) { room in
-                        Button {
-                            Task { await store.select(room: room) }
-                        } label: {
-                            RoomRow(
-                                room: room,
-                                messagePreview: store.roomMessagePreviews[room.id],
-                                isSelected: store.selectedRoomID == room.id,
-                                isUnread: store.isUnread(room),
-                                isWorking: store.isWorking(room, at: now),
-                                now: now
-                            )
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button("Unarchive") { store.unarchive(room) }
-                        }
-                        .macAccessibleAction(
-                            label: "Open \(room.name)",
-                            value: roomAccessibilityValue(for: room, now: now)
-                        ) {
-                            Task { await store.select(room: room) }
+                    // Bounded: the archive sits OUTSIDE the room-list scroll
+                    // view, so an unbounded expansion would crush the room
+                    // list and push the footer offscreen at min window height.
+                    // Rows are a fixed 54pt; cap the reveal at ~4.5 rows.
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(rooms) { room in
+                                Button {
+                                    Task { await store.select(room: room) }
+                                } label: {
+                                    RoomRow(
+                                        room: room,
+                                        messagePreview: store.roomMessagePreviews[room.id],
+                                        isSelected: store.selectedRoomID == room.id,
+                                        isUnread: store.isUnread(room),
+                                        isWorking: store.isWorking(room, at: now),
+                                        now: now
+                                    )
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button("Unarchive") { store.unarchive(room) }
+                                }
+                                .macAccessibleAction(
+                                    label: "Open \(room.name)",
+                                    value: roomAccessibilityValue(for: room, now: now)
+                                ) {
+                                    Task { await store.select(room: room) }
+                                }
+                            }
                         }
                     }
+                    .scrollIndicators(.hidden)
+                    .frame(height: min(CGFloat(rooms.count) * 54, 244))
                 }
             }
         }
@@ -1564,18 +1574,12 @@ private struct EmptyChatView: View {
     @EnvironmentObject private var store: ChatStore
 
     var body: some View {
-        VStack(spacing: 0) {
+        Group {
             if store.rooms.isEmpty {
                 // Centered welcome IS the empty state, with a direct path to
                 // the first room (Patrick, 2026-08-06).
                 VStack(spacing: 20) {
-                    VStack(spacing: 4) {
-                        Text("Howdy, welcome to Cowchat")
-                            .gallopText(.h4, color: SemanticColor.textPrimary)
-                        Text("Choose a local room or start a new conversation.")
-                            .gallopText(.bodyM, color: SemanticColor.textTertiary)
-                    }
-                    .multilineTextAlignment(.center)
+                    welcome(alignment: .center)
 
                     Button {
                         store.presentCreateRoom()
@@ -1593,15 +1597,9 @@ private struct EmptyChatView: View {
                 .padding(24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Howdy, welcome to Cowchat")
-                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                    Text("Choose a local room or start a new conversation.")
-                        .gallopText(.bodyM, color: SemanticColor.textTertiary)
-                }
+                VStack(alignment: .leading, spacing: 18) {
+                    welcome(alignment: .leading)
 
-                if true {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
                         ForEach(store.rooms.prefix(6)) { room in
                             Button {
@@ -1631,12 +1629,23 @@ private struct EmptyChatView: View {
                     }
                     Spacer()
                 }
-            }
-            .padding(24)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
         .background(SemanticColor.surface500)
+    }
+
+    /// One source of truth for the welcome copy; alignment differs per branch.
+    @ViewBuilder
+    private func welcome(alignment: HorizontalAlignment) -> some View {
+        VStack(alignment: alignment, spacing: 4) {
+            Text("Howdy, welcome to Cowchat")
+                .gallopText(.h4, color: SemanticColor.textPrimary)
+            Text("Choose a local room or start a new conversation.")
+                .gallopText(.bodyM, color: SemanticColor.textTertiary)
+        }
+        .multilineTextAlignment(alignment == .center ? .center : .leading)
     }
 }
 
