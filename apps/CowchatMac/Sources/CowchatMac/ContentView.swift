@@ -290,6 +290,7 @@ private struct SidebarView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "archivebox")
                         .font(.system(size: 13, weight: .medium))
+                        .offset(y: 1)  // optical center against the label ink
                     Text("Archive")
                         .gallopText(.bodySStrong)
                     Spacer()
@@ -604,12 +605,8 @@ private struct LobbyDashboardView: View {
                 }
 
                 Spacer()
-                CircleIconButton(
-                    systemName: "plus",
-                    help: "Create room",
-                    action: { store.presentCreateRoom() }
-                )
             }
+            .padding(.top, 10)
             .padding(.leading, 18)
             .padding(.trailing, 14)
             .frame(height: 58)
@@ -740,6 +737,7 @@ private struct RoomSetupView: View {
                 }
                 Spacer()
             }
+            .padding(.top, 10)
             .padding(.leading, 18)
             .padding(.trailing, 14)
             .frame(height: 58)
@@ -972,6 +970,7 @@ private struct ChatRoomView: View {
 
             Spacer()
         }
+        .padding(.top, 10)
         .padding(.leading, 18)
         .padding(.trailing, 14)
         .frame(height: 58)
