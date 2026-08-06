@@ -16,10 +16,11 @@ extension View {
 }
 
 extension SemanticColor {
-    /// Cowchat-local status roles (cowboy app vocabulary: cactus = live/ok, nugget700 = issues).
-    /// The old bridge's warning (#A85700) IS nugget700; success moves from #29754A to cactus500.
-    static let success = Palette.cactus500
-    static let warning = Palette.nugget700
+    /// Cowchat-local status roles, preserving the old bridge's adaptive
+    /// behavior with Dash-palette-exact stops: success = cactus600 light /
+    /// cactus400 dark; warning = nugget700 light / nugget400 dark.
+    static let success = HexColor.adaptive(light: "#29754A", dark: "#4BAA6E")
+    static let warning = HexColor.adaptive(light: "#A85700", dark: "#FFAD33")
 }
 
 extension SemanticColor {

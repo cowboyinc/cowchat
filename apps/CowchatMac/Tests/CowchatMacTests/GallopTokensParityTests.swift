@@ -41,6 +41,11 @@ final class GallopTokensParityTests: XCTestCase {
         assertToken(Palette.nugget500, light: "#FF9D14FF", dark: "#FF9D14FF")
         // Palette colors are non-adaptive (HexColor.color, not .adaptive), so light == dark.
         assertToken(Palette.cactus500, light: "#328F58FF", dark: "#328F58FF")
+        // Regression: success/warning must stay adaptive, matching the old
+        // bridge's exact values — a prior fix collapsed these to a single
+        // static Palette alias, losing dark-mode contrast (Task 4 fix round 1).
+        assertToken(SemanticColor.success, light: "#29754AFF", dark: "#4BAA6EFF")
+        assertToken(SemanticColor.warning, light: "#A85700FF", dark: "#FFAD33FF")
     }
 
     func testTypeRoleTableMatchesGallop() {
@@ -49,5 +54,23 @@ final class GallopTokensParityTests: XCTestCase {
         XCTAssertEqual(GallopTextStyle.bodyL.weight, 550)
         XCTAssertEqual(GallopTextStyle.bodyS.size, 13)
         XCTAssertEqual(GallopTextStyle.caption.size, 12)
+    }
+
+    /// Regression for Task 4 fix round 1: `NSColor(token)` alone stays
+    /// dynamic even inside `performAsCurrentDrawingAppearance`, so the first
+    /// implementation of ThemePreview.color silently re-resolved against
+    /// whichever appearance was ACTUALLY active at draw time — both Settings
+    /// theme-preview swatches followed the ambient appearance instead of
+    /// showing one frozen light and one frozen dark. Assert the same
+    /// resolved value under BOTH ambient appearances to prove freezing.
+    func testThemePreviewColorFreezesAppearance() {
+        assertToken(
+            ThemePreview.color(SemanticColor.surface500, dark: false),
+            light: "#F9F7F5FF", dark: "#F9F7F5FF"
+        )
+        assertToken(
+            ThemePreview.color(SemanticColor.surface500, dark: true),
+            light: "#1D1916FF", dark: "#1D1916FF"
+        )
     }
 }

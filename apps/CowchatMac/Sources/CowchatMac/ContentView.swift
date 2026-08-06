@@ -1719,6 +1719,21 @@ private enum SettingsPage {
     case theme
 }
 
+enum ThemePreview {
+    /// Freezes an adaptive token to a concrete color under the forced
+    /// appearance. NSColor(token) alone stays dynamic — converting to a
+    /// concrete color space inside the forced block is what snapshots it.
+    static func color(_ token: Color, dark: Bool) -> Color {
+        var resolved = token
+        NSAppearance(named: dark ? .darkAqua : .aqua)!.performAsCurrentDrawingAppearance {
+            if let concrete = NSColor(token).usingColorSpace(.sRGB) {
+                resolved = Color(nsColor: concrete)
+            }
+        }
+        return resolved
+    }
+}
+
 private struct SettingsView: View {
     @EnvironmentObject private var store: ChatStore
     @Binding var isPresented: Bool
@@ -2036,10 +2051,10 @@ private struct SettingsView: View {
     private func themePreview(title: String, dark: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             RoundedRectangle(cornerRadius: 9)
-                .fill(themePreviewColor(SemanticColor.surface500, dark: dark))
+                .fill(ThemePreview.color(SemanticColor.surface500, dark: dark))
                 .overlay(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 7)
-                        .fill(themePreviewColor(SemanticColor.surface700, dark: dark))
+                        .fill(ThemePreview.color(SemanticColor.surface700, dark: dark))
                         .frame(width: 42)
                         .padding(6)
                 }
@@ -2052,19 +2067,6 @@ private struct SettingsView: View {
                 .gallopText(.bodySStrong, color: SemanticColor.textSecondary)
         }
         .frame(maxWidth: 190)
-    }
-
-    /// Forces `token` — an adaptive SemanticColor — to resolve as if the
-    /// system appearance were light or dark, regardless of which appearance
-    /// is actually active. Needed because these two preview swatches must
-    /// show BOTH themes side by side. Same resolution technique
-    /// GallopTokensParityTests already validates against known hex values.
-    private func themePreviewColor(_ token: Color, dark: Bool) -> Color {
-        var resolved = token
-        NSAppearance(named: dark ? .darkAqua : .aqua)!.performAsCurrentDrawingAppearance {
-            resolved = Color(nsColor: NSColor(token))
-        }
-        return resolved
     }
 }
 
