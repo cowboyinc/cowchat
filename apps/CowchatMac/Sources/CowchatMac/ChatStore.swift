@@ -27,7 +27,7 @@ final class ChatStore: ObservableObject {
     @Published private(set) var readState = RoomReadState()
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
-    @Published private(set) var lastThinkingAt: [String: Date] = [:]
+    @Published private(set) var lastThinkingAt: [String: [String: Date]] = [:]
     @Published var roomReadyNotice: Room?
     @Published var roomBeingRenamed: Room?
     @Published var connectionStatus: ConnectionStatus = .disconnected
@@ -730,7 +730,7 @@ final class ChatStore: ObservableObject {
     }
 
     func isWorking(_ room: Room, at now: Date = Date()) -> Bool {
-        RoomSidebarPresentation.isWorking(lastThinkingAt: lastThinkingAt[room.id], now: now)
+        RoomSidebarPresentation.isWorking(thinkingByAgent: lastThinkingAt[room.id], now: now)
     }
 
     func archive(_ room: Room) async {
@@ -913,12 +913,9 @@ final class ChatStore: ObservableObject {
         switch type {
         case "message_received":
             if let message = try? decode(ChatMessage.self, payload) {
-                if message.isThinking {
-                    lastThinkingAt[message.roomID] = message.timestamp.cowchatDate ?? Date()
-                } else {
-                    // A completed turn clears the working indicator immediately.
-                    lastThinkingAt.removeValue(forKey: message.roomID)
-                }
+                lastThinkingAt = RoomSidebarPresentation.updatedThinkingByAgent(
+                    lastThinkingAt, message: message, now: Date()
+                )
                 if message.isThinking {
                     updateRoomActivity(from: message)
                     break

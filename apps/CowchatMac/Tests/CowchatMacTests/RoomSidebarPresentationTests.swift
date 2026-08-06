@@ -86,11 +86,99 @@ final class RoomSidebarPresentationTests: XCTestCase {
 
     func testWorkingPredicateHonorsWindow() {
         let now = Date()
-        XCTAssertFalse(RoomSidebarPresentation.isWorking(lastThinkingAt: nil, now: now, window: 120))
+        XCTAssertFalse(RoomSidebarPresentation.isWorking(thinkingByAgent: nil, now: now, window: 120))
         XCTAssertTrue(RoomSidebarPresentation.isWorking(
-            lastThinkingAt: now.addingTimeInterval(-30), now: now, window: 120))
+            thinkingByAgent: ["claude": now.addingTimeInterval(-30)], now: now, window: 120))
         XCTAssertFalse(RoomSidebarPresentation.isWorking(
-            lastThinkingAt: now.addingTimeInterval(-121), now: now, window: 120))
+            thinkingByAgent: ["claude": now.addingTimeInterval(-121)], now: now, window: 120))
+    }
+
+    func testWorkingPredicateTrueWhenAnyAgentIsFresh() {
+        let now = Date()
+        XCTAssertTrue(RoomSidebarPresentation.isWorking(
+            thinkingByAgent: [
+                "claude": now.addingTimeInterval(-200),
+                "codex": now.addingTimeInterval(-10),
+            ],
+            now: now,
+            window: 120
+        ))
+    }
+
+    func testWorkingPredicateFalseWhenAllAgentsExpired() {
+        let now = Date()
+        XCTAssertFalse(RoomSidebarPresentation.isWorking(
+            thinkingByAgent: [
+                "claude": now.addingTimeInterval(-200),
+                "codex": now.addingTimeInterval(-150),
+            ],
+            now: now,
+            window: 120
+        ))
+    }
+
+    func testUpdatedThinkingByAgentStampsThinkingAgent() throws {
+        let now = Date()
+        let message = try makeMessage(roomID: "design", agentID: "claude", isThinking: true)
+
+        let updated = RoomSidebarPresentation.updatedThinkingByAgent([:], message: message, now: now)
+
+        XCTAssertEqual(updated["design"]?["claude"], message.timestamp.cowchatDate)
+    }
+
+    func testUpdatedThinkingByAgentClearsOnlyThatAgentsEntry() throws {
+        let now = Date()
+        let existing: [String: [String: Date]] = [
+            "design": [
+                "claude": now.addingTimeInterval(-10),
+                "codex": now.addingTimeInterval(-5),
+            ],
+        ]
+        let message = try makeMessage(roomID: "design", agentID: "claude", isThinking: false)
+
+        let updated = RoomSidebarPresentation.updatedThinkingByAgent(existing, message: message, now: now)
+
+        XCTAssertNil(updated["design"]?["claude"])
+        XCTAssertNotNil(updated["design"]?["codex"])
+    }
+
+    func testUpdatedThinkingByAgentPrunesRoomWhenLastAgentClears() throws {
+        let now = Date()
+        let existing: [String: [String: Date]] = [
+            "design": ["claude": now.addingTimeInterval(-10)],
+        ]
+        let message = try makeMessage(roomID: "design", agentID: "claude", isThinking: false)
+
+        let updated = RoomSidebarPresentation.updatedThinkingByAgent(existing, message: message, now: now)
+
+        XCTAssertNil(updated["design"])
+    }
+
+    /// `ChatMessage` decodes only (its `init(from:)` suppresses the memberwise
+    /// initializer), so fixtures go through JSONDecoder like the AgentPresence
+    /// helpers above rather than direct construction.
+    private func makeMessage(
+        roomID: String,
+        agentID: String,
+        isThinking: Bool,
+        timestamp: String = "2026-08-04T12:00:00Z"
+    ) throws -> ChatMessage {
+        var json: [String: Any] = [
+            "message_id": UUID().uuidString,
+            "room_id": roomID,
+            "agent_id": agentID,
+            "agent_name": agentID,
+            "content": "hello",
+            "timestamp": timestamp,
+            "seq": 1,
+        ]
+        if isThinking {
+            json["metadata"] = ["type": "thinking"]
+        }
+        return try JSONDecoder().decode(
+            ChatMessage.self,
+            from: JSONSerialization.data(withJSONObject: json)
+        )
     }
 
     private func makeRoom(

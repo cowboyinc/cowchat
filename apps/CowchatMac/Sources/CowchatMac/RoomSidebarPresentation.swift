@@ -72,9 +72,33 @@ enum RoomSidebarPresentation {
     /// Sidebar working signal: presence is selected-room-only and unattributable
     /// per-room (presence_update has no room_id), so background rooms light up on
     /// thinking-message recency instead — see the spec's §4 validation notes.
-    static func isWorking(lastThinkingAt: Date?, now: Date, window: TimeInterval = 120) -> Bool {
-        guard let lastThinkingAt else { return false }
-        return now.timeIntervalSince(lastThinkingAt) < window
+    /// Tracked per agent (not per room) so one agent finishing a turn cannot
+    /// clear the indicator while another agent in the same room is still
+    /// composing.
+    static func isWorking(thinkingByAgent: [String: Date]?, now: Date, window: TimeInterval = 120) -> Bool {
+        guard let thinkingByAgent else { return false }
+        return thinkingByAgent.values.contains { now.timeIntervalSince($0) < window }
+    }
+
+    /// Per-agent thinking tracking: a thinking message stamps that agent's entry;
+    /// a non-thinking message clears ONLY that agent's entry (another agent may
+    /// still be composing). Empty room maps are pruned so `isEmpty` stays a
+    /// cheap "anything working?" check.
+    static func updatedThinkingByAgent(
+        _ current: [String: [String: Date]],
+        message: ChatMessage,
+        now: Date
+    ) -> [String: [String: Date]] {
+        var updated = current
+        if message.isThinking {
+            updated[message.roomID, default: [:]][message.agentID] = message.timestamp.cowchatDate ?? now
+        } else {
+            updated[message.roomID]?.removeValue(forKey: message.agentID)
+            if updated[message.roomID]?.isEmpty == true {
+                updated.removeValue(forKey: message.roomID)
+            }
+        }
+        return updated
     }
 }
 
