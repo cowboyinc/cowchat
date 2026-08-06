@@ -31,6 +31,7 @@ struct ContentView: View {
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
     @State private var isSidebarVisible = true
     @State private var isSettingsPresented = false
+    @Environment(\.controlActiveState) private var controlActiveState
 
     init(onShowOnboarding: @escaping () -> Void = {}) {
         self.onShowOnboarding = onShowOnboarding
@@ -100,6 +101,7 @@ struct ContentView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .cowchatToggleSidebar)) { _ in
+            guard controlActiveState == .key || controlActiveState == .active else { return }
             withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
         }
         .frame(minWidth: 900, minHeight: 600)
@@ -201,6 +203,9 @@ private struct SidebarView: View {
             }
 
             sidebarFooter
+        }
+        .onAppear {
+            if !store.searchText.isEmpty { isSearchVisible = true }
         }
         .padding(.top, 12)
         .background(SemanticColor.surface500)
