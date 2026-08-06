@@ -954,6 +954,9 @@ private struct ChatRoomView: View {
     @State private var isMessageListNearBottom = true
     @State private var newMessageCount = 0
     @State private var hasCopiedQuietRoomPrompt = false
+    /// The list is revealed only after the initial bottom-anchor scroll, so a
+    /// room switch never paints top-anchored content and animates it away.
+    @State private var hasPositionedInitialScroll = false
     /// Fixed anchor for the message-feed relative-time schedule; see the note
     /// on `SidebarView.clockAnchor`.
     @State private var clockAnchor = Date()
@@ -969,6 +972,11 @@ private struct ChatRoomView: View {
 
             ZStack(alignment: .bottomTrailing) {
                 messageList
+                if store.isLoadingMessages && !hasPositionedInitialScroll {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
                 if !store.isLoadingMessages && store.messages.isEmpty {
                     quietRoom
                         .allowsHitTesting(true)
@@ -1081,12 +1089,6 @@ private struct ChatRoomView: View {
                 ZStack(alignment: .bottom) {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 22) {
-                        if store.isLoadingMessages {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, 32)
-                        }
 
                         ForEach(store.messages) { message in
                             MessageFeedRow(
@@ -1121,6 +1123,8 @@ private struct ChatRoomView: View {
                         .padding(.bottom, isComposerExpanded ? 86 : 72)
                     }
                     .scrollIndicators(.hidden)
+                    .opacity(hasPositionedInitialScroll ? 1 : 0)
+                    .animation(.easeOut(duration: 0.15), value: hasPositionedInitialScroll)
 
                     if newMessageCount > 0 {
                         Button(newMessageCount == 1 ? "1 new message" : "\(newMessageCount) new messages") {
@@ -1142,7 +1146,15 @@ private struct ChatRoomView: View {
                     }
                 }
                 .onChange(of: MessageArrivalIdentity.latest(in: store.messages)) { _ in
-                    if isMessageListNearBottom {
+                    if !hasPositionedInitialScroll {
+                        // First population after a room switch: jump to the
+                        // bottom unanimated while the list is still hidden,
+                        // then fade it in already in place.
+                        DispatchQueue.main.async {
+                            proxy.scrollTo("message-list-bottom", anchor: .bottom)
+                            hasPositionedInitialScroll = true
+                        }
+                    } else if isMessageListNearBottom {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo("message-list-bottom", anchor: .bottom)
                         }
@@ -1150,8 +1162,20 @@ private struct ChatRoomView: View {
                         newMessageCount += 1
                     }
                 }
+                .onChange(of: store.isLoadingMessages) { loading in
+                    // A room with no history has nothing to position — reveal
+                    // straight to the quiet-room state.
+                    if !loading && store.messages.isEmpty {
+                        hasPositionedInitialScroll = true
+                    }
+                }
                 .onAppear {
-                    proxy.scrollTo("message-list-bottom", anchor: .bottom)
+                    if !store.messages.isEmpty {
+                        proxy.scrollTo("message-list-bottom", anchor: .bottom)
+                        hasPositionedInitialScroll = true
+                    } else if !store.isLoadingMessages {
+                        hasPositionedInitialScroll = true
+                    }
                 }
             }
         }
