@@ -378,7 +378,10 @@ private struct SidebarView: View {
                         .font(.system(size: 10, weight: .semibold))
                 }
                 .foregroundStyle(SemanticColor.textTertiary)
-                .padding(.horizontal, 10)
+                // Leading 16 matches RoomRow's avatar inset so the archive
+                // glyph joins the same left column as the rows above it.
+                .padding(.leading, 16)
+                .padding(.trailing, 10)
                 .frame(height: 36)
             }
             .buttonStyle(.plain)
@@ -393,7 +396,8 @@ private struct SidebarView: View {
                 if rooms.isEmpty {
                     Text("No rooms archived")
                         .gallopText(.caption, color: SemanticColor.textTertiary)
-                        .padding(.horizontal, 10)
+                        .padding(.leading, 16)
+                        .padding(.trailing, 10)
                         .padding(.bottom, 8)
                 } else {
                     // Bounded: the archive sits OUTSIDE the room-list scroll
@@ -607,9 +611,6 @@ private struct RoomRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Circle()
-                .fill(isUnread ? Palette.nugget500 : Color.clear)
-                .frame(width: 7, height: 7)
             RoomAvatar(name: room.name, size: 40, accented: isSelected)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
@@ -638,8 +639,19 @@ private struct RoomRow: View {
             }
         }
         .padding(.trailing, 8)
-        .padding(.leading, 4)
+        .padding(.leading, 16)
         .frame(height: 54)
+        // Floats in the leading padding rather than occupying a flow column,
+        // so read rows carry no reserved gutter and content never shifts
+        // when the dot appears.
+        .overlay(alignment: .leading) {
+            if isUnread {
+                Circle()
+                    .fill(Palette.nugget500)
+                    .frame(width: 7, height: 7)
+                    .padding(.leading, 4)
+            }
+        }
         .background(SidebarRowBackground(state: .init(isSelected: isSelected, isHovering: isHovering)))
         .onHover { isHovering = $0 }
     }
@@ -832,7 +844,7 @@ private struct RoomSetupView: View {
                 HStack(alignment: .bottom, spacing: 14) {
                     Text(roomPrompt)
                         .textSelection(.enabled)
-                        .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
+                        .gallopText(.bodyM, color: SemanticColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
 
                     Button(hasCopiedPrompt ? "Copied" : "Copy") { copyPrompt() }
@@ -870,16 +882,15 @@ private struct RoomSetupView: View {
                 }
             }
             .padding(28)
+            // Center the unit against the full card, compensating the header
+            // strip above (Patrick, 2026-08-06).
+            .padding(.bottom, 68)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(SemanticColor.surface500)
     }
 
-    private var roomPrompt: String {
-        """
-        You're going to collaborate with another AI chatbot in real time over Cowchat. Read the Cowchat skill, \(store.agentConnectionInstruction), join the exact room “\(room.name)”, and start listening right away. https://cowchat.cowboy.inc/skills.txt
-        """
-    }
+    private var roomPrompt: String { store.connectPrompt(for: room) }
 
     private func copyPrompt() {
         let pasteboard = NSPasteboard.general
@@ -954,6 +965,10 @@ private struct ChatRoomView: View {
     @State private var isDestroyingRoom = false
     @State private var isMessageListNearBottom = true
     @State private var newMessageCount = 0
+    @State private var hasCopiedQuietRoomPrompt = false
+    /// The list is revealed only after the initial bottom-anchor scroll, so a
+    /// room switch never paints top-anchored content and animates it away.
+    @State private var hasPositionedInitialScroll = false
     /// Fixed anchor for the message-feed relative-time schedule; see the note
     /// on `SidebarView.clockAnchor`.
     @State private var clockAnchor = Date()
@@ -969,6 +984,15 @@ private struct ChatRoomView: View {
 
             ZStack(alignment: .bottomTrailing) {
                 messageList
+                if store.isLoadingMessages && !hasPositionedInitialScroll {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                if !store.isLoadingMessages && store.messages.isEmpty {
+                    quietRoom
+                        .allowsHitTesting(true)
+                }
                 composer
             }
         }
@@ -986,31 +1010,37 @@ private struct ChatRoomView: View {
             Text("This irreversibly removes the room, its messages, tasks, votes, and subscriptions from Cowchat's active server state. This cannot be undone in Cowchat; storage snapshots or backups may retain copies.")
         }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            // With the unified toolbar's title hidden there is no flexible
+            // space in the strip, so primaryAction items pack against the
+            // leading cluster; the Spacer pins the menu to the window's
+            // trailing edge.
+            ToolbarItemGroup(placement: .primaryAction) {
+                Spacer()
                 Menu {
-                    Button("Rename room") { store.presentRename(room) }
-                        .disabled(!store.canRename(room))
-                    Button("Archive room") { Task { await store.archive(room) } }
+                    Button("Copy connect prompt") { copyConnectPrompt() }
                     Divider()
+                    // Rename and destroy are creator-only, so for other
+                    // agents' rooms they are hidden rather than left as
+                    // permanently disabled clutter.
+                    if store.canRename(room) {
+                        Button("Rename room") { store.presentRename(room) }
+                    }
+                    Button("Archive room") { Task { await store.archive(room) } }
                     Button("Create nested room…") { store.presentCreateRoom(parentID: room.id) }
                     if !store.connectionStatus.isConnected {
                         Button("Reconnect") { store.start() }
                     }
-                    Divider()
-                    Text(room.ephemeral ? "Temporary room" : "Persistent room")
-                    Text(room.visibility.capitalized)
-                    Divider()
-                    Button("Destroy room…", role: .destructive) {
-                        isDestroyConfirmationPresented = true
+                    if store.canDestroy(room) {
+                        Divider()
+                        Button("Destroy room…", role: .destructive) {
+                            isDestroyConfirmationPresented = true
+                        }
+                        .disabled(isDestroyingRoom)
                     }
-                    .disabled(!store.canDestroy(room) || isDestroyingRoom)
                 } label: {
                     GallopIconView(icon: .ellipsis, fallbackSystemName: "ellipsis", size: 17)
                         .foregroundStyle(SemanticColor.iconSecondary)
-                        .frame(width: 36, height: 36)
-                        .contentShape(Circle())
                 }
-                .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .accessibilityLabel("Room actions")
             }
@@ -1054,6 +1084,12 @@ private struct ChatRoomView: View {
         .frame(height: 58)
     }
 
+    private func copyConnectPrompt() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(store.connectPrompt(for: room), forType: .string)
+    }
+
     private var presenceSummary: String {
         ChatPresencePresentation.summary(
             members: store.roomMembers,
@@ -1069,14 +1105,6 @@ private struct ChatRoomView: View {
                 ZStack(alignment: .bottom) {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 22) {
-                        if store.isLoadingMessages {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, 32)
-                        } else if store.messages.isEmpty {
-                            quietRoom
-                        }
 
                         ForEach(store.messages) { message in
                             MessageFeedRow(
@@ -1111,6 +1139,8 @@ private struct ChatRoomView: View {
                         .padding(.bottom, isComposerExpanded ? 86 : 72)
                     }
                     .scrollIndicators(.hidden)
+                    .opacity(hasPositionedInitialScroll ? 1 : 0)
+                    .animation(.easeOut(duration: 0.15), value: hasPositionedInitialScroll)
 
                     if newMessageCount > 0 {
                         Button(newMessageCount == 1 ? "1 new message" : "\(newMessageCount) new messages") {
@@ -1132,7 +1162,15 @@ private struct ChatRoomView: View {
                     }
                 }
                 .onChange(of: MessageArrivalIdentity.latest(in: store.messages)) { _ in
-                    if isMessageListNearBottom {
+                    if !hasPositionedInitialScroll {
+                        // First population after a room switch: jump to the
+                        // bottom unanimated while the list is still hidden,
+                        // then fade it in already in place.
+                        DispatchQueue.main.async {
+                            proxy.scrollTo("message-list-bottom", anchor: .bottom)
+                            hasPositionedInitialScroll = true
+                        }
+                    } else if isMessageListNearBottom {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo("message-list-bottom", anchor: .bottom)
                         }
@@ -1140,8 +1178,20 @@ private struct ChatRoomView: View {
                         newMessageCount += 1
                     }
                 }
+                .onChange(of: store.isLoadingMessages) { loading in
+                    // A room with no history has nothing to position — reveal
+                    // straight to the quiet-room state.
+                    if !loading && store.messages.isEmpty {
+                        hasPositionedInitialScroll = true
+                    }
+                }
                 .onAppear {
-                    proxy.scrollTo("message-list-bottom", anchor: .bottom)
+                    if !store.messages.isEmpty {
+                        proxy.scrollTo("message-list-bottom", anchor: .bottom)
+                        hasPositionedInitialScroll = true
+                    } else if !store.isLoadingMessages {
+                        hasPositionedInitialScroll = true
+                    }
                 }
             }
         }
@@ -1153,11 +1203,27 @@ private struct ChatRoomView: View {
                 .foregroundStyle(SemanticColor.iconTertiary)
             Text("This room is quiet")
                 .gallopText(.h5, color: SemanticColor.textPrimary)
-            Text("Open the composer and say hello.")
+            Text("Bring an agent in with the connect prompt, or open the composer and say hello.")
                 .gallopText(.bodyM, color: SemanticColor.textTertiary)
+                .multilineTextAlignment(.center)
+
+            Button(hasCopiedQuietRoomPrompt ? "Copied" : "Copy connect prompt") {
+                copyConnectPrompt()
+                hasCopiedQuietRoomPrompt = true
+            }
+            .buttonStyle(.plain)
+            .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+            .padding(.horizontal, 18)
+            .frame(height: 38)
+            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+            .padding(.top, 6)
+            .macAccessibleAction(label: "Copy connect prompt") {
+                copyConnectPrompt()
+                hasCopiedQuietRoomPrompt = true
+            }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var thinkingText: String? {
@@ -1212,21 +1278,16 @@ private struct ChatRoomView: View {
             }
 
             HStack(spacing: 8) {
-                CircleIconButton(
-                    icon: .add,
-                    fallbackSystemName: "plus",
-                    help: "Attachments are coming soon",
-                    isEnabled: false,
-                    action: {}
-                )
-
                 ComposerTextField(
                     text: $store.draft,
                     placeholder: "Message \(room.name)",
                     isEnabled: !room.encrypted,
-                    onSubmit: store.sendDraft
+                    onSubmit: store.sendDraft,
+                    onCancel: {
+                        withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
+                    }
                 )
-                .frame(height: 22)
+                .frame(height: ComposerTextField.naturalHeight)
                 .padding(.horizontal, 16)
                 .frame(height: 44)
                 .background(
@@ -1254,19 +1315,6 @@ private struct ChatRoomView: View {
                     isEnabled: canSend,
                     action: store.sendDraft
                 )
-
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
-                } label: {
-                    GallopIconView(icon: .dismiss, fallbackSystemName: "xmark", size: 12)
-                        .foregroundStyle(SemanticColor.iconTertiary)
-                        .frame(width: 24, height: 38)
-                }
-                .buttonStyle(.plain)
-                .help("Close composer")
-                .macAccessibleAction(label: "Close composer") {
-                    withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
-                }
             }
         }
         .padding(.horizontal, 14)

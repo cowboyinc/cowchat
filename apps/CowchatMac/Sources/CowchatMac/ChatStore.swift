@@ -305,6 +305,19 @@ final class ChatStore: ObservableObject {
         connectionProfile.displayName
     }
 
+    /// The paste-into-a-chatbot prompt that connects an agent to a specific
+    /// room. Single source of truth for the setup screen, the room-actions
+    /// menu, and the quiet-room call to action.
+    nonisolated static func connectPromptText(roomName: String, connectionInstruction: String) -> String {
+        """
+        You're going to collaborate with another AI chatbot in real time over Cowchat. Read the Cowchat skill, \(connectionInstruction), join the exact room \u{201C}\(roomName)\u{201D}, and start listening right away. https://cowchat.cowboy.inc/skills.txt
+        """
+    }
+
+    func connectPrompt(for room: Room) -> String {
+        Self.connectPromptText(roomName: room.name, connectionInstruction: agentConnectionInstruction)
+    }
+
     var agentConnectionInstruction: String {
         if isLocalConnection { return "connect to the local server" }
         return "connect to Cowchat Cloud at \(connectionProfile.endpointDescription) using your Cowchat Cloud API key"
