@@ -1019,29 +1019,28 @@ private struct ChatRoomView: View {
                 Menu {
                     Button("Copy connect prompt") { copyConnectPrompt() }
                     Divider()
-                    Button("Rename room") { store.presentRename(room) }
-                        .disabled(!store.canRename(room))
+                    // Rename and destroy are creator-only, so for other
+                    // agents' rooms they are hidden rather than left as
+                    // permanently disabled clutter.
+                    if store.canRename(room) {
+                        Button("Rename room") { store.presentRename(room) }
+                    }
                     Button("Archive room") { Task { await store.archive(room) } }
-                    Divider()
                     Button("Create nested room…") { store.presentCreateRoom(parentID: room.id) }
                     if !store.connectionStatus.isConnected {
                         Button("Reconnect") { store.start() }
                     }
-                    Divider()
-                    Text(room.ephemeral ? "Temporary room" : "Persistent room")
-                    Text(room.visibility.capitalized)
-                    Divider()
-                    Button("Destroy room…", role: .destructive) {
-                        isDestroyConfirmationPresented = true
+                    if store.canDestroy(room) {
+                        Divider()
+                        Button("Destroy room…", role: .destructive) {
+                            isDestroyConfirmationPresented = true
+                        }
+                        .disabled(isDestroyingRoom)
                     }
-                    .disabled(!store.canDestroy(room) || isDestroyingRoom)
                 } label: {
                     GallopIconView(icon: .ellipsis, fallbackSystemName: "ellipsis", size: 17)
                         .foregroundStyle(SemanticColor.iconSecondary)
-                        .frame(width: 36, height: 36)
-                        .contentShape(Circle())
                 }
-                .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .accessibilityLabel("Room actions")
             }
