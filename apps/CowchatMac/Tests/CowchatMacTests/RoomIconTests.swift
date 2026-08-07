@@ -101,7 +101,7 @@ final class RoomIconTests: XCTestCase {
 
     func testStoredStyleFallsBackWhenUnknown() {
         XCTAssertNil(RoomIconStyle(rawValue: "tumbleweed"))
-        XCTAssertEqual(RoomIconStyle.fallback, .brandOnHide)
+        XCTAssertEqual(RoomIconStyle.fallback, .initials)
         for style in RoomIconStyle.allCases {
             XCTAssertFalse(style.label.isEmpty)
             XCTAssertFalse(style.blurb.isEmpty)

@@ -11,7 +11,7 @@ cask "cowchat" do
   # CLIs; this cask installs the app, which carries its own server helper in
   # Contents/Helpers. They coexist — keep both on the same version so a server
   # started from the app and one started from the terminal are the same build.
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "Cowchat.app"
 

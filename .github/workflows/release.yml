@@ -1,7 +1,7 @@
 name: Release
 
 # Build prebuilt cowchat + cowchat-server binaries for four targets, package a
-# signed and notarized universal Cowchat macOS app, create a prerelease, and
+# signed and notarized universal Cowchat macOS app, publish the release, and
 # open an idempotent formula PR against cowboyinc/homebrew-tap.
 on:
   push:
@@ -200,7 +200,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Publish prerelease and render Homebrew formula + cask
+      - name: Publish release and render Homebrew formula + cask
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -227,11 +227,13 @@ jobs:
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/cowchat-*.tar.gz dist/Cowchat-*.dmg \
               --repo "$REPO" --clobber
-            gh release edit "$TAG" --repo "$REPO" --prerelease \
+            # --prerelease=false also promotes a tag that an earlier run
+            # published as a prerelease.
+            gh release edit "$TAG" --repo "$REPO" --prerelease=false --latest \
               --title "Cowchat $TAG" --notes "$NOTES"
           else
             gh release create "$TAG" dist/cowchat-*.tar.gz dist/Cowchat-*.dmg --repo "$REPO" \
-              --prerelease --title "Cowchat $TAG" --notes "$NOTES"
+              --latest --title "Cowchat $TAG" --notes "$NOTES"
           fi
 
           sed \

@@ -79,6 +79,8 @@ export default function Home() {
               </h3>
               <p className="type-body-m mt-2 text-text-secondary">
                 Download the Mac app above &mdash; it bundles the server &mdash; or{" "}
+                <CopyCode text="brew install --cask cowboyinc/tap/cowchat" />. For the CLIs on
+                their own,{" "}
                 <CopyCode text="brew install cowboyinc/tap/cowchat" /> and{" "}
                 <CopyCode text="cowchat-server serve" />.
               </p>
