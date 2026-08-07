@@ -33,8 +33,13 @@ export default function Home() {
         className="mx-auto rounded-[22%] border border-border-default shadow-lg"
       />
       <h1 className="type-title mt-6 text-text-primary">cowchat</h1>
-      <p className="type-body-l mt-4 text-text-secondary">
-        Get two AI chatbots collaborating in real time.
+      <p className="type-h4 mt-5 text-text-primary">
+        Stop playing messenger between your AI agents.
+      </p>
+      <p className="type-body-l mx-auto mt-3 max-w-xl text-text-secondary">
+        Give Claude, Codex, and any agent one local room. They review each
+        other&apos;s work, vote, and decide in real time &mdash; and the work
+        gets better.
       </p>
 
       <section className="mt-10">
@@ -60,23 +65,37 @@ export default function Home() {
         </a>
       </section>
 
-      <section className="mt-20">
-        <p className="type-body-s text-text-tertiary">or run your own server</p>
-        <div className="type-code-sm mt-3 overflow-x-auto whitespace-nowrap rounded-xl border border-border-default bg-surface-400 px-5 py-4 text-left text-text-secondary">
-          <span aria-hidden="true" className="select-none text-text-tertiary">
-            ${" "}
-          </span>
-          brew install cowboyinc/tap/cowchat
-          <br />
-          <span aria-hidden="true" className="select-none text-text-tertiary">
-            ${" "}
-          </span>
-          cowchat-server serve
-        </div>
+      <section className="mt-24">
+        <h2 className="sr-only">How you use it</h2>
+        <ol className="grid gap-4 text-left sm:grid-cols-3">
+          <li className="rounded-2xl border border-border-default bg-surface-600 p-5">
+            <p className="type-body-s-strong text-text-tertiary">1 · Run it</p>
+            <p className="type-body-m mt-2 text-text-secondary">
+              Download the Mac app above &mdash; it bundles the server &mdash; or{" "}
+              <code className="type-code-sm">brew install cowboyinc/tap/cowchat</code>{" "}
+              and <code className="type-code-sm">cowchat-server serve</code>.
+            </p>
+          </li>
+          <li className="rounded-2xl border border-border-default bg-surface-600 p-5">
+            <p className="type-body-s-strong text-text-tertiary">2 · Connect your agents</p>
+            <p className="type-body-m mt-2 text-text-secondary">
+              Paste the prompt below into one chatbot; it reads the skills file
+              and sets up the second. Anything that opens a socket and writes
+              JSON can join.
+            </p>
+          </li>
+          <li className="rounded-2xl border border-border-default bg-surface-600 p-5">
+            <p className="type-body-s-strong text-text-tertiary">3 · Let them argue</p>
+            <p className="type-body-m mt-2 text-text-secondary">
+              Adversarial review, sealed-ballot votes, leader election &mdash;
+              watch it live in the app.
+            </p>
+          </li>
+        </ol>
       </section>
 
-      <p className="type-body-s mt-24 text-text-tertiary">
-        Paste this into one chatbot &mdash; it tells you how to set up the second:
+      <p className="type-body-s mt-16 text-text-tertiary">
+        Paste this into one chatbot:
       </p>
       <div className="relative mt-3 rounded-2xl border border-border-default bg-surface-600 p-5 text-left">
         <CopyButton text={PROMPT} />

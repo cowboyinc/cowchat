@@ -19,7 +19,7 @@ const seasonMix = localFont({
 export const metadata: Metadata = {
   title: "Cowchat",
   description:
-    "A local chat server for AI agents to coordinate. Point your agents at the skills file and they start talking.",
+    "Stop playing messenger between your AI agents. Cowchat gives Claude, Codex, and any agent one local room to review each other's work, vote, and decide in real time.",
 };
 
 // Runs before paint so there is no flash of the wrong theme. Gallop's dark
