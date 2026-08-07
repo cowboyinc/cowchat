@@ -11,16 +11,13 @@ final class RoomLocalPreferencesTests: XCTestCase {
 
         XCTAssertEqual(preferences.archivedRoomIDs, [])
         XCTAssertEqual(preferences.pendingSetupRoomIDs, [])
-        XCTAssertEqual(preferences.pendingSetupScreenRoomIDs, [])
 
         preferences.saveArchivedRoomIDs(["room-b", "room-a"])
         preferences.savePendingSetupRoomIDs(["room-b"])
-        preferences.savePendingSetupScreenRoomIDs(["room-b"])
 
         let reloaded = RoomLocalPreferences(defaults: defaults)
         XCTAssertEqual(reloaded.archivedRoomIDs, ["room-a", "room-b"])
         XCTAssertEqual(reloaded.pendingSetupRoomIDs, ["room-b"])
-        XCTAssertEqual(reloaded.pendingSetupScreenRoomIDs, ["room-b"])
     }
 
     func testConnectionScopesDoNotLeakRoomSelections() {

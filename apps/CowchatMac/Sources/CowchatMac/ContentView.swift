@@ -53,9 +53,6 @@ struct ContentView: View {
                     if room.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame {
                         LobbyDashboardView(room: room, isSidebarVisible: $isSidebarVisible)
                             .id("lobby-\(room.id)")
-                    } else if store.roomSetupScreenIDs.contains(room.id) {
-                        RoomSetupView(room: room, isSidebarVisible: $isSidebarVisible)
-                            .id("setup-\(room.id)")
                     } else {
                         ChatRoomView(room: room, isSidebarVisible: $isSidebarVisible)
                             .id(room.id)
@@ -665,9 +662,7 @@ private struct LobbyDashboardView: View {
     @Binding var isSidebarVisible: Bool
 
     private var dashboardRooms: [Room] {
-        store.unarchivedRooms.filter {
-            $0.id != room.id && !store.setupRoomIDs.contains($0.id)
-        }
+        store.unarchivedRooms.filter { $0.id != room.id }
     }
 
     private var availableAgentCount: Int {
@@ -800,99 +795,6 @@ private struct DashboardRoomCard: View {
             .accessibilityLabel("Actions for \(room.name)")
             .padding(12)
         }
-    }
-}
-
-private struct RoomSetupView: View {
-    @EnvironmentObject private var store: ChatStore
-    let room: Room
-    @Binding var isSidebarVisible: Bool
-    @State private var hasCopiedPrompt = false
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(room.name)
-                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                    Text("Waiting for your first collaborator")
-                        .gallopText(.caption, color: SemanticColor.textTertiary)
-                }
-                Spacer()
-            }
-            .padding(.top, 10)
-            .padding(.leading, 18)
-            .padding(.trailing, 14)
-            .frame(height: 58)
-
-            VStack(spacing: 22) {
-                HStack(spacing: 14) {
-                    Image(systemName: "list.bullet.rectangle")
-                    Image(systemName: "arrow.right")
-                    Image(systemName: "sparkles")
-                }
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(SemanticColor.iconPrimary)
-
-                Text("Paste this prompt into one AI chatbot")
-                    .gallopText(.h5, color: SemanticColor.textPrimary)
-
-                HStack(alignment: .bottom, spacing: 14) {
-                    Text(roomPrompt)
-                        .textSelection(.enabled)
-                        .gallopText(.bodyM, color: SemanticColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Button(hasCopiedPrompt ? "Copied" : "Copy") { copyPrompt() }
-                        .buttonStyle(.plain)
-                        .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                        .padding(.horizontal, 18)
-                        .frame(height: 38)
-                        .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
-                        .macAccessibleAction(label: "Copy setup prompt", action: copyPrompt)
-                }
-                .padding(18)
-                .frame(maxWidth: 620)
-                .background(
-                    SemanticColor.surface600,
-                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
-                }
-
-                Button("Continue") {
-                    Task { await store.completeRoomSetup(room) }
-                }
-                .buttonStyle(.plain)
-                .gallopText(.bodyMStrong, color: SemanticColor.buttonSecondaryTextDefault)
-                .padding(.horizontal, 18)
-                .frame(height: 38)
-                .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
-                .overlay {
-                    Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
-                }
-                .macAccessibleAction(label: "Finish room setup") {
-                    Task { await store.completeRoomSetup(room) }
-                }
-            }
-            .padding(28)
-            // Center the unit against the full card, compensating the header
-            // strip above (Patrick, 2026-08-06).
-            .padding(.bottom, 68)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(SemanticColor.surface500)
-    }
-
-    private var roomPrompt: String { store.connectPrompt(for: room) }
-
-    private func copyPrompt() {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(roomPrompt, forType: .string)
-        hasCopiedPrompt = true
     }
 }
 

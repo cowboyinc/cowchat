@@ -1441,7 +1441,6 @@ final class RoomTransitionTests: XCTestCase {
         )
         XCTAssertTrue(created)
         XCTAssertTrue(store.setupRoomIDs.contains(room.id))
-        XCTAssertTrue(store.roomSetupScreenIDs.contains(room.id))
 
         connection.onEvent?("message_received", [
             "message_id": "creator-echo",
@@ -1453,96 +1452,19 @@ final class RoomTransitionTests: XCTestCase {
             "seq": 1,
         ])
         XCTAssertTrue(store.setupRoomIDs.contains(room.id))
-        XCTAssertTrue(store.roomSetupScreenIDs.contains(room.id))
         XCTAssertNil(store.roomReadyNotice)
 
-        await store.completeRoomSetup(room)
+        // Navigate away from the freshly created room (e.g. back to Lobby)
+        // before a real collaborator has joined.
+        await store.select(room: lobby)
         XCTAssertEqual(store.selectedRoomID, lobby.id)
         XCTAssertTrue(store.setupRoomIDs.contains(room.id))
-        XCTAssertFalse(store.roomSetupScreenIDs.contains(room.id))
         XCTAssertNil(store.roomReadyNotice)
 
         connection.agentsByRoom[room.id] = [collaborator]
         await store.pollSetupRoomReadiness()
         XCTAssertFalse(store.setupRoomIDs.contains(room.id))
         XCTAssertEqual(store.roomReadyNotice?.id, room.id)
-    }
-
-    @MainActor
-    func testContinuingTemporaryRoomSetupKeepsTheCreatorJoined() async throws {
-        let suiteName = "RoomTransitionTemporarySetupTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set("creator-agent", forKey: "CowchatMac.agentID")
-        let lobby = try decodeRoom(id: "lobby", name: "Lobby")
-        let room = try decodeRoom(
-            id: "temporary",
-            name: "Temporary",
-            createdBy: "creator-agent",
-            ephemeral: true
-        )
-        let selfAgent = try decodeAgent(id: "creator-agent", name: "Cowchat Mac")
-        let connection = MockRoomConnection()
-        connection.listedRooms = [lobby]
-        connection.roomToCreate = room
-        connection.agentsByRoom = [lobby.id: [selfAgent], room.id: [selfAgent]]
-        let store = ChatStore(connection: connection, defaults: defaults)
-        await store.connect()
-        _ = await store.createRoom(
-            name: room.name,
-            description: "",
-            ephemeral: true,
-            isPublic: false
-        )
-
-        await store.completeRoomSetup(room)
-
-        XCTAssertEqual(store.selectedRoomID, room.id)
-        XCTAssertFalse(connection.operations.contains("leave:\(room.id)"))
-        XCTAssertTrue(store.setupRoomIDs.contains(room.id))
-        XCTAssertFalse(store.roomSetupScreenIDs.contains(room.id))
-    }
-
-    @MainActor
-    func testPendingSetupScreenResumesAcrossRelaunchAndDismissalPersists() async throws {
-        let suiteName = "RoomTransitionSetupPersistenceTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set("creator-agent", forKey: "CowchatMac.agentID")
-        let lobby = try decodeRoom(id: "lobby", name: "Lobby")
-        let room = try decodeRoom(id: "design", name: "Design", createdBy: "creator-agent")
-        let selfAgent = try decodeAgent(id: "creator-agent", name: "Cowchat Mac")
-
-        let creatingConnection = MockRoomConnection()
-        creatingConnection.listedRooms = [lobby]
-        creatingConnection.roomToCreate = room
-        creatingConnection.agentsByRoom = [lobby.id: [selfAgent], room.id: [selfAgent]]
-        let creatingStore = ChatStore(connection: creatingConnection, defaults: defaults)
-        await creatingStore.connect()
-        _ = await creatingStore.createRoom(
-            name: room.name,
-            description: "",
-            ephemeral: false,
-            isPublic: false
-        )
-        XCTAssertTrue(creatingStore.roomSetupScreenIDs.contains(room.id))
-
-        let relaunchedConnection = MockRoomConnection()
-        relaunchedConnection.listedRooms = [lobby, room]
-        relaunchedConnection.agentsByRoom = [lobby.id: [selfAgent], room.id: [selfAgent]]
-        let relaunchedStore = ChatStore(connection: relaunchedConnection, defaults: defaults)
-        await relaunchedStore.connect()
-
-        XCTAssertEqual(relaunchedStore.selectedRoomID, room.id)
-        XCTAssertTrue(relaunchedStore.roomSetupScreenIDs.contains(room.id))
-
-        await relaunchedStore.completeRoomSetup(room)
-        let dismissedStore = ChatStore(connection: MockRoomConnection(), defaults: defaults)
-
-        XCTAssertFalse(dismissedStore.roomSetupScreenIDs.contains(room.id))
-        XCTAssertTrue(dismissedStore.setupRoomIDs.contains(room.id))
     }
 
     @MainActor
@@ -1574,8 +1496,38 @@ final class RoomTransitionTests: XCTestCase {
 
         XCTAssertEqual(store.selectedRoomID, room.id)
         XCTAssertFalse(store.setupRoomIDs.contains(room.id))
-        XCTAssertFalse(store.roomSetupScreenIDs.contains(room.id))
         XCTAssertNil(store.roomReadyNotice)
+    }
+
+    @MainActor
+    func testLaunchSelectionPrefersLobbyOverPendingSetupRooms() async throws {
+        let connection = MockRoomConnection()
+        let suiteName = "RoomTransitionTests.launch.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        // A previous build left a persisted setup-screen room behind.
+        defaults.set(["stale-room"], forKey: "CowchatMac.pendingSetupScreenRoomIDs")
+        defaults.set(["stale-room"], forKey: RoomLocalPreferences.pendingSetupRoomIDsKey)
+        let store = ChatStore(connection: connection, defaults: defaults)
+
+        connection.listedRooms = [
+            try decodeRoom(id: "stale-room", name: "stale-room"),
+            try decodeRoom(id: "lobby", name: "lobby"),
+        ]
+        await store.connect()
+
+        XCTAssertEqual(store.selectedRoomID, "lobby")
+    }
+
+    @MainActor
+    func testInitDeletesThePersistedSetupScreenKey() {
+        let connection = MockRoomConnection()
+        let suiteName = "RoomTransitionTests.cleanup.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(["r1"], forKey: "CowchatMac.pendingSetupScreenRoomIDs")
+        _ = ChatStore(connection: connection, defaults: defaults)
+        XCTAssertNil(defaults.object(forKey: "CowchatMac.pendingSetupScreenRoomIDs"))
     }
 
     private func decodeRoom(

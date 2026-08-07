@@ -23,7 +23,6 @@ final class ChatStore: ObservableObject {
     @Published private(set) var messageSearchRoomIDs: Set<String> = []
     @Published private(set) var archivedRoomIDs: Set<String> = []
     @Published private(set) var setupRoomIDs: Set<String> = []
-    @Published private(set) var roomSetupScreenIDs: Set<String> = []
     @Published private(set) var readState = RoomReadState()
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
@@ -169,8 +168,16 @@ final class ChatStore: ObservableObject {
         localPreferences = Self.roomPreferences(defaults: defaults, profile: connectionProfile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
-        roomSetupScreenIDs = localPreferences.pendingSetupScreenRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
+        // One-time cleanup: the setup-screen takeover was removed in the
+        // onboarding redesign (spec 2026-08-07); stale persisted IDs would
+        // otherwise sit orphaned forever.
+        defaults.removeObject(forKey: RoomLocalPreferences.pendingSetupScreenRoomIDsKey)
+        if let scope = connectionProfile.persistentIdentityScope {
+            defaults.removeObject(
+                forKey: "\(RoomLocalPreferences.pendingSetupScreenRoomIDsKey).\(scope)"
+            )
+        }
         connection.onEvent = { [weak self] type, payload in
             self?.handleEvent(type: type, payload: payload)
         }
@@ -277,8 +284,7 @@ final class ChatStore: ObservableObject {
             if let selectedRoom {
                 await select(room: selectedRoom)
             } else {
-                let initial = rooms.first(where: { roomSetupScreenIDs.contains($0.id) })
-                    ?? rooms.first(where: { $0.name.lowercased() == "lobby" })
+                let initial = rooms.first(where: { $0.name.lowercased() == "lobby" })
                     ?? rooms.first
                 if let initial { await select(room: initial) }
                 else { selectedRoomID = nil }
@@ -546,7 +552,6 @@ final class ChatStore: ObservableObject {
         localPreferences = Self.roomPreferences(defaults: defaults, profile: profile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
-        roomSetupScreenIDs = localPreferences.pendingSetupScreenRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
         connectionStatus = .disconnected
     }
@@ -714,8 +719,6 @@ final class ChatStore: ObservableObject {
             rooms.sort(by: roomSort)
             setupRoomIDs.insert(room.id)
             localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
-            roomSetupScreenIDs.insert(room.id)
-            localPreferences.savePendingSetupScreenRoomIDs(roomSetupScreenIDs)
             isCreateRoomPresented = false
             createRoomParentID = nil
             await select(room: room)
@@ -852,19 +855,6 @@ final class ChatStore: ObservableObject {
             present(error)
             return false
         }
-    }
-
-    func completeRoomSetup(_ room: Room) async {
-        let expectedProfileGeneration = profileGeneration
-        roomSetupScreenIDs.remove(room.id)
-        localPreferences.savePendingSetupScreenRoomIDs(roomSetupScreenIDs)
-        if !room.ephemeral, let lobby = rooms.first(where: {
-            $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame
-        }) {
-            await select(room: lobby)
-            guard expectedProfileGeneration == profileGeneration else { return }
-        }
-        startSetupReadinessPolling()
     }
 
     func openRoomReadyNotice() async {
@@ -1307,11 +1297,6 @@ final class ChatStore: ObservableObject {
             setupRoomIDs = pendingSetup
             localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
         }
-        let setupScreens = roomSetupScreenIDs.intersection(pendingSetup)
-        if setupScreens != roomSetupScreenIDs {
-            roomSetupScreenIDs = setupScreens
-            localPreferences.savePendingSetupScreenRoomIDs(roomSetupScreenIDs)
-        }
         if let roomBeingRenamed,
            !validRoomIDs.contains(roomBeingRenamed.id) {
             self.roomBeingRenamed = nil
@@ -1329,8 +1314,6 @@ final class ChatStore: ObservableObject {
         archivedRoomIDs.remove(roomID)
         setupRoomIDs.remove(roomID)
         localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
-        roomSetupScreenIDs.remove(roomID)
-        localPreferences.savePendingSetupScreenRoomIDs(roomSetupScreenIDs)
         draftsByRoomID.removeValue(forKey: roomID)
         failedDraftRestorationsByRoomID.removeValue(forKey: roomID)
         messageSearchRoomIDs.remove(roomID)
@@ -1404,8 +1387,6 @@ final class ChatStore: ObservableObject {
         guard setupRoomIDs.remove(roomID) != nil,
               let room = rooms.first(where: { $0.id == roomID }) else { return }
         localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
-        roomSetupScreenIDs.remove(roomID)
-        localPreferences.savePendingSetupScreenRoomIDs(roomSetupScreenIDs)
         if selectedRoomID != roomID { roomReadyNotice = room }
     }
 
