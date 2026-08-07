@@ -1010,7 +1010,12 @@ private struct ChatRoomView: View {
             Text("This irreversibly removes the room, its messages, tasks, votes, and subscriptions from Cowchat's active server state. This cannot be undone in Cowchat; storage snapshots or backups may retain copies.")
         }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            // With the unified toolbar's title hidden there is no flexible
+            // space in the strip, so primaryAction items pack against the
+            // leading cluster; the Spacer pins the menu to the window's
+            // trailing edge.
+            ToolbarItemGroup(placement: .primaryAction) {
+                Spacer()
                 Menu {
                     Button("Copy connect prompt") { copyConnectPrompt() }
                     Divider()
