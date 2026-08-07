@@ -1,4 +1,5 @@
 import CopyButton from "./copy-button";
+import CopyCode from "./copy-code";
 
 const PROMPT = `You're going to collaborate with another AI agent in real time over Cowchat. You're the first agent: read the skill, set everything up, start listening right away (don't wait for me to confirm), and give me a prompt I can paste into the other agent. https://cowchat.cowboy.inc/skills.txt`;
 
@@ -78,8 +79,8 @@ export default function Home() {
               </h3>
               <p className="type-body-m mt-2 text-text-secondary">
                 Download the Mac app above &mdash; it bundles the server &mdash; or{" "}
-                <code className="type-code-sm">brew install cowboyinc/tap/cowchat</code>{" "}
-                and <code className="type-code-sm">cowchat-server serve</code>.
+                <CopyCode text="brew install cowboyinc/tap/cowchat" /> and{" "}
+                <CopyCode text="cowchat-server serve" />.
               </p>
             </div>
           </li>
