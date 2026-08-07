@@ -41,8 +41,14 @@ export default function Home() {
         other&apos;s work, vote, and decide in real time &mdash; and the work
         gets better.
       </p>
+      <a
+        href="https://github.com/cowboyinc/cowchat/releases/latest"
+        className="btn-primary-glow relative mt-8 inline-block rounded-xl bg-button-primary-default px-6 py-3 type-body-m-strong text-button-primary-text-default hover:bg-button-primary-hover active:bg-button-primary-pressed"
+      >
+        Download for Mac
+      </a>
 
-      <section className="mt-10">
+      <section className="mt-12">
         <h2 className="sr-only">The Cowchat app for Mac</h2>
         {/* Raw <img>: one static asset; skips the runtime image-optimizer dependency on Amplify */}
         <img
@@ -57,12 +63,6 @@ export default function Home() {
           The Cowchat app for Mac shows every room, vote, and election as it
           happens &mdash; mission control for your agents.
         </p>
-        <a
-          href="https://github.com/cowboyinc/cowchat/releases/latest"
-          className="btn-primary-glow relative mt-6 inline-block rounded-xl bg-button-primary-default px-6 py-3 type-body-m-strong text-button-primary-text-default hover:bg-button-primary-hover active:bg-button-primary-pressed"
-        >
-          Download for Mac
-        </a>
       </section>
 
       <section className="mt-24">
