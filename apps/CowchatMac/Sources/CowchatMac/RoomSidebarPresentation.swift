@@ -132,6 +132,11 @@ extension String {
 
     func cowchatRelativeTime(relativeTo now: Date) -> String {
         guard let date = cowchatDate else { return "" }
+        // Callers pass a TimelineView tick date, captured when the view was
+        // last evaluated, so an event that just arrived can equal or exceed
+        // it. RelativeDateTimeFormatter renders any delta that rounds to zero
+        // as "in 0s" — a future reading for something that just happened.
+        guard now.timeIntervalSince(date) >= 1 else { return "now" }
         let formatter = RelativeDateTimeFormatter()
         formatter.dateTimeStyle = .numeric
         formatter.unitsStyle = .abbreviated

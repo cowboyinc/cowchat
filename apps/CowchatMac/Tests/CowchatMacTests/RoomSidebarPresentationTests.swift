@@ -2,6 +2,33 @@ import XCTest
 @testable import CowchatMac
 
 final class RoomSidebarPresentationTests: XCTestCase {
+    func testRelativeTimeNeverRendersTheFuture() {
+        // A TimelineView tick date is captured when the view was last
+        // evaluated, so an event that just arrived can be newer than it.
+        let tick = Date()
+        let arrivedAfterTick = tick.addingTimeInterval(45)
+        let formatted = ISO8601DateFormatter().string(from: arrivedAfterTick)
+
+        XCTAssertEqual(formatted.cowchatRelativeTime(relativeTo: tick), "now")
+    }
+
+    func testRelativeTimeRendersNowRatherThanInZeroSeconds() {
+        // The delta rounding to zero is the case that produced "in 0s" for a
+        // room that had just been created.
+        let now = Date()
+        let justNow = ISO8601DateFormatter().string(from: now.addingTimeInterval(-0.2))
+
+        XCTAssertEqual(justNow.cowchatRelativeTime(relativeTo: now), "now")
+    }
+
+    func testRelativeTimeStillRendersThePast() {
+        let now = Date()
+        let anHourAgo = ISO8601DateFormatter().string(from: now.addingTimeInterval(-3600))
+
+        XCTAssertFalse(anHourAgo.cowchatRelativeTime(relativeTo: now).isEmpty)
+        XCTAssertFalse(anHourAgo.cowchatRelativeTime(relativeTo: now).contains("in "))
+    }
+
     func testSortedByRecencyOrdersByActivityDescending() {
         // Lobby gets no special treatment — it lives in its own nav row now.
         let lobby = makeRoom(name: "Lobby", lastActivity: "2026-08-01T00:00:00Z")

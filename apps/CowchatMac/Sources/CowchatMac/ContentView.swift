@@ -166,10 +166,6 @@ private struct SidebarView: View {
     @State private var isArchiveExpanded = false
     @FocusState private var isSearchFocused: Bool
     @State private var isLobbyHovering = false
-    /// Fixed anchor for the relative-time schedules below. `.now` here is
-    /// evaluated on every body evaluation, so the schedule is rebuilt and its
-    /// interval restarted each time rather than ticking on a stable cadence.
-    @State private var clockAnchor = Date()
     /// Once per process: the launch-focus clear must not repeat on sidebar re-mounts.
     private static var didClearLaunchFocus = false
 
@@ -189,7 +185,7 @@ private struct SidebarView: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 14)
 
-            TimelineView(.periodic(from: clockAnchor, by: store.lastThinkingAt.isEmpty ? 60 : 10)) { timeline in
+            TimelineView(.periodic(from: .now, by: store.lastThinkingAt.isEmpty ? 60 : 10)) { timeline in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         if baseRooms.isEmpty {
@@ -234,7 +230,7 @@ private struct SidebarView: View {
 
             // Archive stays pinned above the footer instead of trailing the
             // room list (which floats it mid-sidebar when the list is short).
-            TimelineView(.periodic(from: clockAnchor, by: 60)) { timeline in
+            TimelineView(.periodic(from: .now, by: 60)) { timeline in
                 archiveSection(at: timeline.date)
                     .padding(.horizontal, 8)
             }
@@ -969,9 +965,6 @@ private struct ChatRoomView: View {
     /// The list is revealed only after the initial bottom-anchor scroll, so a
     /// room switch never paints top-anchored content and animates it away.
     @State private var hasPositionedInitialScroll = false
-    /// Fixed anchor for the message-feed relative-time schedule; see the note
-    /// on `SidebarView.clockAnchor`.
-    @State private var clockAnchor = Date()
 
     private var parentRoom: Room? {
         guard let parentID = room.parentID else { return nil }
@@ -1100,7 +1093,7 @@ private struct ChatRoomView: View {
     }
 
     private var messageList: some View {
-        TimelineView(.periodic(from: clockAnchor, by: 60)) { timeline in
+        TimelineView(.periodic(from: .now, by: 60)) { timeline in
             ScrollViewReader { proxy in
                 ZStack(alignment: .bottom) {
                     ScrollView {
