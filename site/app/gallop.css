@@ -1,0 +1,608 @@
+/*
+ * VENDORED from cowboyinc/gallop packages/foundations/src/gallop.css
+ * at commit 121e38465ef5696bf27ed332a573347e4ae87959 (foundations v0.5.0).
+ * Do not edit by hand — refresh by re-copying from the gallop repo.
+ */
+
+/**
+ * Gallop Design Tokens — CSS Source of Truth
+ *
+ * This file defines all design tokens as Tailwind v4 @theme custom properties.
+ * Tailwind v4 automatically generates utility classes for every variable declared
+ * here (e.g. --color-hay-500 → bg-hay-500, text-hay-500, etc.)
+ *
+ * Consumer usage:
+ *   @import "tailwindcss";
+ *   @import "@cowboyinc/gallop-foundations/gallop.css";
+ *
+ * Dark mode: add the .dark class to <html> to activate dark mode token values.
+ */
+
+@theme {
+  /* ── Animation ─────────────────────────────────────────────────────────── */
+  /* Spur spinner: the 18-spoke rowel advances one spoke (20°) per cycle in
+     4 discrete steps, matching the Figma frame-by-frame states. */
+  --animate-spur-spin: spur-spin 0.6s steps(4) infinite;
+  @keyframes spur-spin {
+    to { transform: rotate(20deg); }
+  }
+
+  /* ── Font families ─────────────────────────────────────────────────────── */
+  --font-sans:    "Season Sans VF", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Season Mix VF", "Georgia", ui-serif, serif;
+  --font-mono:    "SF Mono", "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+
+  /* ── Colour palette ────────────────────────────────────────────────────── */
+
+  /* Hay — warm off-white to mid taupe */
+  --color-hay-50:  #FDFCFB;
+  --color-hay-100: #F9F7F5;
+  --color-hay-200: #F4F0EB;
+  --color-hay-300: #F1EBE5;
+  --color-hay-400: #EBE5DF;
+  --color-hay-500: #E6DED6;
+  --color-hay-600: #DFD6CD;
+  --color-hay-700: #D9CFC4;
+  --color-hay-800: #D3C7BB;
+  --color-hay-900: #CDBFB1;
+  --color-hay-950: #C5B6A5;
+
+  /* Bison — light warm taupe to near-black */
+  --color-bison-50:  #AEA399;
+  --color-bison-100: #988E86;
+  --color-bison-200: #8A7F76;
+  --color-bison-300: #72675F;
+  --color-bison-400: #61574F;
+  --color-bison-500: #4C433C;
+  --color-bison-600: #3D3530;
+  --color-bison-700: #2E2824;
+  --color-bison-800: #26211D;
+  --color-bison-900: #1D1916;
+  --color-bison-950: #0F0E0C;
+
+  /* Nugget — warm amber */
+  --color-nugget-50:  #FFF7EB;
+  --color-nugget-100: #FFEECC;
+  --color-nugget-200: #FFDA99;
+  --color-nugget-300: #FFC15C;
+  --color-nugget-400: #FFAD33;
+  --color-nugget-500: #FF9D14;
+  --color-nugget-600: #E58200;
+  --color-nugget-700: #A85700;
+  --color-nugget-800: #783E00;
+  --color-nugget-900: #512900;
+  --color-nugget-950: #291400;
+
+  /* Canyon — deep terracotta red */
+  --color-canyon-50:  #FDF3F1;
+  --color-canyon-100: #F4D6D0;
+  --color-canyon-200: #EEA79C;
+  --color-canyon-300: #EA7A64;
+  --color-canyon-400: #E34F31;
+  --color-canyon-500: #CD3214;
+  --color-canyon-600: #B22D10;
+  --color-canyon-700: #93240B;
+  --color-canyon-800: #771F0B;
+  --color-canyon-900: #470E00;
+  --color-canyon-950: #290800;
+
+  /* Cactus — fresh sage green */
+  --color-cactus-50:  #EEF7F0;
+  --color-cactus-100: #DBF0E1;
+  --color-cactus-200: #ACD8BC;
+  --color-cactus-300: #7EC89C;
+  --color-cactus-400: #4BAA6E;
+  --color-cactus-500: #328F58;
+  --color-cactus-600: #29754A;
+  --color-cactus-700: #1A5B36;
+  --color-cactus-800: #0F4327;
+  --color-cactus-900: #06321A;
+  --color-cactus-950: #001F0E;
+
+  /* Denim — cool steel blue */
+  --color-denim-50:  #F0F6FA;
+  --color-denim-100: #DEEBF2;
+  --color-denim-200: #AACADA;
+  --color-denim-300: #7EAFC8;
+  --color-denim-400: #5997BB;
+  --color-denim-500: #3982AC;
+  --color-denim-600: #1D5E86;
+  --color-denim-700: #12496E;
+  --color-denim-800: #07304B;
+  --color-denim-900: #012641;
+  --color-denim-950: #001829;
+
+  /* ── Semantic colour tokens — light mode defaults ──────────────────────── */
+
+  /* Surface: 300 = deepest recessed → 700 = highest overlay */
+  --color-surface-300: var(--color-hay-300);
+  --color-surface-400: var(--color-hay-200);
+  --color-surface-500: var(--color-hay-100);
+  --color-surface-600: var(--color-hay-50);
+  --color-surface-700: #FFFFFF;
+
+  /* Surface — Glass (frosted/translucent layers; opacity encoded as 8-digit hex RRGGBBAA) */
+  --color-surface-glass-500:              #FFFFFFCC;
+  --color-surface-glass-border-highlight: #FFFFFFCC;
+  --color-surface-glass-border-shadow:    #2E282414;
+  --color-surface-glass-off-hover:        #2E28240A;
+  --color-surface-glass-off-pressed:      #2E282414;
+  --color-surface-glass-on-default:       #FFF7EB;
+  --color-surface-glass-on-hover:         var(--color-surface-glass-on-default);
+  --color-surface-glass-on-pressed:       var(--color-surface-glass-off-pressed);
+  --color-surface-glass-off-text-default: var(--color-text-secondary);
+  --color-surface-glass-off-text-hover:   var(--color-text-primary);
+  --color-surface-glass-off-text-pressed: var(--color-text-primary);
+  --color-surface-glass-off-icon-default: var(--color-icon-secondary);
+  --color-surface-glass-off-icon-hover:   var(--color-icon-primary);
+  --color-surface-glass-off-icon-pressed: var(--color-icon-primary);
+  --color-surface-glass-on-text-default:  #A85700;
+  --color-surface-glass-on-text-hover:    var(--color-surface-glass-on-text-default);
+
+  /* Text */
+  --color-text-primary:   var(--color-bison-900);
+  --color-text-secondary: var(--color-bison-600);
+  --color-text-tertiary:  var(--color-bison-300);
+  --color-text-error:     var(--color-canyon-600);
+  --color-text-disabled:  var(--color-bison-100);
+
+  /* Button — Primary text */
+  --color-button-primary-text-default:  #512900;
+  --color-button-primary-text-hover:    #783E00;
+  --color-button-primary-text-pressed:  #291400;
+  --color-button-primary-text-disabled: #512900;
+
+  /* Button — Primary icon */
+  --color-button-primary-icon-default:  #783E00;
+  --color-button-primary-icon-hover:    #A85700;
+  --color-button-primary-icon-pressed:  #512900;
+  --color-button-primary-icon-disabled: #783E00;
+
+  /* Button — Secondary text */
+  --color-button-secondary-text-default:  var(--color-text-secondary);
+  --color-button-secondary-text-hover:    var(--color-bison-500);
+  --color-button-secondary-text-pressed:  var(--color-text-primary);
+  --color-button-secondary-text-disabled: var(--color-text-tertiary);
+
+  /* Button — Secondary icon */
+  --color-button-secondary-icon-default:  var(--color-icon-secondary);
+  --color-button-secondary-icon-hover:    var(--color-bison-400);
+  --color-button-secondary-icon-pressed:  var(--color-icon-primary);
+  --color-button-secondary-icon-disabled: var(--color-icon-tertiary);
+
+  /* Button — Ghost icon */
+  --color-button-ghost-icon-default:  var(--color-icon-tertiary);
+  --color-button-ghost-icon-hover:    var(--color-bison-200);
+  --color-button-ghost-icon-pressed:  var(--color-icon-primary);
+  --color-button-ghost-icon-disabled: var(--color-icon-tertiary);
+
+  /* Icon */
+  --color-icon-primary:   var(--color-bison-800);
+  --color-icon-secondary: var(--color-bison-500);
+  --color-icon-tertiary:  var(--color-bison-300);
+  --color-icon-error:     var(--color-canyon-500);
+  --color-icon-disabled:  var(--color-bison-50);
+  --color-icon-subtle:    #AEA399;
+
+  /* Button — Primary */
+  --color-button-primary-default:  var(--color-nugget-500);
+  --color-button-primary-hover:    var(--color-nugget-400);
+  --color-button-primary-pressed:  var(--color-nugget-600);
+  --color-button-primary-disabled: var(--color-nugget-500);
+
+  /* Button — Secondary */
+  --color-button-secondary-default:  var(--color-hay-400);
+  --color-button-secondary-hover:    var(--color-hay-300);
+  --color-button-secondary-pressed:  var(--color-hay-500);
+  --color-button-secondary-disabled: var(--color-hay-400);
+
+  /* Button — Ghost */
+  --color-button-ghost-hover:   var(--color-hay-300);
+  --color-button-ghost-pressed: var(--color-hay-400);
+
+  /* Control (pill/filter — no component built yet) */
+  --color-control-off-default:  var(--color-button-secondary-default);
+  --color-control-off-hover:    var(--color-button-secondary-hover);
+  --color-control-off-pressed:  var(--color-button-secondary-pressed);
+  --color-control-on-default:   #FFDA99;
+  --color-control-on-hover:     #FFEECC;
+  --color-control-on-pressed:   #FFDA99;
+
+  /* TextField */
+  --color-textfield-default:  var(--color-surface-500);
+  --color-textfield-hover:    var(--color-surface-600);
+  --color-textfield-focus:    var(--color-surface-600);
+  --color-textfield-disabled: var(--color-surface-300);
+
+  /* Checkbox */
+  --color-checkbox-disabled:    var(--color-textfield-disabled);
+  --color-checkbox-on-default:  var(--color-nugget-500);
+  --color-checkbox-on-hover:    var(--color-nugget-400);
+  --color-checkbox-on-pressed:  var(--color-nugget-600);
+  --color-checkbox-off-default: var(--color-textfield-default);
+  --color-checkbox-off-hover:   var(--color-textfield-hover);
+  --color-checkbox-off-pressed: var(--color-surface-400);
+
+  /* Radio */
+  --color-radio-disabled:    var(--color-checkbox-disabled);
+  --color-radio-on-default:  var(--color-checkbox-on-default);
+  --color-radio-on-hover:    var(--color-checkbox-on-hover);
+  --color-radio-on-pressed:  var(--color-checkbox-on-pressed);
+  --color-radio-off-default: var(--color-checkbox-off-default);
+  --color-radio-off-hover:   var(--color-checkbox-off-hover);
+  --color-radio-off-pressed: var(--color-checkbox-off-pressed);
+
+  /* Toggle */
+  --color-toggle-disabled:    var(--color-hay-600);
+  --color-toggle-off-default: var(--color-bison-50);
+  --color-toggle-off-hover:   var(--color-hay-950);
+  --color-toggle-off-pressed: var(--color-bison-100);
+  --color-toggle-on-default:  var(--color-nugget-500);
+  --color-toggle-on-hover:    var(--color-nugget-400);
+  --color-toggle-on-pressed:  var(--color-nugget-600);
+
+  /* Border */
+  --color-border-default:            var(--color-hay-700);
+  --color-border-hover:              var(--color-hay-900);
+  --color-border-pressed:            var(--color-bison-100);
+  --color-border-focus:              var(--color-nugget-500);
+  --color-border-accessible-default: var(--color-bison-100);
+  --color-border-accessible-hover:   var(--color-bison-200);
+  --color-border-accessible-pressed: var(--color-bison-300);
+  --color-border-error:              var(--color-canyon-500);
+  --color-border-disabled:           var(--color-hay-500);
+
+  /* Notification (banners) */
+  --color-notification-success-default:        #EEF7F0;
+  --color-notification-success-border-default: #ACD8BC;
+  --color-notification-success-text-default:   #29754A;
+  --color-notification-success-icon-primary:   #328F58;
+  --color-notification-warning-default:        #FEF5ED;
+  --color-notification-warning-border-default: #F8C69A;
+  --color-notification-warning-text-default:   #BA5208;
+  --color-notification-warning-icon-primary:   #EB7214;
+  --color-notification-error-default:          #FDF3F1;
+  --color-notification-error-border-default:   #EEA79C;
+  --color-notification-error-text-default:     #B22D10;
+  --color-notification-error-icon-primary:     #CD3214;
+  --color-notification-info-default:           #F0F6FA;
+  --color-notification-info-border-default:    #AACADA;
+  --color-notification-info-text-default:      #1D5E86;
+  --color-notification-info-icon-primary:      #3982AC;
+
+  /* ── Typography primitive scale ────────────────────────────────────────── */
+
+  /* Font size steps — desktop defaults (px). Steps 8–10 override on mobile. */
+  --text-size-0:  10px;
+  --text-size-1:  12px;
+  --text-size-2:  13px;
+  --text-size-3:  14px;
+  --text-size-4:  16px;
+  --text-size-5:  17px;
+  --text-size-6:  20px;
+  --text-size-7:  24px;
+  --text-size-8:  36px;
+  --text-size-9:  44px;
+  --text-size-10: 56px;
+
+  /* Line height steps — desktop defaults (px). Steps 5–7 override on mobile. */
+  --line-height-0: 16px;
+  --line-height-1: 20px;
+  --line-height-2: 24px;
+  --line-height-3: 28px;
+  --line-height-4: 32px;
+  --line-height-5: 44px;
+  --line-height-6: 52px;
+  --line-height-7: 64px;
+}
+
+/* ── Dark mode overrides ─────────────────────────────────────────────────── */
+/* Applied when <html class="dark"> is set */
+
+.dark {
+  --color-surface-300: #000000;
+  --color-surface-400: var(--color-bison-950);
+  --color-surface-500: var(--color-bison-900);
+  --color-surface-600: var(--color-bison-800);
+  --color-surface-700: var(--color-bison-700);
+
+  /* Surface — Glass */
+  --color-surface-glass-500:              #2E2824CC;
+  --color-surface-glass-border-highlight: #FFFFFF14;
+  --color-surface-glass-border-shadow:    #0F0E0CA3;
+  --color-surface-glass-off-hover:        #0F0E0C29;
+  --color-surface-glass-off-pressed:      #0F0E0C3D;
+  --color-surface-glass-on-default:       #291400;
+  /* surface.glass.on.hover cascades from surface.glass.on.default override above */
+  /* surface.glass.on.pressed cascades from surface.glass.off.pressed override above */
+  --color-surface-glass-off-text-pressed: var(--color-text-secondary);
+  /* surface.glass.off.text/icon.* (non-pressed) cascade from text.* / icon.* overrides below */
+  --color-surface-glass-on-text-default:  #FFAD33;
+  /* surface.glass.on.text.hover cascades from surface.glass.on.text.default override above */
+
+  /* Text */
+  --color-text-primary:   var(--color-hay-200);
+  --color-text-secondary: var(--color-hay-800);
+  --color-text-tertiary:  var(--color-bison-50);
+  --color-text-error:     var(--color-canyon-400);
+  --color-text-disabled:  var(--color-bison-500);
+
+  /* Icon */
+  --color-icon-primary:   var(--color-hay-300);
+  --color-icon-secondary: var(--color-hay-900);
+  --color-icon-tertiary:  var(--color-bison-100);
+  --color-icon-disabled:  var(--color-bison-600);
+  --color-icon-subtle:    #3D3530;
+
+  /* Button — secondary/ghost text & icon (only where dark differs from light) */
+  --color-button-secondary-text-hover:    var(--color-hay-700);
+  --color-button-secondary-text-pressed:  var(--color-text-tertiary);
+  --color-button-secondary-icon-hover:    var(--color-hay-800);
+  --color-button-secondary-icon-pressed:  var(--color-icon-tertiary);
+  --color-button-ghost-icon-hover:        var(--color-bison-50);
+  --color-button-ghost-icon-pressed:      var(--color-icon-tertiary);
+
+  /* Control — on state (only where dark differs from light) */
+  --color-control-on-default:  #512900;
+  --color-control-on-hover:    #783E00;
+  --color-control-on-pressed:  #512900;
+
+  /* Button */
+  --color-button-secondary-default:  var(--color-bison-700);
+  --color-button-secondary-hover:    var(--color-bison-600);
+  --color-button-secondary-pressed:  var(--color-bison-800);
+  --color-button-secondary-disabled: var(--color-bison-700);
+  --color-button-ghost-hover:        var(--color-bison-600);
+  --color-button-ghost-pressed:      var(--color-bison-700);
+
+  /* TextField (default/hover/focus cascade from surface overrides above) */
+  --color-textfield-disabled: var(--color-surface-400);
+
+  /* Toggle */
+  --color-toggle-disabled:    var(--color-bison-700);
+  --color-toggle-off-default: var(--color-bison-500);
+  --color-toggle-off-hover:   var(--color-bison-400);
+  --color-toggle-off-pressed: var(--color-bison-600);
+
+  /* Border */
+  --color-border-default:            var(--color-bison-600);
+  --color-border-hover:              var(--color-bison-500);
+  --color-border-pressed:            var(--color-bison-800);
+  --color-border-accessible-default: var(--color-bison-300);
+  --color-border-accessible-pressed: var(--color-bison-400);
+  --color-border-disabled:           var(--color-bison-700);
+
+  /* Notification (banners) — icon colors are shared with light */
+  --color-notification-success-default:        #001F0E;
+  --color-notification-success-border-default: #0F4327;
+  --color-notification-success-text-default:   #7EC89C;
+  --color-notification-warning-default:        #290F00;
+  --color-notification-warning-border-default: #5F2702;
+  --color-notification-warning-text-default:   #F48732;
+  --color-notification-error-default:          #290800;
+  --color-notification-error-border-default:   #771F0B;
+  --color-notification-error-text-default:     #EA7A64;
+  --color-notification-info-default:           #001829;
+  --color-notification-info-border-default:    #07304B;
+  --color-notification-info-text-default:      #7EAFC8;
+}
+
+/* ── Mobile typography overrides ─────────────────────────────────────────── */
+/* Only steps 8–10 (font sizes) and 5–7 (line heights) change between         */
+/* desktop and mobile. All semantic roles referencing those steps respond      */
+/* automatically (title, h1, h2).                                              */
+
+@media (max-width: 768px) {
+  :root {
+    --text-size-8:  28px;
+    --text-size-9:  36px;
+    --text-size-10: 44px;
+
+    --line-height-5: 36px;
+    --line-height-6: 44px;
+    --line-height-7: 52px;
+  }
+}
+
+/* ── Semantic typestyle utilities ─────────────────────────────────────────── */
+/* Each @utility class applies the full set of typographic properties for      */
+/* a named role. Usage: class="type-h1 text-text-primary"                     */
+
+@utility type-title {
+  font-family:    var(--font-display);
+  font-size:      var(--text-size-10);
+  line-height:    var(--line-height-7);
+  font-weight:    720;
+  letter-spacing: -0.01em;
+}
+
+@utility type-h1 {
+  font-family:    var(--font-display);
+  font-size:      var(--text-size-9);
+  line-height:    var(--line-height-6);
+  font-weight:    780;
+  letter-spacing: -0.005em;
+}
+
+@utility type-h2 {
+  font-family:    var(--font-display);
+  font-size:      var(--text-size-8);
+  line-height:    var(--line-height-5);
+  font-weight:    780;
+  letter-spacing: 0.005em;
+}
+
+@utility type-h3 {
+  font-family:    var(--font-display);
+  font-size:      var(--text-size-7);
+  line-height:    var(--line-height-4);
+  font-weight:    780;
+  letter-spacing: 0.01em;
+}
+
+@utility type-h4 {
+  font-family:    var(--font-display);
+  font-size:      var(--text-size-6);
+  line-height:    var(--line-height-3);
+  font-weight:    780;
+  letter-spacing: 0.01em;
+}
+
+@utility type-h5 {
+  font-family:    var(--font-sans);
+  font-size:      var(--text-size-5);
+  line-height:    var(--line-height-2);
+  font-weight:    750;
+  letter-spacing: 0.02em;
+}
+
+@utility type-body-l {
+  font-family:    var(--font-sans);
+  font-size:      var(--text-size-4);
+  line-height:    var(--line-height-2);
+  font-weight:    550;
+  letter-spacing: 0.025em;
+}
+
+@utility type-body-l-strong {
+  font-family:    var(--font-sans);
+  font-size:      var(--text-size-4);
+  line-height:    var(--line-height-2);
+  font-weight:    750;
+  letter-spacing: 0.025em;
+}
+
+@utility type-body-m {
+  font-family:    var(--font-sans);
+  font-size:      var(--text-size-3);
+  line-height:    var(--line-height-1);
+  font-weight:    550;
+  letter-spacing: 0.03em;
+}
+
+@utility type-body-m-strong {
+  font-family:    var(--font-sans);
+  font-size:      var(--text-size-3);
+  line-height:    var(--line-height-1);
+  font-weight:    750;
+  letter-spacing: 0.03em;
+}
+
+@utility type-body-s {
+  font-family:    var(--font-sans);
+  font-size:      var(--text-size-2);
+  line-height:    var(--line-height-1);
+  font-weight:    550;
+  letter-spacing: 0.035em;
+}
+
+@utility type-body-s-strong {
+  font-family:    var(--font-sans);
+  font-size:      var(--text-size-2);
+  line-height:    var(--line-height-1);
+  font-weight:    750;
+  letter-spacing: 0.035em;
+}
+
+@utility type-code {
+  font-family:    var(--font-mono);
+  font-size:      var(--text-size-3);
+  line-height:    var(--line-height-1);
+  font-weight:    500;
+  letter-spacing: -0.02em;
+}
+
+@utility type-code-sm {
+  font-family:    var(--font-mono);
+  font-size:      var(--text-size-1);
+  line-height:    var(--line-height-1);
+  font-weight:    500;
+  letter-spacing: -0.015em;
+}
+
+@utility type-terms {
+  font-family:    var(--font-sans);
+  font-size:      var(--text-size-1);
+  line-height:    var(--line-height-0);
+  font-weight:    550;
+  letter-spacing: 0.02em;
+}
+
+@utility type-caption {
+  font-family:    var(--font-sans);
+  font-size:      var(--text-size-1);
+  line-height:    var(--line-height-0);
+  font-weight:    550;
+  letter-spacing: 0.04em;
+}
+
+@utility type-data-label {
+  font-family:    var(--font-sans);
+  font-size:      var(--text-size-0);
+  line-height:    var(--line-height-0);
+  font-weight:    550;
+  letter-spacing: 0.05em;
+}
+
+/* ── Button utilities ─────────────────────────────────────────────────────── */
+
+@utility btn-primary-glow {
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: radial-gradient(
+      ellipse 80% 60% at 50% 120%,
+      color-mix(in srgb, var(--color-nugget-300) 38%, transparent),
+      color-mix(in srgb, var(--color-nugget-400) 20%, transparent) 50%,
+      transparent 75%
+    );
+  }
+  /* Hover: shift gradient one stop lighter (matches Figma nugget.200 stops) */
+  &:enabled:hover::after {
+    background: radial-gradient(
+      ellipse 80% 60% at 50% 120%,
+      color-mix(in srgb, var(--color-nugget-200) 38%, transparent),
+      color-mix(in srgb, var(--color-nugget-300) 20%, transparent) 50%,
+      transparent 75%
+    );
+  }
+}
+
+@utility btn-primary-text-shadow {
+  text-shadow: 0 1px 1px var(--color-nugget-300);
+
+  &:active {
+    text-shadow: 0 1px 1px var(--color-nugget-400);
+  }
+}
+
+@utility btn-primary-icon-shadow {
+  filter: drop-shadow(0 1px 1px var(--color-nugget-300));
+  /* Scoped to direct child of this enabled button only — prevents cross-button bleed */
+  :enabled:active > & { filter: drop-shadow(0 1px 1px var(--color-nugget-400)); }
+}
+
+@utility btn-primary-icon-color {
+  color: var(--color-button-primary-icon-default);
+  :enabled:hover > & { color: var(--color-button-primary-icon-hover); }
+  :enabled:active > & { color: var(--color-button-primary-icon-pressed); }
+}
+
+@utility btn-secondary-icon-color {
+  color: var(--color-button-secondary-icon-default);
+  :enabled:hover > & { color: var(--color-button-secondary-icon-hover); }
+  :enabled:active > & { color: var(--color-button-secondary-icon-pressed); }
+}
+
+/* ── Density variants ─────────────────────────────────────────────────────── */
+
+@custom-variant density-compact {
+  [data-density="compact"] & { @slot; }
+}
+
+@custom-variant density-comfortable {
+  [data-density="comfortable"] & { @slot; }
+}
