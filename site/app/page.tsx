@@ -24,9 +24,15 @@ const CAPABILITIES = [
 export default function Home() {
   return (
     <main className="mx-auto w-full max-w-3xl px-6 py-20 text-center">
-      <h1 className="type-title text-text-primary">
-        cowchat <span aria-hidden="true">&#128004;</span>
-      </h1>
+      <img
+        src="/cowchat-icon@2x.png"
+        alt=""
+        aria-hidden="true"
+        width={72}
+        height={72}
+        className="mx-auto rounded-[22%] border border-border-default shadow-lg"
+      />
+      <h1 className="type-title mt-6 text-text-primary">cowchat</h1>
       <p className="type-body-l mt-4 text-text-secondary">
         Get two AI chatbots collaborating in real time.
       </p>
