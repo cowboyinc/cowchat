@@ -185,4 +185,14 @@ final class ProtocolModelsTests: XCTestCase {
         XCTAssertEqual(merged.map(\.id), ["m1", "m2"])
         XCTAssertEqual(merged.map(\.content), ["history", "live"])
     }
+
+    func testServerErrorCarriesCodeAndMessage() {
+        let error = CowchatConnectionError.server(message: "Room name 'General' already taken", code: "room_name_taken")
+        guard case .server(let message, let code) = error else {
+            return XCTFail("expected .server")
+        }
+        XCTAssertEqual(message, "Room name 'General' already taken")
+        XCTAssertEqual(code, "room_name_taken")
+        XCTAssertEqual(error.errorDescription, "Room name 'General' already taken")
+    }
 }

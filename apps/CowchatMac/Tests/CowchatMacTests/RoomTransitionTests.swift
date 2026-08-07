@@ -334,7 +334,7 @@ final class RoomTransitionTests: XCTestCase {
     @MainActor
     func testRegistrationFailureDoesNotLaunchBundledServer() async {
         let connection = MockRoomConnection()
-        connection.registrationError = CowchatConnectionError.server("Protocol mismatch")
+        connection.registrationError = CowchatConnectionError.server(message: "Protocol mismatch", code: nil)
         let supervisor = MockLocalServerSupervisor()
         let defaults = UserDefaults(suiteName: "RoomTransitionTests.\(UUID().uuidString)")!
         let store = ChatStore(
