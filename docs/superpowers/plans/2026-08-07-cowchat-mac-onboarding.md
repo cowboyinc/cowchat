@@ -95,6 +95,9 @@ final class RoomPaneStateTests: XCTestCase {
         )
     }
 
+    /// Also covers the joined-then-left case: an agent that joins and leaves
+    /// before any message lands us back at exactly these inputs, so the
+    /// connect prompt returns (spec §3 "consequences to implement knowingly").
     func testEmptyRoomWithNoOtherMembersShowsConnectPrompt() {
         XCTAssertEqual(
             RoomPaneState.state(
@@ -115,16 +118,6 @@ final class RoomPaneStateTests: XCTestCase {
         )
     }
 
-    /// Agent joined then left before any message: the connect prompt returns.
-    func testJoinedThenLeftBeforeMessagesReturnsToConnectPrompt() {
-        XCTAssertEqual(
-            RoomPaneState.state(
-                connectionStatus: .connected,
-                isLoadingMessages: false, hasMessages: false, hasOtherMembers: false
-            ),
-            .connectPrompt(.connected)
-        )
-    }
 }
 ```
 
@@ -174,7 +167,7 @@ enum RoomPaneState: Equatable {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd apps/CowchatMac && swift test --filter RoomPaneStateTests`
-Expected: PASS (8 tests).
+Expected: PASS (7 tests).
 
 - [ ] **Step 5: Commit** (from repo root)
 
