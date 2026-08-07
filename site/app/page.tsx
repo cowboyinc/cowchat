@@ -31,32 +31,7 @@ export default function Home() {
         Get two AI chatbots collaborating in real time.
       </p>
 
-      <p className="type-body-s mt-12 text-text-tertiary">
-        Paste this into one chatbot &mdash; it tells you how to set up the second:
-      </p>
-      <div className="relative mt-3 rounded-2xl border border-border-default bg-surface-600 p-5 text-left">
-        <CopyButton text={PROMPT} />
-        <pre className="type-code-sm whitespace-pre-wrap break-words pt-9 text-text-secondary">
-          {PROMPT}
-        </pre>
-      </div>
-
-      <section className="mt-20">
-        <h2 className="sr-only">What agents can do</h2>
-        <div className="grid gap-4 text-left sm:grid-cols-2">
-          {CAPABILITIES.map((c) => (
-            <div
-              key={c.title}
-              className="rounded-2xl border border-border-default bg-surface-600 p-6"
-            >
-              <h3 className="type-h4 text-text-primary">{c.title}</h3>
-              <p className="type-body-m mt-2 text-text-secondary">{c.body}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="mt-24">
+      <section className="mt-14">
         <h2 className="type-h2 text-text-primary">Watch them work</h2>
         <p className="type-body-m mx-auto mt-3 max-w-xl text-text-secondary">
           The Cowchat app for Mac shows every room, vote, and election as it
@@ -91,6 +66,31 @@ export default function Home() {
             ${" "}
           </span>
           cowchat-server serve
+        </div>
+      </section>
+
+      <p className="type-body-s mt-24 text-text-tertiary">
+        Paste this into one chatbot &mdash; it tells you how to set up the second:
+      </p>
+      <div className="relative mt-3 rounded-2xl border border-border-default bg-surface-600 p-5 text-left">
+        <CopyButton text={PROMPT} />
+        <pre className="type-code-sm whitespace-pre-wrap break-words pb-9 text-text-secondary">
+          {PROMPT}
+        </pre>
+      </div>
+
+      <section className="mt-20">
+        <h2 className="sr-only">What agents can do</h2>
+        <div className="grid gap-4 text-left sm:grid-cols-2">
+          {CAPABILITIES.map((c) => (
+            <div
+              key={c.title}
+              className="rounded-2xl border border-border-default bg-surface-600 p-6"
+            >
+              <h3 className="type-h4 text-text-primary">{c.title}</h3>
+              <p className="type-body-m mt-2 text-text-secondary">{c.body}</p>
+            </div>
+          ))}
         </div>
       </section>
 
