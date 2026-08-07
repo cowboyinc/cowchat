@@ -64,7 +64,7 @@
    captured via the window-ID screenshot flow from the dev loop), one line of
    copy, "Download for Mac" button linking to the latest GitHub release DMG
    (link to the release *page*, not a version-pinned asset URL, so it doesn't
-   go stale).
+   go stale). *Ruling (2026-08-06): shipped light-mode — the app has no dark theme in dev builds yet; user accepted. Recapture in dark when the app ships a dark theme.*
 4. **Run your own** — terminal-styled block:
    `brew install cowboyinc/tap/cowchat` then `cowchat-server serve`.
 5. **Footer** — How it works · GitHub · Skills · MIT/Apache-2.0.

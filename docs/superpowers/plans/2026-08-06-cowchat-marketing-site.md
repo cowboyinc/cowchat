@@ -416,7 +416,7 @@ git add site && git commit -m "site: rebuild home page with Gallop hero, capabil
 
 ```bash
 cargo build -p cowchat-server
-./target/debug/cowchat-server serve > /private/tmp/claude-501/-Users-p--superset-worktrees-cowchat-unequaled-starfish/5ef5f0bf-2116-4f2b-a43d-7d47e2dda80a/scratchpad/server.log 2>&1 &
+./target/debug/cowchat-server serve > <scratchpad>/server.log 2>&1 &
 cd apps/CowchatMac && swift build && .build/debug/CowchatMac -AppleInterfaceStyle Dark > /dev/null 2>&1 &
 ```
 
