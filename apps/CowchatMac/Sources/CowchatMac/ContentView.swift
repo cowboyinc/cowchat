@@ -873,6 +873,20 @@ private struct ChatRoomView: View {
         return store.rooms.first { $0.id == parentID }
     }
 
+    private var paneState: RoomPaneState {
+        RoomPaneState.state(
+            connectionStatus: store.connectionStatus,
+            isLoadingMessages: store.isLoadingMessages,
+            hasMessages: !store.messages.isEmpty,
+            hasOtherMembers: store.roomMembers.contains { $0.id != store.agentID }
+        )
+    }
+
+    private var connectVariant: RoomPaneState.ConnectVariant? {
+        if case .connectPrompt(let variant) = paneState { return variant }
+        return nil
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             chatHeader
@@ -884,7 +898,13 @@ private struct ChatRoomView: View {
                         .controlSize(.small)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                if !store.isLoadingMessages && store.messages.isEmpty {
+                if let connectVariant {
+                    RoomConnectStateView(
+                        roomName: room.name,
+                        prompt: store.connectPrompt(for: room),
+                        variant: connectVariant
+                    )
+                } else if paneState == .quiet {
                     quietRoom
                         .allowsHitTesting(true)
                 }
@@ -966,8 +986,12 @@ private struct ChatRoomView: View {
                             .foregroundStyle(SemanticColor.iconTertiary)
                     }
                 }
-                Text(presenceSummary)
-                    .gallopText(.caption, color: presenceSummary.contains("active") ? SemanticColor.warning : SemanticColor.textTertiary)
+                Text(connectVariant != nil ? "No agents here yet" : presenceSummary)
+                    .gallopText(
+                        .caption,
+                        color: connectVariant == nil && presenceSummary.contains("active")
+                            ? SemanticColor.warning : SemanticColor.textTertiary
+                    )
                     .lineLimit(1)
             }
 

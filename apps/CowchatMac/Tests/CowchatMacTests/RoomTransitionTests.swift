@@ -1500,6 +1500,26 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
+    func testSelectedAgentlessRoomIsPolledForMembersEvenWhenNotInSetupSet() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        let room = try decodeRoom(id: "r-empty", name: "empty-room")
+        connection.listedRooms = [room]
+        await store.connect()
+        await store.select(room: room)
+        XCTAssertTrue(store.roomMembers.isEmpty)
+        XCTAssertTrue(store.setupRoomIDs.isEmpty)
+        XCTAssertTrue(store.selectedRoomAwaitingFirstAgent)
+
+        // An agent connects between event pushes; only polling can see it.
+        connection.agentsByRoom["r-empty"] = [
+            AgentPresence(agentID: "other-agent", name: "codex")
+        ]
+        await store.pollSetupRoomReadiness()
+        XCTAssertTrue(store.roomMembers.contains { $0.agentID == "other-agent" })
+    }
+
+    @MainActor
     func testLaunchSelectionPrefersLobbyOverPendingSetupRooms() async throws {
         let connection = MockRoomConnection()
         let suiteName = "RoomTransitionTests.launch.\(UUID().uuidString)"

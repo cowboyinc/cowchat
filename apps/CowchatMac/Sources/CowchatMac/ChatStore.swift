@@ -76,6 +76,17 @@ final class ChatStore: ObservableObject {
         rooms.first { $0.roomID == selectedRoomID }
     }
 
+    /// True while the selected room should render the connect state: non-lobby,
+    /// connected, nothing said yet, nobody else here. Keeps the 2s poll honest
+    /// about who is actually in the room (spec §3 "member-truth refresh").
+    var selectedRoomAwaitingFirstAgent: Bool {
+        guard connectionStatus.isConnected,
+              let room = selectedRoom,
+              room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame,
+              messages.isEmpty, !isLoadingMessages else { return false }
+        return !roomMembers.contains { $0.id != agentID }
+    }
+
     var filteredRooms: [Room] {
         RoomSidebarPresentation.filteredRooms(
             from: rooms,
@@ -699,6 +710,7 @@ final class ChatStore: ObservableObject {
         }
         roomLoadTask = transition
         await transition.value
+        startSetupReadinessPolling()
     }
 
     func createRoom(name: String, description: String, ephemeral: Bool, isPublic: Bool) async -> Bool {
@@ -1110,7 +1122,7 @@ final class ChatStore: ObservableObject {
     private func startSetupReadinessPolling() {
         guard setupReadinessTask == nil,
               connectionStatus.isConnected,
-              !setupRoomIDs.isEmpty else { return }
+              (!setupRoomIDs.isEmpty || selectedRoomAwaitingFirstAgent) else { return }
         setupReadinessGeneration += 1
         let generation = setupReadinessGeneration
         let expectedProfileGeneration = profileGeneration
@@ -1119,10 +1131,10 @@ final class ChatStore: ObservableObject {
                 guard let self,
                       expectedProfileGeneration == profileGeneration,
                       connectionStatus.isConnected,
-                      !setupRoomIDs.isEmpty else { break }
+                      (!setupRoomIDs.isEmpty || selectedRoomAwaitingFirstAgent) else { break }
                 await pollSetupRoomReadiness()
                 guard expectedProfileGeneration == profileGeneration,
-                      !setupRoomIDs.isEmpty else { break }
+                      (!setupRoomIDs.isEmpty || selectedRoomAwaitingFirstAgent) else { break }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
             guard let self,
@@ -1144,6 +1156,7 @@ final class ChatStore: ObservableObject {
                 markSetupRoomReadyIfNeeded(roomID: roomID)
             }
         }
+        if selectedRoomAwaitingFirstAgent { await refreshMembers() }
     }
 
     private func append(_ message: ChatMessage) {
