@@ -1542,8 +1542,36 @@ private struct RoomAvatar: View {
     let name: String
     let size: CGFloat
     let accented: Bool
+    /// Settings previews pin a style instead of following the stored one.
+    var styleOverride: RoomIconStyle?
+    @AppStorage(RoomIconStyle.storageKey) private var iconStyle = RoomIconStyle.fallback.rawValue
 
     var body: some View {
+        let style = styleOverride ?? RoomIconStyle(rawValue: iconStyle) ?? .fallback
+        Group {
+            if style == .initials {
+                lettered
+            } else {
+                // Procedural styles carry their own colour, so selection reads
+                // as a ring rather than a fill that would erase the icon.
+                RoomIconView(name: name, style: style, size: size)
+                    .clipShape(Circle())
+                    .overlay {
+                        Circle().stroke(
+                            accented
+                                ? SemanticColor.buttonPrimaryDefault
+                                : SemanticColor.borderDefault.opacity(0.8),
+                            lineWidth: accented ? 2 : 0.5
+                        )
+                    }
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityElement()
+        .accessibilityLabel(name)
+    }
+
+    private var lettered: some View {
         Circle()
             .fill(accented ? SemanticColor.buttonPrimaryDefault : avatarFill)
             .overlay {
@@ -1558,7 +1586,6 @@ private struct RoomAvatar: View {
             .overlay {
                 Circle().stroke(SemanticColor.borderDefault.opacity(0.8), lineWidth: 0.5)
             }
-            .frame(width: size, height: size)
     }
 
     private var avatarFill: Color {
@@ -1739,6 +1766,23 @@ private struct EmptyChatView: View {
 private enum SettingsPage {
     case connection
     case theme
+    case roomIcons
+
+    var title: String {
+        switch self {
+        case .connection: return "Connection"
+        case .theme: return "Theme"
+        case .roomIcons: return "Room icons"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .connection: return "Choose where Cowchat stores and syncs your rooms."
+        case .theme: return "Choose how Cowchat appears on this Mac."
+        case .roomIcons: return "Every room gets the same icon on every Mac — it is drawn from the room name."
+        }
+    }
 }
 
 enum ThemePreview {
@@ -1761,6 +1805,7 @@ private struct SettingsView: View {
     @Binding var isPresented: Bool
     let onShowOnboarding: () -> Void
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
+    @AppStorage(RoomIconStyle.storageKey) private var roomIconStyle = RoomIconStyle.fallback.rawValue
     @State private var selectedPage = SettingsPage.connection
     @State private var cloudURL = ""
     @State private var cloudAPIKey = ""
@@ -1783,6 +1828,11 @@ private struct SettingsView: View {
                     systemName: "circle.lefthalf.filled",
                     page: .theme
                 )
+                settingsNavigationRow(
+                    "Room icons",
+                    systemName: "circle.grid.2x2",
+                    page: .roomIcons
+                )
                 Spacer()
             }
             .frame(width: 230)
@@ -1801,6 +1851,8 @@ private struct SettingsView: View {
                     }
                 case .theme:
                     themeSettings
+                case .roomIcons:
+                    roomIconSettings
                 }
 
                 Spacer()
@@ -1821,13 +1873,9 @@ private struct SettingsView: View {
     private var settingsHeader: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
-                Text(selectedPage == .connection ? "Connection" : "Theme")
+                Text(selectedPage.title)
                     .gallopText(.h4, color: SemanticColor.textPrimary)
-                Text(
-                    selectedPage == .connection
-                        ? "Choose where Cowchat stores and syncs your rooms."
-                        : "Choose how Cowchat appears on this Mac."
-                )
+                Text(selectedPage.subtitle)
                     .gallopText(.bodyM, color: SemanticColor.textTertiary)
             }
             Spacer()
@@ -1979,6 +2027,72 @@ private struct SettingsView: View {
                 onShowOnboarding()
             }
         }
+    }
+
+    private var roomIconSettings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(RoomIconStyle.allCases) { style in
+                    roomIconChoice(style)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func roomIconChoice(_ style: RoomIconStyle) -> some View {
+        let selected = (RoomIconStyle(rawValue: roomIconStyle) ?? .fallback) == style
+        return Button { roomIconStyle = style.rawValue } label: {
+            HStack(spacing: 14) {
+                roomIconSamples(style)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(style.label).gallopText(.bodyMStrong)
+                    Text(style.blurb).gallopText(.caption)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(
+                        selected ? SemanticColor.buttonPrimaryDefault : SemanticColor.iconSubtle
+                    )
+            }
+            .foregroundStyle(SemanticColor.textSecondary)
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity)
+            .frame(height: 74)
+            .background(
+                selected ? SemanticColor.surfaceGlassOnDefault : SemanticColor.surface500,
+                in: RoundedRectangle(cornerRadius: 14)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(
+                        selected ? SemanticColor.buttonPrimaryDefault : SemanticColor.borderDefault,
+                        lineWidth: 1
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+        .macAccessibleAction(label: "Use \(style.label) room icons") {
+            roomIconStyle = style.rawValue
+        }
+    }
+
+    private func roomIconSamples(_ style: RoomIconStyle) -> some View {
+        HStack(spacing: -8) {
+            ForEach(iconSampleNames, id: \.self) { name in
+                RoomAvatar(name: name, size: 44, accented: false, styleOverride: style)
+                    .overlay {
+                        Circle().stroke(SemanticColor.surface500, lineWidth: 2)
+                    }
+            }
+        }
+    }
+
+    /// Previews use this Mac's own rooms so the choice is made against the
+    /// names that will actually sit in the sidebar.
+    private var iconSampleNames: [String] {
+        let live = store.rooms.map(\.name).prefix(3)
+        return live.isEmpty ? ["Lobby", "harness-signing", "canyon-deploy"] : Array(live)
     }
 
     private func settingsNavigationRow(
