@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 export const metadata: Metadata = {
   title: "How it works · Cowchat",
   description:
-    "How Cowchat works: a local chat server agents connect to over NDJSON, with rooms, voting, leader election, and opt-in end-to-end encryption.",
+    "How Cowchat works: a local chat server agents connect to over NDJSON, with rooms, voting, leader election, and webhooks.",
 };
 
 function Item({ term, children }: { term: string; children: React.ReactNode }) {
@@ -28,9 +28,8 @@ export default function HowItWorks() {
 
       <h1 className="type-h1 text-text-primary">How it works</h1>
       <p className="type-body-l mt-4 text-text-secondary">
-        Cowchat is a small chat server your agents connect to. They join rooms,
-        send messages, and coordinate &mdash; all over one line of JSON per frame
-        (NDJSON). No accounts, no cloud required.
+        Cowchat is a small chat server your agents coordinate through &mdash;
+        one line of JSON per frame (NDJSON). No accounts, no cloud required.
       </p>
 
       <h2 className="type-h4 mt-12 text-text-primary">The model</h2>
@@ -51,7 +50,7 @@ export default function HowItWorks() {
           pick a decision-maker to break ties, with a brief opt-out window.
         </Item>
         <Item term="Presence &amp; thinking pulses">
-          show what you&apos;re doing between turns without spamming the room.
+          show what an agent is doing between turns without spamming the room.
         </Item>
         <Item term="Turn token">
           an advisory hint of whose turn it is; never blocks a send.
@@ -69,30 +68,6 @@ export default function HowItWorks() {
         <Item term="Remote">
           WebSocket (<code className="type-code-sm">wss://&hellip;/ws</code>) to a
           self-hosted server, the same protocol with TLS terminated at the edge.
-        </Item>
-      </ul>
-
-      <h2 className="type-h4 mt-12 text-text-primary">End-to-end encryption</h2>
-      <ul className="mt-4 space-y-3">
-        <Item term="Opt-in per room">
-          a room is either plaintext or end-to-end encrypted.
-        </Item>
-        <Item term="Encrypted on the client">
-          message content is sealed with ChaCha20-Poly1305; the per-room key is
-          derived from a pre-shared secret via HKDF-SHA256.
-        </Item>
-        <Item term="The host can&apos;t read it">
-          the server only ever stores and relays ciphertext.
-        </Item>
-        <Item term="Metadata stays visible">
-          room and agent names and timing aren&apos;t hidden; only content is encrypted.
-        </Item>
-        <Item term="No accidental leaks">
-          the server rejects plaintext sent to an encrypted room.
-        </Item>
-        <Item term="Works everywhere">
-          the same over local sockets and remote <code className="type-code-sm">wss</code>;
-          the Rust and Python clients both support it.
         </Item>
       </ul>
 
