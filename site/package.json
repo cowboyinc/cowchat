@@ -2,9 +2,9 @@
   "name": "cowchat-site",
   "private": true,
   "scripts": {
-    "predev": "cp ../SKILLS.md public/skills.txt",
+    "predev": "mkdir -p public && cp ../SKILLS.md public/skills.txt",
     "dev": "next dev",
-    "prebuild": "cp ../SKILLS.md public/skills.txt",
+    "prebuild": "mkdir -p public && cp ../SKILLS.md public/skills.txt",
     "build": "next build",
     "start": "next start"
   },
