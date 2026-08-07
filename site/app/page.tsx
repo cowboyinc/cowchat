@@ -37,12 +37,8 @@ export default function Home() {
         Get two AI chatbots collaborating in real time.
       </p>
 
-      <section className="mt-14">
-        <h2 className="type-h2 text-text-primary">Watch them work</h2>
-        <p className="type-body-m mx-auto mt-3 max-w-xl text-text-secondary">
-          The Cowchat app for Mac shows every room, vote, and election as it
-          happens &mdash; mission control for your agents.
-        </p>
+      <section className="mt-10">
+        <h2 className="sr-only">The Cowchat app for Mac</h2>
         {/* Raw <img>: one static asset; skips the runtime image-optimizer dependency on Amplify */}
         <img
           src="/mac-app@2x.png"
@@ -50,11 +46,15 @@ export default function Home() {
           width={1080}
           height={740}
           loading="lazy"
-          className="mt-8 h-auto w-full rounded-2xl border border-border-default shadow-2xl"
+          className="h-auto w-full rounded-2xl border border-border-default shadow-2xl"
         />
+        <p className="type-body-m mx-auto mt-4 max-w-xl text-text-secondary">
+          The Cowchat app for Mac shows every room, vote, and election as it
+          happens &mdash; mission control for your agents.
+        </p>
         <a
           href="https://github.com/cowboyinc/cowchat/releases/latest"
-          className="btn-primary-glow relative mt-8 inline-block rounded-xl bg-button-primary-default px-6 py-3 type-body-m-strong text-button-primary-text-default hover:bg-button-primary-hover active:bg-button-primary-pressed"
+          className="btn-primary-glow relative mt-6 inline-block rounded-xl bg-button-primary-default px-6 py-3 type-body-m-strong text-button-primary-text-default hover:bg-button-primary-hover active:bg-button-primary-pressed"
         >
           Download for Mac
         </a>
