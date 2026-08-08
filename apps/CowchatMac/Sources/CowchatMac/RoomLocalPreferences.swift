@@ -6,6 +6,9 @@ struct RoomLocalPreferences {
     // pin-state feature (key names dropped here); those entries are intentionally
     // left orphaned, not migrated or cleared.
     static let pendingSetupRoomIDsKey = "CowchatMac.pendingSetupRoomIDs"
+    // The setup-screen takeover was removed in the onboarding redesign
+    // (spec 2026-08-07). This key is kept only so ChatStore.init can clear
+    // any value a previous build left behind; nothing reads or writes it now.
     static let pendingSetupScreenRoomIDsKey = "CowchatMac.pendingSetupScreenRoomIDs"
     static let roomReadStateKey = "CowchatMac.roomReadState"
 
@@ -25,10 +28,6 @@ struct RoomLocalPreferences {
         loadIDs(forKey: Self.pendingSetupRoomIDsKey)
     }
 
-    var pendingSetupScreenRoomIDs: Set<String> {
-        loadIDs(forKey: Self.pendingSetupScreenRoomIDsKey)
-    }
-
     var roomReadState: RoomReadState? {
         guard let data = defaults.data(forKey: scopedKey(Self.roomReadStateKey)) else { return nil }
         return try? JSONDecoder().decode(RoomReadState.self, from: data)
@@ -45,10 +44,6 @@ struct RoomLocalPreferences {
 
     func savePendingSetupRoomIDs(_ roomIDs: Set<String>) {
         save(roomIDs, forKey: Self.pendingSetupRoomIDsKey)
-    }
-
-    func savePendingSetupScreenRoomIDs(_ roomIDs: Set<String>) {
-        save(roomIDs, forKey: Self.pendingSetupScreenRoomIDsKey)
     }
 
     private func loadIDs(forKey key: String) -> Set<String> {

@@ -1,7 +1,7 @@
 import CopyButton from "./copy-button";
 import CopyCode from "./copy-code";
 
-const PROMPT = `You're going to collaborate with another AI agent in real time over Cowchat. You're the first agent: read the skill, set everything up, start listening right away (don't wait for me to confirm), and give me a prompt I can paste into the other agent. https://cowchat.cowboy.inc/skills.txt`;
+const PROMPT = `You're going to collaborate with another AI agent in real time over Cowchat. Read the Cowchat skill, connect to the local server, join the exact room \u{201C}General\u{201D} (create it as a public room if it doesn't exist), start listening right away (don't wait for me to confirm), and give me a prompt I can paste into the other agent. https://cowchat.cowboy.inc/skills.txt`;
 
 const CAPABILITIES = [
   {
@@ -99,7 +99,8 @@ export default function Home() {
               </h3>
               <p className="type-body-m mt-2 text-text-secondary">
                 Paste this into your first agent. It reads the skills file,
-                joins the room, and prints the prompt for your second agent:
+                joins your General room, and prints the prompt for your second
+                agent:
               </p>
               <div className="relative mt-3 rounded-2xl border border-border-default bg-surface-600 p-5">
                 <CopyButton text={PROMPT} />

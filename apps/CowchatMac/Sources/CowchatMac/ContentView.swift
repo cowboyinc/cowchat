@@ -53,9 +53,6 @@ struct ContentView: View {
                     if room.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame {
                         LobbyDashboardView(room: room, isSidebarVisible: $isSidebarVisible)
                             .id("lobby-\(room.id)")
-                    } else if store.roomSetupScreenIDs.contains(room.id) {
-                        RoomSetupView(room: room, isSidebarVisible: $isSidebarVisible)
-                            .id("setup-\(room.id)")
                     } else {
                         ChatRoomView(room: room, isSidebarVisible: $isSidebarVisible)
                             .id(room.id)
@@ -153,9 +150,16 @@ struct ContentView: View {
                     .environmentObject(store)
                     .padding(18)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let room = store.secondAgentHintRoom {
+                SecondAgentHintNotice(room: room)
+                    .id(room.id)
+                    .environmentObject(store)
+                    .padding(18)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.2), value: store.roomReadyNotice?.id)
+        .animation(.easeInOut(duration: 0.2), value: store.secondAgentHintRoom?.id)
     }
 }
 
@@ -665,9 +669,7 @@ private struct LobbyDashboardView: View {
     @Binding var isSidebarVisible: Bool
 
     private var dashboardRooms: [Room] {
-        store.unarchivedRooms.filter {
-            $0.id != room.id && !store.setupRoomIDs.contains($0.id)
-        }
+        store.unarchivedRooms.filter { $0.id != room.id }
     }
 
     private var availableAgentCount: Int {
@@ -803,99 +805,6 @@ private struct DashboardRoomCard: View {
     }
 }
 
-private struct RoomSetupView: View {
-    @EnvironmentObject private var store: ChatStore
-    let room: Room
-    @Binding var isSidebarVisible: Bool
-    @State private var hasCopiedPrompt = false
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(room.name)
-                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                    Text("Waiting for your first collaborator")
-                        .gallopText(.caption, color: SemanticColor.textTertiary)
-                }
-                Spacer()
-            }
-            .padding(.top, 10)
-            .padding(.leading, 18)
-            .padding(.trailing, 14)
-            .frame(height: 58)
-
-            VStack(spacing: 22) {
-                HStack(spacing: 14) {
-                    Image(systemName: "list.bullet.rectangle")
-                    Image(systemName: "arrow.right")
-                    Image(systemName: "sparkles")
-                }
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(SemanticColor.iconPrimary)
-
-                Text("Paste this prompt into one AI chatbot")
-                    .gallopText(.h5, color: SemanticColor.textPrimary)
-
-                HStack(alignment: .bottom, spacing: 14) {
-                    Text(roomPrompt)
-                        .textSelection(.enabled)
-                        .gallopText(.bodyM, color: SemanticColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Button(hasCopiedPrompt ? "Copied" : "Copy") { copyPrompt() }
-                        .buttonStyle(.plain)
-                        .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                        .padding(.horizontal, 18)
-                        .frame(height: 38)
-                        .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
-                        .macAccessibleAction(label: "Copy setup prompt", action: copyPrompt)
-                }
-                .padding(18)
-                .frame(maxWidth: 620)
-                .background(
-                    SemanticColor.surface600,
-                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
-                }
-
-                Button("Continue") {
-                    Task { await store.completeRoomSetup(room) }
-                }
-                .buttonStyle(.plain)
-                .gallopText(.bodyMStrong, color: SemanticColor.buttonSecondaryTextDefault)
-                .padding(.horizontal, 18)
-                .frame(height: 38)
-                .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
-                .overlay {
-                    Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
-                }
-                .macAccessibleAction(label: "Finish room setup") {
-                    Task { await store.completeRoomSetup(room) }
-                }
-            }
-            .padding(28)
-            // Center the unit against the full card, compensating the header
-            // strip above (Patrick, 2026-08-06).
-            .padding(.bottom, 68)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(SemanticColor.surface500)
-    }
-
-    private var roomPrompt: String { store.connectPrompt(for: room) }
-
-    private func copyPrompt() {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(roomPrompt, forType: .string)
-        hasCopiedPrompt = true
-    }
-}
-
 private struct RoomReadyNotice: View {
     @EnvironmentObject private var store: ChatStore
     let room: Room
@@ -908,14 +817,18 @@ private struct RoomReadyNotice: View {
                 Text("You can now begin chatting with your collaborator.")
                     .gallopText(.caption, color: SemanticColor.textTertiary)
             }
-            Button("Open Room") {
+            Button {
                 Task { await store.openRoomReadyNotice() }
+            } label: {
+                // Chrome inside the label: the whole capsule is the hit area.
+                Text("Open Room")
+                    .gallopText(.bodySStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                    .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .gallopText(.bodySStrong, color: SemanticColor.buttonPrimaryTextDefault)
-            .padding(.horizontal, 14)
-            .frame(height: 34)
-            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
             .macAccessibleAction(label: "Open \(room.name)") {
                 Task { await store.openRoomReadyNotice() }
             }
@@ -951,6 +864,47 @@ private struct RoomReadyNotice: View {
     }
 }
 
+private struct SecondAgentHintNotice: View {
+    @EnvironmentObject private var store: ChatStore
+    let room: Room
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Text("Add more agents anytime — Copy connect prompt in the ⋯ menu.")
+                .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
+            Button {
+                store.secondAgentHintRoom = nil
+            } label: {
+                GallopIconView(icon: .dismiss, fallbackSystemName: "xmark", size: 11)
+                    .foregroundStyle(SemanticColor.iconTertiary)
+            }
+            .buttonStyle(.plain)
+            .macAccessibleAction(label: "Dismiss hint") {
+                store.secondAgentHintRoom = nil
+            }
+        }
+        .padding(14)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(SemanticColor.surfaceGlass500)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(SemanticColor.surfaceGlassBorderHighlight, lineWidth: 1)
+                }
+        }
+        .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+        .shadow(color: .black.opacity(0.04), radius: 0, y: 0.5)
+        .task {
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            if !Task.isCancelled { store.secondAgentHintRoom = nil }
+        }
+    }
+}
+
 private struct ChatRoomView: View {
     @EnvironmentObject private var store: ChatStore
     let room: Room
@@ -971,6 +925,20 @@ private struct ChatRoomView: View {
         return store.rooms.first { $0.id == parentID }
     }
 
+    private var paneState: RoomPaneState {
+        RoomPaneState.state(
+            connectionStatus: store.connectionStatus,
+            isLoadingMessages: store.isLoadingMessages,
+            hasMessages: !store.messages.isEmpty,
+            hasOtherMembers: store.roomMembers.contains { $0.id != store.agentID }
+        )
+    }
+
+    private var connectVariant: RoomPaneState.ConnectVariant? {
+        if case .connectPrompt(let variant) = paneState { return variant }
+        return nil
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             chatHeader
@@ -982,7 +950,13 @@ private struct ChatRoomView: View {
                         .controlSize(.small)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                if !store.isLoadingMessages && store.messages.isEmpty {
+                if let connectVariant {
+                    RoomConnectStateView(
+                        roomName: room.name,
+                        prompt: store.connectPrompt(for: room),
+                        variant: connectVariant
+                    )
+                } else if paneState == .quiet {
                     quietRoom
                         .allowsHitTesting(true)
                 }
@@ -1064,8 +1038,12 @@ private struct ChatRoomView: View {
                             .foregroundStyle(SemanticColor.iconTertiary)
                     }
                 }
-                Text(presenceSummary)
-                    .gallopText(.caption, color: presenceSummary.contains("active") ? SemanticColor.warning : SemanticColor.textTertiary)
+                Text(connectVariant != nil ? "No agents here yet" : presenceSummary)
+                    .gallopText(
+                        .caption,
+                        color: connectVariant == nil && presenceSummary.contains("active")
+                            ? SemanticColor.warning : SemanticColor.textTertiary
+                    )
                     .lineLimit(1)
             }
 
@@ -1200,15 +1178,23 @@ private struct ChatRoomView: View {
                 .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 .multilineTextAlignment(.center)
 
-            Button(hasCopiedQuietRoomPrompt ? "Copied" : "Copy connect prompt") {
+            Button {
                 copyConnectPrompt()
                 hasCopiedQuietRoomPrompt = true
+            } label: {
+                // Reserve the wider label's width (no resize on click) and keep
+                // the chrome inside the label so the whole capsule is clickable.
+                ZStack {
+                    Text("Copy connect prompt").hidden()
+                    Text(hasCopiedQuietRoomPrompt ? "Copied" : "Copy connect prompt")
+                }
+                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                .padding(.horizontal, 18)
+                .frame(height: 38)
+                .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-            .padding(.horizontal, 18)
-            .frame(height: 38)
-            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
             .padding(.top, 6)
             .macAccessibleAction(label: "Copy connect prompt") {
                 copyConnectPrompt()
@@ -1731,26 +1717,30 @@ private struct EmptyChatView: View {
     var body: some View {
         Group {
             if store.rooms.isEmpty {
-                // Centered welcome IS the empty state, with a direct path to
-                // the first room (Patrick, 2026-08-06).
-                VStack(spacing: 20) {
-                    welcome(alignment: .center)
+                if case .failed = store.connectionStatus {
+                    connectionFailedState
+                } else {
+                    // Centered welcome IS the empty state, with a direct path to
+                    // the first room (Patrick, 2026-08-06).
+                    VStack(spacing: 20) {
+                        welcome(alignment: .center)
 
-                    Button {
-                        store.presentCreateRoom()
-                    } label: {
-                        Text("New room")
-                            .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                            .padding(.horizontal, 20)
-                            .frame(height: 38)
-                            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                        Button {
+                            store.presentCreateRoom()
+                        } label: {
+                            Text("New room")
+                                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                                .padding(.horizontal, 20)
+                                .frame(height: 38)
+                                .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.defaultAction)
+                        .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
                     }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut(.defaultAction)
-                    .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
+                    .padding(24)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(alignment: .leading, spacing: 18) {
                     welcome(alignment: .leading)
@@ -1801,6 +1791,36 @@ private struct EmptyChatView: View {
                 .gallopText(.bodyM, color: SemanticColor.textTertiary)
         }
         .multilineTextAlignment(alignment == .center ? .center : .leading)
+    }
+
+    private var connectionFailedState: some View {
+        VStack(spacing: 18) {
+            GallopIconView(icon: .retry, fallbackSystemName: "wifi.slash", size: 24)
+                .foregroundStyle(SemanticColor.iconTertiary)
+            Text("Can't reach the local server")
+                .gallopText(.h5, color: SemanticColor.textPrimary)
+            Text(store.connectionStatus.failureMessage ?? "Connection failed")
+                .gallopText(.caption, color: SemanticColor.textTertiary)
+                .multilineTextAlignment(.center)
+
+            Button {
+                store.reconnect()
+            } label: {
+                Text("Reconnect")
+                    .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                    .padding(.horizontal, 20)
+                    .frame(height: 38)
+                    .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .macAccessibleAction(label: "Reconnect", action: store.reconnect)
+
+            ConnectTroubleshootingView()
+                .frame(maxWidth: 420)
+                .padding(.top, 8)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

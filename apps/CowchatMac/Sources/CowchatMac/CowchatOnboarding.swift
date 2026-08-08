@@ -5,9 +5,6 @@ enum CowchatOnboarding {
     static let currentVersion = 1
     static let completedVersionKey = "CowchatMac.completedOnboardingVersion"
     static let migrationAttemptedKey = "CowchatMac.onboardingMigrationAttempted"
-    static let collaborationPrompt = """
-    You're going to collaborate with another AI chatbot in real time over Cowchat. You're the first bot: read the skill, set everything up, start listening right away (don't wait for me to confirm), and give me a prompt I can paste into the other bot. https://cowchat.cowboy.inc/skills.txt
-    """
 
     static func migrateExistingUser(defaults: UserDefaults, hadExistingAgentID: Bool) {
         guard defaults.object(forKey: migrationAttemptedKey) == nil else { return }
@@ -21,14 +18,17 @@ enum CowchatOnboarding {
 struct CowchatOnboardingView: View {
     let onComplete: () -> Void
 
-    @State private var isCopyExplanationPresented = false
-    @State private var hasCopiedPrompt = false
+    private static let steps: [(icon: String, caption: String)] = [
+        ("list.bullet.rectangle", "Copy the prompt from your first room"),
+        ("arrow.right", "Paste it into Claude Code, Codex, or any agent"),
+        ("sparkles", "Watch your agents work together live"),
+    ]
 
     var body: some View {
         ZStack {
             SemanticColor.surface500
 
-            VStack(spacing: 24) {
+            VStack(spacing: 28) {
                 appIcon
 
                 VStack(spacing: 8) {
@@ -40,32 +40,32 @@ struct CowchatOnboardingView: View {
                         .frame(maxWidth: 580)
                 }
 
-                Text(
-                    hasCopiedPrompt
-                        ? "Your prompt is ready. Continue to create your first room."
-                        : "Copy this prompt into an AI chatbot to get your first collaborator connected."
-                )
-                .gallopText(.bodyM, color: SemanticColor.textTertiary)
-                .multilineTextAlignment(.center)
-
-                promptCard
+                HStack(alignment: .top, spacing: 28) {
+                    ForEach(Array(Self.steps.enumerated()), id: \.offset) { _, step in
+                        VStack(spacing: 10) {
+                            Image(systemName: step.icon)
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(SemanticColor.iconPrimary)
+                            Text(step.caption)
+                                .gallopText(.caption, color: SemanticColor.textTertiary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(width: 150)
+                    }
+                }
 
                 Button {
                     onComplete()
                 } label: {
-                    Text(hasCopiedPrompt ? "Continue" : "Skip for now")
+                    Text("Get started")
                         .gallopText(.bodyMStrong)
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(CapsulePillButtonStyle(prominent: true))
-                .macAccessibleAction(
-                    label: hasCopiedPrompt ? "Continue to Cowchat" : "Skip onboarding",
-                    action: onComplete
-                )
+                .macAccessibleAction(label: "Get started", action: onComplete)
             }
             .padding(54)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
         }
         .frame(minWidth: 900, minHeight: 600)
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
@@ -75,9 +75,6 @@ struct CowchatOnboardingView: View {
                 .allowsHitTesting(false)
         }
         .ignoresSafeArea(.container, edges: .top)
-        .sheet(isPresented: $isCopyExplanationPresented) {
-            copyExplanation
-        }
     }
 
     private var appIcon: some View {
@@ -99,91 +96,15 @@ struct CowchatOnboardingView: View {
             SemanticColor.surface600,
             in: RoundedRectangle(cornerRadius: 22, style: .continuous)
         )
+        // The dev-build fallback PNG is raw square art (the packaged .icns is
+        // pre-masked); clip so both render as the same rounded tile.
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .shadow(
             color: SemanticColor.surfaceGlassBorderShadow,
             radius: 18,
             y: 8
         )
         .accessibilityHidden(true)
-    }
-
-    private var promptCard: some View {
-        HStack(alignment: .bottom, spacing: 14) {
-            Text(CowchatOnboarding.collaborationPrompt)
-                .textSelection(.enabled)
-                .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Button {
-                isCopyExplanationPresented = true
-            } label: {
-                Text("Copy")
-                    .gallopText(.bodyMStrong)
-            }
-            .buttonStyle(CapsulePillButtonStyle(prominent: true))
-            .macAccessibleAction(label: "Copy collaboration prompt") {
-                isCopyExplanationPresented = true
-            }
-        }
-        .padding(18)
-        .frame(maxWidth: 620)
-        .background(
-            SemanticColor.surface600,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(SemanticColor.borderDefault, lineWidth: 1)
-        }
-    }
-
-    private var copyExplanation: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Copy and paste it into your AI chatbot")
-                .gallopText(.h5, color: SemanticColor.textPrimary)
-            Text("This copies a setup prompt to your clipboard. It does not send anything; you choose the chatbot and when to paste it.")
-                .gallopText(.bodyM, color: SemanticColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 10) {
-                Button {
-                    isCopyExplanationPresented = false
-                    onComplete()
-                } label: {
-                    Text("Skip")
-                        .gallopText(.bodyMStrong)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(CapsulePillButtonStyle(prominent: false))
-                .macAccessibleAction(label: "Skip copying and continue") {
-                    isCopyExplanationPresented = false
-                    onComplete()
-                }
-
-                Button {
-                    copyPrompt()
-                } label: {
-                    Text("Copy")
-                        .gallopText(.bodyMStrong)
-                        .frame(maxWidth: .infinity)
-                }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(CapsulePillButtonStyle(prominent: true))
-                .macAccessibleAction(label: "Copy prompt to clipboard", action: copyPrompt)
-            }
-        }
-        .padding(22)
-        .frame(width: 380, height: 220)
-        .background(SemanticColor.surface600)
-        .accessibilityAddTraits(.isModal)
-    }
-
-    private func copyPrompt() {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(CowchatOnboarding.collaborationPrompt, forType: .string)
-        hasCopiedPrompt = true
-        isCopyExplanationPresented = false
     }
 }
 

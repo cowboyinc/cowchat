@@ -23,12 +23,12 @@ final class ChatStore: ObservableObject {
     @Published private(set) var messageSearchRoomIDs: Set<String> = []
     @Published private(set) var archivedRoomIDs: Set<String> = []
     @Published private(set) var setupRoomIDs: Set<String> = []
-    @Published private(set) var roomSetupScreenIDs: Set<String> = []
     @Published private(set) var readState = RoomReadState()
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
     @Published private(set) var lastThinkingAt: [String: [String: Date]] = [:]
     @Published var roomReadyNotice: Room?
+    @Published var secondAgentHintRoom: Room?
     @Published var roomBeingRenamed: Room?
     @Published var connectionStatus: ConnectionStatus = .disconnected
     @Published private(set) var connectionProfile: ConnectionProfile
@@ -47,6 +47,12 @@ final class ChatStore: ObservableObject {
     private var connectionAttemptGeneration = 0
     private var profileGeneration = 0
     private var reconnectTask: Task<Void, Never>?
+    /// The latched-supervisor-error text last surfaced to the alert, tracked
+    /// independently of `connectionStatus` — the real transport's own
+    /// `onStatusChange` overwrites `connectionStatus` mid-attempt (`.connecting`,
+    /// then `.failed(<transport message>)`) before a spawn failure is even
+    /// thrown, so `connectionStatus` can never be trusted to detect a repeat.
+    private var surfacedSpawnFailureDescription: String?
     private var roomRefreshTask: Task<Void, Never>?
     private var roomLoadTask: Task<Void, Never>?
     private var messageSearchTask: Task<Void, Never>?
@@ -64,6 +70,7 @@ final class ChatStore: ObservableObject {
     private var pendingDestructionRoomIDs: Set<String> = []
     private var confirmedDestructionRoomIDs: Set<String> = []
     private var destroyedRoomIDs: Set<String> = []
+    private var secondAgentHintShownRoomIDs: Set<String> = []
     private var draftsByRoomID: [String: String] = [:]
     private var failedDraftRestorationsByRoomID: [String: FailedDraftRestoration] = [:]
     private var sendGeneration = 0
@@ -75,6 +82,17 @@ final class ChatStore: ObservableObject {
 
     var selectedRoom: Room? {
         rooms.first { $0.roomID == selectedRoomID }
+    }
+
+    /// True while the selected room should render the connect state: non-lobby,
+    /// connected, nothing said yet, nobody else here. Keeps the 2s poll honest
+    /// about who is actually in the room (spec §3 "member-truth refresh").
+    var selectedRoomAwaitingFirstAgent: Bool {
+        guard connectionStatus.isConnected,
+              let room = selectedRoom,
+              room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame,
+              messages.isEmpty, !isLoadingMessages else { return false }
+        return !roomMembers.contains { $0.id != agentID }
     }
 
     var filteredRooms: [Room] {
@@ -101,6 +119,22 @@ final class ChatStore: ObservableObject {
         let generated = "cowchat-mac-\(UUID().uuidString.lowercased())"
         defaults.set(generated, forKey: key)
         return generated
+    }
+
+    nonisolated static let didCreateDefaultRoomKey = "CowchatMac.didCreateDefaultRoom"
+    nonisolated static let defaultRoomBackfillKey = "CowchatMac.defaultRoomBackfillAttempted"
+
+    /// One-shot: installs already past onboarding v1 never get an unrequested
+    /// auto-created room (spec §2 — retroactive creation was reviewed out).
+    /// Runs after migrateExistingUser so migrated users are stamped by the
+    /// time it reads the completed version.
+    nonisolated static func suppressDefaultRoomForExistingInstalls(defaults: UserDefaults) {
+        guard !defaults.bool(forKey: defaultRoomBackfillKey) else { return }
+        defaults.set(true, forKey: defaultRoomBackfillKey)
+        if defaults.integer(forKey: CowchatOnboarding.completedVersionKey)
+            >= CowchatOnboarding.currentVersion {
+            defaults.set(true, forKey: didCreateDefaultRoomKey)
+        }
     }
 
     convenience init() {
@@ -162,6 +196,7 @@ final class ChatStore: ObservableObject {
             defaults: defaults,
             hadExistingAgentID: hadExistingAgentID
         )
+        Self.suppressDefaultRoomForExistingInstalls(defaults: defaults)
         stableAgentID = Self.resolveAgentID(
             defaults: defaults,
             scope: connectionProfile.persistentIdentityScope
@@ -169,8 +204,16 @@ final class ChatStore: ObservableObject {
         localPreferences = Self.roomPreferences(defaults: defaults, profile: connectionProfile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
-        roomSetupScreenIDs = localPreferences.pendingSetupScreenRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
+        // One-time cleanup: the setup-screen takeover was removed in the
+        // onboarding redesign (spec 2026-08-07); stale persisted IDs would
+        // otherwise sit orphaned forever.
+        defaults.removeObject(forKey: RoomLocalPreferences.pendingSetupScreenRoomIDsKey)
+        if let scope = connectionProfile.persistentIdentityScope {
+            defaults.removeObject(
+                forKey: "\(RoomLocalPreferences.pendingSetupScreenRoomIDsKey).\(scope)"
+            )
+        }
         connection.onEvent = { [weak self] type, payload in
             self?.handleEvent(type: type, payload: payload)
         }
@@ -240,7 +283,21 @@ final class ChatStore: ObservableObject {
         guard !Task.isCancelled,
               expectedProfileGeneration == profileGeneration,
               connectionProfile == expectedProfile else { return }
-        errorMessage = nil
+        let enteredFromFailedState: Bool = {
+            if case .failed = connectionStatus { return true }
+            return false
+        }()
+        if enteredFromFailedState {
+            // Background retry of an already-failed connection: keep any surfaced
+            // error until the episode resolves (success below) or the user acts.
+            // Clearing it here would auto-dismiss an alert the user hasn't
+            // acknowledged, and the transition guard below would then never
+            // re-show it for this failure episode. Every user-initiated path
+            // (reconnect(), activate()) resets connectionStatus to .disconnected
+            // before calling connect(), so .failed here always means "retry".
+        } else {
+            errorMessage = nil
+        }
         do {
             try await connectTransport(expectedProfileGeneration: expectedProfileGeneration)
             guard expectedProfileGeneration == profileGeneration,
@@ -265,6 +322,10 @@ final class ChatStore: ObservableObject {
                 joinedRoomID = desiredRoomID
             }
             connectionStatus = .connected
+            if enteredFromFailedState {
+                errorMessage = nil
+                surfacedSpawnFailureDescription = nil
+            }
             reconnectTask?.cancel()
             reconnectTask = nil
             try await refreshRooms(selectFallbackForMissingSelection: false)
@@ -277,19 +338,86 @@ final class ChatStore: ObservableObject {
             if let selectedRoom {
                 await select(room: selectedRoom)
             } else {
-                let initial = rooms.first(where: { roomSetupScreenIDs.contains($0.id) })
-                    ?? rooms.first(where: { $0.name.lowercased() == "lobby" })
+                let initial = rooms.first(where: { $0.name.lowercased() == "lobby" })
                     ?? rooms.first
                 if let initial { await select(room: initial) }
                 else { selectedRoomID = nil }
             }
+            guard expectedProfileGeneration == profileGeneration else { return }
+            await ensureDefaultRoomIfNeeded()
             guard expectedProfileGeneration == profileGeneration else { return }
             startSetupReadinessPolling()
         } catch {
             guard expectedProfileGeneration == profileGeneration,
                   connectionProfile == expectedProfile else { return }
             connectionStatus = .failed(error.localizedDescription)
+            // Spawn/launch failures are latched (no background retry can fix
+            // them) — surface them on the alert instead of a footer tooltip.
+            // Only alert on the transition into this failure, not on every
+            // automatic reconnect retry of the same latched error — otherwise
+            // a dismissed alert reappears every ~2s until the user retries.
+            // Tracked separately from connectionStatus: the real transport's
+            // onStatusChange overwrites connectionStatus with its own
+            // .connecting/.failed(transport message) mid-attempt before this
+            // catch ever runs, so connectionStatus can't detect a repeat.
+            if error is LocalServerSupervisorError,
+               surfacedSpawnFailureDescription != error.localizedDescription {
+                surfacedSpawnFailureDescription = error.localizedDescription
+                errorMessage = error.localizedDescription
+            }
             scheduleReconnect()
+        }
+    }
+
+    private func ensureDefaultRoomIfNeeded() async {
+        guard connectionProfile.kind == .local,
+              !defaults.bool(forKey: Self.didCreateDefaultRoomKey) else { return }
+        let expectedProfileGeneration = profileGeneration
+
+        if let general = rooms.first(where: {
+            $0.name.localizedCaseInsensitiveCompare("General") == .orderedSame
+        }) {
+            defaults.set(true, forKey: Self.didCreateDefaultRoomKey)
+            await select(room: general)
+            return
+        }
+        let hasUserRooms = rooms.contains {
+            $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
+        }
+        guard !hasUserRooms, !rooms.isEmpty else {
+            // CLI-first user (or an anomalous empty list): normal selection
+            // stands. An empty list still sets the flag — the seeded lobby is
+            // always present on a healthy server, so this state is not "fresh".
+            defaults.set(true, forKey: Self.didCreateDefaultRoomKey)
+            return
+        }
+        do {
+            let room = try await connection.createRoom(
+                name: "General",
+                description: "Where your agents meet and work together",
+                parentID: nil,
+                ephemeral: false,
+                isPublic: true
+            )
+            guard expectedProfileGeneration == profileGeneration else { return }
+            if !rooms.contains(where: { $0.id == room.id }) {
+                rooms.append(room)
+                recordRoomMutation(roomID: room.id)
+            }
+            rooms.sort(by: roomSort)
+            setupRoomIDs.insert(room.id)
+            localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
+            defaults.set(true, forKey: Self.didCreateDefaultRoomKey)
+            await select(room: room)
+        } catch {
+            guard expectedProfileGeneration == profileGeneration else { return }
+            if let connectionError = error as? CowchatConnectionError,
+               case .server(_, .some("room_name_taken")) = connectionError {
+                // The name is squatted by a room this key can't see; retrying
+                // can never succeed. Silent fallback to normal selection.
+                defaults.set(true, forKey: Self.didCreateDefaultRoomKey)
+            }
+            // Transient failure: flag stays unset; the next launch retries once.
         }
     }
 
@@ -305,12 +433,12 @@ final class ChatStore: ObservableObject {
         connectionProfile.displayName
     }
 
-    /// The paste-into-a-chatbot prompt that connects an agent to a specific
-    /// room. Single source of truth for the setup screen, the room-actions
+    /// The paste-into-an-agent prompt that connects an agent to a specific
+    /// room. Single source of truth for the connect state, the room-actions
     /// menu, and the quiet-room call to action.
     nonisolated static func connectPromptText(roomName: String, connectionInstruction: String) -> String {
         """
-        You're going to collaborate with another AI chatbot in real time over Cowchat. Read the Cowchat skill, \(connectionInstruction), join the exact room \u{201C}\(roomName)\u{201D}, and start listening right away. https://cowchat.cowboy.inc/skills.txt
+        You're going to collaborate with another AI agent in real time over Cowchat. Read the Cowchat skill, \(connectionInstruction), join the exact room \u{201C}\(roomName)\u{201D}, and start listening right away. https://cowchat.cowboy.inc/skills.txt
         """
     }
 
@@ -375,6 +503,7 @@ final class ChatStore: ObservableObject {
             localServerSupervisor?.prepareForExplicitRetry()
         }
         connectionStatus = .disconnected
+        surfacedSpawnFailureDescription = nil
         start()
     }
 
@@ -527,6 +656,8 @@ final class ChatStore: ObservableObject {
         roomMessagePreviews = [:]
         lastThinkingAt = [:]
         roomReadyNotice = nil
+        secondAgentHintRoom = nil
+        secondAgentHintShownRoomIDs = []
         roomBeingRenamed = nil
         isLoadingMessages = false
         isCreateRoomPresented = false
@@ -546,9 +677,9 @@ final class ChatStore: ObservableObject {
         localPreferences = Self.roomPreferences(defaults: defaults, profile: profile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
-        roomSetupScreenIDs = localPreferences.pendingSetupScreenRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
         connectionStatus = .disconnected
+        surfacedSpawnFailureDescription = nil
     }
 
     private static func roomPreferences(
@@ -694,13 +825,19 @@ final class ChatStore: ObservableObject {
         }
         roomLoadTask = transition
         await transition.value
+        startSetupReadinessPolling()
     }
 
     func createRoom(name: String, description: String, ephemeral: Bool, isPublic: Bool) async -> Bool {
         let expectedProfileGeneration = profileGeneration
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedName.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
+            errorMessage = "\u{201C}lobby\u{201D} is reserved for the Lobby dashboard. Choose another name."
+            return false
+        }
         do {
             let room = try await connection.createRoom(
-                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                name: trimmedName,
                 description: description.trimmingCharacters(in: .whitespacesAndNewlines),
                 parentID: createRoomParentID,
                 ephemeral: ephemeral,
@@ -714,8 +851,6 @@ final class ChatStore: ObservableObject {
             rooms.sort(by: roomSort)
             setupRoomIDs.insert(room.id)
             localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
-            roomSetupScreenIDs.insert(room.id)
-            localPreferences.savePendingSetupScreenRoomIDs(roomSetupScreenIDs)
             isCreateRoomPresented = false
             createRoomParentID = nil
             await select(room: room)
@@ -796,6 +931,10 @@ final class ChatStore: ObservableObject {
             errorMessage = "Room names cannot be empty."
             return false
         }
+        guard name.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
+            errorMessage = "\u{201C}lobby\u{201D} is reserved for the Lobby dashboard. Choose another name."
+            return false
+        }
 
         do {
             let updated = try await connection.rename(roomID: room.id, name: name)
@@ -852,19 +991,6 @@ final class ChatStore: ObservableObject {
             present(error)
             return false
         }
-    }
-
-    func completeRoomSetup(_ room: Room) async {
-        let expectedProfileGeneration = profileGeneration
-        roomSetupScreenIDs.remove(room.id)
-        localPreferences.savePendingSetupScreenRoomIDs(roomSetupScreenIDs)
-        if !room.ephemeral, let lobby = rooms.first(where: {
-            $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame
-        }) {
-            await select(room: lobby)
-            guard expectedProfileGeneration == profileGeneration else { return }
-        }
-        startSetupReadinessPolling()
     }
 
     func openRoomReadyNotice() async {
@@ -981,6 +1107,11 @@ final class ChatStore: ObservableObject {
                 guard let self,
                       expectedProfileGeneration == profileGeneration else { return }
                 await refreshMembers()
+                // The last member leaving can put the selected room back into
+                // the connect state after the poll loop already exited (it
+                // stops once selectedRoomAwaitingFirstAgent goes false) — pick
+                // it back up so "waiting…" isn't stuck without a live poll.
+                startSetupReadinessPolling()
             }
         case "presence_update":
             updatePresence(from: payload)
@@ -1120,7 +1251,7 @@ final class ChatStore: ObservableObject {
     private func startSetupReadinessPolling() {
         guard setupReadinessTask == nil,
               connectionStatus.isConnected,
-              !setupRoomIDs.isEmpty else { return }
+              (!setupRoomIDs.isEmpty || selectedRoomAwaitingFirstAgent) else { return }
         setupReadinessGeneration += 1
         let generation = setupReadinessGeneration
         let expectedProfileGeneration = profileGeneration
@@ -1129,10 +1260,10 @@ final class ChatStore: ObservableObject {
                 guard let self,
                       expectedProfileGeneration == profileGeneration,
                       connectionStatus.isConnected,
-                      !setupRoomIDs.isEmpty else { break }
+                      (!setupRoomIDs.isEmpty || selectedRoomAwaitingFirstAgent) else { break }
                 await pollSetupRoomReadiness()
                 guard expectedProfileGeneration == profileGeneration,
-                      !setupRoomIDs.isEmpty else { break }
+                      (!setupRoomIDs.isEmpty || selectedRoomAwaitingFirstAgent) else { break }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
             guard let self,
@@ -1154,6 +1285,7 @@ final class ChatStore: ObservableObject {
                 markSetupRoomReadyIfNeeded(roomID: roomID)
             }
         }
+        if selectedRoomAwaitingFirstAgent { await refreshMembers() }
     }
 
     private func append(_ message: ChatMessage) {
@@ -1307,11 +1439,6 @@ final class ChatStore: ObservableObject {
             setupRoomIDs = pendingSetup
             localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
         }
-        let setupScreens = roomSetupScreenIDs.intersection(pendingSetup)
-        if setupScreens != roomSetupScreenIDs {
-            roomSetupScreenIDs = setupScreens
-            localPreferences.savePendingSetupScreenRoomIDs(roomSetupScreenIDs)
-        }
         if let roomBeingRenamed,
            !validRoomIDs.contains(roomBeingRenamed.id) {
             self.roomBeingRenamed = nil
@@ -1329,8 +1456,6 @@ final class ChatStore: ObservableObject {
         archivedRoomIDs.remove(roomID)
         setupRoomIDs.remove(roomID)
         localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
-        roomSetupScreenIDs.remove(roomID)
-        localPreferences.savePendingSetupScreenRoomIDs(roomSetupScreenIDs)
         draftsByRoomID.removeValue(forKey: roomID)
         failedDraftRestorationsByRoomID.removeValue(forKey: roomID)
         messageSearchRoomIDs.remove(roomID)
@@ -1338,6 +1463,7 @@ final class ChatStore: ObservableObject {
         previewActivityByRoomID.removeValue(forKey: roomID)
         lastThinkingAt.removeValue(forKey: roomID)
         if roomReadyNotice?.id == roomID { roomReadyNotice = nil }
+        if secondAgentHintRoom?.id == roomID { secondAgentHintRoom = nil }
         if roomBeingRenamed?.id == roomID { roomBeingRenamed = nil }
         if createRoomParentID == roomID {
             createRoomParentID = nil
@@ -1404,9 +1530,11 @@ final class ChatStore: ObservableObject {
         guard setupRoomIDs.remove(roomID) != nil,
               let room = rooms.first(where: { $0.id == roomID }) else { return }
         localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
-        roomSetupScreenIDs.remove(roomID)
-        localPreferences.savePendingSetupScreenRoomIDs(roomSetupScreenIDs)
-        if selectedRoomID != roomID { roomReadyNotice = room }
+        if selectedRoomID != roomID {
+            roomReadyNotice = room
+        } else if secondAgentHintShownRoomIDs.insert(roomID).inserted {
+            secondAgentHintRoom = room
+        }
     }
 
     private func hasCollaborator(in members: [AgentPresence]) -> Bool {

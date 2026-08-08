@@ -123,9 +123,6 @@ struct CowchatMacApp: App {
                 if completedOnboardingVersion < CowchatOnboarding.currentVersion {
                     CowchatOnboardingView {
                         completedOnboardingVersion = CowchatOnboarding.currentVersion
-                        DispatchQueue.main.async {
-                            store.presentCreateRoom()
-                        }
                     }
                 } else {
                     ContentView {

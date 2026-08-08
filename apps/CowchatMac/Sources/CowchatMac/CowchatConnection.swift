@@ -30,7 +30,7 @@ enum CowchatLocalAPIKey {
 enum CowchatConnectionError: LocalizedError {
     case notConnected
     case invalidResponse
-    case server(String)
+    case server(message: String, code: String?)
     case transport(String)
     case timeout
 
@@ -40,7 +40,9 @@ enum CowchatConnectionError: LocalizedError {
             return "Cowchat is not connected."
         case .invalidResponse:
             return "Cowchat returned an invalid response."
-        case .server(let message), .transport(let message):
+        case .server(let message, _):
+            return message
+        case .transport(let message):
             return message
         case .timeout:
             return "Cowchat did not respond in time."
@@ -447,7 +449,13 @@ final class CowchatConnection: CowchatConnectionProtocol {
             } else if let replyTo = object["reply_to"] as? String {
                 if type == "error" {
                     let message = payload["message"] as? String ?? "Unknown server error"
-                    finishRequest(id: replyTo, result: .failure(CowchatConnectionError.server(message)))
+                    finishRequest(
+                        id: replyTo,
+                        result: .failure(CowchatConnectionError.server(
+                            message: message,
+                            code: payload["code"] as? String
+                        ))
+                    )
                 } else {
                     finishRequest(id: replyTo, result: .success(payload))
                 }

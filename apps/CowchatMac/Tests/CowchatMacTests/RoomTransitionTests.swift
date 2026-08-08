@@ -29,6 +29,7 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
     var connectFailuresRemaining = 0
     var blocksConnect = false
     var registrationError: Error?
+    var createRoomError: Error?
     private var connectContinuation: CheckedContinuation<Void, Never>?
     private var registrationContinuation: CheckedContinuation<Void, Never>?
     private var createContinuation: CheckedContinuation<Void, Never>?
@@ -40,12 +41,20 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
 
     func connect() async throws {
         connectCallCount += 1
+        // Production-faithful: CowchatConnection.connect() emits .connecting at
+        // entry, then .failed(<transport message>) on a failed attempt, before
+        // any local-server-supervisor error is ever thrown (CowchatConnection.swift:136,
+        // failConnection). ChatStore must not infer "already surfaced" from
+        // connectionStatus, since this overwrites it mid-attempt.
+        onStatusChange?(.connecting)
         if blocksConnect {
             await withCheckedContinuation { connectContinuation = $0 }
         }
         if connectFailuresRemaining > 0 {
             connectFailuresRemaining -= 1
-            throw CowchatConnectionError.transport("Connection refused")
+            let error = CowchatConnectionError.transport("Connection refused")
+            onStatusChange?(.failed(error.localizedDescription))
+            throw error
         }
     }
     func register(name: String, agentID: String) async throws -> CowchatRegistration {
@@ -76,6 +85,7 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         isPublic: Bool
     ) async throws -> Room {
         operations.append("create:\(name)")
+        if let createRoomError { throw createRoomError }
         if blocksCreate {
             await withCheckedContinuation { createContinuation = $0 }
         }
@@ -258,6 +268,15 @@ final class RoomTransitionTests: XCTestCase {
         let suiteName = "RoomTransitionTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
+        return ChatStore(connection: connection, defaults: defaults)
+    }
+
+    @MainActor
+    private func makeFreshInstallStore(connection: MockRoomConnection) -> ChatStore {
+        let suiteName = "RoomTransitionTests.fresh.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
         return ChatStore(connection: connection, defaults: defaults)
     }
 
@@ -266,6 +285,7 @@ final class RoomTransitionTests: XCTestCase {
         let suiteName = "RoomTransitionTests.profile.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
         defaults.set("profile-owner", forKey: "CowchatMac.agentID")
         let preferences = ConnectionProfilePreferences(
             defaults: defaults,
@@ -334,7 +354,7 @@ final class RoomTransitionTests: XCTestCase {
     @MainActor
     func testRegistrationFailureDoesNotLaunchBundledServer() async {
         let connection = MockRoomConnection()
-        connection.registrationError = CowchatConnectionError.server("Protocol mismatch")
+        connection.registrationError = CowchatConnectionError.server(message: "Protocol mismatch", code: nil)
         let supervisor = MockLocalServerSupervisor()
         let defaults = UserDefaults(suiteName: "RoomTransitionTests.\(UUID().uuidString)")!
         let store = ChatStore(
@@ -540,6 +560,113 @@ final class RoomTransitionTests: XCTestCase {
         store.connectionStatus = .failed("transient local failure")
         store.reconnect()
         XCTAssertEqual(supervisor.explicitRetryCount, 2)
+    }
+
+    @MainActor
+    func testBundledServerFailureSurfacesInErrorMessage() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        supervisor.launchError = LocalServerSupervisorError.launchFailed("spawn denied")
+        connection.connectFailuresRemaining = 99
+        let suiteName = "RoomTransitionTests.spawnfail.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        await store.connect()
+
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertTrue(store.errorMessage?.contains("spawn denied") == true)
+    }
+
+    @MainActor
+    func testLatchedSpawnFailureAlertsOnceNotEveryReconnect() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        supervisor.launchError = LocalServerSupervisorError.launchFailed("spawn denied")
+        connection.connectFailuresRemaining = 99
+        let suiteName = "RoomTransitionTests.spawnfail-repeat.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        await store.connect()
+        XCTAssertNotNil(store.errorMessage)
+
+        // The user dismisses the alert. A subsequent reconnect attempt that
+        // hits the same latched failure must not re-fire it.
+        store.errorMessage = nil
+        await store.connect()
+
+        XCTAssertNil(store.errorMessage)
+    }
+
+    @MainActor
+    func testUndismissedSpawnFailureAlertSurvivesBackgroundReconnect() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        supervisor.launchError = LocalServerSupervisorError.launchFailed("spawn denied")
+        connection.connectFailuresRemaining = 99
+        let suiteName = "RoomTransitionTests.spawnfail-undismissed.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        await store.connect()
+        XCTAssertNotNil(store.errorMessage)
+
+        // The user has NOT dismissed the alert. A background reconnect attempt
+        // that hits the same latched failure must not silently clear it.
+        await store.connect()
+
+        XCTAssertEqual(store.errorMessage, LocalServerSupervisorError.launchFailed("spawn denied").localizedDescription)
+    }
+
+    @MainActor
+    func testSpawnFailureAlertClearsWhenBackgroundReconnectSucceeds() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        supervisor.launchError = LocalServerSupervisorError.launchFailed("spawn denied")
+        connection.connectFailuresRemaining = 99
+        let suiteName = "RoomTransitionTests.spawnfail-recovers.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        await store.connect()
+        XCTAssertNotNil(store.errorMessage)
+
+        // The transient outage self-heals; the user never touched the alert.
+        supervisor.launchError = nil
+        connection.connectFailuresRemaining = 0
+        await store.connect()
+
+        XCTAssertTrue(store.connectionStatus.isConnected)
+        XCTAssertNil(store.errorMessage)
     }
 
     @MainActor
@@ -1441,7 +1568,6 @@ final class RoomTransitionTests: XCTestCase {
         )
         XCTAssertTrue(created)
         XCTAssertTrue(store.setupRoomIDs.contains(room.id))
-        XCTAssertTrue(store.roomSetupScreenIDs.contains(room.id))
 
         connection.onEvent?("message_received", [
             "message_id": "creator-echo",
@@ -1453,96 +1579,19 @@ final class RoomTransitionTests: XCTestCase {
             "seq": 1,
         ])
         XCTAssertTrue(store.setupRoomIDs.contains(room.id))
-        XCTAssertTrue(store.roomSetupScreenIDs.contains(room.id))
         XCTAssertNil(store.roomReadyNotice)
 
-        await store.completeRoomSetup(room)
+        // Navigate away from the freshly created room (e.g. back to Lobby)
+        // before a real collaborator has joined.
+        await store.select(room: lobby)
         XCTAssertEqual(store.selectedRoomID, lobby.id)
         XCTAssertTrue(store.setupRoomIDs.contains(room.id))
-        XCTAssertFalse(store.roomSetupScreenIDs.contains(room.id))
         XCTAssertNil(store.roomReadyNotice)
 
         connection.agentsByRoom[room.id] = [collaborator]
         await store.pollSetupRoomReadiness()
         XCTAssertFalse(store.setupRoomIDs.contains(room.id))
         XCTAssertEqual(store.roomReadyNotice?.id, room.id)
-    }
-
-    @MainActor
-    func testContinuingTemporaryRoomSetupKeepsTheCreatorJoined() async throws {
-        let suiteName = "RoomTransitionTemporarySetupTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set("creator-agent", forKey: "CowchatMac.agentID")
-        let lobby = try decodeRoom(id: "lobby", name: "Lobby")
-        let room = try decodeRoom(
-            id: "temporary",
-            name: "Temporary",
-            createdBy: "creator-agent",
-            ephemeral: true
-        )
-        let selfAgent = try decodeAgent(id: "creator-agent", name: "Cowchat Mac")
-        let connection = MockRoomConnection()
-        connection.listedRooms = [lobby]
-        connection.roomToCreate = room
-        connection.agentsByRoom = [lobby.id: [selfAgent], room.id: [selfAgent]]
-        let store = ChatStore(connection: connection, defaults: defaults)
-        await store.connect()
-        _ = await store.createRoom(
-            name: room.name,
-            description: "",
-            ephemeral: true,
-            isPublic: false
-        )
-
-        await store.completeRoomSetup(room)
-
-        XCTAssertEqual(store.selectedRoomID, room.id)
-        XCTAssertFalse(connection.operations.contains("leave:\(room.id)"))
-        XCTAssertTrue(store.setupRoomIDs.contains(room.id))
-        XCTAssertFalse(store.roomSetupScreenIDs.contains(room.id))
-    }
-
-    @MainActor
-    func testPendingSetupScreenResumesAcrossRelaunchAndDismissalPersists() async throws {
-        let suiteName = "RoomTransitionSetupPersistenceTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set("creator-agent", forKey: "CowchatMac.agentID")
-        let lobby = try decodeRoom(id: "lobby", name: "Lobby")
-        let room = try decodeRoom(id: "design", name: "Design", createdBy: "creator-agent")
-        let selfAgent = try decodeAgent(id: "creator-agent", name: "Cowchat Mac")
-
-        let creatingConnection = MockRoomConnection()
-        creatingConnection.listedRooms = [lobby]
-        creatingConnection.roomToCreate = room
-        creatingConnection.agentsByRoom = [lobby.id: [selfAgent], room.id: [selfAgent]]
-        let creatingStore = ChatStore(connection: creatingConnection, defaults: defaults)
-        await creatingStore.connect()
-        _ = await creatingStore.createRoom(
-            name: room.name,
-            description: "",
-            ephemeral: false,
-            isPublic: false
-        )
-        XCTAssertTrue(creatingStore.roomSetupScreenIDs.contains(room.id))
-
-        let relaunchedConnection = MockRoomConnection()
-        relaunchedConnection.listedRooms = [lobby, room]
-        relaunchedConnection.agentsByRoom = [lobby.id: [selfAgent], room.id: [selfAgent]]
-        let relaunchedStore = ChatStore(connection: relaunchedConnection, defaults: defaults)
-        await relaunchedStore.connect()
-
-        XCTAssertEqual(relaunchedStore.selectedRoomID, room.id)
-        XCTAssertTrue(relaunchedStore.roomSetupScreenIDs.contains(room.id))
-
-        await relaunchedStore.completeRoomSetup(room)
-        let dismissedStore = ChatStore(connection: MockRoomConnection(), defaults: defaults)
-
-        XCTAssertFalse(dismissedStore.roomSetupScreenIDs.contains(room.id))
-        XCTAssertTrue(dismissedStore.setupRoomIDs.contains(room.id))
     }
 
     @MainActor
@@ -1574,8 +1623,243 @@ final class RoomTransitionTests: XCTestCase {
 
         XCTAssertEqual(store.selectedRoomID, room.id)
         XCTAssertFalse(store.setupRoomIDs.contains(room.id))
-        XCTAssertFalse(store.roomSetupScreenIDs.contains(room.id))
         XCTAssertNil(store.roomReadyNotice)
+    }
+
+    @MainActor
+    func testFirstCollaboratorInSelectedRoomShowsSecondAgentHintOnce() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        let room = try decodeRoom(id: "r1", name: "my-room")
+        connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby"), room]
+        await store.connect()
+        connection.roomToCreate = room
+        _ = await store.createRoom(name: "my-room", description: "", ephemeral: false, isPublic: true)
+
+        // Collaborator appears while the room is selected → in-place flip.
+        connection.agentsByRoom["r1"] = [AgentPresence(agentID: "other", name: "codex")]
+        await store.pollSetupRoomReadiness()
+
+        XCTAssertEqual(store.secondAgentHintRoom?.id, "r1")
+        XCTAssertNil(store.roomReadyNotice)
+
+        // Once per room: re-entering the setup state can't re-trigger it.
+        store.secondAgentHintRoom = nil
+        connection.agentsByRoom["r1"] = []
+        await store.pollSetupRoomReadiness()
+        connection.agentsByRoom["r1"] = [AgentPresence(agentID: "other", name: "codex")]
+        await store.pollSetupRoomReadiness()
+        XCTAssertNil(store.secondAgentHintRoom)
+    }
+
+    @MainActor
+    func testSelectedAgentlessRoomIsPolledForMembersEvenWhenNotInSetupSet() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        let room = try decodeRoom(id: "r-empty", name: "empty-room")
+        connection.listedRooms = [room]
+        await store.connect()
+        await store.select(room: room)
+        XCTAssertTrue(store.roomMembers.isEmpty)
+        XCTAssertTrue(store.setupRoomIDs.isEmpty)
+        XCTAssertTrue(store.selectedRoomAwaitingFirstAgent)
+
+        // An agent connects between event pushes; only polling can see it.
+        connection.agentsByRoom["r-empty"] = [
+            AgentPresence(agentID: "other-agent", name: "codex")
+        ]
+        await store.pollSetupRoomReadiness()
+        XCTAssertTrue(store.roomMembers.contains { $0.agentID == "other-agent" })
+    }
+
+    @MainActor
+    func testAgentLeftRestartsSetupReadinessPollingForConnectStateRoom() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        let room = try decodeRoom(id: "r-emptied", name: "emptied-room")
+        connection.listedRooms = [room]
+        connection.agentsByRoom[room.id] = [AgentPresence(agentID: "collaborator", name: "Claude")]
+        await store.connect()
+        await store.select(room: room)
+        // The room already has a collaborator at selection time, so the setup
+        // readiness poll loop never starts (its guard requires
+        // selectedRoomAwaitingFirstAgent, which is false here).
+        XCTAssertFalse(store.selectedRoomAwaitingFirstAgent)
+
+        // The only other member leaves live; refreshMembers empties roomMembers
+        // and the room re-enters the connect state.
+        connection.agentsByRoom[room.id] = []
+        connection.onEvent?("agent_left", [:])
+        for _ in 0..<100 where !store.roomMembers.isEmpty {
+            await Task.yield()
+        }
+        XCTAssertTrue(store.roomMembers.isEmpty)
+        XCTAssertTrue(store.selectedRoomAwaitingFirstAgent)
+
+        // A later member appears with no further live event — only a poll
+        // loop restarted after agent_left can discover it (bug: the loop
+        // already exited when the room first got a collaborator, and nothing
+        // restarted it on agent_left, so "waiting…" would be stuck forever).
+        connection.agentsByRoom[room.id] = [AgentPresence(agentID: "later-agent", name: "codex")]
+        var observedLaterJoiner = false
+        for _ in 0..<400 {
+            if store.roomMembers.contains(where: { $0.agentID == "later-agent" }) {
+                observedLaterJoiner = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(observedLaterJoiner)
+    }
+
+    @MainActor
+    func testLaunchSelectionPrefersLobbyOverPendingSetupRooms() async throws {
+        let connection = MockRoomConnection()
+        let suiteName = "RoomTransitionTests.launch.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        // A previous build left a persisted setup-screen room behind.
+        defaults.set(["stale-room"], forKey: "CowchatMac.pendingSetupScreenRoomIDs")
+        defaults.set(["stale-room"], forKey: RoomLocalPreferences.pendingSetupRoomIDsKey)
+        let store = ChatStore(connection: connection, defaults: defaults)
+
+        connection.listedRooms = [
+            try decodeRoom(id: "stale-room", name: "stale-room"),
+            try decodeRoom(id: "lobby", name: "lobby"),
+        ]
+        await store.connect()
+
+        XCTAssertEqual(store.selectedRoomID, "lobby")
+    }
+
+    @MainActor
+    func testInitDeletesThePersistedSetupScreenKey() {
+        let connection = MockRoomConnection()
+        let suiteName = "RoomTransitionTests.cleanup.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(["r1"], forKey: "CowchatMac.pendingSetupScreenRoomIDs")
+        _ = ChatStore(connection: connection, defaults: defaults)
+        XCTAssertNil(defaults.object(forKey: "CowchatMac.pendingSetupScreenRoomIDs"))
+    }
+
+    @MainActor
+    func testFreshInstallAutoCreatesPublicGeneralAndSelectsIt() async throws {
+        let connection = MockRoomConnection()
+        connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby")]
+        connection.roomToCreate = try decodeRoom(id: "general-id", name: "General")
+        let store = makeFreshInstallStore(connection: connection)
+
+        await store.connect()
+
+        XCTAssertTrue(connection.operations.contains("create:General"))
+        XCTAssertEqual(store.selectedRoomID, "general-id")
+        XCTAssertTrue(store.setupRoomIDs.contains("general-id"))
+    }
+
+    @MainActor
+    func testAutoCreateSkipsWhenUserRoomsExist() async throws {
+        let connection = MockRoomConnection()
+        connection.listedRooms = [
+            try decodeRoom(id: "lobby", name: "lobby"),
+            try decodeRoom(id: "mine", name: "my-room"),
+        ]
+        let store = makeFreshInstallStore(connection: connection)
+
+        await store.connect()
+
+        XCTAssertFalse(connection.operations.contains { $0.hasPrefix("create:") })
+        XCTAssertEqual(store.selectedRoomID, "lobby")
+    }
+
+    @MainActor
+    func testAutoCreateSelectsExistingVisibleGeneralInstead() async throws {
+        let connection = MockRoomConnection()
+        connection.listedRooms = [
+            try decodeRoom(id: "lobby", name: "lobby"),
+            try decodeRoom(id: "existing-general", name: "general"),
+        ]
+        let store = makeFreshInstallStore(connection: connection)
+
+        await store.connect()
+
+        XCTAssertFalse(connection.operations.contains { $0.hasPrefix("create:") })
+        XCTAssertEqual(store.selectedRoomID, "existing-general")
+    }
+
+    @MainActor
+    func testAutoCreateRunsOnlyOnce() async throws {
+        let connection = MockRoomConnection()
+        connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby")]
+        connection.roomToCreate = try decodeRoom(id: "general-id", name: "General")
+        let store = makeFreshInstallStore(connection: connection)
+        await store.connect()
+
+        // User destroyed General; a later connect must not resurrect it.
+        connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby")]
+        await store.connect()
+
+        XCTAssertEqual(connection.operations.filter { $0 == "create:General" }.count, 1)
+    }
+
+    @MainActor
+    func testNameTakenSetsGuardFlagInsteadOfRetryLooping() async throws {
+        let connection = MockRoomConnection()
+        connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby")]
+        connection.createRoomError = CowchatConnectionError.server(
+            message: "Room name 'General' already taken", code: "room_name_taken"
+        )
+        let suiteName = "RoomTransitionTests.taken.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = ChatStore(connection: connection, defaults: defaults)
+
+        await store.connect()
+
+        XCTAssertTrue(defaults.bool(forKey: ChatStore.didCreateDefaultRoomKey))
+        XCTAssertNil(store.errorMessage)  // silent fallback, no alert
+        XCTAssertEqual(store.selectedRoomID, "lobby")
+    }
+
+    func testBackfillSuppressesAutoCreateForExistingInstalls() {
+        let suiteName = "RoomTransitionTests.backfill.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        // Existing install: already past onboarding v1.
+        defaults.set(CowchatOnboarding.currentVersion, forKey: CowchatOnboarding.completedVersionKey)
+
+        ChatStore.suppressDefaultRoomForExistingInstalls(defaults: defaults)
+
+        XCTAssertTrue(defaults.bool(forKey: ChatStore.didCreateDefaultRoomKey))
+        // And it never re-runs: a later reset of the guard flag sticks.
+        defaults.removeObject(forKey: ChatStore.didCreateDefaultRoomKey)
+        ChatStore.suppressDefaultRoomForExistingInstalls(defaults: defaults)
+        XCTAssertFalse(defaults.bool(forKey: ChatStore.didCreateDefaultRoomKey))
+    }
+
+    func testBackfillLeavesFreshInstallsEligible() {
+        let suiteName = "RoomTransitionTests.backfill2.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        ChatStore.suppressDefaultRoomForExistingInstalls(defaults: defaults)
+
+        XCTAssertFalse(defaults.bool(forKey: ChatStore.didCreateDefaultRoomKey))
+    }
+
+    @MainActor
+    func testCreateAndRenameRejectLobbyNames() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby")]
+        await store.connect()
+
+        let created = await store.createRoom(
+            name: "Lobby", description: "", ephemeral: false, isPublic: true
+        )
+        XCTAssertFalse(created)
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertFalse(connection.operations.contains("create:Lobby"))
     }
 
     private func decodeRoom(
