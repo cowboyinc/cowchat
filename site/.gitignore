@@ -4,3 +4,6 @@ node_modules/
 public/skills.txt
 next-env.d.ts
 *.tsbuildinfo
+
+# Static export output (rebuilt in CI by amplify.yml)
+out/

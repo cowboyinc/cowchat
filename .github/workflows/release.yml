@@ -1,7 +1,7 @@
 name: Release
 
 # Build prebuilt cowchat + cowchat-server binaries for four targets, package a
-# signed and notarized universal Cowchat macOS app, create a prerelease, and
+# signed and notarized universal Cowchat macOS app, publish the release, and
 # open an idempotent formula PR against cowboyinc/homebrew-tap.
 on:
   push:
@@ -200,7 +200,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Publish prerelease and render Homebrew formula
+      - name: Publish release and render Homebrew formula + cask
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -212,7 +212,7 @@ jobs:
             exit 1
           }
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
-          NOTES='Signed and notarized universal Cowchat.app DMG, plus prebuilt cowchat + cowchat-server binaries (macOS arm64/x86_64, Linux arm64/x86_64). Homebrew install: pending formula merge — this note is updated on promotion.'
+          NOTES='Signed and notarized universal Cowchat.app DMG, plus prebuilt cowchat + cowchat-server binaries (macOS arm64/x86_64, Linux arm64/x86_64). Homebrew: `brew install --cask cowboyinc/tap/cowchat` for the app, `brew install cowboyinc/tap/cowchat` for the CLIs — pending tap merge; this note is updated on promotion.'
 
           sha() {
             shasum -a 256 "dist/cowchat-${TAG}-$1.tar.gz" | awk '{print $1}'
@@ -221,15 +221,19 @@ jobs:
           MAC_X86=$(sha x86_64-apple-darwin)
           LIN_ARM=$(sha aarch64-unknown-linux-gnu)
           LIN_X86=$(sha x86_64-unknown-linux-gnu)
+          VERSION="${TAG#v}"
+          DMG=$(shasum -a 256 "dist/Cowchat-${VERSION}.dmg" | awk '{print $1}')
 
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/cowchat-*.tar.gz dist/Cowchat-*.dmg \
               --repo "$REPO" --clobber
-            gh release edit "$TAG" --repo "$REPO" --prerelease \
+            # --prerelease=false also promotes a tag that an earlier run
+            # published as a prerelease.
+            gh release edit "$TAG" --repo "$REPO" --prerelease=false --latest \
               --title "Cowchat $TAG" --notes "$NOTES"
           else
             gh release create "$TAG" dist/cowchat-*.tar.gz dist/Cowchat-*.dmg --repo "$REPO" \
-              --prerelease --title "Cowchat $TAG" --notes "$NOTES"
+              --latest --title "Cowchat $TAG" --notes "$NOTES"
           fi
 
           sed \
@@ -240,7 +244,13 @@ jobs:
             -e "s|@LIN_ARM@|${LIN_ARM}|g" \
             -e "s|@LIN_X86@|${LIN_X86}|g" \
             .github/cowchat-formula.rb.tmpl > /tmp/cowchat.rb
-      - name: Open formula PR against cowboyinc/homebrew-tap
+
+          sed \
+            -e "s|@VERSION@|${VERSION}|g" \
+            -e "s|@BASE@|${BASE}|g" \
+            -e "s|@DMG@|${DMG}|g" \
+            .github/cowchat-cask.rb.tmpl > /tmp/cowchat-cask.rb
+      - name: Open formula + cask PR against cowboyinc/homebrew-tap
         env:
           GH_TOKEN: ${{ secrets.TAP_PR_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -252,22 +262,31 @@ jobs:
           }
           git clone "https://x-access-token:${GH_TOKEN}@github.com/cowboyinc/homebrew-tap.git" tap
           cd tap
-          if git show origin/main:Formula/cowchat.rb 2>/dev/null | cmp -s - /tmp/cowchat.rb; then
-            echo "rendered formula already on main; nothing to do"
+          # The formula (CLIs) and the cask (Cowchat.app) ship together, so both
+          # have to be up to date before there is nothing to do.
+          if git show origin/main:Formula/cowchat.rb 2>/dev/null | cmp -s - /tmp/cowchat.rb \
+            && git show origin/main:Casks/cowchat.rb 2>/dev/null | cmp -s - /tmp/cowchat-cask.rb; then
+            echo "rendered formula and cask already on main; nothing to do"
             exit 0
           fi
           if git ls-remote --exit-code origin "refs/heads/cowchat-${TAG}" >/dev/null 2>&1; then
             git checkout -b "cowchat-${TAG}" "origin/cowchat-${TAG}"
-            if [ -f Formula/cowchat.rb ] && ! cmp -s /tmp/cowchat.rb Formula/cowchat.rb; then
-              echo "Formula/cowchat.rb on the existing cowchat-${TAG} branch differs from the render — human edits present; resolve manually" >&2
-              exit 1
-            fi
+            for pair in "Formula/cowchat.rb:/tmp/cowchat.rb" "Casks/cowchat.rb:/tmp/cowchat-cask.rb"; do
+              tracked="${pair%%:*}"
+              rendered="${pair##*:}"
+              if [ -f "$tracked" ] && ! cmp -s "$rendered" "$tracked"; then
+                echo "$tracked on the existing cowchat-${TAG} branch differs from the render — human edits present; resolve manually" >&2
+                exit 1
+              fi
+            done
           else
             git checkout -b "cowchat-${TAG}"
           fi
-          mkdir -p Formula
+          mkdir -p Formula Casks
           cp /tmp/cowchat.rb Formula/cowchat.rb
-          git -c user.name=cowchat-release -c user.email=noreply@cowboy.inc add Formula/cowchat.rb
+          cp /tmp/cowchat-cask.rb Casks/cowchat.rb
+          git -c user.name=cowchat-release -c user.email=noreply@cowboy.inc \
+            add Formula/cowchat.rb Casks/cowchat.rb
           if ! git diff --cached --quiet; then
             git -c user.name=cowchat-release -c user.email=noreply@cowboy.inc \
               commit -m "cowchat ${TAG}"
@@ -276,7 +295,7 @@ jobs:
           gh pr create --repo cowboyinc/homebrew-tap \
             --head "cowchat-${TAG}" --base main \
             --title "cowchat ${TAG}" \
-            --body "Automated formula bump from the cowchat release workflow." || true
+            --body "Automated formula and cask bump from the cowchat release workflow. Formula installs the cowchat + cowchat-server CLIs; the cask installs Cowchat.app from the notarized DMG." || true
           OPEN=$(gh pr list --repo cowboyinc/homebrew-tap \
             --head "cowchat-${TAG}" --state open --json number --jq 'length')
           [ "$OPEN" -ge 1 ] || {

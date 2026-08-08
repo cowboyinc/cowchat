@@ -82,7 +82,7 @@ enum RoomIconStyle: String, CaseIterable, Identifiable {
 
     var blurb: String {
         switch self {
-        case .initials: return "Plain lettering, the way it was."
+        case .initials: return "First letter of the room name."
         case .hide: return "Breed palette and patch field from the name."
         case .brand: return "Room letters plus a hashed brand modifier."
         case .bandana: return "Rotationally symmetric paisley tile."
