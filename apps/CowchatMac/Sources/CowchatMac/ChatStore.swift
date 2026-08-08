@@ -113,6 +113,22 @@ final class ChatStore: ObservableObject {
         return generated
     }
 
+    nonisolated static let didCreateDefaultRoomKey = "CowchatMac.didCreateDefaultRoom"
+    nonisolated static let defaultRoomBackfillKey = "CowchatMac.defaultRoomBackfillAttempted"
+
+    /// One-shot: installs already past onboarding v1 never get an unrequested
+    /// auto-created room (spec §2 — retroactive creation was reviewed out).
+    /// Runs after migrateExistingUser so migrated users are stamped by the
+    /// time it reads the completed version.
+    nonisolated static func suppressDefaultRoomForExistingInstalls(defaults: UserDefaults) {
+        guard !defaults.bool(forKey: defaultRoomBackfillKey) else { return }
+        defaults.set(true, forKey: defaultRoomBackfillKey)
+        if defaults.integer(forKey: CowchatOnboarding.completedVersionKey)
+            >= CowchatOnboarding.currentVersion {
+            defaults.set(true, forKey: didCreateDefaultRoomKey)
+        }
+    }
+
     convenience init() {
         let credentialStore = KeychainCowchatCredentialStore()
         let preferences = ConnectionProfilePreferences(
@@ -172,6 +188,7 @@ final class ChatStore: ObservableObject {
             defaults: defaults,
             hadExistingAgentID: hadExistingAgentID
         )
+        Self.suppressDefaultRoomForExistingInstalls(defaults: defaults)
         stableAgentID = Self.resolveAgentID(
             defaults: defaults,
             scope: connectionProfile.persistentIdentityScope
@@ -301,12 +318,66 @@ final class ChatStore: ObservableObject {
                 else { selectedRoomID = nil }
             }
             guard expectedProfileGeneration == profileGeneration else { return }
+            await ensureDefaultRoomIfNeeded()
+            guard expectedProfileGeneration == profileGeneration else { return }
             startSetupReadinessPolling()
         } catch {
             guard expectedProfileGeneration == profileGeneration,
                   connectionProfile == expectedProfile else { return }
             connectionStatus = .failed(error.localizedDescription)
             scheduleReconnect()
+        }
+    }
+
+    private func ensureDefaultRoomIfNeeded() async {
+        guard connectionProfile.kind == .local,
+              !defaults.bool(forKey: Self.didCreateDefaultRoomKey) else { return }
+        let expectedProfileGeneration = profileGeneration
+
+        if let general = rooms.first(where: {
+            $0.name.localizedCaseInsensitiveCompare("General") == .orderedSame
+        }) {
+            defaults.set(true, forKey: Self.didCreateDefaultRoomKey)
+            await select(room: general)
+            return
+        }
+        let hasUserRooms = rooms.contains {
+            $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
+        }
+        guard !hasUserRooms, !rooms.isEmpty else {
+            // CLI-first user (or an anomalous empty list): normal selection
+            // stands. An empty list still sets the flag — the seeded lobby is
+            // always present on a healthy server, so this state is not "fresh".
+            defaults.set(true, forKey: Self.didCreateDefaultRoomKey)
+            return
+        }
+        do {
+            let room = try await connection.createRoom(
+                name: "General",
+                description: "Where your agents meet and work together",
+                parentID: nil,
+                ephemeral: false,
+                isPublic: true
+            )
+            guard expectedProfileGeneration == profileGeneration else { return }
+            if !rooms.contains(where: { $0.id == room.id }) {
+                rooms.append(room)
+                recordRoomMutation(roomID: room.id)
+            }
+            rooms.sort(by: roomSort)
+            setupRoomIDs.insert(room.id)
+            localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
+            defaults.set(true, forKey: Self.didCreateDefaultRoomKey)
+            await select(room: room)
+        } catch {
+            guard expectedProfileGeneration == profileGeneration else { return }
+            if let connectionError = error as? CowchatConnectionError,
+               case .server(_, .some("room_name_taken")) = connectionError {
+                // The name is squatted by a room this key can't see; retrying
+                // can never succeed. Silent fallback to normal selection.
+                defaults.set(true, forKey: Self.didCreateDefaultRoomKey)
+            }
+            // Transient failure: flag stays unset; the next launch retries once.
         }
     }
 
@@ -715,9 +786,14 @@ final class ChatStore: ObservableObject {
 
     func createRoom(name: String, description: String, ephemeral: Bool, isPublic: Bool) async -> Bool {
         let expectedProfileGeneration = profileGeneration
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedName.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
+            errorMessage = "\u{201C}lobby\u{201D} is reserved for the Lobby dashboard. Choose another name."
+            return false
+        }
         do {
             let room = try await connection.createRoom(
-                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                name: trimmedName,
                 description: description.trimmingCharacters(in: .whitespacesAndNewlines),
                 parentID: createRoomParentID,
                 ephemeral: ephemeral,
@@ -809,6 +885,10 @@ final class ChatStore: ObservableObject {
         let name = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
             errorMessage = "Room names cannot be empty."
+            return false
+        }
+        guard name.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
+            errorMessage = "\u{201C}lobby\u{201D} is reserved for the Lobby dashboard. Choose another name."
             return false
         }
 
