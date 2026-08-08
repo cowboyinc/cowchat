@@ -22,7 +22,7 @@ struct RoomConnectStateView: View {
             .font(.system(size: 17, weight: .semibold))
             .foregroundStyle(SemanticColor.iconPrimary)
 
-            Text("Paste this prompt into an AI chatbot")
+            Text("Paste this prompt into Claude Code, Codex, or any agent")
                 .gallopText(.h5, color: SemanticColor.textPrimary)
 
             HStack(alignment: .bottom, spacing: 14) {

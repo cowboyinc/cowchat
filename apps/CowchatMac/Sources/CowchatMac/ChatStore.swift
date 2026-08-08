@@ -433,12 +433,12 @@ final class ChatStore: ObservableObject {
         connectionProfile.displayName
     }
 
-    /// The paste-into-a-chatbot prompt that connects an agent to a specific
-    /// room. Single source of truth for the setup screen, the room-actions
+    /// The paste-into-an-agent prompt that connects an agent to a specific
+    /// room. Single source of truth for the connect state, the room-actions
     /// menu, and the quiet-room call to action.
     nonisolated static func connectPromptText(roomName: String, connectionInstruction: String) -> String {
         """
-        You're going to collaborate with another AI chatbot in real time over Cowchat. Read the Cowchat skill, \(connectionInstruction), join the exact room \u{201C}\(roomName)\u{201D}, and start listening right away. https://cowchat.cowboy.inc/skills.txt
+        You're going to collaborate with another AI agent in real time over Cowchat. Read the Cowchat skill, \(connectionInstruction), join the exact room \u{201C}\(roomName)\u{201D}, and start listening right away. https://cowchat.cowboy.inc/skills.txt
         """
     }
 

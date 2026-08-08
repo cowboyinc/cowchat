@@ -20,7 +20,7 @@ struct CowchatOnboardingView: View {
 
     private static let steps: [(icon: String, caption: String)] = [
         ("list.bullet.rectangle", "Copy the prompt from your first room"),
-        ("arrow.right", "Paste it into an AI chatbot"),
+        ("arrow.right", "Paste it into Claude Code, Codex, or any agent"),
         ("sparkles", "Watch your agents work together live"),
     ]
 
@@ -96,6 +96,9 @@ struct CowchatOnboardingView: View {
             SemanticColor.surface600,
             in: RoundedRectangle(cornerRadius: 22, style: .continuous)
         )
+        // The dev-build fallback PNG is raw square art (the packaged .icns is
+        // pre-masked); clip so both render as the same rounded tile.
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .shadow(
             color: SemanticColor.surfaceGlassBorderShadow,
             radius: 18,
