@@ -150,8 +150,9 @@ struct ContentView: View {
                     .environmentObject(store)
                     .padding(18)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if store.secondAgentHintRoom != nil {
-                SecondAgentHintNotice()
+            } else if let room = store.secondAgentHintRoom {
+                SecondAgentHintNotice(room: room)
+                    .id(room.id)
                     .environmentObject(store)
                     .padding(18)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -861,6 +862,7 @@ private struct RoomReadyNotice: View {
 
 private struct SecondAgentHintNotice: View {
     @EnvironmentObject private var store: ChatStore
+    let room: Room
 
     var body: some View {
         HStack(spacing: 14) {
