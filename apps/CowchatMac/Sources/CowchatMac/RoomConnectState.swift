@@ -31,7 +31,16 @@ struct RoomConnectStateView: View {
                     .gallopText(.bodyM, color: SemanticColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Button(hasCopiedPrompt ? "Copied" : "Copy") { copyPrompt() }
+                Button {
+                    copyPrompt()
+                } label: {
+                    // Reserve the wider label's width so Copy → Copied never
+                    // resizes the button and rewraps the prompt beside it.
+                    ZStack {
+                        Text("Copied").hidden()
+                        Text(hasCopiedPrompt ? "Copied" : "Copy")
+                    }
+                }
                     .buttonStyle(.plain)
                     .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
                     .padding(.horizontal, 18)
@@ -137,11 +146,17 @@ struct ConnectTroubleshootingView: View {
                 Text("brew upgrade cowchat")
                     .gallopText(.code, color: SemanticColor.textSecondary)
                     .textSelection(.enabled)
-                Button(hasCopiedBrewCommand ? "Copied" : "Copy") {
+                Button {
                     let pasteboard = NSPasteboard.general
                     pasteboard.clearContents()
                     pasteboard.setString("brew upgrade cowchat", forType: .string)
                     hasCopiedBrewCommand = true
+                } label: {
+                    // Same width-reservation as the prompt card's Copy button.
+                    ZStack {
+                        Text("Copied").hidden()
+                        Text(hasCopiedBrewCommand ? "Copied" : "Copy")
+                    }
                 }
                 .buttonStyle(.plain)
                 .gallopText(.bodySStrong, color: SemanticColor.buttonSecondaryTextDefault)
