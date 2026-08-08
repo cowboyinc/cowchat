@@ -633,6 +633,35 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
+    func testSpawnFailureAlertClearsWhenBackgroundReconnectSucceeds() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        supervisor.launchError = LocalServerSupervisorError.launchFailed("spawn denied")
+        connection.connectFailuresRemaining = 99
+        let suiteName = "RoomTransitionTests.spawnfail-recovers.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        await store.connect()
+        XCTAssertNotNil(store.errorMessage)
+
+        // The transient outage self-heals; the user never touched the alert.
+        supervisor.launchError = nil
+        connection.connectFailuresRemaining = 0
+        await store.connect()
+
+        XCTAssertTrue(store.connectionStatus.isConnected)
+        XCTAssertNil(store.errorMessage)
+    }
+
+    @MainActor
     func testProfileSwitchDiscardsCreateCompletionFromOldServer() async throws {
         let localRoom = try decodeRoom(id: "local-room", name: "Local room", createdBy: "profile-owner")
         let staleCreated = try decodeRoom(id: "stale-created", name: "Stale", createdBy: "profile-owner")

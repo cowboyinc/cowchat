@@ -275,10 +275,15 @@ final class ChatStore: ObservableObject {
         guard !Task.isCancelled,
               expectedProfileGeneration == profileGeneration,
               connectionProfile == expectedProfile else { return }
-        if case .failed = connectionStatus {
-            // Background retry of an already-failed connection: leave any surfaced
-            // error alone. Clearing it here would auto-dismiss an alert the user
-            // hasn't acknowledged, and the transition guard below would then never
+        let enteredFromFailedState: Bool = {
+            if case .failed = connectionStatus { return true }
+            return false
+        }()
+        if enteredFromFailedState {
+            // Background retry of an already-failed connection: keep any surfaced
+            // error until the episode resolves (success below) or the user acts.
+            // Clearing it here would auto-dismiss an alert the user hasn't
+            // acknowledged, and the transition guard below would then never
             // re-show it for this failure episode. Every user-initiated path
             // (reconnect(), activate()) resets connectionStatus to .disconnected
             // before calling connect(), so .failed here always means "retry".
@@ -309,6 +314,7 @@ final class ChatStore: ObservableObject {
                 joinedRoomID = desiredRoomID
             }
             connectionStatus = .connected
+            if enteredFromFailedState { errorMessage = nil }
             reconnectTask?.cancel()
             reconnectTask = nil
             try await refreshRooms(selectFallbackForMissingSelection: false)
