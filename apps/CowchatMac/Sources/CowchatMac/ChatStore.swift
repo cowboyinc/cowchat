@@ -324,10 +324,17 @@ final class ChatStore: ObservableObject {
         } catch {
             guard expectedProfileGeneration == profileGeneration,
                   connectionProfile == expectedProfile else { return }
+            // Only alert on the transition into this failure, not on every
+            // automatic reconnect retry of the same latched error — otherwise
+            // a dismissed alert reappears every ~2s until the user retries.
+            let alreadySurfaced: Bool = {
+                if case .failed(let prior) = connectionStatus { return prior == error.localizedDescription }
+                return false
+            }()
             connectionStatus = .failed(error.localizedDescription)
             // Spawn/launch failures are latched (no background retry can fix
             // them) — surface them on the alert instead of a footer tooltip.
-            if error is LocalServerSupervisorError {
+            if error is LocalServerSupervisorError, !alreadySurfaced {
                 errorMessage = error.localizedDescription
             }
             scheduleReconnect()

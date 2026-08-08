@@ -578,6 +578,34 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
+    func testLatchedSpawnFailureAlertsOnceNotEveryReconnect() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        supervisor.launchError = LocalServerSupervisorError.launchFailed("spawn denied")
+        connection.connectFailuresRemaining = 99
+        let suiteName = "RoomTransitionTests.spawnfail-repeat.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        await store.connect()
+        XCTAssertNotNil(store.errorMessage)
+
+        // The user dismisses the alert. A subsequent reconnect attempt that
+        // hits the same latched failure must not re-fire it.
+        store.errorMessage = nil
+        await store.connect()
+
+        XCTAssertNil(store.errorMessage)
+    }
+
+    @MainActor
     func testProfileSwitchDiscardsCreateCompletionFromOldServer() async throws {
         let localRoom = try decodeRoom(id: "local-room", name: "Local room", createdBy: "profile-owner")
         let staleCreated = try decodeRoom(id: "stale-created", name: "Stale", createdBy: "profile-owner")
