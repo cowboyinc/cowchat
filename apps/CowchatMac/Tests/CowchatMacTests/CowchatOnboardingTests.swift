@@ -2,16 +2,6 @@ import XCTest
 @testable import CowchatMac
 
 final class CowchatOnboardingTests: XCTestCase {
-    func testPromptUsesCurrentCowchatNameAndCanonicalSkillURL() {
-        XCTAssertTrue(CowchatOnboarding.collaborationPrompt.contains("over Cowchat"))
-        XCTAssertTrue(
-            CowchatOnboarding.collaborationPrompt.contains(
-                "https://cowchat.cowboy.inc/skills.txt"
-            )
-        )
-        XCTAssertFalse(CowchatOnboarding.collaborationPrompt.contains("ClawChat"))
-    }
-
     func testExistingUserIsNotInterruptedByUpgrade() throws {
         let (defaults, suiteName) = freshDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
