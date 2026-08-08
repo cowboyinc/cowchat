@@ -150,9 +150,15 @@ struct ContentView: View {
                     .environmentObject(store)
                     .padding(18)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if store.secondAgentHintRoom != nil {
+                SecondAgentHintNotice()
+                    .environmentObject(store)
+                    .padding(18)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.2), value: store.roomReadyNotice?.id)
+        .animation(.easeInOut(duration: 0.2), value: store.secondAgentHintRoom?.id)
     }
 }
 
@@ -850,6 +856,46 @@ private struct RoomReadyNotice: View {
         }
         .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
         .shadow(color: .black.opacity(0.04), radius: 0, y: 0.5)
+    }
+}
+
+private struct SecondAgentHintNotice: View {
+    @EnvironmentObject private var store: ChatStore
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Text("Add more agents anytime — Copy connect prompt in the ⋯ menu.")
+                .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
+            Button {
+                store.secondAgentHintRoom = nil
+            } label: {
+                GallopIconView(icon: .dismiss, fallbackSystemName: "xmark", size: 11)
+                    .foregroundStyle(SemanticColor.iconTertiary)
+            }
+            .buttonStyle(.plain)
+            .macAccessibleAction(label: "Dismiss hint") {
+                store.secondAgentHintRoom = nil
+            }
+        }
+        .padding(14)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(SemanticColor.surfaceGlass500)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(SemanticColor.surfaceGlassBorderHighlight, lineWidth: 1)
+                }
+        }
+        .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+        .shadow(color: .black.opacity(0.04), radius: 0, y: 0.5)
+        .task {
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            if !Task.isCancelled { store.secondAgentHintRoom = nil }
+        }
     }
 }
 

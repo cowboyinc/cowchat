@@ -28,6 +28,7 @@ final class ChatStore: ObservableObject {
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
     @Published private(set) var lastThinkingAt: [String: [String: Date]] = [:]
     @Published var roomReadyNotice: Room?
+    @Published var secondAgentHintRoom: Room?
     @Published var roomBeingRenamed: Room?
     @Published var connectionStatus: ConnectionStatus = .disconnected
     @Published private(set) var connectionProfile: ConnectionProfile
@@ -63,6 +64,7 @@ final class ChatStore: ObservableObject {
     private var pendingDestructionRoomIDs: Set<String> = []
     private var confirmedDestructionRoomIDs: Set<String> = []
     private var destroyedRoomIDs: Set<String> = []
+    private var secondAgentHintShownRoomIDs: Set<String> = []
     private var draftsByRoomID: [String: String] = [:]
     private var failedDraftRestorationsByRoomID: [String: FailedDraftRestoration] = [:]
     private var sendGeneration = 0
@@ -642,6 +644,8 @@ final class ChatStore: ObservableObject {
         roomMessagePreviews = [:]
         lastThinkingAt = [:]
         roomReadyNotice = nil
+        secondAgentHintRoom = nil
+        secondAgentHintShownRoomIDs = []
         roomBeingRenamed = nil
         isLoadingMessages = false
         isCreateRoomPresented = false
@@ -1441,6 +1445,7 @@ final class ChatStore: ObservableObject {
         previewActivityByRoomID.removeValue(forKey: roomID)
         lastThinkingAt.removeValue(forKey: roomID)
         if roomReadyNotice?.id == roomID { roomReadyNotice = nil }
+        if secondAgentHintRoom?.id == roomID { secondAgentHintRoom = nil }
         if roomBeingRenamed?.id == roomID { roomBeingRenamed = nil }
         if createRoomParentID == roomID {
             createRoomParentID = nil
@@ -1507,7 +1512,11 @@ final class ChatStore: ObservableObject {
         guard setupRoomIDs.remove(roomID) != nil,
               let room = rooms.first(where: { $0.id == roomID }) else { return }
         localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
-        if selectedRoomID != roomID { roomReadyNotice = room }
+        if selectedRoomID != roomID {
+            roomReadyNotice = room
+        } else if secondAgentHintShownRoomIDs.insert(roomID).inserted {
+            secondAgentHintRoom = room
+        }
     }
 
     private func hasCollaborator(in members: [AgentPresence]) -> Bool {

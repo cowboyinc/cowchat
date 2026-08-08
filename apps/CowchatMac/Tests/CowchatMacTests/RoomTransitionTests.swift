@@ -1619,6 +1619,32 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
+    func testFirstCollaboratorInSelectedRoomShowsSecondAgentHintOnce() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        let room = try decodeRoom(id: "r1", name: "my-room")
+        connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby"), room]
+        await store.connect()
+        connection.roomToCreate = room
+        _ = await store.createRoom(name: "my-room", description: "", ephemeral: false, isPublic: true)
+
+        // Collaborator appears while the room is selected → in-place flip.
+        connection.agentsByRoom["r1"] = [AgentPresence(agentID: "other", name: "codex")]
+        await store.pollSetupRoomReadiness()
+
+        XCTAssertEqual(store.secondAgentHintRoom?.id, "r1")
+        XCTAssertNil(store.roomReadyNotice)
+
+        // Once per room: re-entering the setup state can't re-trigger it.
+        store.secondAgentHintRoom = nil
+        connection.agentsByRoom["r1"] = []
+        await store.pollSetupRoomReadiness()
+        connection.agentsByRoom["r1"] = [AgentPresence(agentID: "other", name: "codex")]
+        await store.pollSetupRoomReadiness()
+        XCTAssertNil(store.secondAgentHintRoom)
+    }
+
+    @MainActor
     func testSelectedAgentlessRoomIsPolledForMembersEvenWhenNotInSetupSet() async throws {
         let connection = MockRoomConnection()
         let store = makeStore(connection: connection)
