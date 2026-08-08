@@ -65,7 +65,7 @@ enum RoomIconStyle: String, CaseIterable, Identifiable {
     case cowFace
 
     static let storageKey = "CowchatMac.roomIconStyle"
-    static let fallback = RoomIconStyle.brandOnHide
+    static let fallback = RoomIconStyle.initials
 
     var id: String { rawValue }
 
