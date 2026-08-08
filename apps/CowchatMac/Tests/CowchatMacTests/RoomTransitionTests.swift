@@ -606,6 +606,33 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
+    func testUndismissedSpawnFailureAlertSurvivesBackgroundReconnect() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        supervisor.launchError = LocalServerSupervisorError.launchFailed("spawn denied")
+        connection.connectFailuresRemaining = 99
+        let suiteName = "RoomTransitionTests.spawnfail-undismissed.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        await store.connect()
+        XCTAssertNotNil(store.errorMessage)
+
+        // The user has NOT dismissed the alert. A background reconnect attempt
+        // that hits the same latched failure must not silently clear it.
+        await store.connect()
+
+        XCTAssertEqual(store.errorMessage, LocalServerSupervisorError.launchFailed("spawn denied").localizedDescription)
+    }
+
+    @MainActor
     func testProfileSwitchDiscardsCreateCompletionFromOldServer() async throws {
         let localRoom = try decodeRoom(id: "local-room", name: "Local room", createdBy: "profile-owner")
         let staleCreated = try decodeRoom(id: "stale-created", name: "Stale", createdBy: "profile-owner")
