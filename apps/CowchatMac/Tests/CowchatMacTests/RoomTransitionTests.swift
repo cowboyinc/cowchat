@@ -555,6 +555,29 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
+    func testBundledServerFailureSurfacesInErrorMessage() async {
+        let connection = MockRoomConnection()
+        let supervisor = MockLocalServerSupervisor()
+        supervisor.launchError = LocalServerSupervisorError.launchFailed("spawn denied")
+        connection.connectFailuresRemaining = 99
+        let suiteName = "RoomTransitionTests.spawnfail.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
+        let store = ChatStore(
+            connection: connection,
+            defaults: defaults,
+            localServerSupervisor: supervisor,
+            localServerRetryDelaysNanoseconds: []
+        )
+
+        await store.connect()
+
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertTrue(store.errorMessage?.contains("spawn denied") == true)
+    }
+
+    @MainActor
     func testProfileSwitchDiscardsCreateCompletionFromOldServer() async throws {
         let localRoom = try decodeRoom(id: "local-room", name: "Local room", createdBy: "profile-owner")
         let staleCreated = try decodeRoom(id: "stale-created", name: "Stale", createdBy: "profile-owner")

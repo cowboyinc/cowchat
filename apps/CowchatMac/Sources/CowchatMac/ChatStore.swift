@@ -325,6 +325,11 @@ final class ChatStore: ObservableObject {
             guard expectedProfileGeneration == profileGeneration,
                   connectionProfile == expectedProfile else { return }
             connectionStatus = .failed(error.localizedDescription)
+            // Spawn/launch failures are latched (no background retry can fix
+            // them) — surface them on the alert instead of a footer tooltip.
+            if error is LocalServerSupervisorError {
+                errorMessage = error.localizedDescription
+            }
             scheduleReconnect()
         }
     }

@@ -1657,26 +1657,30 @@ private struct EmptyChatView: View {
     var body: some View {
         Group {
             if store.rooms.isEmpty {
-                // Centered welcome IS the empty state, with a direct path to
-                // the first room (Patrick, 2026-08-06).
-                VStack(spacing: 20) {
-                    welcome(alignment: .center)
+                if case .failed = store.connectionStatus {
+                    connectionFailedState
+                } else {
+                    // Centered welcome IS the empty state, with a direct path to
+                    // the first room (Patrick, 2026-08-06).
+                    VStack(spacing: 20) {
+                        welcome(alignment: .center)
 
-                    Button {
-                        store.presentCreateRoom()
-                    } label: {
-                        Text("New room")
-                            .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                            .padding(.horizontal, 20)
-                            .frame(height: 38)
-                            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                        Button {
+                            store.presentCreateRoom()
+                        } label: {
+                            Text("New room")
+                                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                                .padding(.horizontal, 20)
+                                .frame(height: 38)
+                                .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.defaultAction)
+                        .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
                     }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut(.defaultAction)
-                    .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
+                    .padding(24)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(alignment: .leading, spacing: 18) {
                     welcome(alignment: .leading)
@@ -1727,6 +1731,36 @@ private struct EmptyChatView: View {
                 .gallopText(.bodyM, color: SemanticColor.textTertiary)
         }
         .multilineTextAlignment(alignment == .center ? .center : .leading)
+    }
+
+    private var connectionFailedState: some View {
+        VStack(spacing: 18) {
+            GallopIconView(icon: .retry, fallbackSystemName: "wifi.slash", size: 24)
+                .foregroundStyle(SemanticColor.iconTertiary)
+            Text("Can't reach the local server")
+                .gallopText(.h5, color: SemanticColor.textPrimary)
+            Text(store.connectionStatus.failureMessage ?? "Connection failed")
+                .gallopText(.caption, color: SemanticColor.textTertiary)
+                .multilineTextAlignment(.center)
+
+            Button {
+                store.reconnect()
+            } label: {
+                Text("Reconnect")
+                    .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                    .padding(.horizontal, 20)
+                    .frame(height: 38)
+                    .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .macAccessibleAction(label: "Reconnect", action: store.reconnect)
+
+            ConnectTroubleshootingView()
+                .frame(maxWidth: 420)
+                .padding(.top, 8)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
