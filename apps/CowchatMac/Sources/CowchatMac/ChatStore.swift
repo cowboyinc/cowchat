@@ -47,6 +47,12 @@ final class ChatStore: ObservableObject {
     private var connectionAttemptGeneration = 0
     private var profileGeneration = 0
     private var reconnectTask: Task<Void, Never>?
+    /// The latched-supervisor-error text last surfaced to the alert, tracked
+    /// independently of `connectionStatus` — the real transport's own
+    /// `onStatusChange` overwrites `connectionStatus` mid-attempt (`.connecting`,
+    /// then `.failed(<transport message>)`) before a spawn failure is even
+    /// thrown, so `connectionStatus` can never be trusted to detect a repeat.
+    private var surfacedSpawnFailureDescription: String?
     private var roomRefreshTask: Task<Void, Never>?
     private var roomLoadTask: Task<Void, Never>?
     private var messageSearchTask: Task<Void, Never>?
@@ -316,7 +322,10 @@ final class ChatStore: ObservableObject {
                 joinedRoomID = desiredRoomID
             }
             connectionStatus = .connected
-            if enteredFromFailedState { errorMessage = nil }
+            if enteredFromFailedState {
+                errorMessage = nil
+                surfacedSpawnFailureDescription = nil
+            }
             reconnectTask?.cancel()
             reconnectTask = nil
             try await refreshRooms(selectFallbackForMissingSelection: false)
@@ -341,17 +350,19 @@ final class ChatStore: ObservableObject {
         } catch {
             guard expectedProfileGeneration == profileGeneration,
                   connectionProfile == expectedProfile else { return }
-            // Only alert on the transition into this failure, not on every
-            // automatic reconnect retry of the same latched error — otherwise
-            // a dismissed alert reappears every ~2s until the user retries.
-            let alreadySurfaced: Bool = {
-                if case .failed(let prior) = connectionStatus { return prior == error.localizedDescription }
-                return false
-            }()
             connectionStatus = .failed(error.localizedDescription)
             // Spawn/launch failures are latched (no background retry can fix
             // them) — surface them on the alert instead of a footer tooltip.
-            if error is LocalServerSupervisorError, !alreadySurfaced {
+            // Only alert on the transition into this failure, not on every
+            // automatic reconnect retry of the same latched error — otherwise
+            // a dismissed alert reappears every ~2s until the user retries.
+            // Tracked separately from connectionStatus: the real transport's
+            // onStatusChange overwrites connectionStatus with its own
+            // .connecting/.failed(transport message) mid-attempt before this
+            // catch ever runs, so connectionStatus can't detect a repeat.
+            if error is LocalServerSupervisorError,
+               surfacedSpawnFailureDescription != error.localizedDescription {
+                surfacedSpawnFailureDescription = error.localizedDescription
                 errorMessage = error.localizedDescription
             }
             scheduleReconnect()
@@ -492,6 +503,7 @@ final class ChatStore: ObservableObject {
             localServerSupervisor?.prepareForExplicitRetry()
         }
         connectionStatus = .disconnected
+        surfacedSpawnFailureDescription = nil
         start()
     }
 
@@ -667,6 +679,7 @@ final class ChatStore: ObservableObject {
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
         connectionStatus = .disconnected
+        surfacedSpawnFailureDescription = nil
     }
 
     private static func roomPreferences(
@@ -1094,6 +1107,11 @@ final class ChatStore: ObservableObject {
                 guard let self,
                       expectedProfileGeneration == profileGeneration else { return }
                 await refreshMembers()
+                // The last member leaving can put the selected room back into
+                // the connect state after the poll loop already exited (it
+                // stops once selectedRoomAwaitingFirstAgent goes false) — pick
+                // it back up so "waiting…" isn't stuck without a live poll.
+                startSetupReadinessPolling()
             }
         case "presence_update":
             updatePresence(from: payload)

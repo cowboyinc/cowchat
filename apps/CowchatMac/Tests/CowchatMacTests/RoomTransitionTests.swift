@@ -41,12 +41,20 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
 
     func connect() async throws {
         connectCallCount += 1
+        // Production-faithful: CowchatConnection.connect() emits .connecting at
+        // entry, then .failed(<transport message>) on a failed attempt, before
+        // any local-server-supervisor error is ever thrown (CowchatConnection.swift:136,
+        // failConnection). ChatStore must not infer "already surfaced" from
+        // connectionStatus, since this overwrites it mid-attempt.
+        onStatusChange?(.connecting)
         if blocksConnect {
             await withCheckedContinuation { connectContinuation = $0 }
         }
         if connectFailuresRemaining > 0 {
             connectFailuresRemaining -= 1
-            throw CowchatConnectionError.transport("Connection refused")
+            let error = CowchatConnectionError.transport("Connection refused")
+            onStatusChange?(.failed(error.localizedDescription))
+            throw error
         }
     }
     func register(name: String, agentID: String) async throws -> CowchatRegistration {
@@ -1662,6 +1670,46 @@ final class RoomTransitionTests: XCTestCase {
         ]
         await store.pollSetupRoomReadiness()
         XCTAssertTrue(store.roomMembers.contains { $0.agentID == "other-agent" })
+    }
+
+    @MainActor
+    func testAgentLeftRestartsSetupReadinessPollingForConnectStateRoom() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        let room = try decodeRoom(id: "r-emptied", name: "emptied-room")
+        connection.listedRooms = [room]
+        connection.agentsByRoom[room.id] = [AgentPresence(agentID: "collaborator", name: "Claude")]
+        await store.connect()
+        await store.select(room: room)
+        // The room already has a collaborator at selection time, so the setup
+        // readiness poll loop never starts (its guard requires
+        // selectedRoomAwaitingFirstAgent, which is false here).
+        XCTAssertFalse(store.selectedRoomAwaitingFirstAgent)
+
+        // The only other member leaves live; refreshMembers empties roomMembers
+        // and the room re-enters the connect state.
+        connection.agentsByRoom[room.id] = []
+        connection.onEvent?("agent_left", [:])
+        for _ in 0..<100 where !store.roomMembers.isEmpty {
+            await Task.yield()
+        }
+        XCTAssertTrue(store.roomMembers.isEmpty)
+        XCTAssertTrue(store.selectedRoomAwaitingFirstAgent)
+
+        // A later member appears with no further live event — only a poll
+        // loop restarted after agent_left can discover it (bug: the loop
+        // already exited when the room first got a collaborator, and nothing
+        // restarted it on agent_left, so "waiting…" would be stuck forever).
+        connection.agentsByRoom[room.id] = [AgentPresence(agentID: "later-agent", name: "codex")]
+        var observedLaterJoiner = false
+        for _ in 0..<400 {
+            if store.roomMembers.contains(where: { $0.agentID == "later-agent" }) {
+                observedLaterJoiner = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(observedLaterJoiner)
     }
 
     @MainActor
