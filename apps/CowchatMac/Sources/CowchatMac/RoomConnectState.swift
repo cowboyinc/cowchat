@@ -36,16 +36,19 @@ struct RoomConnectStateView: View {
                 } label: {
                     // Reserve the wider label's width so Copy → Copied never
                     // resizes the button and rewraps the prompt beside it.
+                    // Chrome lives inside the label so the whole capsule is
+                    // the hit area, not just the text.
                     ZStack {
                         Text("Copied").hidden()
                         Text(hasCopiedPrompt ? "Copied" : "Copy")
                     }
-                }
-                    .buttonStyle(.plain)
                     .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
                     .padding(.horizontal, 18)
                     .frame(height: 38)
                     .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                    .contentShape(Capsule())
+                }
+                    .buttonStyle(.plain)
                     .macAccessibleAction(label: "Copy connect prompt", action: copyPrompt)
             }
             .padding(18)

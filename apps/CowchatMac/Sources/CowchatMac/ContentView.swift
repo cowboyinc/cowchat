@@ -817,14 +817,18 @@ private struct RoomReadyNotice: View {
                 Text("You can now begin chatting with your collaborator.")
                     .gallopText(.caption, color: SemanticColor.textTertiary)
             }
-            Button("Open Room") {
+            Button {
                 Task { await store.openRoomReadyNotice() }
+            } label: {
+                // Chrome inside the label: the whole capsule is the hit area.
+                Text("Open Room")
+                    .gallopText(.bodySStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                    .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .gallopText(.bodySStrong, color: SemanticColor.buttonPrimaryTextDefault)
-            .padding(.horizontal, 14)
-            .frame(height: 34)
-            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
             .macAccessibleAction(label: "Open \(room.name)") {
                 Task { await store.openRoomReadyNotice() }
             }
@@ -1174,15 +1178,23 @@ private struct ChatRoomView: View {
                 .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 .multilineTextAlignment(.center)
 
-            Button(hasCopiedQuietRoomPrompt ? "Copied" : "Copy connect prompt") {
+            Button {
                 copyConnectPrompt()
                 hasCopiedQuietRoomPrompt = true
+            } label: {
+                // Reserve the wider label's width (no resize on click) and keep
+                // the chrome inside the label so the whole capsule is clickable.
+                ZStack {
+                    Text("Copy connect prompt").hidden()
+                    Text(hasCopiedQuietRoomPrompt ? "Copied" : "Copy connect prompt")
+                }
+                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+                .padding(.horizontal, 18)
+                .frame(height: 38)
+                .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-            .padding(.horizontal, 18)
-            .frame(height: 38)
-            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
             .padding(.top, 6)
             .macAccessibleAction(label: "Copy connect prompt") {
                 copyConnectPrompt()
