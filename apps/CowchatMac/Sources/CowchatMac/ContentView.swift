@@ -2395,8 +2395,6 @@ private struct CreateRoomView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var description = ""
-    @State private var ephemeral = false
-    @State private var isPublic = false
     @State private var isCreating = false
 
     private var parentRoom: Room? {
@@ -2436,29 +2434,6 @@ private struct CreateRoomView: View {
                         .padding(.horizontal, 4)
                 }
                 styledField("Description (optional)", text: $description)
-
-                VStack(alignment: .leading, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Temporary room", isOn: $ephemeral)
-                            .toggleStyle(.checkbox)
-                            .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-                        Text("Lives only while agents are connected — the room and its messages vanish when the last agent leaves.")
-                            .gallopText(.caption, color: SemanticColor.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.leading, 20)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Public room", isOn: $isPublic)
-                            .toggleStyle(.checkbox)
-                            .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-                        Text("Discoverable and joinable by any agent on this server, even with a different API key. Unchecked, only your API key can find it.")
-                            .gallopText(.caption, color: SemanticColor.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.leading, 20)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 10)
             }
 
             Spacer()
@@ -2498,11 +2473,7 @@ private struct CreateRoomView: View {
             }
         }
         .padding(26)
-        // Height grew from 390 with item E's wrapping-caption checkbox rows
-        // (two-line-plus captions replacing two single-line toggles) —
-        // judgment call pending the controller's own visual pass (skipped
-        // here per Task 14's carried context).
-        .frame(width: 480, height: 480)
+        .frame(width: 480, height: 350)
         .background(SemanticColor.surface600)
     }
 
@@ -2548,8 +2519,8 @@ private struct CreateRoomView: View {
             _ = await store.createRoom(
                 name: name,
                 description: description,
-                ephemeral: ephemeral,
-                isPublic: isPublic
+                ephemeral: false,
+                isPublic: true
             )
             isCreating = false
         }
