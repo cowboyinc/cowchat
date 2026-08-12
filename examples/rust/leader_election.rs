@@ -28,8 +28,9 @@ fn read_api_key() -> String {
         .to_string()
 }
 
-async fn connect(key: &str, name: &str) -> CowchatClient {
-    CowchatClient::connect_tcp("127.0.0.1:9229", key, name, None, vec![])
+async fn connect(key: &str, name: &str, run_id: &str) -> CowchatClient {
+    let agent_id = format!("{name}-{run_id}");
+    CowchatClient::connect_tcp("127.0.0.1:9229", key, name, Some(&agent_id), vec![])
         .await
         .unwrap_or_else(|e| panic!("Failed to connect as {name}: {e}"))
 }
@@ -55,18 +56,18 @@ async fn wait_for(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key = read_api_key();
+    let run_id = uuid::Uuid::new_v4().to_string();
 
     // Connect 3 agents
     println!("Connecting agents...");
-    let lead = connect(&key, "lead").await;
-    let dev1 = connect(&key, "dev-1").await;
-    let dev2 = connect(&key, "dev-2").await;
+    let lead = connect(&key, "lead", &run_id).await;
+    let dev1 = connect(&key, "dev-1", &run_id).await;
+    let dev2 = connect(&key, "dev-2", &run_id).await;
     println!("  lead:  {}", lead.agent_id);
     println!("  dev-1: {}", dev1.agent_id);
     println!("  dev-2: {}", dev2.agent_id);
 
     // Create a room and join (unique name for re-runnability)
-    let run_id = &uuid::Uuid::new_v4().to_string()[..6];
     let room = lead
         .create_room(
             &format!("sprint-{run_id}"),

@@ -17,4 +17,4 @@ pub mod voting;
 pub mod web;
 pub mod webhooks;
 
-pub use server::{CowchatServer, ServerConfig};
+pub use server::{lock_database_for_maintenance, CowchatServer, ServerConfig};

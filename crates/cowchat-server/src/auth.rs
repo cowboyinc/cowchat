@@ -35,6 +35,20 @@ pub fn load_or_create_key(path: &Path) -> std::io::Result<String> {
     Ok(key)
 }
 
+/// Load an existing credential without ever creating a replacement. Used by
+/// recovery commands where a missing or empty old key must fail closed.
+pub fn load_existing_key(path: &Path) -> std::io::Result<String> {
+    harden_file_permissions(path)?;
+    let key = fs::read_to_string(path)?.trim().to_string();
+    if key.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("key file {} is empty", path.display()),
+        ));
+    }
+    Ok(key)
+}
+
 /// Rotate the key: generate a new one and overwrite the file.
 pub fn rotate_key(path: &Path) -> std::io::Result<String> {
     let key = generate_key();
@@ -66,12 +80,25 @@ fn write_owner_only_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
         file.sync_all()?;
         harden_file_permissions(&temporary)?;
         fs::rename(&temporary, path)?;
-        harden_file_permissions(path)
+        harden_file_permissions(path)?;
+        sync_parent_directory(path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 pub(crate) fn harden_file_permissions(path: &Path) -> std::io::Result<()> {
@@ -138,5 +165,9 @@ mod tests {
         );
         assert_eq!(mode(&repair_parent), 0o700);
         assert_eq!(mode(&existing_key), 0o600);
+
+        let empty_key = dir.path().join("empty.key");
+        fs::write(&empty_key, "\n").unwrap();
+        assert!(load_existing_key(&empty_key).is_err());
     }
 }

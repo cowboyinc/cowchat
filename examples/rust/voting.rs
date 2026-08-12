@@ -28,8 +28,9 @@ fn read_api_key() -> String {
         .to_string()
 }
 
-async fn connect(key: &str, name: &str) -> CowchatClient {
-    CowchatClient::connect_tcp("127.0.0.1:9229", key, name, None, vec![])
+async fn connect(key: &str, name: &str, run_id: &str) -> CowchatClient {
+    let agent_id = format!("{name}-{run_id}");
+    CowchatClient::connect_tcp("127.0.0.1:9229", key, name, Some(&agent_id), vec![])
         .await
         .unwrap_or_else(|e| panic!("Failed to connect as {name}: {e}"))
 }
@@ -37,18 +38,18 @@ async fn connect(key: &str, name: &str) -> CowchatClient {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key = read_api_key();
+    let run_id = uuid::Uuid::new_v4().to_string();
 
     // Connect 3 agents
     println!("Connecting agents...");
-    let alice = connect(&key, "alice").await;
-    let bob = connect(&key, "bob").await;
-    let charlie = connect(&key, "charlie").await;
+    let alice = connect(&key, "alice", &run_id).await;
+    let bob = connect(&key, "bob", &run_id).await;
+    let charlie = connect(&key, "charlie", &run_id).await;
     println!("  alice:   {}", alice.agent_id);
     println!("  bob:     {}", bob.agent_id);
     println!("  charlie: {}", charlie.agent_id);
 
     // Create a room and have everyone join (unique name for re-runnability)
-    let run_id = &uuid::Uuid::new_v4().to_string()[..6];
     let room = alice
         .create_room(
             &format!("lang-vote-{run_id}"),

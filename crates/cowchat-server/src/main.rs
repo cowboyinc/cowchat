@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
-use cowchat_server::{auth, CowchatServer, ServerConfig};
+use cowchat_server::store::Store;
+use cowchat_server::{auth, lock_database_for_maintenance, CowchatServer, ServerConfig};
 use std::{
     io::{self, BufRead},
     path::PathBuf,
@@ -110,6 +111,21 @@ enum AuthAction {
     RotateKey {
         #[arg(long, default_value = default_key_path())]
         key_file: PathBuf,
+        /// SQLite database whose ownership records must survive the rotation.
+        #[arg(long, default_value = default_db_path())]
+        db: PathBuf,
+    },
+    /// Recover ownership after a legacy rotation by mapping the previous key
+    /// onto the stable primary credential principal. The server must be
+    /// stopped, and the previous key is required to avoid taking another
+    /// credential's resources.
+    MigratePrimaryOwnership {
+        /// Owner-only file containing the previous primary key. Keeping the
+        /// secret out of argv avoids shell-history and process-list exposure.
+        #[arg(long)]
+        previous_key_file: PathBuf,
+        #[arg(long, default_value = default_db_path())]
+        db: PathBuf,
     },
 }
 
@@ -301,10 +317,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let key = auth::load_or_create_key(&key_file)?;
                 println!("{}", key);
             }
-            AuthAction::RotateKey { key_file } => {
+            AuthAction::RotateKey { key_file, db } => {
+                let (db, _maintenance_lock) = lock_database_for_maintenance(&db)?;
+                // Acquire the same lock as the server before touching the key
+                // file. If the server is still running, rotation must leave
+                // both the credential and ownership database unchanged.
+                let old_key = auth::load_or_create_key(&key_file)?;
+                let store = Store::open(&db)?;
+                store.primary_credential_principal(&old_key)?;
                 let key = auth::rotate_key(&key_file)?;
                 println!("New API key: {}", key);
-                println!("All connected agents will need to reconnect with the new key.");
+                println!(
+                    "Stable agent, room, and subscription ownership was preserved in {}.",
+                    db.display()
+                );
+                println!("Restart the server, then reconnect agents with the new key.");
+            }
+            AuthAction::MigratePrimaryOwnership {
+                previous_key_file,
+                db,
+            } => {
+                let (db, _maintenance_lock) = lock_database_for_maintenance(&db)?;
+                let store = Store::open(&db)?;
+                let previous_key = auth::load_existing_key(&previous_key_file)?;
+                let principal = store.primary_credential_principal(&previous_key)?;
+                println!(
+                    "Migrated ownership for the previous primary key in {} to {}.",
+                    db.display(),
+                    principal
+                );
+                println!("Restart the server before reconnecting agents.");
             }
         },
     }

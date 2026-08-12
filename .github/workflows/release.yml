@@ -1,8 +1,8 @@
 name: Release
 
-# Build prebuilt cowchat + cowchat-server binaries for four targets, package a
-# signed and notarized universal Cowchat macOS app, publish the release, and
-# open an idempotent formula PR against cowboyinc/homebrew-tap.
+# Build prebuilt cowchat, cowchat-server, and cowchat-codex binaries for four
+# targets, package a signed and notarized universal Cowchat macOS app, publish
+# the release, and open an idempotent formula PR against cowboyinc/homebrew-tap.
 on:
   push:
     tags: ["v*"]
@@ -38,11 +38,16 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+      - name: Verify workspace crates are packageable
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        # Package the release set together so same-version internal path
+        # dependencies are validated before any one crate is published.
+        run: cargo package --workspace --locked --no-verify
       - name: Build release binaries and third-party notices
         run: |
           set -euo pipefail
           cargo build --release --locked --target "${{ matrix.target }}" \
-            -p cowchat-cli -p cowchat-server
+            -p cowchat-cli -p cowchat-server -p cowchat-codex
           cargo install cargo-about --locked --features cli
           cargo about generate --locked --target "${{ matrix.target }}" \
             about.hbs > THIRD-PARTY-NOTICES.md
@@ -56,7 +61,8 @@ jobs:
             exit 1
           }
           tar -czf "cowchat-${TAG}-${{ matrix.target }}.tar.gz" \
-            -C "target/${{ matrix.target }}/release" cowchat cowchat-server \
+            -C "target/${{ matrix.target }}/release" \
+              cowchat cowchat-server cowchat-codex \
             -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -196,6 +202,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
@@ -212,7 +220,7 @@ jobs:
             exit 1
           }
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
-          NOTES='Signed and notarized universal Cowchat.app DMG, plus prebuilt cowchat + cowchat-server binaries (macOS arm64/x86_64, Linux arm64/x86_64). Homebrew: `brew install --cask cowboyinc/tap/cowchat` for the app, `brew install cowboyinc/tap/cowchat` for the CLIs — pending tap merge; this note is updated on promotion.'
+          NOTES='Signed and notarized universal Cowchat.app DMG, plus prebuilt cowchat, cowchat-server, and cowchat-codex binaries (macOS arm64/x86_64, Linux arm64/x86_64) with third-party notices. Homebrew: `brew install --cask cowboyinc/tap/cowchat` for the app, `brew install cowboyinc/tap/cowchat` for all three CLIs — pending tap merge; this note is updated on promotion.'
 
           sha() {
             shasum -a 256 "dist/cowchat-${TAG}-$1.tar.gz" | awk '{print $1}'
@@ -271,14 +279,12 @@ jobs:
           fi
           if git ls-remote --exit-code origin "refs/heads/cowchat-${TAG}" >/dev/null 2>&1; then
             git checkout -b "cowchat-${TAG}" "origin/cowchat-${TAG}"
-            for pair in "Formula/cowchat.rb:/tmp/cowchat.rb" "Casks/cowchat.rb:/tmp/cowchat-cask.rb"; do
-              tracked="${pair%%:*}"
-              rendered="${pair##*:}"
-              if [ -f "$tracked" ] && ! cmp -s "$rendered" "$tracked"; then
-                echo "$tracked on the existing cowchat-${TAG} branch differs from the render — human edits present; resolve manually" >&2
-                exit 1
-              fi
-            done
+            # Rebuilt archives and notarized DMGs are not byte-reproducible, so
+            # their hashes normally change on a workflow rerun. Refresh an
+            # existing branch only when it is still entirely bot-owned and its
+            # complete diff is exactly the two generated Homebrew files.
+            bash "$GITHUB_WORKSPACE/.github/verify-release-tap-branch.sh" \
+              origin/main HEAD
           else
             git checkout -b "cowchat-${TAG}"
           fi
@@ -295,7 +301,7 @@ jobs:
           gh pr create --repo cowboyinc/homebrew-tap \
             --head "cowchat-${TAG}" --base main \
             --title "cowchat ${TAG}" \
-            --body "Automated formula and cask bump from the cowchat release workflow. Formula installs the cowchat + cowchat-server CLIs; the cask installs Cowchat.app from the notarized DMG." || true
+            --body "Automated formula and cask bump from the cowchat release workflow. Formula installs the cowchat, cowchat-server, and cowchat-codex CLIs; the cask installs Cowchat.app from the notarized DMG." || true
           OPEN=$(gh pr list --repo cowboyinc/homebrew-tap \
             --head "cowchat-${TAG}" --state open --json number --jq 'length')
           [ "$OPEN" -ge 1 ] || {

@@ -9,15 +9,15 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cowboyinc/cowchat"
 
 [workspace.dependencies]
-cowchat-core = { path = "crates/cowchat-core" }
-cowchat-server = { path = "crates/cowchat-server" }
-cowchat-client = { path = "crates/cowchat-client" }
+cowchat-core = { version = "0.7.0", path = "crates/cowchat-core" }
+cowchat-server = { version = "0.7.0", path = "crates/cowchat-server" }
+cowchat-client = { version = "0.7.0", path = "crates/cowchat-client" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }

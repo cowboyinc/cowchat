@@ -132,6 +132,369 @@ mod tests {
         }
         server.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn subscribers_are_closed_when_the_transport_reaches_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut reader = BufReader::new(read_half);
+            let register = read_frame_line(&mut reader).await.unwrap().unwrap();
+            let register = Frame::from_line(&register).unwrap();
+            let ok = Frame::ok(
+                register.id.as_deref(),
+                serde_json::json!({"agent_id": "eof-client"}),
+            );
+            write_half
+                .write_all(ok.to_line().unwrap().as_bytes())
+                .await
+                .unwrap();
+            write_half.shutdown().await.unwrap();
+        });
+
+        let client = CowchatClient::connect_tcp(
+            &addr.to_string(),
+            "test-key",
+            "client",
+            Some("eof-client"),
+            vec![],
+        )
+        .await
+        .unwrap();
+        let mut events = client.subscribe();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("transport EOF must close subscribers promptly");
+        assert!(matches!(result, Err(broadcast::error::RecvError::Closed)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn contiguous_history_rejects_a_missing_first_sequence() {
+        let (write_tx, mut write_rx) = mpsc::channel(1);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (event_tx, _) = broadcast::channel(1);
+        let client = CowchatClient {
+            write_tx,
+            pending: pending.clone(),
+            event_tx: event_tx.downgrade(),
+            agent_id: "reader".into(),
+            agent_name: "reader".into(),
+            stable_identity: true,
+            room_secret: None,
+        };
+        let responder = tokio::spawn(async move {
+            let request = write_rx.recv().await.unwrap();
+            assert_eq!(request.frame_type, FrameType::GetHistory);
+            let message = ChatMessage {
+                message_id: "second".into(),
+                room_id: "lobby".into(),
+                agent_id: "peer".into(),
+                agent_name: "peer".into(),
+                content: "seq one was retained away".into(),
+                reply_to_message: None,
+                metadata: serde_json::json!({}),
+                timestamp: chrono::Utc::now(),
+                seq: 2,
+            };
+            let response = Frame {
+                id: Some("history-response".into()),
+                reply_to: request.id.clone(),
+                frame_type: FrameType::HistoryResult,
+                payload: serde_json::json!({ "messages": [message] }),
+            };
+            pending
+                .lock()
+                .await
+                .remove(request.id.as_deref().unwrap())
+                .unwrap()
+                .send(response)
+                .unwrap();
+        });
+
+        let error = client
+            .get_contiguous_history_page("lobby", 0, 2, 50)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::HistoryGap {
+                expected: 1,
+                found: Some(2),
+                ..
+            }
+        ));
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_rejects_a_cursor_ahead_of_the_captured_tip() {
+        let (write_tx, mut write_rx) = mpsc::channel(1);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (event_tx, _) = broadcast::channel(1);
+        let client = CowchatClient {
+            write_tx,
+            pending: pending.clone(),
+            event_tx: event_tx.downgrade(),
+            agent_id: "reader".into(),
+            agent_name: "reader".into(),
+            stable_identity: true,
+            room_secret: None,
+        };
+        let responder = tokio::spawn(async move {
+            let request = write_rx.recv().await.unwrap();
+            assert_eq!(request.frame_type, FrameType::RoomTip);
+            pending
+                .lock()
+                .await
+                .remove(request.id.as_deref().unwrap())
+                .unwrap()
+                .send(Frame {
+                    id: Some("tip-response".into()),
+                    reply_to: request.id,
+                    frame_type: FrameType::RoomTipResult,
+                    payload: serde_json::json!({ "room_id": "lobby", "seq": 4 }),
+                })
+                .unwrap();
+        });
+
+        let error = client
+            .wait_for_message("lobby", 60, Some(5))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::HistoryCursorAhead {
+                after_seq: 5,
+                through_seq: 4,
+                ..
+            }
+        ));
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_sequence_jump_requires_contiguous_history_recovery() {
+        let (write_tx, mut write_rx) = mpsc::channel(1);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (event_tx, _) = broadcast::channel(4);
+        let client = CowchatClient {
+            write_tx,
+            pending: pending.clone(),
+            event_tx: event_tx.downgrade(),
+            agent_id: "reader".into(),
+            agent_name: "reader".into(),
+            stable_identity: true,
+            room_secret: None,
+        };
+        let mut events = client.subscribe();
+        event_tx
+            .send(Event {
+                frame: Frame {
+                    id: None,
+                    reply_to: None,
+                    frame_type: FrameType::MessageReceived,
+                    payload: serde_json::to_value(ChatMessage {
+                        message_id: "second".into(),
+                        room_id: "lobby".into(),
+                        agent_id: "peer".into(),
+                        agent_name: "peer".into(),
+                        content: "jumped live event".into(),
+                        reply_to_message: None,
+                        metadata: serde_json::json!({}),
+                        timestamp: chrono::Utc::now(),
+                        seq: 2,
+                    })
+                    .unwrap(),
+                },
+            })
+            .unwrap();
+
+        let responder = tokio::spawn(async move {
+            let tip_request = write_rx.recv().await.unwrap();
+            assert_eq!(tip_request.frame_type, FrameType::RoomTip);
+            pending
+                .lock()
+                .await
+                .remove(tip_request.id.as_deref().unwrap())
+                .unwrap()
+                .send(Frame {
+                    id: Some("tip-response".into()),
+                    reply_to: tip_request.id,
+                    frame_type: FrameType::RoomTipResult,
+                    payload: serde_json::json!({ "seq": 2 }),
+                })
+                .unwrap();
+
+            let history_request = write_rx.recv().await.unwrap();
+            assert_eq!(history_request.frame_type, FrameType::GetHistory);
+            pending
+                .lock()
+                .await
+                .remove(history_request.id.as_deref().unwrap())
+                .unwrap()
+                .send(Frame {
+                    id: Some("history-response".into()),
+                    reply_to: history_request.id,
+                    frame_type: FrameType::HistoryResult,
+                    payload: serde_json::json!({
+                        "messages": [{
+                            "message_id": "second",
+                            "room_id": "lobby",
+                            "agent_id": "peer",
+                            "agent_name": "peer",
+                            "content": "jumped persisted event",
+                            "reply_to_message": null,
+                            "metadata": {},
+                            "timestamp": chrono::Utc::now(),
+                            "seq": 2
+                        }]
+                    }),
+                })
+                .unwrap();
+        });
+
+        let error = client
+            .wait_for_live_message("lobby", 1, Some(0), &mut events)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::HistoryGap {
+                expected: 1,
+                found: Some(2),
+                ..
+            }
+        ));
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lagged_wait_fails_closed_instead_of_returning_a_later_message() {
+        let (write_tx, _write_rx) = mpsc::channel(1);
+        let (event_tx, _) = broadcast::channel(256);
+        let client = CowchatClient {
+            write_tx,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            event_tx: event_tx.downgrade(),
+            agent_id: "stable-waiter".into(),
+            agent_name: "waiter".into(),
+            stable_identity: true,
+            room_secret: None,
+        };
+        let mut events = client.subscribe();
+
+        for seq in 1..=300 {
+            event_tx
+                .send(Event {
+                    frame: Frame {
+                        id: None,
+                        reply_to: None,
+                        frame_type: FrameType::MessageReceived,
+                        payload: serde_json::json!({
+                            "room_id": "lobby",
+                            "seq": seq,
+                        }),
+                    },
+                })
+                .unwrap();
+        }
+
+        let error = client
+            .wait_for_live_message("lobby", 1, None, &mut events)
+            .await
+            .expect_err("a lag without an authoritative history floor must fail closed");
+        assert!(matches!(
+            error,
+            ClientError::EventStreamLagged { skipped } if skipped >= 44
+        ));
+    }
+
+    #[tokio::test]
+    async fn lagged_wait_backfills_from_original_cursor_before_returning_live_tail() {
+        let (write_tx, mut write_rx) = mpsc::channel(1);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (event_tx, _) = broadcast::channel(256);
+        let client = CowchatClient {
+            write_tx,
+            pending: pending.clone(),
+            event_tx: event_tx.downgrade(),
+            agent_id: "stable-waiter".into(),
+            agent_name: "waiter".into(),
+            stable_identity: true,
+            room_secret: None,
+        };
+        let mut events = client.subscribe();
+        for seq in 101..=400 {
+            event_tx
+                .send(Event {
+                    frame: Frame {
+                        id: None,
+                        reply_to: None,
+                        frame_type: FrameType::MessageReceived,
+                        payload: serde_json::json!({ "room_id": "lobby", "seq": seq }),
+                    },
+                })
+                .unwrap();
+        }
+
+        let responder = tokio::spawn(async move {
+            let request = write_rx.recv().await.unwrap();
+            assert_eq!(request.frame_type, FrameType::RoomTip);
+            let response = Frame {
+                id: Some("tip-response".into()),
+                reply_to: request.id.clone(),
+                frame_type: FrameType::RoomTipResult,
+                payload: serde_json::json!({ "room_id": "lobby", "seq": 1 }),
+            };
+            pending
+                .lock()
+                .await
+                .remove(request.id.as_deref().unwrap())
+                .unwrap()
+                .send(response)
+                .unwrap();
+
+            let request = write_rx.recv().await.unwrap();
+            assert_eq!(request.frame_type, FrameType::GetHistory);
+            assert_eq!(request.payload["since_seq"], serde_json::json!(0));
+            let earliest = ChatMessage {
+                message_id: "earliest".into(),
+                room_id: "lobby".into(),
+                agent_id: "peer".into(),
+                agent_name: "peer".into(),
+                content: "persisted before the retained tail".into(),
+                reply_to_message: None,
+                metadata: serde_json::json!({}),
+                timestamp: chrono::Utc::now(),
+                seq: 1,
+            };
+            let response = Frame {
+                id: Some("history-response".into()),
+                reply_to: request.id.clone(),
+                frame_type: FrameType::HistoryResult,
+                payload: serde_json::json!({ "messages": [earliest] }),
+            };
+            pending
+                .lock()
+                .await
+                .remove(request.id.as_deref().unwrap())
+                .unwrap()
+                .send(response)
+                .unwrap();
+        });
+
+        let message = client
+            .wait_for_live_message("lobby", 1, Some(0), &mut events)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.seq, 1);
+        assert_eq!(message.content, "persisted before the retained tail");
+        responder.await.unwrap();
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -150,6 +513,24 @@ pub enum ClientError {
     Channel,
     #[error("WebSocket error: {0}")]
     Ws(String),
+    #[error("Event stream lagged by {skipped} frame(s); history backfill could not recover contiguously")]
+    EventStreamLagged { skipped: u64 },
+    #[error(
+        "History gap in room {room_id}: expected seq {expected}, found {found:?}; refusing to skip unread events"
+    )]
+    HistoryGap {
+        room_id: String,
+        expected: i64,
+        found: Option<i64>,
+    },
+    #[error(
+        "History cursor for room {room_id} is ahead of captured tip ({after_seq} > {through_seq})"
+    )]
+    HistoryCursorAhead {
+        room_id: String,
+        after_seq: i64,
+        through_seq: i64,
+    },
 }
 
 /// An event received from the server (pushed, not in response to a request).
@@ -164,7 +545,7 @@ pub struct CowchatClient {
     /// Pending request completions: correlation_id -> oneshot sender.
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Frame>>>>,
     /// Broadcast channel for server-pushed events.
-    event_tx: broadcast::Sender<Event>,
+    event_tx: broadcast::WeakSender<Event>,
     /// Agent info after registration.
     pub agent_id: String,
     pub agent_name: String,
@@ -276,6 +657,9 @@ impl CowchatClient {
                     Err(_) => break,
                 }
             }
+            // Wake in-flight requests immediately, then let this task's sole
+            // strong event sender drop so subscribers observe transport close.
+            pending_clone.lock().await.clear();
         });
 
         Self::finish_register(
@@ -364,6 +748,7 @@ impl CowchatClient {
                     let _ = event_tx_clone.send(Event { frame });
                 }
             }
+            pending_clone.lock().await.clear();
         });
 
         Self::finish_register(
@@ -445,7 +830,7 @@ impl CowchatClient {
         Ok(Self {
             write_tx,
             pending,
-            event_tx,
+            event_tx: event_tx.downgrade(),
             agent_id,
             agent_name: name.to_string(),
             stable_identity,
@@ -768,6 +1153,80 @@ impl CowchatClient {
         Ok(messages)
     }
 
+    /// Fetch one bounded, exactly contiguous history page after `after_seq`,
+    /// never reading beyond the previously captured `through_seq`. A retained
+    /// history hole is an error rather than permission to skip unread events.
+    pub async fn get_contiguous_history_page(
+        &self,
+        room_id: &str,
+        after_seq: i64,
+        through_seq: i64,
+        page_size: u32,
+    ) -> Result<Vec<ChatMessage>, ClientError> {
+        if after_seq > through_seq {
+            return Err(ClientError::HistoryCursorAhead {
+                room_id: room_id.to_string(),
+                after_seq,
+                through_seq,
+            });
+        }
+        if after_seq == through_seq {
+            return Ok(Vec::new());
+        }
+
+        let remaining = through_seq.saturating_sub(after_seq).max(1) as u64;
+        let requested = u64::from(page_size.max(1)).min(remaining) as u32;
+        let page = self
+            .get_history_filtered(room_id, requested, None, None, Some(after_seq))
+            .await?;
+        let page: Vec<_> = page
+            .into_iter()
+            .take_while(|message| message.seq <= through_seq)
+            .collect();
+
+        let mut expected =
+            after_seq
+                .checked_add(1)
+                .ok_or_else(|| ClientError::HistoryCursorAhead {
+                    room_id: room_id.to_string(),
+                    after_seq,
+                    through_seq,
+                })?;
+        if page.is_empty() {
+            return Err(ClientError::HistoryGap {
+                room_id: room_id.to_string(),
+                expected,
+                found: None,
+            });
+        }
+        for message in &page {
+            if message.seq != expected {
+                return Err(ClientError::HistoryGap {
+                    room_id: room_id.to_string(),
+                    expected,
+                    found: Some(message.seq),
+                });
+            }
+            expected = expected
+                .checked_add(1)
+                .ok_or_else(|| ClientError::HistoryGap {
+                    room_id: room_id.to_string(),
+                    expected,
+                    found: None,
+                })?;
+        }
+        if page.len() < requested as usize
+            && page.last().is_some_and(|message| message.seq < through_seq)
+        {
+            return Err(ClientError::HistoryGap {
+                room_id: room_id.to_string(),
+                expected,
+                found: None,
+            });
+        }
+        Ok(page)
+    }
+
     /// Return the latest seq for a room, or 0 if the room has no messages.
     pub async fn room_tip(&self, room_id: &str) -> Result<i64, ClientError> {
         let resp = self
@@ -1002,7 +1461,14 @@ impl CowchatClient {
 
     /// Subscribe to server-pushed events (messages, joins, leaves, etc.)
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
-        self.event_tx.subscribe()
+        match self.event_tx.upgrade() {
+            Some(sender) => sender.subscribe(),
+            None => {
+                let (sender, receiver) = broadcast::channel(1);
+                drop(sender);
+                receiver
+            }
+        }
     }
 
     /// Wait for the next message in a specific room. Blocks until a message arrives or timeout.
@@ -1020,37 +1486,80 @@ impl CowchatClient {
         since_seq: Option<i64>,
     ) -> Result<Option<ChatMessage>, ClientError> {
         // Subscribe FIRST so we don't miss anything that arrives while we're fetching history.
-        let mut events = self.event_tx.subscribe();
+        let mut events = self.subscribe();
 
         if let Some(seq) = since_seq {
-            // Pull a small batch and return the oldest *real chat message from
-            // another agent* past `seq`. Skip:
-            //  - thinking pulses (semantically not chat; the event-type split
-            //    deliberately spares live waiters from them too),
-            //  - system messages (joins, etc.) — they're protocol noise, not chat.
-            //    Every CLI invocation gets a fresh random agent_id so even prior
-            //    joins from the same `--name` look like "another agent" to a
-            //    naive self-filter; filtering on metadata.type is robust.
-            //  - messages this agent itself posted (the live path excludes the
-            //    sender from the broadcast, so backlog should mirror that).
-            let backlog = self
-                .get_history_filtered(room_id, 32, None, None, Some(seq))
-                .await?;
-            if let Some(msg) = backlog.into_iter().find(|m| {
-                let meta_type = m.metadata.get("type").and_then(|v| v.as_str());
-                let is_thinking = meta_type == Some("thinking");
-                let is_system = meta_type == Some("system");
-                // Self by agent_id OR by --name. Each CLI invocation registers a
-                // fresh random agent_id, so two invocations under the same --name
-                // (e.g. one `send` + one `wait`) have different ids; the name
-                // backstop catches that case.
-                let is_self = self.is_self_message(m);
-                !is_thinking && !is_system && !is_self
-            }) {
-                return Ok(Some(msg));
+            let tip = self.room_tip(room_id).await?;
+            if seq > tip {
+                return Err(ClientError::HistoryCursorAhead {
+                    room_id: room_id.to_string(),
+                    after_seq: seq,
+                    through_seq: tip,
+                });
+            }
+            if let Some(message) = self.oldest_wait_backlog_message(room_id, seq, tip).await? {
+                return Ok(Some(message));
             }
         }
 
+        self.wait_for_live_message(room_id, timeout_secs, since_seq, &mut events)
+            .await
+    }
+
+    /// Return the oldest persisted peer chat after `seq`, paging past arbitrary
+    /// thinking/system/self noise. Keeping this as a separate operation lets a
+    /// lagged broadcast receiver repeat the same authoritative backfill rather
+    /// than accepting a later retained event and creating a cursor gap.
+    async fn oldest_wait_backlog_message(
+        &self,
+        room_id: &str,
+        seq: i64,
+        through_seq: i64,
+    ) -> Result<Option<ChatMessage>, ClientError> {
+        const BACKLOG_PAGE_SIZE: u32 = 32;
+        let mut history_cursor = seq;
+        while history_cursor < through_seq {
+            let backlog = self
+                .get_contiguous_history_page(
+                    room_id,
+                    history_cursor,
+                    through_seq,
+                    BACKLOG_PAGE_SIZE,
+                )
+                .await?;
+            let page_tip = backlog.last().map(|message| message.seq);
+
+            if let Some(message) = backlog.into_iter().find(|message| {
+                let meta_type = message
+                    .metadata
+                    .get("type")
+                    .and_then(|value| value.as_str());
+                meta_type != Some("thinking")
+                    && meta_type != Some("system")
+                    && !self.is_self_message(message)
+            }) {
+                return Ok(Some(message));
+            }
+
+            let Some(next_cursor) = page_tip else {
+                return Err(ClientError::HistoryGap {
+                    room_id: room_id.to_string(),
+                    expected: history_cursor.saturating_add(1),
+                    found: None,
+                });
+            };
+            history_cursor = next_cursor;
+        }
+        Ok(None)
+    }
+
+    async fn wait_for_live_message(
+        &self,
+        room_id: &str,
+        timeout_secs: u64,
+        since_seq: Option<i64>,
+        events: &mut broadcast::Receiver<Event>,
+    ) -> Result<Option<ChatMessage>, ClientError> {
         let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
         tokio::pin!(deadline);
 
@@ -1067,6 +1576,26 @@ impl CowchatClient {
                                     if event_room == room_id {
                                         let mut msg: ChatMessage = serde_json::from_value(evt.frame.payload)
                                             .map_err(ClientError::Json)?;
+                                        if let Some(seq) = since_seq {
+                                            if msg.seq <= seq {
+                                                continue;
+                                            }
+                                            if msg.seq != seq.saturating_add(1) {
+                                                // A later live event is only safe
+                                                // after authoritative history has
+                                                // accounted for every intervening
+                                                // sequence (including filtered
+                                                // self/system/thinking rows).
+                                                let tip = self.room_tip(room_id).await?;
+                                                if let Some(message) = self
+                                                    .oldest_wait_backlog_message(room_id, seq, tip)
+                                                    .await?
+                                                {
+                                                    return Ok(Some(message));
+                                                }
+                                                continue;
+                                            }
+                                        }
                                         // Same filter as the backlog path: skip
                                         // system messages and anything from the
                                         // same --name (different connection's
@@ -1087,8 +1616,17 @@ impl CowchatClient {
                         Err(broadcast::error::RecvError::Closed) => {
                             return Err(ClientError::ConnectionClosed);
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            continue;
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            if let Some(seq) = since_seq {
+                                let tip = self.room_tip(room_id).await?;
+                                if let Some(message) = self
+                                    .oldest_wait_backlog_message(room_id, seq, tip)
+                                    .await?
+                                {
+                                    return Ok(Some(message));
+                                }
+                            }
+                            return Err(ClientError::EventStreamLagged { skipped });
                         }
                     }
                 }

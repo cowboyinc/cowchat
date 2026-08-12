@@ -121,6 +121,7 @@ pub struct CowchatServer {
     task_mgr: Arc<TaskManager>,
     webhook_mgr: Arc<crate::webhooks::WebhookManager>,
     api_key: String,
+    primary_principal: String,
 }
 
 struct PreparedListeners {
@@ -248,6 +249,15 @@ fn acquire_instance_lock(db_path: &Path) -> io::Result<File> {
     Ok(lock)
 }
 
+/// Acquire the same canonical per-database lock used by the server before an
+/// offline maintenance operation such as primary-key rotation.
+pub fn lock_database_for_maintenance(db_path: &Path) -> io::Result<(PathBuf, File)> {
+    let canonical = canonical_db_path(db_path)?;
+    reject_hard_linked_database(&canonical)?;
+    let lock = acquire_instance_lock(&canonical)?;
+    Ok((canonical, lock))
+}
+
 fn same_socket_inode(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     left.file_type().is_socket()
         && right.file_type().is_socket()
@@ -359,7 +369,9 @@ impl CowchatServer {
             .map(bind_tcp_listener)
             .transpose()?;
 
+        let api_key = auth::load_or_create_key(&config.auth_key_path)?;
         let store = Arc::new(Store::open(&config.db_path)?);
+        let primary_principal = store.primary_credential_principal(&api_key)?;
         let agents: Arc<DashMap<String, AgentConnection>> = Arc::new(DashMap::new());
         let room_members: Arc<DashMap<String, Vec<String>>> = Arc::new(DashMap::new());
         let broker = Arc::new(Broker::new(agents, room_members));
@@ -372,8 +384,6 @@ impl CowchatServer {
             store.clone(),
             config.allow_private_webhooks,
         ));
-        let api_key = auth::load_or_create_key(&config.auth_key_path)?;
-
         log::info!("API key loaded from {:?}", config.auth_key_path);
         log::info!("Database at {:?}", config.db_path);
 
@@ -395,6 +405,7 @@ impl CowchatServer {
             task_mgr,
             webhook_mgr,
             api_key,
+            primary_principal,
         })
     }
 
@@ -425,6 +436,7 @@ impl CowchatServer {
         let uds_ephemeral = self.ephemeral_rooms.clone();
         let uds_vote_mgr = self.vote_mgr.clone();
         let uds_api_key = self.api_key.clone();
+        let uds_primary_principal = self.primary_principal.clone();
         let uds_no_auth = self.config.no_auth;
         let uds_allow_keyless = self.config.allow_keyless_local;
         let uds_rate_limiter = self.rate_limiter.clone();
@@ -441,6 +453,7 @@ impl CowchatServer {
                         let ephemeral = uds_ephemeral.clone();
                         let vote_mgr = uds_vote_mgr.clone();
                         let api_key = uds_api_key.clone();
+                        let primary_principal = uds_primary_principal.clone();
                         let rate_limiter = uds_rate_limiter.clone();
                         let reconnect_mgr = uds_reconnect_mgr.clone();
                         let task_mgr = uds_task_mgr.clone();
@@ -454,6 +467,7 @@ impl CowchatServer {
                                 ephemeral,
                                 vote_mgr,
                                 api_key,
+                                primary_principal,
                                 uds_no_auth,
                                 uds_allow_keyless,
                                 rate_limiter,
@@ -482,6 +496,7 @@ impl CowchatServer {
             let tcp_ephemeral = self.ephemeral_rooms.clone();
             let tcp_vote_mgr = self.vote_mgr.clone();
             let tcp_api_key = self.api_key.clone();
+            let tcp_primary_principal = self.primary_principal.clone();
             let tcp_no_auth = self.config.no_auth;
             let tcp_allow_keyless_local = self.config.allow_keyless_local;
             let tcp_rate_limiter = self.rate_limiter.clone();
@@ -503,6 +518,7 @@ impl CowchatServer {
                             let ephemeral = tcp_ephemeral.clone();
                             let vote_mgr = tcp_vote_mgr.clone();
                             let api_key = tcp_api_key.clone();
+                            let primary_principal = tcp_primary_principal.clone();
                             let rate_limiter = tcp_rate_limiter.clone();
                             let reconnect_mgr = tcp_reconnect_mgr.clone();
                             let task_mgr = tcp_task_mgr.clone();
@@ -516,6 +532,7 @@ impl CowchatServer {
                                     ephemeral,
                                     vote_mgr,
                                     api_key,
+                                    primary_principal,
                                     tcp_no_auth,
                                     connection_allows_keyless,
                                     rate_limiter,
@@ -548,6 +565,7 @@ impl CowchatServer {
                 rate_limiter: self.rate_limiter.clone(),
                 no_auth: self.config.no_auth,
                 api_key: self.api_key.clone(),
+                primary_principal: self.primary_principal.clone(),
                 reconnect_mgr: self.reconnect_mgr.clone(),
                 task_mgr: self.task_mgr.clone(),
                 webhook_mgr: self.webhook_mgr.clone(),
@@ -676,6 +694,7 @@ pub async fn connection_loop<R, W>(
     ephemeral_rooms: Arc<DashMap<String, Room>>,
     vote_mgr: Arc<VoteManager>,
     api_key: String,
+    primary_principal: String,
     // Server-wide `--no-auth`; unlike `allow_keyless`, this intentionally
     // bypasses room ownership boundaries.
     no_auth: bool,
@@ -784,12 +803,11 @@ where
         }
 
         // Validate API key
-        let authenticated_key = if no_auth
-            || (allow_keyless && payload.key.is_empty())
-            || (!payload.key.is_empty()
-                && (payload.key == api_key
-                    || store.validate_api_key(&payload.key).unwrap_or(false)))
-        {
+        let authenticated_key = if no_auth || (allow_keyless && payload.key.is_empty()) {
+            payload.key.clone()
+        } else if !payload.key.is_empty() && payload.key == api_key {
+            primary_principal.clone()
+        } else if !payload.key.is_empty() && store.validate_api_key(&payload.key).unwrap_or(false) {
             payload.key.clone()
         } else {
             let err = Frame::error(
@@ -799,25 +817,6 @@ where
             write_half.write_all(err.to_line()?.as_bytes()).await?;
             return Ok(());
         };
-
-        // Check rate limit for agent count (skip in no_auth mode)
-        if !no_auth && !authenticated_key.is_empty() {
-            let tier = store
-                .get_key_tier(&authenticated_key)
-                .unwrap_or_else(|_| "free".to_string());
-            let limits = TierLimits::for_tier(&tier);
-            if !rate_limiter.check_agent_limit(&authenticated_key, &limits) {
-                let err = Frame::error(
-                    frame.id.as_deref(),
-                    ErrorPayload::new(
-                        ErrorCode::RateLimitAgents,
-                        "Agent limit exceeded for this API key",
-                    ),
-                );
-                write_half.write_all(err.to_line()?.as_bytes()).await?;
-                return Ok(());
-            }
-        }
 
         let stable_identity_requested = payload.agent_id.is_some();
         let agent_id = payload
@@ -979,8 +978,30 @@ where
             }
         }
 
-        // Track agent in rate limiter
-        if !authenticated_key.is_empty() {
+        // Check and claim quota while the lifecycle lock is held. This makes
+        // the limit decision atomic with installing the broker entry. A
+        // same-key live takeover inherits the existing identity's quota slot,
+        // so it neither needs a spare slot nor increments the unique count.
+        let inherits_quota_slot = takeover_rooms.is_some();
+        if !inherits_quota_slot && !no_auth && !authenticated_key.is_empty() {
+            let tier = store
+                .get_key_tier(&authenticated_key)
+                .unwrap_or_else(|_| "free".to_string());
+            let limits = TierLimits::for_tier(&tier);
+            if !rate_limiter.check_agent_limit(&authenticated_key, &limits) {
+                drop(agent_lifecycle_guard);
+                let err = Frame::error(
+                    frame.id.as_deref(),
+                    ErrorPayload::new(
+                        ErrorCode::RateLimitAgents,
+                        "Agent limit exceeded for this API key",
+                    ),
+                );
+                write_half.write_all(err.to_line()?.as_bytes()).await?;
+                return Ok(());
+            }
+        }
+        if !inherits_quota_slot && !authenticated_key.is_empty() {
             rate_limiter.add_agent(&authenticated_key);
         }
 
@@ -1233,10 +1254,10 @@ where
                 }
             }
         }
-        drop(failed_registration_guard);
-        if !agent_api_key.is_empty() {
+        if removed_own_connection && !agent_api_key.is_empty() {
             rate_limiter.remove_agent(&agent_api_key);
         }
+        drop(failed_registration_guard);
         let _ = store.record_session_end(&session_id);
         return Ok(());
     }
@@ -1395,11 +1416,6 @@ where
     // Phase 4: Cleanup on disconnect
     log::info!("Agent disconnected: {} ({})", agent_name, agent_id);
 
-    // Remove from rate limiter
-    if !agent_api_key.is_empty() {
-        rate_limiter.remove_agent(&agent_api_key);
-    }
-
     let cleanup_lifecycle_guard = broker.lock_agent_lifecycle();
 
     // If a newer connection took over this agent_id (take-over / reconnect race),
@@ -1414,6 +1430,13 @@ where
         drop(cleanup_lifecycle_guard);
         let _ = store.record_session_end(&session_id);
         return Ok(());
+    }
+
+    // This session still owns the broker entry and therefore its quota slot.
+    // Keep removal under the lifecycle lock so a concurrent reconnect cannot
+    // observe or inherit a count that cleanup is about to decrement.
+    if !agent_api_key.is_empty() {
+        rate_limiter.remove_agent(&agent_api_key);
     }
 
     // Collect room memberships BEFORE leaving them (for stash)

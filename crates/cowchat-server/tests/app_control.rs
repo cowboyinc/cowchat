@@ -119,3 +119,41 @@ fn pre_ready_app_control_eof_exits_cleanly_and_removes_socket() {
     );
     assert!(!socket.exists(), "owned Unix socket should be removed");
 }
+
+#[test]
+fn key_rotation_refuses_a_live_database_without_touching_the_key() {
+    let temporary = tempfile::tempdir().expect("temporary server directory should be created");
+    let (mut child, socket) = spawn_server(&temporary, Stdio::piped());
+    wait_for_ready(&mut child.0, &socket);
+    let database = temporary.path().join("cowchat.db");
+    let key_file = temporary.path().join("auth.key");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !key_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "server did not create its key before the deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let original_key = std::fs::read_to_string(&key_file).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cowchat-server"))
+        .args(["auth", "rotate-key", "--key-file"])
+        .arg(&key_file)
+        .arg("--db")
+        .arg(&database)
+        .output()
+        .expect("rotation command should launch");
+    assert!(
+        !output.status.success(),
+        "rotation must fail while the server owns the database lock"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&key_file).unwrap(),
+        original_key,
+        "a rejected rotation must not modify the credential"
+    );
+
+    drop(child.0.stdin.take());
+    assert!(wait_for_exit(&mut child.0).success());
+}

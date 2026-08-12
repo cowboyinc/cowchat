@@ -28,8 +28,9 @@ fn read_api_key() -> String {
         .to_string()
 }
 
-async fn connect(key: &str, name: &str) -> CowchatClient {
-    CowchatClient::connect_tcp("127.0.0.1:9229", key, name, None, vec![])
+async fn connect(key: &str, name: &str, run_id: &str) -> CowchatClient {
+    let agent_id = format!("{name}-{run_id}");
+    CowchatClient::connect_tcp("127.0.0.1:9229", key, name, Some(&agent_id), vec![])
         .await
         .unwrap_or_else(|e| panic!("Failed to connect as {name}: {e}"))
 }
@@ -55,22 +56,22 @@ async fn wait_for(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key = read_api_key();
+    let run_id = uuid::Uuid::new_v4().to_string();
 
     // ========================================================
     println!("\n=== PHASE 1: SETUP & PLANNING ===\n");
     // ========================================================
 
     // Connect 3 agents
-    let coordinator = connect(&key, "coordinator").await;
-    let server_dev = connect(&key, "server-dev").await;
-    let client_dev = connect(&key, "client-dev").await;
+    let coordinator = connect(&key, "coordinator", &run_id).await;
+    let server_dev = connect(&key, "server-dev", &run_id).await;
+    let client_dev = connect(&key, "client-dev", &run_id).await;
     println!("  Connected 3 agents:");
     println!("    coordinator: {}", coordinator.agent_id);
     println!("    server-dev:  {}", server_dev.agent_id);
     println!("    client-dev:  {}", client_dev.agent_id);
 
     // Coordinator creates the project room (unique name for re-runnability)
-    let run_id = &uuid::Uuid::new_v4().to_string()[..6];
     let room_name = format!("tictactoe-{run_id}");
     let project = coordinator
         .create_room(&room_name, Some("Tic-tac-toe game project"), None, false)

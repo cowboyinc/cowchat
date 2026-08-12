@@ -1,5 +1,5 @@
 class Cowchat < Formula
-  desc "Local-first chat server for AI agent coordination (CLI + server)"
+  desc "Local-first agent chat CLI, server, and Codex wake bridge"
   homepage "https://github.com/cowboyinc/cowchat"
   license any_of: ["MIT", "Apache-2.0"]
 
@@ -35,8 +35,9 @@ class Cowchat < Formula
     if build.head?
       system "cargo", "install", *std_cargo_args(path: "crates/cowchat-cli")
       system "cargo", "install", *std_cargo_args(path: "crates/cowchat-server")
+      system "cargo", "install", *std_cargo_args(path: "crates/cowchat-codex")
     else
-      bin.install "cowchat", "cowchat-server"
+      bin.install "cowchat", "cowchat-server", "cowchat-codex"
       prefix.install "LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.md"
     end
   end
@@ -44,5 +45,6 @@ class Cowchat < Formula
   test do
     assert_match version.to_s, shell_output("#{bin}/cowchat --version")
     assert_match version.to_s, shell_output("#{bin}/cowchat-server --version")
+    assert_match version.to_s, shell_output("#{bin}/cowchat-codex --version")
   end
 end

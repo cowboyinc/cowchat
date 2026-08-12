@@ -1,5 +1,5 @@
-use cowchat_client::CowchatClient;
-use cowchat_core::{Frame, FrameType, RegisterPayload, VoteStatus};
+use cowchat_client::{ClientError, CowchatClient};
+use cowchat_core::{ErrorCode, Frame, FrameType, RegisterPayload, VoteStatus};
 use cowchat_server::{CowchatServer, ServerConfig};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -2935,6 +2935,110 @@ async fn test_agent_id_takeover_is_bound_to_api_key() {
 }
 
 #[tokio::test]
+async fn test_same_id_takeover_at_agent_limit_reuses_quota_slot() {
+    let (_handle, addr, key, _tmp) = start_test_server().await;
+    let mut agents = Vec::new();
+    for index in 0..20 {
+        let agent_id = format!("quota-agent-{index}");
+        agents.push(
+            CowchatClient::connect_tcp(&addr, &key, &agent_id, Some(&agent_id), vec![])
+                .await
+                .unwrap(),
+        );
+    }
+
+    let rejected =
+        CowchatClient::connect_tcp(&addr, &key, "over-limit", Some("quota-agent-new"), vec![])
+            .await;
+    assert!(matches!(
+        rejected,
+        Err(ClientError::Server {
+            code: ErrorCode::RateLimitAgents,
+            ..
+        })
+    ));
+
+    let replacement = CowchatClient::connect_tcp(
+        &addr,
+        &key,
+        "quota-agent-0 replacement",
+        Some("quota-agent-0"),
+        vec![],
+    )
+    .await
+    .expect("a same-key live takeover should reuse the existing quota slot");
+    replacement.ping().await.unwrap();
+
+    // The displaced connection's cleanup must not release the replacement's
+    // inherited slot and let a twenty-first unique identity through.
+    sleep(Duration::from_millis(100)).await;
+    let still_rejected = CowchatClient::connect_tcp(
+        &addr,
+        &key,
+        "still-over-limit",
+        Some("quota-agent-newer"),
+        vec![],
+    )
+    .await;
+    assert!(matches!(
+        still_rejected,
+        Err(ClientError::Server {
+            code: ErrorCode::RateLimitAgents,
+            ..
+        })
+    ));
+
+    drop((agents, replacement));
+}
+
+#[tokio::test]
+async fn test_concurrent_registrations_cannot_race_past_agent_limit() {
+    let (_handle, addr, key, _tmp) = start_test_server().await;
+    let mut agents = Vec::new();
+    for index in 0..19 {
+        let agent_id = format!("race-quota-agent-{index}");
+        agents.push(
+            CowchatClient::connect_tcp(&addr, &key, &agent_id, Some(&agent_id), vec![])
+                .await
+                .unwrap(),
+        );
+    }
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let mut attempts = Vec::new();
+    for suffix in ["a", "b"] {
+        let addr = addr.clone();
+        let key = key.clone();
+        let barrier = barrier.clone();
+        attempts.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let id = format!("racing-agent-{suffix}");
+            CowchatClient::connect_tcp(&addr, &key, &id, Some(&id), vec![]).await
+        }));
+    }
+    barrier.wait().await;
+    let first = attempts.remove(0).await.unwrap();
+    let second = attempts.remove(0).await.unwrap();
+    let results = [first, second];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(
+                result,
+                Err(ClientError::Server {
+                    code: ErrorCode::RateLimitAgents,
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
+
+    drop((agents, results));
+}
+
+#[tokio::test]
 async fn test_agent_id_ownership_survives_server_restart() {
     let (handle, addr, key_a, tmp) = start_test_server().await;
     let owner =
@@ -2994,6 +3098,74 @@ async fn test_agent_id_ownership_survives_server_restart() {
     )
     .await
     .expect("the original credential must retain its identity after restart");
+    restarted_handle.abort();
+}
+
+#[tokio::test]
+async fn test_primary_key_rotation_preserves_stable_agent_identity() {
+    let (handle, addr, old_key, tmp) = start_test_server().await;
+    let owner = CowchatClient::connect_tcp(
+        &addr,
+        &old_key,
+        "owner",
+        Some("rotation-stable-agent"),
+        vec![],
+    )
+    .await
+    .unwrap();
+    owner.join_room("lobby").await.unwrap();
+    drop(owner);
+    handle.abort();
+    let _ = handle.await;
+
+    let key_path = tmp.path().join("auth.key");
+    let new_key = cowchat_server::auth::rotate_key(&key_path).unwrap();
+    assert_ne!(old_key, new_key);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let restarted_addr = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    let restarted = CowchatServer::new(ServerConfig {
+        socket_path: tmp.path().join("rotated.sock"),
+        tcp_addr: Some(restarted_addr.clone()),
+        http_addr: None,
+        db_path: tmp.path().join("test.db"),
+        auth_key_path: key_path,
+        no_auth: false,
+        allow_keyless_local: false,
+        allow_private_webhooks: true,
+        http_signup_enabled: false,
+        http_admin_secret: None,
+        http_allowed_origins: vec![],
+        trusted_proxy_ips: vec![],
+    })
+    .unwrap();
+    let restarted_handle = tokio::spawn(async move {
+        let _ = restarted.run().await;
+    });
+    sleep(Duration::from_millis(100)).await;
+
+    CowchatClient::connect_tcp(
+        &restarted_addr,
+        &new_key,
+        "owner",
+        Some("rotation-stable-agent"),
+        vec![],
+    )
+    .await
+    .expect("the rotated primary key must retain the stable identity");
+    assert!(
+        CowchatClient::connect_tcp(
+            &restarted_addr,
+            &old_key,
+            "old credential",
+            Some("rotation-stable-agent"),
+            vec![],
+        )
+        .await
+        .is_err(),
+        "the old primary key must no longer authenticate"
+    );
     restarted_handle.abort();
 }
 

@@ -18,19 +18,22 @@ from cowchat import Agent, CowchatError, read_api_key
 
 def main():
     key = read_api_key()
-    run_id = uuid.uuid4().hex[:6]
+    run_id = str(uuid.uuid4())
+    run_label = run_id[:8]
 
     # Connect 3 agents
     print("Connecting agents...")
-    lead = Agent(key, f"lead-{run_id}")
-    dev1 = Agent(key, f"dev-1-{run_id}")
-    dev2 = Agent(key, f"dev-2-{run_id}")
+    lead = Agent(key, f"lead-{run_label}", agent_id=f"lead-{run_id}")
+    dev1 = Agent(key, f"dev-1-{run_label}", agent_id=f"dev-1-{run_id}")
+    dev2 = Agent(key, f"dev-2-{run_label}", agent_id=f"dev-2-{run_id}")
     print(f"  lead:  {lead.agent_id}")
     print(f"  dev-1: {dev1.agent_id}")
     print(f"  dev-2: {dev2.agent_id}")
 
     # Create a room and join
-    room = lead.create_room(f"sprint-{run_id}", description="Sprint planning session")
+    room = lead.create_room(
+        f"sprint-{run_id}", description="Sprint planning session"
+    )
     room_id = room["room_id"]
     print(f"\nCreated room: {room['name']} ({room_id})")
 

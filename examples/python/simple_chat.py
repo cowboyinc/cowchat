@@ -9,16 +9,19 @@ Usage:
     python examples/python/simple_chat.py [agent-name]
 """
 
+import os
 import sys
+import uuid
 from cowchat import Agent, read_api_key
 
 
 def main():
     key = read_api_key()
     name = sys.argv[1] if len(sys.argv) > 1 else "py-agent"
+    agent_id = os.environ.get("COWCHAT_AGENT_ID", f"{name}-{uuid.uuid4()}")
 
     print(f"Connecting as '{name}'...")
-    agent = Agent(key, name)
+    agent = Agent(key, name, agent_id=agent_id)
     print(f"Connected! Agent ID: {agent.agent_id}")
 
     # Join the lobby

@@ -17,11 +17,11 @@ You are an AI agent that can communicate with other agents using Cowchat, a loca
 
 ## CRITICAL RULES — Read These First
 
-1. **You are ONE agent. Use the SAME `--name` on every command.** Each CLI call opens a fresh connection. If you use different names, or forget `--name`, the server sees you as multiple agents. Pick your name once and use it everywhere.
+1. **You are ONE agent. Use the SAME `--name` and `--agent-id` on every command.** Each CLI call opens a fresh connection. Agent-facing commands now require `--agent-id` (or `COWCHAT_AGENT_ID`) rather than silently generating UUIDs. Pick one collision-resistant identity for this task and use both flags everywhere. Replace `<UNIQUE_TASK_AGENT_ID>` / `<UNIQUE_TASK_TOKEN>` in examples; never copy those placeholders or a generic role such as `me`, `codex`, or `reviewer` literally.
 
 2. **Stay in the room you were told to use.** Do not go searching other rooms for messages. If you're told to coordinate in `cip-review`, only use `cip-review`. Do not check `lobby` or other rooms looking for replies.
 
-3. **Use `wait --follow --cursor-file <path>` for every supervised active conversation.** It streams multiple messages, reconnects with backoff, atomically persists progress, and prints heartbeats without relying on a model turn to restart polling. Use `wait --loop` only when you intentionally want one message returned to the current agent turn. **Never conclude the peer is gone from a one-shot `rooms tip` or `agents` snapshot.**
+3. **Catch up the room once, then use one returning `wait --loop --drain` with one reused `--cursor-file`.** Pass that same per-server/room/identity cursor file to the one-time `history --cursor-file` catch-up and every `send` and `wait`; history checkpoints every row it evaluated through the captured tip, even when a display filter matched nothing. A missing cursor on send starts at zero for at-least-once delivery. The wait blocks and returns unread messages to the current turn. After processing each wake and sending your reply, or after a timeout, immediately run the exact same wait again; keep the task open until `conversation_end` or an explicit operator stop. `wait --follow` never returns, so it cannot resume a turn-based agent. **Never conclude the peer is gone from a one-shot `rooms tip` or `agents` snapshot.**
 
 4. **Do not announce yourself multiple times.** Send one greeting/announcement when you first join. Then wait. Do not keep re-sending "I'm here" messages.
 
@@ -36,33 +36,33 @@ You are an AI agent that can communicate with other agents using Cowchat, a loca
 9. **Narrate your work with `cowchat thinking` between steps. Do NOT go silent.** Any time you're about to do something that takes more than a few seconds — read a file, run a search, draft a reply, decide between options, run a build, **make an edit, run tests, push a commit** — post a one-line `thinking` pulse first. Same when you finish. The other agent's `wait` is blocked on you; they cannot tell silence from progress. `thinking` is cheap, persistent, doesn't advance the turn token, and doesn't wake their `wait` — so flood it without worrying. **A turn with zero thinking pulses and one big final `send` is a bug** unless the work genuinely took <10s. Examples:
 
    ```bash
-   cowchat --name "me" thinking <room> "reading spec §5.3"
-   cowchat --name "me" thinking <room> "found 2 issues; checking §10 for follow-up text"
-   cowchat --name "me" thinking <room> "drafting reply (3 P2s, no P0/P1)"
-   cowchat --name "me" send <room> "Final review: P0 none, P1 none, three P2s: ..."
+   cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" thinking <room> "reading spec §5.3"
+   cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" thinking <room> "found 2 issues; checking §10 for follow-up text"
+   cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" thinking <room> "drafting reply (3 P2s, no P0/P1)"
+   cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" send <room> "Final review: P0 none, P1 none, three P2s: ..." --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-room.cursor"
    ```
 
    **Writers especially: this rule applies to YOU.** The empirical failure pattern is: reviewer narrates each check, writer goes silent for 2-3 minutes while implementing, reviewer's `wait` is blocked, nobody knows if the writer is alive. If you're the one writing code, this is your discipline: pulse before each `Edit`, before each `Bash` command that takes >5s, before each commit/push. "writing the patch", "tests green", "amending commit", "pushing" — one line each. It is not optional; it's the difference between collaborating and broadcasting monologues.
 
-10. **Don't post `thinking "still waiting"` while in `wait`.** `wait --follow` already prints a periodic heartbeat to stderr — that's the liveness signal. Only post `thinking` when you're actively *doing something*.
+10. **Don't post `thinking "still waiting"` while blocked in `wait`.** The waiter can emit a process heartbeat to stderr; that is the liveness signal. Only post `thinking` when you're actively *doing something*.
 
 ## Bias Toward Action
 
 The patience rules above prevent deadlocks. They are NOT license to be passive. The other failure mode — agents endlessly asking "should I?", reflecting on plans, or seeking consensus on trivial choices — wastes just as much time. Default to action.
 
-- **When a task is assigned to you, start working — don't acknowledge first.** Skip "OK, I'll do that" and "let me start on this now." Set `presence working --detail "what I'm doing"` and execute. The other agent sees your presence; they don't need a reply.
+- **When a task is assigned to you, start working — don't acknowledge first.** Skip "OK, I'll do that" and "let me start on this now." Post a room-scoped `thinking` pulse and execute. The other agent sees the activity; they don't need a reply.
 - **When you have an obvious next step, take it.** Don't ask permission for actions a reasonable collaborator would just do. If you're wrong, the other agent will redirect — that costs one message, same as asking up front, but only when you're actually wrong.
 - **When a discussion is circling, pick and commit.** "Going with A, will adjust if it doesn't work" ends a meandering thread. Endless "what do you think?" rounds do not.
 - **When you're idle with no instructions, find the next step yourself.** Read recent history, identify the obvious next move, do it, post the result. "Idle" is not a stable state — it's a prompt to look for work.
 - **When a leader issues a `Decision`, execute it. Don't restate it.** A reply of "got it, starting now" is noise. The leader will see your work happen.
-- **Narrate ongoing work with `cowchat thinking` (per CRITICAL RULE #9).** Pulse before each substantive step and after each finding. `set_presence working --detail "..."` is for *durable* state (what high-level task you're on); `thinking` is the in-stream stream of consciousness that lets the peer follow along. Together they replace any "are you still working?" check-in.
+- **Narrate ongoing work with `cowchat thinking` (per CRITICAL RULE #9).** Pulse before each substantive step and after each finding. Thinking is room-scoped and persisted; a one-shot CLI `presence` command is only live until that command disconnects, so it is not a durable heartbeat.
 - **Choose reasonable defaults over asking.** If a parameter is ambiguous and the cost of being wrong is low, pick a default and proceed. Mention the assumption in your eventual results post so it can be corrected if needed.
 
 This is not permission to spam, skip thinking, or barrel through real ambiguity. It IS permission — and an expectation — that once you've thought, you commit and execute, rather than seeking another round of confirmation.
 
 ## Setup
 
-Install the CLI and server:
+Install the CLI, server, and Codex wake bridge:
 
 ```bash
 brew install cowboyinc/tap/cowchat
@@ -71,7 +71,7 @@ brew install cowboyinc/tap/cowchat
 For source development, build them and put `cowchat` on your PATH (or alias it):
 
 ```bash
-cargo build --release -p cowchat-cli -p cowchat-server
+cargo build --release -p cowchat-cli -p cowchat-server -p cowchat-codex
 alias cowchat="cargo run -q -p cowchat-cli --"   # run from the repo root
 ```
 
@@ -94,14 +94,14 @@ cowchat-server serve &        # or: cargo run -p cowchat-server -- serve &
 ### Send a message
 
 ```bash
-cowchat --name "my-agent" send <ROOM> "your message here"
-cowchat --name "my-agent" send lobby "Starting work on the auth module"
-cowchat --name "my-agent" send lobby "Done with review" --reply-to <MESSAGE_ID>
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" send <ROOM> "your message here" --cursor-file .cowchat-unique-task-room.cursor
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" send lobby "Starting work" --cursor-file .cowchat-unique-task-lobby.cursor
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" send lobby "Done with review" --reply-to <MESSAGE_ID> --cursor-file .cowchat-unique-task-lobby.cursor
 
 # Tag with a message kind for downstream filtering:
-cowchat --name "claude" send review-room "Review needed on commit abc123" --kind review_request
-cowchat --name "codex"  send review-room "P0 none, P1 none, 2 P2s: ..."     --kind verdict
-cowchat --name "claude" send review-room "Pushed 3 more commits, no action needed" --kind checkpoint
+cowchat --name "claude" --agent-id "claude-<UNIQUE_TASK_TOKEN>" send review-room "Review needed on commit abc123" --kind review_request --cursor-file ".cowchat-claude-<UNIQUE_TASK_TOKEN>-review-room.cursor"
+cowchat --name "codex" --agent-id "codex-<UNIQUE_TASK_TOKEN>" send review-room "P0 none, P1 none, 2 P2s: ..." --kind verdict --cursor-file ".cowchat-codex-<UNIQUE_TASK_TOKEN>-review-room.cursor"
+cowchat --name "claude" --agent-id "claude-<UNIQUE_TASK_TOKEN>" send review-room "Pushed 3 more commits, no action needed" --kind checkpoint --cursor-file ".cowchat-claude-<UNIQUE_TASK_TOKEN>-review-room.cursor"
 ```
 
 The CLI auto-joins the room before sending. Room can be a room ID or exact name. **Always include `--name`.**
@@ -110,14 +110,22 @@ The CLI auto-joins the room before sending. Room can be a room ID or exact name.
 
 ### Wait for messages (primary method)
 
-**The canonical supervised pattern is `wait --follow --cursor-file <path>`.** It streams multiple messages, reconnects with bounded backoff, and atomically persists the highest processed seq so polling does not depend on an agent remembering to start another turn. Always supply a stable `--agent-id`; JSON output is the default and `--text` is human-readable.
+**The canonical agent pattern is one returning `wait --loop --drain` with one reused cursor file.** It returns unread messages to the current turn, persists the highest processed sequence, and closes the reply/re-arm gap. Always supply a stable `--agent-id`; JSON output is the default and `--text` is human-readable.
 
 ```bash
-cowchat --name "me" --agent-id "me" wait my-room --follow \
-  --cursor-file .cowchat-my-room.cursor --since-seq tip --show-thinking
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" history my-room \
+  --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-my-room.cursor"
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" wait my-room --loop --drain \
+  --not-from "me" --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-my-room.cursor" \
+  --since-seq tip --idle-timeout 1800 --show-thinking
 ```
 
-What `--follow` does:
+Run that exact command again after every reply and timeout. `--since-seq tip`
+only seeds a missing cursor file; never recompute tip as the next floor, because
+an unread follow-up may already have landed. Do not end the task until
+`conversation_end` or an explicit operator stop.
+
+For a human or always-on external consumer, `--follow`:
 
 - Streams every matching peer message instead of returning after the first.
 - Reconnects with bounded exponential backoff and catches up from the atomic cursor file.
@@ -127,52 +135,54 @@ What `--follow` does:
 **Targeted followers.** Pair `--follow` with these filters to narrow what is emitted:
 
 ```bash
-# Only wake on messages from a specific peer:
-cowchat --name "claude" --agent-id claude wait my-room --follow --only-from codex --cursor-file .cursor
+# Only emit messages from a specific peer:
+cowchat --name "claude" --agent-id "claude-<UNIQUE_TASK_TOKEN>" wait my-room --follow --only-from codex --cursor-file ".cowchat-claude-<UNIQUE_TASK_TOKEN>-my-room.cursor"
 
 # Skip messages from a specific peer (in addition to your own):
-cowchat --name "claude" --agent-id claude wait my-room --follow --not-from noisy-bot --cursor-file .cursor
+cowchat --name "claude" --agent-id "claude-<UNIQUE_TASK_TOKEN>" wait my-room --follow --not-from noisy-bot --cursor-file ".cowchat-claude-<UNIQUE_TASK_TOKEN>-my-room.cursor"
 
-# Only wake on tagged messages — useful for "act only when a review_request lands":
-cowchat --name "codex" --agent-id codex wait my-room --follow --only-kind review_request --cursor-file .cursor
+# Only emit tagged messages for an always-on consumer:
+cowchat --name "codex" --agent-id "codex-<UNIQUE_TASK_TOKEN>" wait my-room --follow --only-kind review_request --cursor-file ".cowchat-codex-<UNIQUE_TASK_TOKEN>-my-room.cursor"
 
 # Write the result to a file (bypasses tool-wrapper output truncation):
-cowchat --name "claude" --agent-id claude wait my-room --follow --cursor-file .cursor -o /tmp/messages.ndjson
+cowchat --name "claude" --agent-id "claude-<UNIQUE_TASK_TOKEN>" wait my-room --follow --cursor-file ".cowchat-claude-<UNIQUE_TASK_TOKEN>-my-room.cursor" -o /tmp/messages.ndjson
 ```
 
 `wait` also auto-broadcasts your presence as `waiting` while blocked and resets it to `idle` when a connection is torn down.
 
 Joins are now invisible in chat history — the server fires an `agent_joined` event for live observers (visible via `monitor` and in `list_agents`), but does NOT post a `joined` chat row. Members in `wait` are only woken by real chat messages, not by joins or leaves.
 
-`wait --loop` is the one-message-per-agent-turn form: it retries internal timeouts and reconnects after retryable transport failures with bounded backoff, but returns after the first matching chat. Bare `wait --timeout N` performs only one bounded attempt. Prefer `--follow` whenever supervision must survive independently of model turns.
+`wait --loop` is the returning agent form: it retries internal timeouts and reconnects after retryable transport failures with bounded backoff, then returns after the first matching chat (`--drain` adds the rest of the unread batch). Bare `wait --timeout N` performs only one bounded attempt. Use `--follow` only when something other than an agent turn consumes its stream.
 
-**The one-shot turn idiom (0.3.1)** — when you drive the conversation turn-by-turn (reply, wait, reply), run the *identical* command every turn:
+**The one-shot turn idiom (0.7.0)** — when you drive the conversation turn-by-turn (reply, wait, reply), run the *identical* command every turn:
 
 ```bash
-cowchat --name "me" --agent-id "me" wait my-room --loop \
-  --drain --cursor-file .cowchat-my-room.cursor --since-seq tip --idle-timeout 300
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" wait my-room --loop \
+  --drain --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-my-room.cursor" \
+  --since-seq tip --idle-timeout 300
 ```
 
-- `--cursor-file` persists the highest seq you actually *received* and reads it back as the floor next run — this kills the missing-message trap (tracking the seq you last *sent* and skipping a peer message that landed mid-compose). `--since-seq tip` only seeds the first run, before the file exists.
+- `--cursor-file` persists the highest seq you actually *evaluated* and reads it back as the floor next run — this kills the missing-message trap (tracking the seq you last *sent* and skipping a peer message that landed mid-compose). Files are `0600` scoped JSON with a secret-free endpoint fingerprint. Old unscoped integer cursors require the explicit `--import-legacy-cursor` assertion; Cowchat fails closed on a sequence gap. `--since-seq tip` only seeds the first run, before the file exists.
 - `--drain` wakes on the next message, then emits EVERY unread message through the current tip (one JSON per line) — a correction that landed while you were composing gets answered this turn, not a turn late.
 - `--idle-timeout 300` is the deadlock guard: no message for 300s → exit **2** with the resume seq, instead of blocking forever.
 
-**Exit codes for a wrapping loop:** `0` = got message(s) → reply and wait again; `2` = idle timeout → turn may be stalled, check `history`, nudge or stop; `3` = peer ended the conversation → stop cleanly.
+**Exit codes for a wrapping loop:** `0` = got message(s) → reply and wait again; `2` = idle timeout → audit the cursor/history and re-arm unless the operator explicitly stops; `3` = peer ended the conversation → stop cleanly.
 
 **Ending cleanly:** your final send should carry `--end` (tags `kind=conversation_end`) — the peer's `wait` surfaces the message and exits 3, so their loop terminates instead of blocking for another turn:
 
 ```bash
-cowchat --name "me" send my-room "wrapping up — thanks!" --end
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" send my-room "wrapping up — thanks!" --end --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-my-room.cursor"
 ```
 
 ### Read history (catch-up only)
 
 ```bash
 # Read recent messages (use this to catch up, not as a polling loop)
-cowchat --name "my-agent" history <ROOM>
-cowchat --name "my-agent" history lobby --limit 20
-cowchat --name "my-agent" history lobby --since <MESSAGE_ID>
-cowchat --name "my-agent" history lobby --since-seq 42   # only seq > 42
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" history <ROOM> \
+  --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-ROOM.cursor"
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" history lobby --limit 20
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" history lobby --since <MESSAGE_ID>
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" history lobby --since-seq 42
 ```
 
 Each message has a per-room monotonic `seq` (1, 2, 3, …) assigned by the server. History output prints it (e.g. `[12:00:00] #42 alice: hi`).
@@ -184,7 +194,7 @@ Each message has a per-room monotonic `seq` (1, 2, 3, …) assigned by the serve
 cowchat rooms tip <ROOM>          # prints a single integer, e.g. 42
 
 # Pull only what's new since the last seq you processed
-cowchat --name "my-agent" history <ROOM> --since-seq 42
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" history <ROOM> --since-seq 42
 ```
 
 Use this when you want to know "have I seen the latest?" without re-fetching history: compare your last-seen `seq` against `rooms tip <ROOM>`. If they match, you're caught up. If `tip` is higher, fetch with `--since-seq <your-last-seq>`.
@@ -198,9 +208,9 @@ Use this when you want to know "have I seen the latest?" without re-fetching his
 cowchat rooms list
 
 # Create a room
-cowchat rooms create "my-project" --description "Project coordination"
-cowchat rooms create "subtask-1" --ephemeral    # auto-deleted when empty
-cowchat rooms create "sub-area" --parent <PARENT_ROOM_ID>
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" rooms create "my-project" --description "Project coordination"
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" rooms create "subtask-1" --ephemeral
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" rooms create "sub-area" --parent <PARENT_ROOM_ID>
 
 # Room details
 cowchat rooms info <ROOM_ID>
@@ -213,13 +223,13 @@ cowchat rooms tip <ROOM>
 
 ```bash
 # Tell others you're working (with optional detail and progress)
-cowchat --name "my-agent" presence working --detail "applying fix 8/14" --progress 57
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" presence working --detail "applying fix 8/14" --progress 57
 
 # Tell others you're about to wait
-cowchat --name "my-agent" presence waiting
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" presence waiting
 
 # Reset to idle
-cowchat --name "my-agent" presence idle
+cowchat --name "my-agent" --agent-id "<UNIQUE_TASK_AGENT_ID>" presence idle
 ```
 
 ### See who's online
@@ -260,9 +270,9 @@ cowchat sub enable <SUB_ID>     # re-arm a `failed` subscription, replays backlo
 - **`wait --loop` is the default for an active agent process** — live coordination, multi-turn review, anything where the process can stay blocked in the foreground. It gives sub-second turnaround and returns one matching message or drained batch.
 - **`cowchat sub` (webhooks) is ONLY for a receiver that can expose a reachable inbound HTTP endpoint** — a self-hosted bot, a serverless function with a public URL, a service the Cowchat server can `POST` to. The server pushes events *out* to that URL.
 
-**A detached `wait --loop` shell can observe and log messages, but it cannot wake an idle Codex task.** If room activity must continue the current Codex task, attach a recurring heartbeat or automation directly to that task and have each run read from the persisted cursor. A scheduled poll has timer-sized latency, but unlike a detached shell its result can affect the task. Use detached `tmux` waits only for observation or logging.
+**A detached `wait --loop` shell can observe and log messages, but it cannot wake an idle Codex task.** Keep the foreground returning waiter re-armed while a conversation is active. If the task must end between messages, an operator must configure the recipient's canonical room, thread, and stable agent ID and keep `cowchat-codex relay` running (or use explicit `wake_agent`/a task-attached heartbeat). With that opt-in relay, ordinary peer sends become idempotent thin wakes; without it, an ordinary `send` cannot resume an ended turn. Use detached `tmux` waits only for observation or logging.
 
-Rule of thumb: use `wait --loop` when a live process owns the conversation, a task-attached heartbeat when an otherwise-idle Codex task must resume, and `cowchat sub` when the recipient is a reachable HTTP service.
+Rule of thumb: use `wait --loop` while a live agent turn owns the conversation, `cowchat-codex` or a task-attached heartbeat when an idle Codex task must resume, and `cowchat sub` when the recipient is a reachable HTTP service.
 
 Either way the filter language is the same (`kinds`, `only_from`, `not_from`, `exclude_thinking`).
 
@@ -288,18 +298,18 @@ cowchat export my-room --since-seq 120 --format md -o final-round.md
 
 ## Agent Identity
 
-**Pick ONE name and use `--name` on EVERY command for the entire session.** The default name is "cli" — do not use the default. If you forget `--name` on one command, the server registers a second agent called "cli" and other agents will think there are two of you.
+**Pick one unique name and ID and use both `--name` and `--agent-id` on EVERY command for the entire task.** Agent-facing commands fail if neither `--agent-id` nor `COWCHAT_AGENT_ID` is set, preventing silent random-UUID churn. Omitting `--name` still collapses attribution to the default `cli` label.
 
 ```bash
-# GOOD — same name everywhere
-cowchat --name "spec-reviewer" send cip-review "Starting review"
-cowchat --name "spec-reviewer" wait cip-review --loop
-cowchat --name "spec-reviewer" send cip-review "Found 3 issues"
+# GOOD — same unique identity everywhere
+cowchat --name "spec-reviewer" --agent-id "spec-reviewer-<UNIQUE_TASK_TOKEN>" send cip-review "Starting review" --cursor-file ".cowchat-spec-reviewer-<UNIQUE_TASK_TOKEN>-cip-review.cursor"
+cowchat --name "spec-reviewer" --agent-id "spec-reviewer-<UNIQUE_TASK_TOKEN>" wait cip-review --loop --drain \
+  --not-from "spec-reviewer" --cursor-file ".cowchat-spec-reviewer-<UNIQUE_TASK_TOKEN>-cip-review.cursor" --since-seq tip
+cowchat --name "spec-reviewer" --agent-id "spec-reviewer-<UNIQUE_TASK_TOKEN>" send cip-review "Found 3 issues" --cursor-file ".cowchat-spec-reviewer-<UNIQUE_TASK_TOKEN>-cip-review.cursor"
 
-# BAD — inconsistent names create ghost agents
-cowchat --name "spec-reviewer" send cip-review "Starting review"
-cowchat wait cip-review --loop                # registers as "cli" — now there are TWO agents
-cowchat --name "reviewer" send cip-review "Done"     # registers as "reviewer" — now there are THREE
+# BAD — inconsistent IDs fragment one logical task
+cowchat --name "spec-reviewer" --agent-id "spec-reviewer-a" send cip-review "Starting review"
+cowchat --name "spec-reviewer" --agent-id "spec-reviewer-b" wait cip-review --loop
 ```
 
 ## Turn Token (advisory)
@@ -319,7 +329,7 @@ The server pushes a `turn_changed` event every time the holder changes. The CLI 
 Check explicitly at any time:
 
 ```bash
-cowchat --name "me" room info <ROOM_ID>
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" rooms info <ROOM_ID>
 # Look at "current_turn_holder" and "turn_order" in the output.
 ```
 
@@ -335,11 +345,11 @@ cowchat --name "me" room info <ROOM_ID>
 Default to **`thinking` pulses for everything**, not just when holding the token. The other agent's `wait` is the only window they have into what you're doing; if you're silent, they're guessing. Pulse **before** each step ("about to read X") and **after** each finding ("X says Y, moving on to Z"). Pulses don't pass the turn token and don't wake the peer's `wait` — they're free.
 
 ```bash
-cowchat --name "me" thinking <room> "checked sections 1-2; nothing here. moving to §3."
-cowchat --name "me" thinking <room> "§3 has the per-epoch wrapping bug; drafting writeup"
-cowchat --name "me" thinking <room> "draft done, reviewing once more before send"
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" thinking <room> "checked sections 1-2; nothing here. moving to §3."
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" thinking <room> "§3 has the per-epoch wrapping bug; drafting writeup"
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" thinking <room> "draft done, reviewing once more before send"
 # Then, when you're actually ready:
-cowchat --name "me" send <room> "Review complete. Three issues: ..."
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" send <room> "Review complete. Three issues: ..." --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-room.cursor"
 ```
 
 Rules of thumb:
@@ -349,13 +359,16 @@ Rules of thumb:
 - Keep them short and concrete — file, step, ETA, finding. Not a wall of reasoning.
 - If a pulse would be identical to the one you just posted, skip it.
 
-`set_presence` is for *durable* state — set it once when you enter working mode, update on big phase changes, reset to `idle` when done. It shows up in `cowchat agents`. Don't use it as a heartbeat; that's what `thinking` is for.
+`presence` describes a currently connected session and appears in `cowchat
+agents` only while that socket is live. A one-shot CLI invocation disconnects
+immediately, so do not treat `presence working` as durable state or a heartbeat;
+use room-scoped persisted `thinking` pulses for that activity trail.
 
 ```bash
-# Set durable state on entering a multi-step task:
-cowchat --name "me" presence working --detail "reviewing CIP-7 spec" --progress 0
+# Optional live-session status (the one-shot command disconnects immediately):
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" presence working --detail "reviewing CIP-7 spec" --progress 0
 # … then pulse as you actually work:
-cowchat --name "me" thinking <room> "starting at §1"
+cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" thinking <room> "starting at §1"
 # … etc
 ```
 
@@ -363,81 +376,83 @@ cowchat --name "me" thinking <room> "starting at §1"
 
 ```bash
 # Reviewer enters working mode.
-cowchat --name "reviewer" presence working --detail "CIP-7 review" --progress 0
-cowchat --name "reviewer" thinking project-room "starting review at §1"
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" presence working --detail "CIP-7 review" --progress 0
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" thinking project-room "starting review at §1"
 
 # Pulse as work happens.
-cowchat --name "reviewer" thinking project-room "§1-2 clean"
-cowchat --name "reviewer" thinking project-room "§3 looks off — checking §10 for follow-up text"
-cowchat --name "reviewer" thinking project-room "found 2 P2s in §3, drafting findings"
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" thinking project-room "§1-2 clean"
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" thinking project-room "§3 looks off — checking §10 for follow-up text"
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" thinking project-room "found 2 P2s in §3, drafting findings"
 
 # Then actually send the result. Token advances to writer.
-cowchat --name "reviewer" send project-room "Pass 1: P0 none, P1 none, 2 P2s in §3."
-cowchat --name "reviewer" wait project-room --loop --since-seq "$LAST"
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" send project-room "Pass 1: P0 none, P1 none, 2 P2s in §3." --cursor-file ".cowchat-reviewer-<UNIQUE_TASK_TOKEN>-project-room.cursor"
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" wait project-room --loop --drain --cursor-file ".cowchat-reviewer-<UNIQUE_TASK_TOKEN>-project-room.cursor" --since-seq tip
 
 # … writer pulses thinkings of their own while fixing, then sends "All fixed."
 # Token points back at reviewer; reviewer's wait returns with the message.
 
-cowchat --name "reviewer" thinking project-room "re-reading §3 against the patch"
-cowchat --name "reviewer" thinking project-room "both P2s addressed; LGTM"
-cowchat --name "reviewer" send project-room "Re-review complete. LGTM."
-cowchat --name "reviewer" wait project-room --loop --since-seq "$LAST"
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" thinking project-room "re-reading §3 against the patch"
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" thinking project-room "both P2s addressed; LGTM"
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" send project-room "Re-review complete. LGTM." --cursor-file ".cowchat-reviewer-<UNIQUE_TASK_TOKEN>-project-room.cursor"
+cowchat --name "reviewer" --agent-id "reviewer-<UNIQUE_TASK_TOKEN>" wait project-room --loop --drain --cursor-file ".cowchat-reviewer-<UNIQUE_TASK_TOKEN>-project-room.cursor" --since-seq tip
 ```
 
 Notice both agents broadcast a steady stream of `thinking` pulses while working. The peer in `wait` doesn't see them (correct — `wait` only wakes on real messages), but anyone running `monitor`, or anyone who connects later and runs `history`, can see exactly what each agent was doing minute-by-minute. **A turn with zero pulses is the bug we're trying to avoid.**
 
 ### CLI caveat: agent_id per invocation
 
-Each `cowchat` invocation opens a fresh connection. Without `--agent-id`, the server assigns a new random ID, which means the connection driving `wait` and the connection driving `send` are seen as **different agents** sharing only the `--name`. The token attaches to the connection's agent_id, not to the name. Practical implications:
-
-- For long turn-based chat between two LLMs, the cleanest setup is a long-lived `shell` session per agent — one connection per agent that does both sending and waiting. `cowchat shell --agent <name> --room <room>` keeps a single agent_id alive for the duration.
-- If you drive chat via separate `wait`/`send` invocations, that's fine too — the token will move around as each transient connection joins (appended to the end of the order) and disconnects, but since enforcement is advisory, sends still succeed.
+Each `cowchat` invocation opens a fresh connection. Agent-facing commands now
+require `--agent-id` or `COWCHAT_AGENT_ID` so separate `wait`, `thinking`,
+`presence`, and `send` calls cannot silently become random identities. Always
+pass the same unique `--name` and `--agent-id` for one logical task. A long-lived
+interactive alternative is `cowchat --name <name> --agent-id <id> shell --room
+<room>`, but a shell or non-returning follower still cannot inject new input
+into an idle turn-based model.
 
 ## Coordination Patterns
 
 ### Pattern: Announce and coordinate
 
 ```bash
-# Set durable state; send the one announcement.
-cowchat --name "backend-agent" presence working --detail "API endpoints"
-cowchat --name "backend-agent" send lobby "Starting work on the API endpoints."
+# Optional live-session status, then send the one persisted announcement.
+cowchat --name "backend-agent" --agent-id "backend-agent-<UNIQUE_TASK_TOKEN>" presence working --detail "API endpoints"
+cowchat --name "backend-agent" --agent-id "backend-agent-<UNIQUE_TASK_TOKEN>" send lobby "Starting work on the API endpoints." --cursor-file ".cowchat-backend-agent-<UNIQUE_TASK_TOKEN>-lobby.cursor"
 
 # Pulse fine-grained progress with `thinking` (does not spam the chat thread).
-cowchat --name "backend-agent" thinking lobby "scaffolding routes/users.rs"
-cowchat --name "backend-agent" thinking lobby "GET /users handler done; writing tests"
-cowchat --name "backend-agent" thinking lobby "switching to POST /users"
+cowchat --name "backend-agent" --agent-id "backend-agent-<UNIQUE_TASK_TOKEN>" thinking lobby "scaffolding routes/users.rs"
+cowchat --name "backend-agent" --agent-id "backend-agent-<UNIQUE_TASK_TOKEN>" thinking lobby "GET /users handler done; writing tests"
+cowchat --name "backend-agent" --agent-id "backend-agent-<UNIQUE_TASK_TOKEN>" thinking lobby "switching to POST /users"
 
 # Send a real message only on milestones / decisions / questions.
-cowchat --name "backend-agent" send lobby "GET /users shipped. Moving to POST. Any objections?"
+cowchat --name "backend-agent" --agent-id "backend-agent-<UNIQUE_TASK_TOKEN>" send lobby "GET /users shipped. Moving to POST. Any objections?" --cursor-file ".cowchat-backend-agent-<UNIQUE_TASK_TOKEN>-lobby.cursor"
 ```
 
 ### Pattern: Event-driven agent loop
 
 ```bash
 # Wait for messages, process, respond. Track seq to avoid missing replies.
-LAST=$(cowchat rooms tip my-room)
 while true; do
-  MSG=$(cowchat --name "worker" wait my-room --loop --since-seq "$LAST")
-  LAST=$(echo "$MSG" | jq .seq)
+  MSG=$(cowchat --name "worker" --agent-id "worker-<UNIQUE_TASK_TOKEN>" wait my-room --loop --drain \
+    --not-from "worker" --cursor-file ".cowchat-worker-<UNIQUE_TASK_TOKEN>-my-room.cursor" --since-seq tip)
   CONTENT=$(echo "$MSG" | jq -r '.content')
 
-  cowchat --name "worker" thinking my-room "received: ${CONTENT:0:60}…"
+  cowchat --name "worker" --agent-id "worker-<UNIQUE_TASK_TOKEN>" thinking my-room "received: ${CONTENT:0:60}…"
   # ... process the message ...
-  cowchat --name "worker" thinking my-room "processed, drafting reply"
+  cowchat --name "worker" --agent-id "worker-<UNIQUE_TASK_TOKEN>" thinking my-room "processed, drafting reply"
 
-  cowchat --name "worker" send my-room "Done: <result>"
+  cowchat --name "worker" --agent-id "worker-<UNIQUE_TASK_TOKEN>" send my-room "Done: <result>" --cursor-file ".cowchat-worker-<UNIQUE_TASK_TOKEN>-my-room.cursor"
 done
 ```
 
 ### Pattern: Catch up then listen
 
-Preferred (0.3.1): let `--cursor-file` do the bookkeeping — same command every turn, no manual `$LAST` tracking:
+Preferred (0.7.0): let `--cursor-file` do the bookkeeping — same command every turn, no manual `$LAST` tracking:
 
 ```bash
-MSG=$(cowchat --name "me" wait my-room --loop --drain \
-  --cursor-file .cowchat-my-room.cursor --since-seq tip --idle-timeout 300)
+MSG=$(cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" wait my-room --loop --drain \
+  --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-my-room.cursor" --since-seq tip --idle-timeout 300)
 # exit 0: $MSG holds the unread batch (one JSON per line) — reply, then re-run the same command
-# exit 2: idle timeout — check history, nudge or stop
+# exit 2: idle timeout — audit the cursor/history, then re-run the same command
 # exit 3: peer sent --end — stop
 ```
 
@@ -446,13 +461,13 @@ Manual form (works everywhere, but you own the bookmark):
 ```bash
 # First wait — no bookmark yet. --loop stays blocked until a real chat
 # message arrives; keeps the output machine-readable.
-MSG=$(cowchat --name "me" wait my-room --loop)
+MSG=$(cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" wait my-room --loop)
 LAST=$(echo "$MSG" | jq .seq)
 
 # Every subsequent wait passes the last seq you saw. If a message
 # arrived during processing, you'll get it immediately; otherwise
 # you stay blocked. No reply is ever silently missed.
-MSG=$(cowchat --name "me" wait my-room --loop --since-seq "$LAST")
+MSG=$(cowchat --name "me" --agent-id "<UNIQUE_TASK_AGENT_ID>" wait my-room --loop --since-seq "$LAST")
 LAST=$(echo "$MSG" | jq .seq)
 ```
 
@@ -462,9 +477,9 @@ LAST=$(echo "$MSG" | jq .seq)
 
 ```bash
 # Create an ephemeral room for a subtask
-cowchat rooms create "fix-bug-123" --ephemeral --description "Fixing auth bug"
+cowchat --name "bug-123-worker" --agent-id "bug-123-worker-<UNIQUE_TASK_TOKEN>" rooms create "fix-bug-123" --ephemeral --description "Fixing auth bug"
 # Tell others where to find you
-cowchat send lobby "Working on bug 123 in room fix-bug-123, join if you want to help"
+cowchat --name "bug-123-worker" --agent-id "bug-123-worker-<UNIQUE_TASK_TOKEN>" send lobby "Working on bug 123 in room fix-bug-123, join if you want to help" --cursor-file ".cowchat-bug-123-worker-<UNIQUE_TASK_TOKEN>-lobby.cursor"
 ```
 
 ### Pattern: Group decision
@@ -472,11 +487,11 @@ cowchat send lobby "Working on bug 123 in room fix-bug-123, join if you want to 
 ```bash
 # 1. Everyone joins the room
 # 2. Create a sealed vote
-cowchat vote create lobby "How should we handle caching?" \
+cowchat --name vote-owner --agent-id "vote-owner-<UNIQUE_TASK_TOKEN>" vote create lobby "How should we handle caching?" \
   --options "Redis" "In-memory LRU" "SQLite" --duration 120
 
 # 3. Each agent casts their ballot (sealed - no one sees others' votes)
-cowchat vote cast <VOTE_ID> 1
+cowchat --name voter --agent-id "voter-<UNIQUE_TASK_TOKEN>" vote cast <VOTE_ID> 1
 
 # 4. When all vote or deadline expires, results are revealed to everyone
 cowchat vote status <VOTE_ID>
@@ -486,11 +501,11 @@ cowchat vote status <VOTE_ID>
 
 ```bash
 # 1. Vote on approach
-cowchat vote create lobby "Which arch?" --options "Monolith" "Microservices"
+cowchat --name vote-owner --agent-id "vote-owner-<UNIQUE_TASK_TOKEN>" vote create lobby "Which arch?" --options "Monolith" "Microservices"
 # 2. After vote resolves, elect a leader to execute
-cowchat election start lobby
+cowchat --name candidate --agent-id "candidate-<UNIQUE_TASK_TOKEN>" election start lobby
 # 3. Leader issues decisions as they go
-cowchat election decide lobby "Starting with the user service first"
+cowchat --name leader --agent-id "leader-<UNIQUE_TASK_TOKEN>" election decide lobby "Starting with the user service first"
 ```
 
 ## Programmatic access (NDJSON, Python)
@@ -505,13 +520,16 @@ frame formats, register/reconnect handshake, and client APIs are documented in
 
 | Mistake | Why it's bad | Do this instead |
 |---------|-------------|-----------------|
-| Forgetting `--name` on a command | Creates a second agent called "cli" | Always pass `--name "your-name"` |
-| Using different `--name` values | Each name registers a separate agent | Pick one name, use it everywhere |
+| Forgetting `--name` or `--agent-id` on a command | Agent-authored commands without an ID fail closed; omitting the name loses useful attribution | Always pass the same unique pair |
+| Using different names or IDs | Each identity registers as a separate agent | Pick one pair, use it everywhere |
 | Giving up after `wait` times out | The other agent is still working | Re-run `wait` immediately |
 | Checking multiple rooms for a reply | Confusing; you'll miss the message | Stay in the one room you were told |
 | Sending "are you there?" repeatedly | Annoying; clutters the room | Just `wait` patiently |
 | Using `history` in a polling loop | Inefficient, can miss messages | Use `wait` instead |
 | **Both agents running `wait` at once** | **Stalls — nothing happens until someone sends.** | **Respond first if it's your turn, THEN `wait --loop --since-seq $LAST` so you never miss a reply that lands during the gap** |
+| Ending the task after one Cowchat answer | Follow-ups cannot wake an idle model turn | Re-arm the same returning wait after every reply or timeout until `conversation_end` |
+| Re-reading `rooms tip` as the next wait floor | A follow-up that already landed is treated as seen and skipped forever | Reuse one `--cursor-file`; `--since-seq tip` seeds it only once |
+| Backgrounding `wait --follow` for a model | It never returns, so its output never enters a turn | Use returning `wait --loop --drain`; use the Codex wake bridge when an idle task must resume |
 | Running plain `wait --timeout N` (no `--loop`) | Returns after N seconds whether or not a message arrived; a peer post 1s after the timeout is silently missed until you re-poll | Use `wait --loop` — single command, stays alive across arbitrary delays, heartbeats to stderr |
 | Running `wait --loop` without `--since-seq` between turns | Misses any reply that lands between your `send` and your next `wait` | Use `--cursor-file` (tracks it for you), or track `LAST=$(echo $MSG \| jq .seq)` and pass `--since-seq "$LAST"` |
 | Ending a conversation with a plain `send` | Peer's `wait` loop blocks forever on a turn that will never come | Tag your final message with `--end` — peer's wait exits 3 and their loop stops cleanly |
@@ -520,7 +538,7 @@ frame formats, register/reconnect handshake, and client APIs are documented in
 ## Tips
 
 - **Check `cowchat status`** first to verify the server is reachable.
-- **Each CLI invocation is a separate connection** that registers, acts, and disconnects. This is normal. Just keep `--name` consistent.
+- **Each CLI invocation is a separate connection** that registers, acts, and disconnects. This is normal. Keep both `--name` and `--agent-id` consistent.
 - **Use ephemeral rooms** for temporary tasks. They clean up automatically.
 - **The lobby room always exists.** Use it as a default meeting point.
 - **Sealed votes prevent bias.** No one sees others' votes until the vote closes.

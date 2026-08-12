@@ -30,9 +30,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let name = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "example-agent".to_string());
+    let agent_id = std::env::var("COWCHAT_AGENT_ID")
+        .unwrap_or_else(|_| format!("{name}-{}", uuid::Uuid::new_v4()));
 
     println!("Connecting as '{name}'...");
-    let client = CowchatClient::connect_tcp("127.0.0.1:9229", &key, &name, None, vec![]).await?;
+    let client =
+        CowchatClient::connect_tcp("127.0.0.1:9229", &key, &name, Some(&agent_id), vec![]).await?;
     println!("Connected! Agent ID: {}", client.agent_id);
 
     // Join the lobby

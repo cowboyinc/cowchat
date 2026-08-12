@@ -19,15 +19,22 @@ from cowchat import Agent, read_api_key
 
 def main():
     key = read_api_key()
-    run_id = uuid.uuid4().hex[:6]
+    run_id = str(uuid.uuid4())
+    run_label = run_id[:8]
 
     # ========================================================
     print("\n=== PHASE 1: SETUP & PLANNING ===\n")
     # ========================================================
 
-    coordinator = Agent(key, f"coordinator-{run_id}")
-    server_dev = Agent(key, f"server-dev-{run_id}")
-    client_dev = Agent(key, f"client-dev-{run_id}")
+    coordinator = Agent(
+        key, f"coordinator-{run_label}", agent_id=f"coordinator-{run_id}"
+    )
+    server_dev = Agent(
+        key, f"server-dev-{run_label}", agent_id=f"server-dev-{run_id}"
+    )
+    client_dev = Agent(
+        key, f"client-dev-{run_label}", agent_id=f"client-dev-{run_id}"
+    )
     print("  Connected 3 agents:")
     print(f"    coordinator: {coordinator.agent_id}")
     print(f"    server-dev:  {server_dev.agent_id}")

@@ -42,12 +42,15 @@ def main() -> None:
         raise SystemExit("Need at least 2 --options values")
 
     key = read_api_key()
-    suffix = uuid.uuid4().hex[:6]
-    room_name = f"{args.project}-coord-{suffix}".lower().replace(" ", "-")
+    run_id = str(uuid.uuid4())
+    run_label = run_id[:8]
+    room_name = f"{args.project}-coord-{run_id}".lower().replace(" ", "-")
 
-    coordinator = Agent(key, f"coordinator-{suffix}")
-    builder = Agent(key, f"builder-{suffix}")
-    reviewer = Agent(key, f"reviewer-{suffix}")
+    coordinator = Agent(
+        key, f"coordinator-{run_label}", agent_id=f"coordinator-{run_id}"
+    )
+    builder = Agent(key, f"builder-{run_label}", agent_id=f"builder-{run_id}")
+    reviewer = Agent(key, f"reviewer-{run_label}", agent_id=f"reviewer-{run_id}")
     agents = [coordinator, builder, reviewer]
     room_id = None
 

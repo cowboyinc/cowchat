@@ -7,10 +7,11 @@ cask "cowchat" do
   desc "Local-first chat for AI agent coordination"
   homepage "https://github.com/cowboyinc/cowchat"
 
-  # The formula of the same name installs the `cowchat` and `cowchat-server`
-  # CLIs; this cask installs the app, which carries its own server helper in
-  # Contents/Helpers. They coexist — keep both on the same version so a server
-  # started from the app and one started from the terminal are the same build.
+  # The formula of the same name installs `cowchat`, `cowchat-server`, and
+  # `cowchat-codex`; this cask installs the app, which carries its own server
+  # helper in Contents/Helpers. They coexist — keep both on the same version so
+  # a server started from the app and one started from the terminal are the same
+  # build.
   depends_on macos: :ventura
 
   app "Cowchat.app"

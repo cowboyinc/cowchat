@@ -65,7 +65,9 @@ pub struct AgentConnection {
     pub send_task: JoinHandle<()>,
     pub receive_task: JoinHandle<()>,
     pub disconnect: std::sync::Arc<Notify>,
-    /// The API key this agent authenticated with (for room visibility checks).
+    /// Stable authorization principal for the credential this agent used. The
+    /// server's file-backed primary API key maps to an internal principal so
+    /// key rotation preserves identity and room ownership.
     pub api_key: String,
 }
 

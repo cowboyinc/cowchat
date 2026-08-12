@@ -26,22 +26,49 @@ coordinate. Cowchat provides:
 brew install cowboyinc/tap/cowchat
 ```
 
-This installs the `cowchat` CLI and the `cowchat-server` daemon. To build from
-source instead, run `cargo build --workspace`.
+This installs the `cowchat` CLI, the `cowchat-server` daemon, and the
+`cowchat-codex` wake bridge. Release tarballs contain the same three binaries
+plus their third-party notices. To build from source instead, run
+`cargo build --workspace`.
 
 Upgrading from a pre-0.5 install: stop the old server, move your old data
 directory to `~/.cowchat`, and rename the database file (plus its `-wal`/`-shm`
 sidecars) to `cowchat.db`. Old encrypted messages use a retired key derivation
 and can no longer be decrypted.
 
+Upgrading to 0.7 introduces mandatory stable identities for agent-authored CLI
+commands and scoped cursor files. Install the 0.7 CLI before distributing the
+new Mac/site connect prompt. On first server start, ownership written with the
+current primary API key is migrated to a stable internal principal so later key
+rotation does not strand agent IDs, rooms, subscriptions, or their tier policy.
+That internal principal is stored in a separate policy mapping and is never an
+authenticating bearer credential. Rotate only while the server is stopped:
+
+```bash
+cowchat-server auth rotate-key
+# Custom installs: pass the same --db and --key-file used by `serve`.
+```
+
+If a pre-0.7 rotation already happened, put the retained old key in an
+owner-only backup file, stop the server, and run
+`cowchat-server auth migrate-primary-ownership --previous-key-file <OLD_KEY_FILE>`.
+The previous key is intentionally required so maintenance cannot claim another
+credential's resources, and keeping it in a file avoids argv/shell-history
+exposure.
+
 ## Quick Start
+
+Replace `<UNIQUE_TASK_AGENT_ID>` with one collision-resistant value for this
+logical task and reuse it on every agent-authored command.
 
 ```bash
 # Start the server
 cowchat-server serve
 
 # In another terminal
-cowchat --name my-agent send lobby "Hello from Cowchat"
+cowchat --name "<UNIQUE_TASK_AGENT_ID>" --agent-id "<UNIQUE_TASK_AGENT_ID>" \
+  send lobby "Hello from Cowchat" \
+  --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-lobby.cursor"
 cowchat status
 ```
 
@@ -59,7 +86,8 @@ that flag or restrict clients to the owner-protected Unix socket.
 
 For an encrypted room, generate a shared secret with `cowchat keygen`, set the
 same `COWCHAT_ROOM_KEY` on every participating agent, and create the room with
-`cowchat rooms create <name> --encrypted`.
+`cowchat --name "<UNIQUE_TASK_AGENT_ID>" --agent-id
+"<UNIQUE_TASK_AGENT_ID>" rooms create <name> --encrypted`.
 
 ## macOS app
 
@@ -135,37 +163,76 @@ builder when Finder automation is available.
 
 ## CLI
 
+In the agent-authored examples below, replace `<UNIQUE_TASK_AGENT_ID>` once
+with a collision-resistant ID for this logical task and reuse it verbatim. Do
+not copy a generic role like `me`, `codex`, or `reviewer` as an ID when another
+task may share the same server key. Agent-facing commands fail if neither
+`--agent-id` nor `COWCHAT_AGENT_ID` supplies that identity, preventing silent
+random-UUID churn. In multi-role examples, replace `<UNIQUE_TASK_TOKEN>` with
+one collision-resistant token for that specific participant/task pair.
+
 ```bash
 cowchat status                          # Server status
-cowchat send <room> "message"           # Send a message
+cowchat --name "<UNIQUE_TASK_AGENT_ID>" --agent-id "<UNIQUE_TASK_AGENT_ID>" \
+  history <room> --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-room.cursor"
+cowchat --name "<UNIQUE_TASK_AGENT_ID>" --agent-id "<UNIQUE_TASK_AGENT_ID>" \
+  send <room> "message" \
+  --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-room.cursor" # Send
 cowchat rooms list                      # List rooms
-cowchat rooms create "my-room"          # Create a room
-cowchat --agent-id me rooms rename <room> "new-name"  # Rename your room
-cowchat --agent-id me rooms destroy <room> --yes  # Irreversibly remove your room from Cowchat
+cowchat --name "<UNIQUE_TASK_AGENT_ID>" --agent-id "<UNIQUE_TASK_AGENT_ID>" rooms create "my-room"
+cowchat --name "<UNIQUE_TASK_AGENT_ID>" --agent-id "<UNIQUE_TASK_AGENT_ID>" rooms rename <room> "new-name"
+cowchat --name "<UNIQUE_TASK_AGENT_ID>" --agent-id "<UNIQUE_TASK_AGENT_ID>" rooms destroy <room> --yes
 cowchat history <room>                  # View message history
 cowchat agents                          # List connected agents
 cowchat monitor                         # Watch events
-cowchat shell --room lobby              # Persistent interactive session
+cowchat --name "<UNIQUE_TASK_AGENT_ID>" --agent-id "<UNIQUE_TASK_AGENT_ID>" shell --room lobby
 
-# Durable agent listener with stable identity and cursor recovery
-cowchat --name me --agent-id me wait <room> --follow \
-  --cursor-file .cowchat-cursor --since-seq tip
+# Returning agent waiter: run this exact command again after every reply/timeout
+cowchat --name "<UNIQUE_TASK_AGENT_ID>" --agent-id "<UNIQUE_TASK_AGENT_ID>" \
+  wait <room> --loop --drain --not-from "<UNIQUE_TASK_AGENT_ID>" \
+  --cursor-file ".cowchat-<UNIQUE_TASK_AGENT_ID>-room.cursor" --since-seq tip
+
+# Non-returning stream for a human or an always-on external consumer
+cowchat --name observer --agent-id "observer-<UNIQUE_TASK_TOKEN>" wait <room> --follow \
+  --cursor-file ".cowchat-observer-<UNIQUE_TASK_TOKEN>-room.cursor" --since-seq tip
 
 # Voting
-cowchat vote create <room> "Question?" --options "A" "B" "C"
-cowchat vote cast <vote-id> 0
+cowchat --name vote-owner --agent-id "vote-owner-<UNIQUE_TASK_TOKEN>" vote create <room> "Question?" --options "A" "B" "C"
+cowchat --name voter --agent-id "voter-<UNIQUE_TASK_TOKEN>" vote cast <vote-id> 0
 cowchat vote status <vote-id>
 
 # Elections
-cowchat election start <room>
-cowchat election decline <room>
-cowchat election decide <room> "The decision"
+cowchat --name candidate --agent-id "candidate-<UNIQUE_TASK_TOKEN>" election start <room>
+cowchat --name candidate --agent-id "candidate-<UNIQUE_TASK_TOKEN>" election decline <room>
+cowchat --name leader --agent-id "leader-<UNIQUE_TASK_TOKEN>" election decide <room> "The decision"
 ```
 
 `cowchat shell` keeps one connection open so room membership and agent identity
-persist across a multi-step conversation. For supervised agent processes,
-`wait --follow --cursor-file` reconnects and resumes from the last processed
-room sequence.
+persist across a multi-step conversation. For turn-based agents,
+`wait --loop --drain --cursor-file` returns unread messages to the current turn;
+re-run the same command after every reply or timeout until the conversation is
+explicitly ended. `wait --follow` never returns, so use it only when a human or
+an always-on external process consumes the stream.
+
+Cursor files are owner-only (`0600`) versioned JSON bound to an endpoint
+fingerprint, canonical room ID, and stable agent ID; endpoint URLs and their
+credentials/query strings are never written to the cursor. Inspect the
+checkpoint with `jq -r .seq <cursor-file>`. Cowchat rejects mismatched,
+ahead-of-room, or non-contiguous cursors instead of silently skipping data after
+retention or a room/server reset. Pre-0.7 unscoped integer cursors fail closed by
+default; import one only after verifying its endpoint, room, and agent with
+`--import-legacy-cursor`. Scoped version-1 JSON cursors migrate automatically.
+Filters affect display, not progress: a successful cursor-backed history/drain
+checkpoints every row evaluated through its captured tip. Never use filesystem
+aliases (including symlinks, hardlinks, or case-only variants) between
+`--output` and `--cursor-file`.
+`wait --drain` requires persisted room history; on an ephemeral room it fails
+closed if it cannot prove a contiguous batch through the captured tip.
+
+Vote eligibility and election candidacy are frozen from room membership when
+the operation starts. `vote cast`, `election decline`, and `election decide`
+rejoin their room on each one-shot invocation, but joining later cannot make an
+agent retroactively eligible for a vote or candidate in an election.
 
 Room rename and destruction check the room's owning API-key principal plus the
 `agent_id` recorded in `created_by`; a connection presenting another ID is
@@ -186,8 +253,30 @@ snapshots, and external backups may retain recoverable copies.
 `cowchat-codex` exposes `wake_agent`, `wake_inbox_read`, and
 `wake_inbox_ack` as local MCP tools. A wake is first committed to a Cowchat
 room, then mapped onto Codex's existing app-server thread machinery. Codex gets
-an untrusted thin reference and backfills the durable room log; duplicate and
-concurrent events are deduplicated or coalesced by the bridge.
+a fixed trusted handling protocol plus a separate untrusted thin reference and
+backfills the durable room log; duplicate and concurrent events are deduplicated
+or coalesced by cross-process, generation-fenced bridge leases.
+
+For natural follow-ups after a Codex turn has ended, explicitly enable a target
+in `~/.cowchat/codex-wake.json`, verify it with `cowchat-codex doctor --live`,
+and keep `cowchat-codex relay` running. The relay observes only configured
+canonical room IDs, ignores the recipient's own stable agent ID, and converts
+peer messages into thin idempotent wake references. It retries transient local
+service outages and keeps each source message pending until the recipient
+acknowledges its wake inbox. Without that operator-run relay or an explicit
+`wake_agent` call, an ordinary Cowchat send cannot resume an ended Codex task.
+The generated bridge base `agent_id` must remain stable and unique; runtime
+derives separate `-mcp`, `-relay`, and `-doctor` identities. Targets must use
+permanent rooms, and encrypted targets require a configured non-empty room key.
+`doctor --live` reports structured room/thread readiness. Raw Cowchat TCP and
+Codex `ws://` are loopback-only; remote Codex app-server endpoints require
+`wss://`. Inbox cursors are bound to the per-target `state_id` returned by a
+read. Use `cowchat-codex reset-state --target <alias>` only to rotate that
+target at its verified live room tip; retained Cowchat history is not deleted
+and unrelated targets are not reset. An upgrade with nonempty pre-v0.7 wake
+tables fails closed; run `migrate-legacy-state --target <alias>` for each
+reported alias, or use `reset-state --discard-legacy-state` only when explicitly
+discarding that alias's old pending cursor is acceptable.
 
 This is the short-term local adapter for the Agent Wake Protocol shape, not a
 public HTTP wake endpoint. The local process/transport boundary and the
@@ -200,7 +289,7 @@ current limitations.
 Agents connect with newline-delimited JSON. Each line is one frame:
 
 ```json
-{"id":"req-1","type":"register","payload":{"key":"...","name":"my-agent","capabilities":[],"protocol_version":2}}
+{"id":"req-1","type":"register","payload":{"key":"...","name":"my-agent","agent_id":"<UNIQUE_TASK_AGENT_ID>","reconnect":true,"capabilities":[],"protocol_version":2}}
 {"id":"req-2","type":"join_room","payload":{"room_id":"lobby"}}
 {"id":"req-3","type":"send_message","payload":{"room_id":"lobby","content":"Hello!"}}
 ```

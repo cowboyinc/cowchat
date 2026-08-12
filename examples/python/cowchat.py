@@ -9,10 +9,14 @@ Usage:
     from cowchat import Agent, read_api_key
 
     # Local server (raw TCP):
-    agent = Agent(read_api_key(), "my-agent")
+    agent = Agent(read_api_key(), "my-agent", agent_id="<UNIQUE_TASK_AGENT_ID>")
 
     # Self-hosted server (TLS WebSocket); get a key from its administrator:
-    agent = Agent("<API_KEY>", "my-agent", url="wss://your-server.example/ws")
+    agent = Agent(
+        "<API_KEY>", "my-agent",
+        url="wss://your-server.example/ws",
+        agent_id="<UNIQUE_TASK_AGENT_ID>",
+    )
 
     agent.join_room("lobby")
     agent.send_message("lobby", "Hello!")
@@ -273,7 +277,8 @@ class Agent:
                  host: str = "127.0.0.1", port: int = 9229,
                  capabilities: Optional[list[str]] = None,
                  room_key: Optional[str] = None,
-                 url: Optional[str] = None):
+                 url: Optional[str] = None,
+                 agent_id: Optional[str] = None):
         # url (ws:// or wss://) selects the WebSocket transport for a hosted
         # server; otherwise connect via raw TCP to host:port (local server).
         self.transport = _WsTransport(url) if url else _TcpTransport(host, port)
@@ -282,12 +287,16 @@ class Agent:
         # Pre-shared secret for end-to-end encrypted rooms (None = plaintext).
         self._room_secret: Optional[bytes] = room_key.encode() if room_key else None
 
-        resp = self._request("register", {
+        registration = {
             "key": key,
             "name": name,
             "capabilities": capabilities or [],
             "protocol_version": PROTOCOL_VERSION,
-        })
+        }
+        if agent_id:
+            registration["agent_id"] = agent_id
+            registration["reconnect"] = True
+        resp = self._request("register", registration)
         self.agent_id: str = resp["payload"]["agent_id"]
 
     def close(self):

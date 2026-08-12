@@ -340,7 +340,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cowchat-cli"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "clap",
@@ -352,13 +352,14 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]
 
 [[package]]
 name = "cowchat-client"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "cowchat-core",
@@ -374,29 +375,36 @@ dependencies = [
 
 [[package]]
 name = "cowchat-codex"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
  "clap",
  "cowchat-client",
  "cowchat-core",
+ "cowchat-server",
  "directories",
  "env_logger",
+ "fs2",
  "futures-util",
+ "libc",
+ "log",
  "rmcp",
  "rusqlite",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "uuid",
 ]
 
 [[package]]
 name = "cowchat-core"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -411,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "cowchat-server"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "axum",
  "base64 0.22.1",

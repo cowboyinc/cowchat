@@ -69,6 +69,7 @@ pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     pub no_auth: bool,
     pub api_key: String,
+    pub primary_principal: String,
     pub reconnect_mgr: Arc<ReconnectManager>,
     pub task_mgr: Arc<TaskManager>,
     pub webhook_mgr: Arc<crate::webhooks::WebhookManager>,
@@ -194,6 +195,7 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
     let vote_mgr = state.vote_mgr;
     let rate_limiter = state.rate_limiter;
     let api_key = state.api_key;
+    let primary_principal = state.primary_principal;
     let no_auth = state.no_auth;
     let reconnect_mgr = state.reconnect_mgr;
     let task_mgr = state.task_mgr;
@@ -210,6 +212,7 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
             ephemeral_rooms,
             vote_mgr,
             api_key,
+            primary_principal,
             no_auth,
             false,
             rate_limiter,
@@ -391,11 +394,16 @@ async fn api_list_agents(
     if key != state.api_key && !state.store.validate_api_key(key).unwrap_or(false) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let principal = if key == state.api_key {
+        state.primary_principal.as_str()
+    } else {
+        key
+    };
     let agents: Vec<serde_json::Value> = state
         .broker
         .agents
         .iter()
-        .filter(|agent| state.no_auth || agent.api_key == key)
+        .filter(|agent| state.no_auth || agent.api_key == principal)
         .map(|a| {
             serde_json::json!({
                 "agent_id": a.info.agent_id,
@@ -490,6 +498,7 @@ mod tests {
             rate_limiter: Arc::new(RateLimiter::new()),
             no_auth: false,
             api_key: "master".into(),
+            primary_principal: "primary:test".into(),
             reconnect_mgr: Arc::new(ReconnectManager::new()),
             task_mgr: Arc::new(TaskManager::new(store.clone())),
             webhook_mgr: Arc::new(crate::webhooks::WebhookManager::new(store, true)),
@@ -497,6 +506,22 @@ mod tests {
             admin_secret: None,
             allowed_origins: vec![],
             trusted_proxy_ips: vec![],
+        }
+    }
+
+    #[test]
+    fn embedded_web_pages_link_to_canonical_repository() {
+        for path in ["index.html", "dashboard.html"] {
+            let asset = WebAssets::get(path).expect("embedded web page");
+            let body = std::str::from_utf8(asset.data.as_ref()).expect("UTF-8 web page");
+            assert!(
+                body.contains("https://github.com/cowboyinc/cowchat"),
+                "{path} must link to the canonical repository"
+            );
+            assert!(
+                !body.contains(concat!("https://github.com/", "cbd/cowchat")),
+                "{path} must not ship the retired repository URL"
+            );
         }
     }
 
@@ -632,6 +657,46 @@ mod tests {
         .await
         .expect("registered WebSocket close should finish server-side cleanup");
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn primary_key_rest_agent_list_uses_stable_principal() {
+        let (server, addr) = start_test_web_server(test_state()).await;
+        let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        let register = Frame {
+            id: Some("register-rest-visible-agent".into()),
+            reply_to: None,
+            frame_type: FrameType::Register,
+            payload: serde_json::to_value(RegisterPayload {
+                key: "master".into(),
+                agent_id: Some("rest-visible-agent".into()),
+                name: "rest-visible".into(),
+                capabilities: vec![],
+                reconnect: false,
+                protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+            })
+            .unwrap(),
+        };
+        socket
+            .send(ClientMessage::Text(
+                register.to_line().unwrap().trim_end().to_owned().into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(next_text_frame(&mut socket).await.frame_type, FrameType::Ok);
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/api/agents"))
+            .header(API_KEY_HEADER, "master")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["agents"][0]["agent_id"], "rest-visible-agent");
+
+        socket.close(None).await.unwrap();
         server.abort();
     }
 

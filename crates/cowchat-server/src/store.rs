@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use cowchat_core::{ChatMessage, Room};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -111,6 +111,20 @@ impl Store {
                 agent_id  TEXT PRIMARY KEY,
                 owner_key TEXT NOT NULL,
                 claimed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS server_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            -- Stable ownership principals are deliberately not bearer
+            -- credentials. Keep their quota/retention policy in a separate
+            -- table so key rotation does not either authenticate a principal
+            -- string or silently downgrade its rooms to the free tier.
+            CREATE TABLE IF NOT EXISTS credential_principal_policies (
+                principal TEXT PRIMARY KEY,
+                tier      TEXT NOT NULL DEFAULT 'free'
             );
 
             CREATE TABLE IF NOT EXISTS rooms (
@@ -583,7 +597,9 @@ impl Store {
                 SELECT m.message_id FROM messages m
                 JOIN rooms r ON m.room_id = r.room_id
                 LEFT JOIN api_keys k ON r.owner_key = k.api_key
-                WHERE COALESCE(k.tier, 'free') = ?1
+                LEFT JOIN credential_principal_policies p
+                  ON r.owner_key = p.principal
+                WHERE COALESCE(p.tier, k.tier, 'free') = ?1
                   AND m.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
             )",
             params![tier, age_modifier],
@@ -802,6 +818,68 @@ impl Store {
         Ok(stored_key == owner_key)
     }
 
+    /// Resolve the server's rotating file-backed credential to a stable local
+    /// principal. On first upgrade, ownership rows written with the current raw
+    /// key are migrated transactionally. Future key rotations keep using this
+    /// principal and therefore do not strand rooms, subscriptions, or agent IDs.
+    pub fn primary_credential_principal(&self, current_key: &str) -> Result<String, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let principal = tx
+            .query_row(
+                "SELECT value FROM server_state WHERE key = 'primary_credential_principal'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| format!("primary:{}", uuid::Uuid::new_v4()));
+        if current_key == principal {
+            return Err(StoreError::InternalPrincipalUsedAsCredential);
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO server_state(key, value)
+             VALUES ('primary_credential_principal', ?1)",
+            [&principal],
+        )?;
+        // The policy mapping is intentionally separate from api_keys: the
+        // principal is an authorization/ownership identity, never a bearer
+        // secret. Copy a known current key's tier, while preserving the prior
+        // policy when a newly rotated file key has not been entered in
+        // api_keys.
+        tx.execute(
+            "INSERT OR IGNORE INTO credential_principal_policies(principal, tier)
+             VALUES (?1, 'free')",
+            [&principal],
+        )?;
+        tx.execute(
+            "INSERT INTO credential_principal_policies(principal, tier)
+             SELECT ?1, tier FROM api_keys WHERE api_key = ?2
+             ON CONFLICT(principal) DO UPDATE SET tier = excluded.tier",
+            params![&principal, current_key],
+        )?;
+        if !current_key.is_empty() && current_key != principal {
+            // If operators historically assigned a tier by also inserting the
+            // file-backed primary key into api_keys, revoke that duplicate
+            // bearer after copying its policy. Otherwise a later file rotation
+            // would leave the old primary credential valid as a secondary key.
+            tx.execute("DELETE FROM api_keys WHERE api_key = ?1", [current_key])?;
+            tx.execute(
+                "UPDATE agent_identities SET owner_key = ?2 WHERE owner_key = ?1",
+                params![current_key, &principal],
+            )?;
+            tx.execute(
+                "UPDATE rooms SET owner_key = ?2 WHERE owner_key = ?1",
+                params![current_key, &principal],
+            )?;
+            tx.execute(
+                "UPDATE subscriptions SET owner_key = ?2 WHERE owner_key = ?1",
+                params![current_key, &principal],
+            )?;
+        }
+        tx.commit()?;
+        Ok(principal)
+    }
+
     // --- Vote operations ---
 
     pub fn create_vote(
@@ -985,7 +1063,12 @@ impl Store {
     pub fn validate_api_key(&self, api_key: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM api_keys WHERE api_key = ?1",
+            "SELECT COUNT(*) FROM api_keys k
+             WHERE k.api_key = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM credential_principal_policies p
+                   WHERE p.principal = k.api_key
+               )",
             params![api_key],
             |row| row.get(0),
         )?;
@@ -996,7 +1079,12 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let tier: String = conn
             .query_row(
-                "SELECT tier FROM api_keys WHERE api_key = ?1",
+                "SELECT tier FROM (
+                    SELECT tier, 0 AS priority FROM credential_principal_policies
+                    WHERE principal = ?1
+                    UNION ALL
+                    SELECT tier, 1 AS priority FROM api_keys WHERE api_key = ?1
+                 ) ORDER BY priority LIMIT 1",
                 params![api_key],
                 |row| row.get(0),
             )
@@ -1744,6 +1832,9 @@ pub enum StoreError {
 
     #[error("already voted")]
     AlreadyVoted,
+
+    #[error("the internal primary ownership principal cannot be used as a bearer credential")]
+    InternalPrincipalUsedAsCredential,
 }
 
 #[cfg(test)]
@@ -2524,6 +2615,137 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert!(store.claim_agent_identity("stable-agent", "key-a").unwrap());
         assert!(!store.claim_agent_identity("stable-agent", "key-b").unwrap());
+    }
+
+    #[test]
+    fn primary_credential_rotation_preserves_identity_and_room_ownership() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store
+            .claim_agent_identity("stable-agent", "old-primary-key")
+            .unwrap());
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO rooms
+                 (room_id, name, created_by, visibility, owner_key)
+                 VALUES ('owned-room', 'Owned room', 'stable-agent', 'private', 'old-primary-key')",
+                [],
+            )
+            .unwrap();
+
+        let principal = store
+            .primary_credential_principal("old-primary-key")
+            .unwrap();
+        assert!(principal.starts_with("primary:"));
+        assert!(store
+            .claim_agent_identity("stable-agent", &principal)
+            .unwrap());
+        assert!(!store
+            .claim_agent_identity("stable-agent", "old-primary-key")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_room("owned-room")
+                .unwrap()
+                .unwrap()
+                .owner_key
+                .as_deref(),
+            Some(principal.as_str())
+        );
+
+        assert_eq!(
+            store
+                .primary_credential_principal("new-primary-key")
+                .unwrap(),
+            principal
+        );
+    }
+
+    #[test]
+    fn primary_principal_keeps_tier_policy_without_becoming_a_bearer_key() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_api_key("old-primary-key", Some("primary"))
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE api_keys SET tier = 'pro' WHERE api_key = 'old-primary-key'",
+                [],
+            )
+            .unwrap();
+        store
+            .create_room_with_visibility(
+                "policy-room",
+                "Policy room",
+                None,
+                None,
+                Some("stable-agent"),
+                "private",
+                Some("old-primary-key"),
+                false,
+            )
+            .unwrap();
+        let message = store
+            .insert_message(
+                "old-message",
+                "policy-room",
+                "stable-agent",
+                "agent",
+                "retained by pro policy",
+                None,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')
+                 WHERE message_id = ?1",
+                [&message.message_id],
+            )
+            .unwrap();
+
+        let principal = store
+            .primary_credential_principal("old-primary-key")
+            .unwrap();
+        assert_eq!(store.get_key_tier(&principal).unwrap(), "pro");
+        assert!(!store.validate_api_key(&principal).unwrap());
+        assert!(!store.validate_api_key("old-primary-key").unwrap());
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO api_keys(api_key, tier) VALUES (?1, 'free')",
+                [&principal],
+            )
+            .unwrap();
+        assert!(!store.validate_api_key(&principal).unwrap());
+        assert_eq!(store.get_key_tier(&principal).unwrap(), "pro");
+        assert!(matches!(
+            store.primary_credential_principal(&principal),
+            Err(StoreError::InternalPrincipalUsedAsCredential)
+        ));
+        assert_eq!(store.purge_messages_by_tier("free", "-14 days").unwrap(), 0);
+        assert_eq!(store.get_history("policy-room", 10, None).unwrap().len(), 1);
+
+        // A newly generated file key need not itself be present in api_keys;
+        // rotation must preserve the established principal policy.
+        assert_eq!(
+            store
+                .primary_credential_principal("new-primary-key")
+                .unwrap(),
+            principal
+        );
+        assert_eq!(store.get_key_tier(&principal).unwrap(), "pro");
+        assert_eq!(store.purge_messages_by_tier("pro", "-14 days").unwrap(), 1);
     }
 
     #[test]

@@ -18,19 +18,22 @@ from cowchat import Agent, read_api_key
 
 def main():
     key = read_api_key()
-    run_id = uuid.uuid4().hex[:6]
+    run_id = str(uuid.uuid4())
+    run_label = run_id[:8]
 
     # Connect 3 agents
     print("Connecting agents...")
-    alice = Agent(key, f"alice-{run_id}")
-    bob = Agent(key, f"bob-{run_id}")
-    charlie = Agent(key, f"charlie-{run_id}")
+    alice = Agent(key, f"alice-{run_label}", agent_id=f"alice-{run_id}")
+    bob = Agent(key, f"bob-{run_label}", agent_id=f"bob-{run_id}")
+    charlie = Agent(key, f"charlie-{run_label}", agent_id=f"charlie-{run_id}")
     print(f"  alice:   {alice.agent_id}")
     print(f"  bob:     {bob.agent_id}")
     print(f"  charlie: {charlie.agent_id}")
 
     # Create a room and join
-    room = alice.create_room(f"lang-vote-{run_id}", description="Vote on language choice")
+    room = alice.create_room(
+        f"lang-vote-{run_id}", description="Vote on language choice"
+    )
     room_id = room["room_id"]
     print(f"\nCreated room: {room['name']} ({room_id})")
 
