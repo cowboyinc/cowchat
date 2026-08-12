@@ -315,13 +315,24 @@ final class CowchatConnection: CowchatConnectionProtocol {
             throw CowchatConnectionError.transport("Cowchat frames cannot exceed 1 MiB.")
         }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
-            sendRequestFrame(data, id: id)
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
-                guard !Task.isCancelled else { return }
-                self?.timeoutRequest(id: id)
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pending[id] = continuation
+                sendRequestFrame(data, id: id)
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                    guard !Task.isCancelled else { return }
+                    self?.timeoutRequest(id: id)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.finishRequest(id: id, result: .failure(CancellationError()))
             }
         }
     }

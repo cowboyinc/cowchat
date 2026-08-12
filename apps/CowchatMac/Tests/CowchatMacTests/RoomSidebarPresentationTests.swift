@@ -16,7 +16,9 @@ final class RoomSidebarPresentationTests: XCTestCase {
         // The delta rounding to zero is the case that produced "in 0s" for a
         // room that had just been created.
         let now = Date()
-        let justNow = ISO8601DateFormatter().string(from: now.addingTimeInterval(-0.2))
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let justNow = formatter.string(from: now.addingTimeInterval(-0.2))
 
         XCTAssertEqual(justNow.cowchatRelativeTime(relativeTo: now), "now")
     }
@@ -96,8 +98,7 @@ final class RoomSidebarPresentationTests: XCTestCase {
             ChatPresencePresentation.summary(
                 members: members,
                 currentAgentID: "cowchat-mac",
-                fallbackMemberCount: 99,
-                isConnected: true
+                fallbackMemberCount: 99
             ),
             "Claude active"
         )
@@ -105,10 +106,115 @@ final class RoomSidebarPresentationTests: XCTestCase {
             ChatPresencePresentation.summary(
                 members: [members[0]],
                 currentAgentID: "cowchat-mac",
-                fallbackMemberCount: 1,
-                isConnected: true
+                fallbackMemberCount: 1
             ),
-            "No collaborators"
+            "No agents connected"
+        )
+    }
+
+    func testChatPresenceUsesNewerRoomCountWhenMemberSnapshotOnlyContainsThisMac() {
+        let mac = AgentPresence(agentID: "cowchat-mac", name: "Cowchat Mac")
+
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: [mac],
+                currentAgentID: mac.id,
+                fallbackMemberCount: 3
+            ),
+            "2 agents connected"
+        )
+    }
+
+    func testChatPresenceDoesNotSubtractThisMacBeforeItHasJoinedTheRoom() {
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: [],
+                currentAgentID: "cowchat-mac",
+                fallbackMemberCount: 1
+            ),
+            "1 agent connected"
+        )
+    }
+
+    func testChatPresenceSubtractsThisMacOnlyWhenFallbackSnapshotIncludesIt() {
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: [],
+                currentAgentID: "cowchat-mac",
+                fallbackMemberCount: 1,
+                fallbackMemberCountIncludesCurrentAgent: true
+            ),
+            "No agents connected"
+        )
+    }
+
+    func testChatPresenceShowsRecentThinkingAfterOneShotAgentDisconnects() {
+        let now = Date()
+
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: [],
+                currentAgentID: "cowchat-mac",
+                fallbackMemberCount: 0,
+                recentActivityByAgent: ["claude": now.addingTimeInterval(-30)],
+                now: now
+            ),
+            "1 agent active recently"
+        )
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: [],
+                currentAgentID: "cowchat-mac",
+                fallbackMemberCount: 0,
+                recentActivityByAgent: ["claude": now.addingTimeInterval(-121)],
+                now: now
+            ),
+            "No agents connected"
+        )
+    }
+
+    func testChatPresenceCombinesRecentActivityWithConnectedCount() {
+        let now = Date()
+        let members = [
+            AgentPresence(agentID: "claude", name: "Claude"),
+            AgentPresence(agentID: "codex", name: "Codex"),
+            AgentPresence(agentID: "reviewer", name: "Reviewer"),
+        ]
+
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: members,
+                currentAgentID: "cowchat-mac",
+                fallbackMemberCount: nil,
+                recentActivityByAgent: ["claude": now.addingTimeInterval(-30)],
+                now: now
+            ),
+            "1 agent active recently · 3 agents connected"
+        )
+    }
+
+    func testChatPresenceNeverClaimsCachedMembersAreLiveWhileOfflineOrConnecting() {
+        let members = [AgentPresence(agentID: "cowchat-mac", name: "Cowchat Mac")]
+
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: [],
+                currentAgentID: "cowchat-mac",
+                fallbackMemberCount: 2,
+                fallbackMemberCountIncludesCurrentAgent: false,
+                connectionStatus: .failed("offline")
+            ),
+            "Offline"
+        )
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: members,
+                currentAgentID: "cowchat-mac",
+                fallbackMemberCount: 1,
+                fallbackMemberCountIncludesCurrentAgent: true,
+                connectionStatus: .connecting
+            ),
+            "Connecting…"
         )
     }
 
@@ -151,7 +257,7 @@ final class RoomSidebarPresentationTests: XCTestCase {
 
         let updated = RoomSidebarPresentation.updatedThinkingByAgent([:], message: message, now: now)
 
-        XCTAssertEqual(updated["design"]?["claude"], message.timestamp.cowchatDate)
+        XCTAssertEqual(updated["design"]?["claude"], now)
     }
 
     func testUpdatedThinkingByAgentClearsOnlyThatAgentsEntry() throws {
