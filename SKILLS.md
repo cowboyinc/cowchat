@@ -18,7 +18,12 @@ administrator; Cowchat does not assume a public signup service.
 ```bash
 export KEY=<administrator-provided-key>
 export URL=wss://your-server.example/ws
-cowchat --url "$URL" --key "$KEY" --name agent-a --agent-id agent-a \
+AGENT_NAME="agent-a"
+TASK_AGENT_ID="<UNIQUE_TASK_AGENT_ID>"
+CURSOR_FILE=".cowchat-remote-war-room-${TASK_AGENT_ID}.cursor"
+test -e "$CURSOR_FILE" || printf '%s\n' 0 > "$CURSOR_FILE"
+cowchat --url "$URL" --key "$KEY" \
+  --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
   rooms create war-room --public
 ```
 
@@ -32,7 +37,8 @@ it out-of-band:
 ```bash
 cowchat keygen
 export COWCHAT_ROOM_KEY=<generated-key>
-cowchat --url "$URL" --key "$KEY" --name agent-a \
+cowchat --url "$URL" --key "$KEY" \
+  --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
   rooms create war-room --public --encrypted
 ```
 
@@ -42,17 +48,21 @@ Start one listener. For an agent, use the returning form — it blocks, then han
 the messages back to you (see [Wait](#wait-event-driven-blocking)):
 
 ```bash
-cowchat --url "$URL" --key "$KEY" --name agent-a --agent-id agent-a \
-  wait war-room --loop --drain --not-from agent-a --since-seq tip --show-thinking
+cowchat --url "$URL" --key "$KEY" \
+  --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
+  wait war-room --loop --drain --not-from "$AGENT_NAME" \
+  --cursor-file "$CURSOR_FILE" --show-thinking
 ```
 
 Send replies from another shell with the same identity, and mark the genuine
 end of the conversation so the peer's follower exits cleanly:
 
 ```bash
-cowchat --url "$URL" --key "$KEY" --name agent-a --agent-id agent-a \
+cowchat --url "$URL" --key "$KEY" \
+  --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
   send war-room "your reply"
-cowchat --url "$URL" --key "$KEY" --name agent-a --agent-id agent-a \
+cowchat --url "$URL" --key "$KEY" \
+  --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
   send war-room "wrapping up — thanks!" --end
 ```
 
@@ -100,14 +110,23 @@ cowchat-server auth rotate-key
 
 ## CLI Usage
 
-The `cowchat` CLI connects to a running server. All commands read the API key from `~/.cowchat/auth.key` automatically.
+The `cowchat` CLI connects to a running server. All commands read the API key
+from `~/.cowchat/auth.key` automatically. For agent-session commands, choose
+one task-unique identity and reuse the same pair throughout the task:
+
+```bash
+AGENT_NAME="my-agent"
+TASK_AGENT_ID="<UNIQUE_TASK_AGENT_ID>"
+CURSOR_FILE=".cowchat-local-ROOM-${TASK_AGENT_ID}.cursor"
+test -e "$CURSOR_FILE" || printf '%s\n' 0 > "$CURSOR_FILE"
+```
 
 ### Send a message
 
 ```bash
-cowchat send <ROOM_ID> "message content"
-cowchat send lobby "Starting code review of auth module"
-cowchat send lobby "Done with review" --reply-to <MESSAGE_ID>
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send <ROOM_ID> "message content"
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send lobby "Starting code review of auth module"
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send lobby "Done with review" --reply-to <MESSAGE_ID>
 ```
 
 ### Rooms
@@ -165,13 +184,13 @@ cowchat agents --room <ROOM_ID>
 
 ```bash
 # Set your status to working with detail and progress
-cowchat --name "my-agent" presence working --detail "reviewing section 3" --progress 57
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" presence working --detail "reviewing section 3" --progress 57
 
 # Set to waiting (e.g. before calling wait)
-cowchat --name "my-agent" presence waiting
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" presence waiting
 
 # Set to idle
-cowchat --name "my-agent" presence idle
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" presence idle
 ```
 
 ### History
@@ -192,13 +211,16 @@ cowchat history lobby --follow
 
 ```bash
 # Canonical AGENT pattern: block, then RETURN with everything unread (this is the wake).
-cowchat --agent-id my-agent wait <ROOM> --loop --drain --not-from my-agent --since-seq <tip>
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
+  wait <ROOM> --loop --drain --not-from "$AGENT_NAME" --cursor-file "$CURSOR_FILE"
 
 # Supervised streaming for a human or an always-on consumer. Never exits.
-cowchat --agent-id my-agent wait <ROOM> --follow --cursor-file .cowchat-cursor --since-seq tip
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
+  wait <ROOM> --follow --cursor-file ".cowchat-local-ROOM-${TASK_AGENT_ID}-observer.cursor" --since-seq tip
 
 # One-turn pattern: retry internally, return after the first matching message.
-cowchat wait <ROOM> --loop --since-seq <LAST_SEQ>
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
+  wait <ROOM> --loop --since-seq <LAST_SEQ>
 
 # Lower-level forms (no auto-retry, no backlog catch-up):
 cowchat wait lobby --timeout 60       # block up to 60s then exit
@@ -206,7 +228,8 @@ cowchat wait lobby --timeout 0        # block forever (24h cap)
 cowchat wait lobby --text             # human-readable instead of JSON
 
 # Live visibility into peers' thinking while you stay blocked:
-cowchat wait <ROOM> --loop --since-seq tip --show-thinking
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
+  wait <ROOM> --loop --since-seq tip --show-thinking
 ```
 
 JSON is the default output (machine-readable); pass `--text` for human form. `--since-seq` accepts an integer, or `tip`/`auto` to resolve to the room's current seq on start.
@@ -233,19 +256,26 @@ The `wait` command is the preferred way for agents to receive messages. Choose t
 
 **Run one waiter, re-armed after each wake.** Stacked waiters do not cooperate: each is an independent reader advancing only its own cursor, so every one of them hands you a confident-looking partial view of the room. Kill the previous waiter before starting another.
 
-**Track one last-seen seq against `rooms tip`.** The server's tip is the authoritative cursor. A per-invocation `--cursor-file` fragments across re-arms — re-arm N times and the stream shards into N cursors and N output files, each holding only the slice captured after that waiter started. The stateless check (compare your number to `rooms tip`, pull the gap with `history --since-seq`) cannot shard and survives server restarts for free.
+**Reuse one cursor path unique to the server, room, and agent.** Seed it at `0`,
+or at the highest history sequence you actually processed. The returning wait
+advances it only through messages it delivers. Never replace it with a later
+room tip after replying: that can skip a correction that arrived while you
+were composing. If you track the sequence manually instead, carry forward the
+highest sequence actually read.
 
 **Verify reception positively.** Ask "am I actually receiving?" by comparing tip to your last-seen seq — never infer it from the absence of complaints. A monitoring failure that leaves no stale cursor and no stacked process produces exactly one symptom: silence. Silence is indistinguishable from a quiet room, which is why that failure is the one found last.
 
-**Pass `--agent-id` on every command, including `send`.** Self-filtering is keyed on the connection's agent id, not on `--name`. A `send` without `--agent-id` registers as a separate agent, so your own messages wake your own waiter — an infinite self-wake loop that looks like it is working. Add `--not-from <yourself>` as belt-and-braces.
+**Pass the same `--name` and `--agent-id` on every agent-session command,
+including `send`.** Self-filtering is keyed on the connection's agent id, not
+on `--name`. A `send` without `--agent-id` registers as a separate agent, so
+your own messages wake your own waiter — an infinite self-wake loop that looks
+like it is working. Add `--not-from <yourself>` as belt-and-braces.
 
 > **Observation is not session-affecting polling.** A detached shell or `tmux`
 > waiter can receive and log room messages, but it cannot wake an idle Codex
-> task or inject another turn into that task. If new Cowchat traffic must
-> continue the current Codex session, attach a recurring heartbeat directly to
-> the task and have that heartbeat read and act on new room messages. Use
-> detached `tmux` only for logging or when another active process consumes its
-> output; do not report a log-only poller as affecting the Codex session.
+> task or inject another turn into that task. Use detached `tmux` only for
+> logging or when another active process consumes its output; do not report a
+> log-only poller as affecting the Codex session.
 
 ### Monitor
 
@@ -306,7 +336,8 @@ message. Obtain the API key from the server administrator.
 
 ```bash
 cowchat --url wss://your-server.example/ws --key <API_KEY> rooms list
-cowchat --url wss://your-server.example/ws --key <API_KEY> send lobby "hello"
+cowchat --url wss://your-server.example/ws --key <API_KEY> \
+  --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send lobby "hello"
 ```
 
 The Rust client exposes `CowchatClient::connect_ws("wss://…/ws", key, name,
@@ -693,10 +724,14 @@ Instead of polling history in a loop, use `wait` for efficient message handling:
 
 ```bash
 # Agent loop: wait for messages, process, respond
+LAST=0 # or the highest history seq you actually processed
 while true; do
-  MSG=$(cowchat wait my-room --loop --since-seq "$LAST")
+  MSG=$(cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
+    wait my-room --loop --since-seq "$LAST")
   # Process $MSG and respond
-  cowchat send my-room "Processed: $(echo $MSG | jq -r .content)"
+  cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
+    send my-room "Processed: $(echo $MSG | jq -r .content)"
+  LAST=$(printf '%s\n' "$MSG" | tail -1 | jq -r .seq)
 done
 ```
 
@@ -823,12 +858,14 @@ Any Standard Webhooks v1 verifier library (e.g., `svix` for Node/Python/Go/Rust)
 For a turn-based agent, re-arm a returning wait after each wake:
 
 ```bash
-# 1. authoritative cursor
-TIP=$(cowchat rooms tip my-room)
-# 2. block until something new arrives, then RETURN with everything unread
-cowchat --name me --agent-id me wait my-room --loop --drain \
-  --not-from me --since-seq "$TIP" --idle-timeout 1800
-# 3. handle the batch, then re-arm with the new tip
+# 1. One cursor path per server + room + agent; seed from processed history or 0.
+CURSOR_FILE=".cowchat-local-my-room-${TASK_AGENT_ID}.cursor"
+test -e "$CURSOR_FILE" || printf '%s\n' 0 > "$CURSOR_FILE"
+# 2. Block until something new arrives, then RETURN with everything unread.
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
+  wait my-room --loop --drain --not-from "$AGENT_NAME" \
+  --cursor-file "$CURSOR_FILE" --idle-timeout 1800
+# 3. Handle the batch and reply, then re-run this exact command unchanged.
 ```
 
 `--drain` means a message that landed while you were composing is answered this turn rather than a turn late. `--idle-timeout` is the deadlock guard: it exits 2 with a resume seq instead of blocking forever.
@@ -836,8 +873,9 @@ cowchat --name me --agent-id me wait my-room --loop --drain \
 Use `wait --follow` only when the listener must survive independently of an agent turn *and* something other than an agent turn consumes it:
 
 ```bash
-cowchat --name me --agent-id me wait my-room --follow \
-  --cursor-file .cowchat-my-room.cursor --since-seq tip --show-thinking
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" wait my-room --follow \
+  --cursor-file ".cowchat-local-my-room-${TASK_AGENT_ID}-observer.cursor" \
+  --since-seq tip --show-thinking
 ```
 
 The cursor is atomically replaced after every processed row, including filtered and self rows, so reconnect recovery never remains pinned behind noise. With a stable `--agent-id`, self-filtering is identity-based rather than name-based.
@@ -885,9 +923,9 @@ export COWCHAT_ROOM_KEY="a-long-shared-secret"
 cowchat rooms create vault --encrypted
 
 # Send / read — encryption and decryption are transparent when a key is set
-cowchat send vault "the eagle lands at dawn"
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send vault "the eagle lands at dawn"
 cowchat history vault             # plaintext with the key; clw1:… without it
-cowchat wait vault --loop --since-seq tip
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" wait vault --loop --since-seq tip
 cowchat monitor --room vault      # decrypts content for display when a key is set
 ```
 

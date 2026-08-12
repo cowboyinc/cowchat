@@ -147,8 +147,9 @@ struct Cli {
     name: String,
 
     /// Stable agent id for this session. Pass a consistent value across calls so
-    /// the server treats your separate send/wait invocations as ONE agent —
-    /// required for leader election and reconnect to work across one-shot calls.
+    /// the server treats separate send/wait invocations as one logical agent.
+    /// May also be supplied through COWCHAT_AGENT_ID. Named agent workflows fail
+    /// closed when neither source is set.
     #[arg(long, global = true)]
     agent_id: Option<String>,
 
@@ -253,12 +254,14 @@ enum Commands {
         /// a real chat message arrives. Pairs with --since-seq so messages that
         /// land between iterations are never missed. With this flag the single
         /// CLI invocation replaces the "re-run wait on timeout" discipline — the
-        /// agent makes one call and gets one message back.
+        /// active agent turn makes one call and gets one message back. After the
+        /// caller handles and replies, it must invoke this returning wait again;
+        /// Cowchat cannot by itself resume a task whose turn has already ended.
         #[arg(long = "loop")]
         loop_: bool,
         /// Keep streaming messages until interrupted or a conversation_end is
-        /// received. Uses a durable cursor, reconnects with backoff, and emits
-        /// every matching message instead of returning after the first one.
+        /// received. Intended for human-watched observation or an always-on
+        /// consumer; it does not return each message to a turn-based agent.
         #[arg(long)]
         follow: bool,
         /// Bound the total wall-clock of a `--loop` wait (seconds). On expiry the
@@ -306,6 +309,7 @@ enum Commands {
         /// Takes precedence over --since-seq (which then just seeds the first
         /// run, before the file exists). This is the fix for "advanced my cursor
         /// past an unread peer message": track last-processed, never last-sent.
+        /// Use one path unique to the server, room, and logical agent.
         #[arg(long)]
         cursor_file: Option<PathBuf>,
     },
@@ -731,6 +735,38 @@ fn env_non_empty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
+fn resolve_agent_id(cli: &Cli) -> Option<String> {
+    cli.agent_id
+        .clone()
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_non_empty("COWCHAT_AGENT_ID"))
+}
+
+fn command_represents_agent_session(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Send { .. }
+            | Commands::Thinking { .. }
+            | Commands::Wait { .. }
+            | Commands::Shell { .. }
+            | Commands::Presence { .. }
+    )
+}
+
+fn require_stable_named_agent(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.name != "cli"
+        && command_represents_agent_session(&cli.command)
+        && resolve_agent_id(cli).is_none()
+    {
+        return Err(format!(
+            "named agent '{}' requires a stable identity; pass --agent-id <UNIQUE_TASK_AGENT_ID> or set COWCHAT_AGENT_ID",
+            cli.name
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_room_key(flag: Option<String>) -> Option<String> {
     flag.filter(|v| !v.is_empty())
         .or_else(|| env_non_empty("COWCHAT_ROOM_KEY"))
@@ -758,7 +794,8 @@ fn decrypt_field(secret: Option<&[u8]>, room_id: &str, content: &str) -> String 
 async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>> {
     let key = load_key(&cli.key);
 
-    let agent_id = cli.agent_id.as_deref();
+    let agent_id = resolve_agent_id(cli);
+    let agent_id = agent_id.as_deref();
     let mut client = if let Some(url) = &cli.url {
         CowchatClient::connect_ws(url, &key, &cli.name, agent_id, vec![]).await?
     } else if let Some(addr) = &cli.tcp {
@@ -1326,6 +1363,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let cli = Cli::parse();
+    require_stable_named_agent(&cli)?;
 
     match &cli.command {
         Commands::Send {
