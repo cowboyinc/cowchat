@@ -2276,24 +2276,19 @@ private struct SettingsView: View {
                             .stroke(SemanticColor.borderDefault, lineWidth: 1)
                     }
                 }
-                HStack {
-                    Label {
-                        Text("Stored only in this Mac's Keychain")
-                    } icon: {
-                        GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
-                    }
-                    .gallopText(.caption, color: SemanticColor.textTertiary)
+                HStack(spacing: 10) {
                     Spacer()
                     if workspace.isGlobalEnabled {
                         Button("Leave global rooms") { workspace.disableGlobalRooms() }
                             .buttonStyle(.plain)
                             .gallopText(.bodyMStrong, color: SemanticColor.buttonSecondaryTextDefault)
-                            .padding(.horizontal, 16)
-                            .frame(height: 36)
+                            .padding(.horizontal, 20)
+                            .frame(height: 42)
                             .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
                             .overlay {
                                 Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                             }
+                            .fixedSize()
                             .macAccessibleAction(label: "Leave global rooms") {
                                 workspace.disableGlobalRooms()
                             }
@@ -2301,11 +2296,12 @@ private struct SettingsView: View {
                     Button(connectButtonTitle, action: saveCloudConfiguration)
                         .buttonStyle(.plain)
                         .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                        .padding(.horizontal, 16)
-                        .frame(height: 36)
+                        .padding(.horizontal, 20)
+                        .frame(height: 42)
                         .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
                         .disabled(!canSaveCloudConfiguration)
                         .opacity(canSaveCloudConfiguration ? 1 : 0.45)
+                        .fixedSize()
                         .macAccessibleAction(
                             label: connectButtonTitle,
                             isEnabled: canSaveCloudConfiguration,
