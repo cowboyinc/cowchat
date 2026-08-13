@@ -922,12 +922,28 @@ final class ChatStore: ObservableObject {
         roomHistoryTaskGeneration = nil
     }
 
-    func createRoom(name: String, description: String, isPublic: Bool) async -> Bool {
+    enum CreateRoomOutcome: Equatable {
+        case created
+        /// The server owns a room with this name that isn't necessarily
+        /// visible to this key. The sheet decides whether to navigate or
+        /// explain.
+        case nameTaken
+        case failed(String)
+
+        var succeeded: Bool { self == .created }
+    }
+
+    /// Errors surface through the returned outcome, not `errorMessage` — the
+    /// create sheet renders them inline. Routing them at the store's alert
+    /// used to be silently dropped when the sheet was presented (or when the
+    /// target store wasn't the active one).
+    func createRoom(name: String, description: String, isPublic: Bool) async -> CreateRoomOutcome {
         let expectedProfileGeneration = profileGeneration
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedName.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
-            errorMessage = "\u{201C}lobby\u{201D} is reserved for the Lobby dashboard. Choose another name."
-            return false
+            return .failed(
+                "\u{201C}lobby\u{201D} is reserved for the Lobby dashboard. Choose another name."
+            )
         }
         do {
             let room = try await connection.createRoom(
@@ -936,7 +952,9 @@ final class ChatStore: ObservableObject {
                 parentID: createRoomParentID,
                 isPublic: isPublic
             )
-            guard expectedProfileGeneration == profileGeneration else { return false }
+            guard expectedProfileGeneration == profileGeneration else {
+                return .failed("The connection changed while creating the room.")
+            }
             if !rooms.contains(where: { $0.id == room.id }) {
                 rooms.append(room)
                 recordRoomMutation(roomID: room.id)
@@ -947,13 +965,20 @@ final class ChatStore: ObservableObject {
             isCreateRoomPresented = false
             createRoomParentID = nil
             await select(room: room)
-            guard expectedProfileGeneration == profileGeneration else { return false }
+            guard expectedProfileGeneration == profileGeneration else {
+                return .failed("The connection changed while creating the room.")
+            }
             startSetupReadinessPolling()
-            return true
+            return .created
         } catch {
-            guard expectedProfileGeneration == profileGeneration else { return false }
-            present(error)
-            return false
+            guard expectedProfileGeneration == profileGeneration else {
+                return .failed("The connection changed while creating the room.")
+            }
+            if let connectionError = error as? CowchatConnectionError,
+               case .server(_, .some("room_name_taken")) = connectionError {
+                return .nameTaken
+            }
+            return .failed(error.localizedDescription)
         }
     }
 

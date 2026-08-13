@@ -2697,6 +2697,7 @@ private struct CreateRoomView: View {
     @State private var description = ""
     @State private var isCreating = false
     @State private var chosenServer: WorkspaceStore.Server?
+    @State private var creationError: String?
 
     private var parentRoom: Room? {
         guard let parentID = store.createRoomParentID else { return nil }
@@ -2760,7 +2761,16 @@ private struct CreateRoomView: View {
                         .padding(.horizontal, 4)
                 }
                 styledField("Description (optional)", text: $description)
+                if let creationError {
+                    Text(creationError)
+                        .gallopText(.caption, color: SemanticColor.textError)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
+                }
             }
+            .onChange(of: name) { _ in creationError = nil }
+            .onChange(of: chosenServer) { _ in creationError = nil }
 
             Spacer()
 
@@ -2848,26 +2858,46 @@ private struct CreateRoomView: View {
     private func createRoom() {
         guard canCreate else { return }
         isCreating = true
+        creationError = nil
         let server = targetServer
         let target = targetStore
         let presenting = store
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
-            let created = await target.createRoom(
+            let outcome = await target.createRoom(
                 name: name,
                 description: description,
                 isPublic: true
             )
             isCreating = false
-            if created {
+            switch outcome {
+            case .created:
                 // The room was created and selected on `server`; make that
                 // server active so the chat pane shows it, and close the
                 // sheet on whichever store presented it.
                 workspace.activate(server: server)
-                presenting.isCreateRoomPresented = false
-                presenting.createRoomParentID = nil
-                dismiss()
+                closeSheet(presenting: presenting)
+            case .nameTaken:
+                if let existing = target.rooms.first(where: {
+                    $0.name.localizedCaseInsensitiveCompare(trimmedName) == .orderedSame
+                }) {
+                    // The room already exists and this key can see it — just
+                    // go there instead of arguing about the name.
+                    await workspace.select(room: existing, on: server)
+                    closeSheet(presenting: presenting)
+                } else {
+                    creationError = "A room named \u{201C}\(trimmedName)\u{201D} already exists on this server, but it isn't visible to you. Choose another name."
+                }
+            case let .failed(message):
+                creationError = message
             }
         }
+    }
+
+    private func closeSheet(presenting: ChatStore) {
+        presenting.isCreateRoomPresented = false
+        presenting.createRoomParentID = nil
+        dismiss()
     }
 
     private func cancel() {

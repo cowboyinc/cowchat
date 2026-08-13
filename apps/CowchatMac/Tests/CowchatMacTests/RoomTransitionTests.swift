@@ -764,8 +764,8 @@ final class RoomTransitionTests: XCTestCase {
         switchToTestCloud(store, connection: connection)
         connection.resumeBlockedCreate()
 
-        let creationSucceeded = await creation.value
-        XCTAssertFalse(creationSucceeded)
+        let creationOutcome = await creation.value
+        XCTAssertNotEqual(creationOutcome, .created)
         XCTAssertFalse(store.rooms.contains(where: { $0.id == staleCreated.id }))
         XCTAssertNil(store.selectedRoomID)
     }
@@ -796,8 +796,8 @@ final class RoomTransitionTests: XCTestCase {
         store.reconnect()
         connection.resumeBlockedCreate()
 
-        let creationSucceeded = await creation.value
-        XCTAssertFalse(creationSucceeded)
+        let creationOutcome = await creation.value
+        XCTAssertNotEqual(creationOutcome, .created)
         XCTAssertFalse(store.rooms.contains(where: { $0.id == staleCreated.id }))
     }
 
@@ -2208,7 +2208,7 @@ final class RoomTransitionTests: XCTestCase {
             description: "",
             isPublic: false
         )
-        XCTAssertTrue(created)
+        XCTAssertEqual(created, .created)
         XCTAssertTrue(store.setupRoomIDs.contains(room.id))
 
         connection.onEvent?("message_received", [
@@ -2498,9 +2498,36 @@ final class RoomTransitionTests: XCTestCase {
         let created = await store.createRoom(
             name: "Lobby", description: "", isPublic: true
         )
-        XCTAssertFalse(created)
-        XCTAssertNotNil(store.errorMessage)
+        guard case .failed(let reason) = created else {
+            return XCTFail("expected .failed, got \(created)")
+        }
+        XCTAssertTrue(reason.contains("reserved"))
         XCTAssertFalse(connection.operations.contains("create:Lobby"))
+    }
+
+    @MainActor
+    func testCreateRoomReportsNameTakenAndFailuresAsOutcomesNotAlerts() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby")]
+        await store.connect()
+
+        connection.createRoomError = CowchatConnectionError.server(
+            message: "Room name 'design' already taken", code: "room_name_taken"
+        )
+        let taken = await store.createRoom(name: "design", description: "", isPublic: true)
+        XCTAssertEqual(taken, .nameTaken)
+        XCTAssertNil(store.errorMessage)  // the sheet renders this inline, no alert
+
+        connection.createRoomError = CowchatConnectionError.server(
+            message: "quota exceeded", code: "rate_limited"
+        )
+        let failed = await store.createRoom(name: "design2", description: "", isPublic: true)
+        guard case .failed(let message) = failed else {
+            return XCTFail("expected .failed, got \(failed)")
+        }
+        XCTAssertTrue(message.contains("quota exceeded"))
+        XCTAssertNil(store.errorMessage)
     }
 
     private func decodeRoom(
