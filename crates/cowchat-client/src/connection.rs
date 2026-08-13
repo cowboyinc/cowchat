@@ -33,7 +33,9 @@ async fn read_frame_line<R: AsyncBufRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
 
     #[tokio::test]
     async fn client_answers_server_heartbeat_ping() {
@@ -132,6 +134,128 @@ mod tests {
         }
         server.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn stream_eof_closes_pending_requests_and_event_subscribers() {
+        // TCP and UDS both use `setup`, so this exercises their shared reader
+        // lifecycle without depending on a filesystem socket path.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut reader = BufReader::new(read_half);
+            let register = read_frame_line(&mut reader).await.unwrap().unwrap();
+            let register = Frame::from_line(&register).unwrap();
+            let ok = Frame::ok(
+                register.id.as_deref(),
+                serde_json::json!({"agent_id": "eof-client"}),
+            );
+            write_half
+                .write_all(ok.to_line().unwrap().as_bytes())
+                .await
+                .unwrap();
+
+            let request = read_frame_line(&mut reader).await.unwrap().unwrap();
+            let request = Frame::from_line(&request).unwrap();
+            assert_eq!(request.frame_type, FrameType::Ping);
+            write_half.shutdown().await.unwrap();
+        });
+
+        let client = CowchatClient::connect_tcp(
+            &addr.to_string(),
+            "test-key",
+            "client",
+            Some("eof-client"),
+            vec![],
+        )
+        .await
+        .unwrap();
+        let mut events = client.subscribe();
+
+        let (request, wait) = tokio::join!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), client.ping()),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                client.wait_for_message("room", 60, None),
+            ),
+        );
+        let request = request.expect("transport EOF must wake pending requests promptly");
+        assert!(matches!(request, Err(ClientError::ConnectionClosed)));
+        let wait = wait.expect("transport EOF must wake message waits promptly");
+        assert!(matches!(wait, Err(ClientError::ConnectionClosed)));
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("transport EOF must close event subscribers promptly");
+        assert!(matches!(event, Err(broadcast::error::RecvError::Closed)));
+
+        let post_eof_request = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.wait_for_message("room", 60, Some(0)),
+        )
+        .await
+        .expect("requests started after EOF must fail before the request timeout");
+        assert!(matches!(
+            post_eof_request,
+            Err(ClientError::ConnectionClosed)
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_close_closes_pending_requests_and_event_subscribers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let register = socket.next().await.unwrap().unwrap();
+            let register = Frame::from_line(register.to_text().unwrap()).unwrap();
+            let ok = Frame::ok(
+                register.id.as_deref(),
+                serde_json::json!({"agent_id": "ws-eof-client"}),
+            );
+            socket
+                .send(Message::Text(ok.to_line().unwrap().into()))
+                .await
+                .unwrap();
+
+            let request = socket.next().await.unwrap().unwrap();
+            let request = Frame::from_line(request.to_text().unwrap()).unwrap();
+            assert_eq!(request.frame_type, FrameType::Ping);
+            socket.close(None).await.unwrap();
+        });
+
+        let client = CowchatClient::connect_ws(
+            &format!("ws://{addr}"),
+            "test-key",
+            "client",
+            Some("ws-eof-client"),
+            vec![],
+        )
+        .await
+        .unwrap();
+        let mut events = client.subscribe();
+
+        let (request, wait) = tokio::join!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), client.ping()),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                client.wait_for_message("room", 60, None),
+            ),
+        );
+        let request = request.expect("WebSocket close must wake pending requests promptly");
+        assert!(matches!(request, Err(ClientError::ConnectionClosed)));
+        let wait = wait.expect("WebSocket close must wake message waits promptly");
+        assert!(matches!(wait, Err(ClientError::ConnectionClosed)));
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("WebSocket close must close event subscribers promptly");
+        assert!(matches!(event, Err(broadcast::error::RecvError::Closed)));
+        server.await.unwrap();
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -164,7 +288,7 @@ pub struct CowchatClient {
     /// Pending request completions: correlation_id -> oneshot sender.
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Frame>>>>,
     /// Broadcast channel for server-pushed events.
-    event_tx: broadcast::Sender<Event>,
+    event_tx: broadcast::WeakSender<Event>,
     /// Agent info after registration.
     pub agent_id: String,
     pub agent_name: String,
@@ -276,6 +400,11 @@ impl CowchatClient {
                     Err(_) => break,
                 }
             }
+            // Close the event channel before taking the pending lock. A request
+            // checks that channel while holding the same lock, so it either
+            // registers before this cleanup or fails immediately after it.
+            drop(event_tx_clone);
+            pending_clone.lock().await.clear();
         });
 
         Self::finish_register(
@@ -364,6 +493,8 @@ impl CowchatClient {
                     let _ = event_tx_clone.send(Event { frame });
                 }
             }
+            drop(event_tx_clone);
+            pending_clone.lock().await.clear();
         });
 
         Self::finish_register(
@@ -445,7 +576,7 @@ impl CowchatClient {
         Ok(Self {
             write_tx,
             pending,
-            event_tx,
+            event_tx: event_tx.downgrade(),
             agent_id,
             agent_name: name.to_string(),
             stable_identity,
@@ -509,6 +640,10 @@ impl CowchatClient {
         let (resp_tx, resp_rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
+            let _event_sender = self
+                .event_tx
+                .upgrade()
+                .ok_or(ClientError::ConnectionClosed)?;
             pending.insert(id.clone(), resp_tx);
         }
 
@@ -1002,7 +1137,14 @@ impl CowchatClient {
 
     /// Subscribe to server-pushed events (messages, joins, leaves, etc.)
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
-        self.event_tx.subscribe()
+        match self.event_tx.upgrade() {
+            Some(sender) => sender.subscribe(),
+            None => {
+                let (sender, receiver) = broadcast::channel(1);
+                drop(sender);
+                receiver
+            }
+        }
     }
 
     /// Wait for the next message in a specific room. Blocks until a message arrives or timeout.
@@ -1020,34 +1162,46 @@ impl CowchatClient {
         since_seq: Option<i64>,
     ) -> Result<Option<ChatMessage>, ClientError> {
         // Subscribe FIRST so we don't miss anything that arrives while we're fetching history.
-        let mut events = self.event_tx.subscribe();
+        let mut events = self.subscribe();
 
         if let Some(seq) = since_seq {
-            // Pull a small batch and return the oldest *real chat message from
-            // another agent* past `seq`. Skip:
-            //  - thinking pulses (semantically not chat; the event-type split
-            //    deliberately spares live waiters from them too),
-            //  - system messages (joins, etc.) — they're protocol noise, not chat.
-            //    Every CLI invocation gets a fresh random agent_id so even prior
-            //    joins from the same `--name` look like "another agent" to a
-            //    naive self-filter; filtering on metadata.type is robust.
-            //  - messages this agent itself posted (the live path excludes the
-            //    sender from the broadcast, so backlog should mirror that).
-            let backlog = self
-                .get_history_filtered(room_id, 32, None, None, Some(seq))
-                .await?;
-            if let Some(msg) = backlog.into_iter().find(|m| {
-                let meta_type = m.metadata.get("type").and_then(|v| v.as_str());
-                let is_thinking = meta_type == Some("thinking");
-                let is_system = meta_type == Some("system");
-                // Self by agent_id OR by --name. Each CLI invocation registers a
-                // fresh random agent_id, so two invocations under the same --name
-                // (e.g. one `send` + one `wait`) have different ids; the name
-                // backstop catches that case.
-                let is_self = self.is_self_message(m);
-                !is_thinking && !is_system && !is_self
-            }) {
-                return Ok(Some(msg));
+            // Return the oldest real chat message from another agent past
+            // `seq`, skipping thinking, system, and self-authored rows. Capture
+            // a finite backlog boundary, then page through every row up to it:
+            // one page can contain only skipped rows while the oldest unread
+            // peer message sits immediately beyond it.
+            let backlog_tip = self.room_tip(room_id).await?;
+            let mut scanned_through = seq;
+            while scanned_through < backlog_tip {
+                let backlog = self
+                    .get_history_filtered(room_id, 32, None, None, Some(scanned_through))
+                    .await?;
+                let mut advanced = false;
+
+                for msg in backlog {
+                    if msg.seq > backlog_tip {
+                        break;
+                    }
+                    if msg.seq <= scanned_through {
+                        continue;
+                    }
+                    scanned_through = msg.seq;
+                    advanced = true;
+
+                    let meta_type = msg.metadata.get("type").and_then(|v| v.as_str());
+                    let is_thinking = meta_type == Some("thinking");
+                    let is_system = meta_type == Some("system");
+                    let is_self = self.is_self_message(&msg);
+                    if !is_thinking && !is_system && !is_self {
+                        return Ok(Some(msg));
+                    }
+                }
+
+                // Ephemeral rooms do not persist history, and a malformed or
+                // sparse server response must not spin this client forever.
+                if !advanced {
+                    break;
+                }
             }
         }
 

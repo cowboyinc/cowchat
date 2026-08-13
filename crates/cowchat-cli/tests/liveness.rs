@@ -144,6 +144,150 @@ async fn wait_loop_reconnects_after_transport_disconnect() {
     );
 }
 
+/// Named agent workflows must not silently receive a new server UUID on every
+/// one-shot invocation. They either supply an explicit stable ID or inherit one
+/// from COWCHAT_AGENT_ID; the unnamed human-oriented CLI remains compatible.
+#[tokio::test]
+async fn named_agent_command_requires_stable_identity_or_environment() {
+    let (_handle, addr, key, _tmp) = start_test_server().await;
+
+    let missing = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            "codex-reviewer",
+            "send",
+            "lobby",
+            "should not send",
+        ])
+        .env_remove("COWCHAT_AGENT_ID")
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.contains("requires a stable identity"), "{stderr}");
+    assert!(stderr.contains("COWCHAT_AGENT_ID"), "{stderr}");
+
+    let from_env = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            "codex-reviewer",
+            "send",
+            "lobby",
+            "sent with environment identity",
+        ])
+        .env("COWCHAT_AGENT_ID", "review-task-4f6f22a8")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        from_env.status.success(),
+        "environment identity should work: {}",
+        String::from_utf8_lossy(&from_env.stderr)
+    );
+
+    let from_env_again = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            "codex-reviewer",
+            "send",
+            "lobby",
+            "same logical agent on the next process",
+        ])
+        .env("COWCHAT_AGENT_ID", "review-task-4f6f22a8")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        from_env_again.status.success(),
+        "the stable environment identity should reconnect: {}",
+        String::from_utf8_lossy(&from_env_again.stderr)
+    );
+
+    let inspector = CowchatClient::connect_tcp(&addr, &key, "inspector", None, vec![])
+        .await
+        .unwrap();
+    let authored: Vec<_> = inspector
+        .get_history("lobby", 20, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.agent_name == "codex-reviewer")
+        .collect();
+    assert_eq!(authored.len(), 2);
+    assert!(
+        authored
+            .iter()
+            .all(|message| message.agent_id == "review-task-4f6f22a8"),
+        "separate CLI processes must persist one logical agent id: {authored:?}"
+    );
+
+    let unnamed = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "send",
+            "lobby",
+            "ordinary CLI remains compatible",
+        ])
+        .env_remove("COWCHAT_AGENT_ID")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        unnamed.status.success(),
+        "default CLI identity should remain optional: {}",
+        String::from_utf8_lossy(&unnamed.stderr)
+    );
+
+    let named_read = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            "codex-reviewer",
+            "history",
+            "lobby",
+        ])
+        .env_remove("COWCHAT_AGENT_ID")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        named_read.status.success(),
+        "read-only named commands remain backward compatible: {}",
+        String::from_utf8_lossy(&named_read.stderr)
+    );
+
+    let offline = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args(["--name", "codex-reviewer", "keygen"])
+        .env_remove("COWCHAT_AGENT_ID")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        offline.status.success(),
+        "offline commands must not require connection identity: {}",
+        String::from_utf8_lossy(&offline.stderr)
+    );
+}
+
 /// A `wait --loop` on a silent room exits 2 once the idle deadline passes,
 /// instead of blocking forever.
 #[tokio::test]
@@ -160,6 +304,8 @@ async fn wait_idle_timeout_exits_2() {
                 &key,
                 "--name",
                 "waiter",
+                "--agent-id",
+                "stable-waiter",
                 "wait",
                 "lobby",
                 "--loop",
@@ -195,6 +341,8 @@ async fn wait_conversation_end_exits_3() {
             &key,
             "--name",
             "waiter",
+            "--agent-id",
+            "stable-waiter",
             "wait",
             "lobby",
             "--loop",
@@ -283,6 +431,8 @@ async fn wait_cursor_file_does_not_skip_unread() {
             &key,
             "--name",
             "waiter",
+            "--agent-id",
+            "stable-waiter",
             "wait",
             "lobby",
             "--loop",
@@ -307,9 +457,10 @@ async fn wait_cursor_file_does_not_skip_unread() {
         .send_message("lobby", "correction", None, vec![])
         .await
         .unwrap();
-    let waiter_send = CowchatClient::connect_tcp(&addr, &key, "waiter", None, vec![])
-        .await
-        .unwrap();
+    let waiter_send =
+        CowchatClient::connect_tcp(&addr, &key, "waiter", Some("stable-waiter"), vec![])
+            .await
+            .unwrap();
     waiter_send.join_room("lobby").await.unwrap();
     waiter_send
         .send_message("lobby", "my reply", None, vec![])
@@ -326,6 +477,8 @@ async fn wait_cursor_file_does_not_skip_unread() {
             &key,
             "--name",
             "waiter",
+            "--agent-id",
+            "stable-waiter",
             "wait",
             "lobby",
             "--loop",
@@ -353,6 +506,87 @@ async fn wait_cursor_file_does_not_skip_unread() {
     assert_ne!(
         new_seq, m1_seq,
         "cursor must advance past m1 to the correction"
+    );
+}
+
+/// Backlog catch-up must page past more than one history page of rows that do
+/// not wake this logical agent. Otherwise a peer chat immediately after a
+/// thinking/self-message burst remains unread while `wait --loop` blocks.
+#[tokio::test]
+async fn wait_pages_past_filtered_backlog_to_peer_message() {
+    let (_handle, addr, key, tmp) = start_test_server().await;
+    let cursor = tmp.path().join("filtered-backlog-cursor");
+    std::fs::write(&cursor, "0").unwrap();
+
+    let waiter = CowchatClient::connect_tcp(&addr, &key, "waiter", Some("stable-waiter"), vec![])
+        .await
+        .unwrap();
+    waiter.join_room("lobby").await.unwrap();
+    for index in 0..20 {
+        waiter
+            .thinking("lobby", &format!("thinking-{index}"))
+            .await
+            .unwrap();
+        waiter
+            .send_message("lobby", &format!("self-{index}"), None, vec![])
+            .await
+            .unwrap();
+    }
+
+    let peer = CowchatClient::connect_tcp(&addr, &key, "peer", Some("stable-peer"), vec![])
+        .await
+        .unwrap();
+    peer.join_room("lobby").await.unwrap();
+    let peer_message = peer
+        .send_message("lobby", "peer-after-filtered-backlog", None, vec![])
+        .await
+        .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            "waiter",
+            "--agent-id",
+            "stable-waiter",
+            "wait",
+            "lobby",
+            "--loop",
+            "--drain",
+            "--cursor-file",
+            cursor.to_str().unwrap(),
+            "--idle-timeout",
+            "5",
+            "--heartbeat-secs",
+            "0",
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "wait must page through filtered backlog instead of timing out: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("peer-after-filtered-backlog"),
+        "wait should return the peer message after the filtered prefix: {stdout}"
+    );
+    assert_eq!(
+        stdout.trim().lines().count(),
+        1,
+        "only peer chat should wake"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cursor).unwrap().trim(),
+        peer_message.seq.to_string(),
+        "cursor should advance through the returned peer message"
     );
 }
 
@@ -384,6 +618,8 @@ async fn wait_drain_returns_full_batch() {
             &key,
             "--name",
             "waiter",
+            "--agent-id",
+            "stable-waiter",
             "wait",
             "lobby",
             "--loop",
@@ -520,6 +756,8 @@ async fn lantern_flow_reconstructs_and_scores() {
                 key,
                 "--name".to_string(),
                 name.to_string(),
+                "--agent-id".to_string(),
+                format!("lantern-{name}"),
                 "lantern".to_string(),
             ];
             args.extend(extra);
