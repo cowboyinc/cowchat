@@ -1190,6 +1190,9 @@ private struct ChatRoomView: View {
     }
 
     private func copyConnectPrompt() {
+        // Retry a failed guest-key mint so the NEXT copy embeds a key; this
+        // copy ships whatever instruction is ready now.
+        store.ensureGuestPromptKey()
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(store.connectPrompt(for: room), forType: .string)

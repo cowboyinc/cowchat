@@ -39,6 +39,9 @@ final class ChatStore: ObservableObject {
     @Published var roomBeingRenamed: Room?
     @Published var connectionStatus: ConnectionStatus = .disconnected
     @Published private(set) var connectionProfile: ConnectionProfile
+    /// Session-cached guest API key embedded in connect prompts for shared
+    /// servers, so a pasted prompt works without any key hand-off.
+    @Published private(set) var guestPromptKey: String?
     @Published var errorMessage: String?
     @Published var isLoadingMessages = false
     @Published var isCreateRoomPresented = false
@@ -95,6 +98,9 @@ final class ChatStore: ObservableObject {
     private var failedDraftRestorationsByRoomID: [String: FailedDraftRestoration] = [:]
     private var sendGeneration = 0
     private var previewActivityByRoomID: [String: String] = [:]
+    private var guestKeyTask: Task<Void, Never>?
+    /// Injectable for tests; production mints over HTTPS.
+    var mintGuestAPIKey: (URL) async throws -> String = WorkspaceStore.requestAPIKeyOverHTTP
     private(set) var agentID = ""
     let agentName = "Cowchat Mac"
     private var stableAgentID: String
@@ -323,6 +329,7 @@ final class ChatStore: ObservableObject {
             }
             reconnectTask?.cancel()
             reconnectTask = nil
+            ensureGuestPromptKey()
             try await refreshRooms(selectFallbackForMissingSelection: false)
             guard expectedProfileGeneration == profileGeneration else { return }
             if let joinedRoomID,
@@ -432,13 +439,21 @@ final class ChatStore: ObservableObject {
         Self.connectPromptText(roomName: room.name, connectionInstruction: agentConnectionInstruction)
     }
 
-    /// For global rooms the recipient has no credentials, so the instruction
-    /// must be one-shot: mint your own key from the server's self-serve
-    /// signup, then connect with it. Falls back to "use your key" wording
-    /// only if the endpoint can't be parsed into a signup URL.
+    /// For global rooms the recipient has no credentials, so the prompt
+    /// carries one: a guest API key minted from the server's self-serve
+    /// signup and embedded directly (the share channel is assumed ephemeral;
+    /// key exchange can harden later). Until a guest key exists — or if
+    /// minting failed — the instruction falls back to mint-your-own.
     var agentConnectionInstruction: String {
         if isLocalConnection { return "connect to the local server" }
         let endpoint = connectionProfile.endpointDescription
+        if let guestPromptKey {
+            return """
+            connect to the shared Cowchat server by passing \
+            `--url \(endpoint) --key \(guestPromptKey)` on every cowchat command \
+            (that key was minted for this invitation)
+            """
+        }
         guard let signupURL = WorkspaceStore.signupURL(forCloudURLString: endpoint) else {
             return "connect to the Cowchat server at \(endpoint) using your Cowchat API key"
         }
@@ -449,6 +464,29 @@ final class ChatStore: ObservableObject {
         prompt for a key), then pass `--url \(endpoint) --key <your api_key>` on every \
         cowchat command
         """
+    }
+
+    /// Mints (once per connected session) the guest key that connect prompts
+    /// embed. Fire-and-forget: prompts fall back to mint-your-own wording
+    /// until it lands. Never called from a view render path — only from
+    /// connect() and copy actions.
+    func ensureGuestPromptKey() {
+        guard connectionProfile.kind == .cowchatCloud,
+              guestPromptKey == nil,
+              guestKeyTask == nil,
+              let signupURL = WorkspaceStore.signupURL(
+                  forCloudURLString: connectionProfile.endpointDescription
+              )
+        else { return }
+        let expectedProfileGeneration = profileGeneration
+        let mint = mintGuestAPIKey
+        guestKeyTask = Task { [weak self] in
+            let key = try? await mint(signupURL)
+            guard let self else { return }
+            guestKeyTask = nil
+            guard expectedProfileGeneration == profileGeneration else { return }
+            if let key { guestPromptKey = key }
+        }
     }
 
     /// Retries a user-selected connection immediately. For Local this is the
@@ -613,6 +651,9 @@ final class ChatStore: ObservableObject {
     }
 
     private func resetServerBackedState(for profile: ConnectionProfile) {
+        guestKeyTask?.cancel()
+        guestKeyTask = nil
+        guestPromptKey = nil
         roomRefreshTask?.cancel()
         roomRefreshTask = nil
         roomLoadTask?.cancel()

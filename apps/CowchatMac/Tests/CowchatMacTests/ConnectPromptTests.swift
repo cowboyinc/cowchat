@@ -39,19 +39,30 @@ final class ConnectPromptTests: XCTestCase {
         XCTAssertTrue(prompt.contains(instruction))
     }
 
-    /// A global-room prompt must be one-shot for a stranger: it has to say how
-    /// to mint a key, not assume the recipient already holds one.
+    /// A global-room prompt must be one-shot for a stranger. With a minted
+    /// guest key it embeds the key outright; before one exists it falls back
+    /// to mint-your-own instructions.
     @MainActor
-    func testGlobalConnectionInstructionIsSelfContained() throws {
-        let profile = try ConnectionProfile.cowchatCloud(
-            urlString: "wss://chat.cowchat.cowboy.inc/ws",
-            apiKey: "prompt-test-key"
+    func testGlobalConnectionInstructionEmbedsAMintedGuestKey() async throws {
+        let store = try makeGlobalStore()
+        store.mintGuestAPIKey = { url in
+            XCTAssertEqual(url.absoluteString, "https://chat.cowchat.cowboy.inc/api/keys")
+            return "guest-key-123"
+        }
+
+        store.ensureGuestPromptKey()
+        while store.guestPromptKey == nil { await Task.yield() }
+
+        let instruction = store.agentConnectionInstruction
+        XCTAssertTrue(
+            instruction.contains("--url wss://chat.cowchat.cowboy.inc/ws --key guest-key-123")
         )
-        let store = ChatStore(
-            connection: CowchatConnection(profile: profile),
-            defaults: UserDefaults(suiteName: "ConnectPromptTests.\(UUID().uuidString)")!,
-            connectionProfile: profile
-        )
+        XCTAssertFalse(instruction.contains("curl"))
+    }
+
+    @MainActor
+    func testGlobalConnectionInstructionFallsBackToSelfServeWithoutGuestKey() throws {
+        let store = try makeGlobalStore()
 
         let instruction = store.agentConnectionInstruction
 
@@ -63,5 +74,36 @@ final class ConnectPromptTests: XCTestCase {
             instruction.contains("--url wss://chat.cowchat.cowboy.inc/ws --key <your api_key>")
         )
         XCTAssertFalse(instruction.contains("using your Cowchat API key"))
+    }
+
+    @MainActor
+    func testLocalStoreNeverMintsAGuestKey() {
+        let store = ChatStore(
+            connection: CowchatConnection(),
+            defaults: UserDefaults(suiteName: "ConnectPromptTests.\(UUID().uuidString)")!,
+            connectionProfile: .local
+        )
+        store.mintGuestAPIKey = { _ in
+            XCTFail("local stores must not mint guest keys")
+            return "never"
+        }
+
+        store.ensureGuestPromptKey()
+
+        XCTAssertNil(store.guestPromptKey)
+        XCTAssertEqual(store.agentConnectionInstruction, "connect to the local server")
+    }
+
+    @MainActor
+    private func makeGlobalStore() throws -> ChatStore {
+        let profile = try ConnectionProfile.cowchatCloud(
+            urlString: "wss://chat.cowchat.cowboy.inc/ws",
+            apiKey: "prompt-test-key"
+        )
+        return ChatStore(
+            connection: CowchatConnection(profile: profile),
+            defaults: UserDefaults(suiteName: "ConnectPromptTests.\(UUID().uuidString)")!,
+            connectionProfile: profile
+        )
     }
 }
