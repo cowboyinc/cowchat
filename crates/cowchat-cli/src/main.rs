@@ -556,9 +556,6 @@ enum RoomAction {
         /// Parent room ID
         #[arg(long)]
         parent: Option<String>,
-        /// Create as ephemeral (auto-deleted when empty)
-        #[arg(long)]
-        ephemeral: bool,
         /// Create as public: visible and joinable by any API key on the server.
         /// Default is private (only your API-key or keyless-local boundary can
         /// resolve it by name) — use this so other principals can find the room.
@@ -1245,12 +1242,11 @@ async fn run_shell(
                                     if rooms.is_empty() {
                                         println!("No rooms found.");
                                     } else {
-                                        println!("{:<38} {:<20} {:<10} DESCRIPTION", "ID", "NAME", "TYPE");
+                                        println!("{:<38} {:<20} DESCRIPTION", "ID", "NAME");
                                         println!("{}", "-".repeat(80));
                                         for room in rooms {
-                                            let room_type = if room.ephemeral { "ephemeral" } else { "permanent" };
                                             let desc = room.description.as_deref().unwrap_or("");
-                                            println!("{:<38} {:<20} {:<10} {}", room.room_id, room.name, room_type, desc);
+                                            println!("{:<38} {:<20} {}", room.room_id, room.name, desc);
                                         }
                                     }
                                 }
@@ -1430,16 +1426,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("No rooms found.");
                     } else {
                         println!(
-                            "{:<38} {:<20} {:<10} {:<8} {:<20} DESCRIPTION",
-                            "ID", "NAME", "TYPE", "MEMBERS", "LAST ACTIVITY"
+                            "{:<38} {:<20} {:<8} {:<20} DESCRIPTION",
+                            "ID", "NAME", "MEMBERS", "LAST ACTIVITY"
                         );
-                        println!("{}", "-".repeat(130));
+                        println!("{}", "-".repeat(120));
                         for room in rooms {
-                            let room_type = if room.ephemeral {
-                                "ephemeral"
-                            } else {
-                                "permanent"
-                            };
                             let desc = room.description.as_deref().unwrap_or("");
                             let members = room
                                 .member_count
@@ -1450,8 +1441,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .map(|t| t.format("%H:%M:%S").to_string())
                                 .unwrap_or_else(|| "-".to_string());
                             println!(
-                                "{:<38} {:<20} {:<10} {:<8} {:<20} {}",
-                                room.room_id, room.name, room_type, members, activity, desc
+                                "{:<38} {:<20} {:<8} {:<20} {}",
+                                room.room_id, room.name, members, activity, desc
                             );
                         }
                     }
@@ -1460,7 +1451,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     name,
                     description,
                     parent,
-                    ephemeral,
                     public,
                     encrypted,
                 } => {
@@ -1469,15 +1459,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             name,
                             description.as_deref(),
                             parent.as_deref(),
-                            *ephemeral,
                             *public,
                             *encrypted,
                         )
                         .await?;
                     println!("Created room: {} ({})", room.name, room.room_id);
-                    if room.ephemeral {
-                        println!("  Type: ephemeral (auto-deleted when empty)");
-                    }
                     println!(
                         "  Visibility: {}",
                         if room.visibility == "public" {
@@ -2039,8 +2025,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 && t != Some("system")
                                 && !client.is_self_message(m)
                         });
-                        // Ephemeral rooms don't persist history, so the wake
-                        // message may be absent — include it exactly once.
+                        // Guard against a history race dropping the wake
+                        // message — include it exactly once.
                         if !all.iter().any(|m| m.seq == msg.seq) {
                             all.push(msg.clone());
                         }
@@ -2827,13 +2813,7 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
-            let ephemeral = frame
-                .payload
-                .get("ephemeral")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let tag = if ephemeral { " (ephemeral)" } else { "" };
-            println!("[room+] created #{}{}", name, tag);
+            println!("[room+] created #{}", name);
         }
         FrameType::RoomUpdated => {
             let room = frame

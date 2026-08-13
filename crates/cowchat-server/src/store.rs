@@ -543,26 +543,13 @@ impl Store {
         Ok(room)
     }
 
-    /// Delete durable side-state for an in-memory (ephemeral) room. Webhook
-    /// subscriptions are persisted even when room chat history is not, and
-    /// legacy schemas may contain other room-scoped rows without foreign keys.
+    /// Delete durable side-state for a room whose destruction raced an
+    /// in-flight operation. Legacy schemas may contain room-scoped rows
+    /// without foreign keys.
     pub fn delete_room_artifacts(&self, room_id: &str) -> Result<(), StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         delete_room_artifacts_in_transaction(&tx, room_id)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Atomically prepare an in-memory room for destruction. Persistent
-    /// children are detached in the same transaction that removes all durable
-    /// room-scoped artifacts. Callers must complete in-memory removal only
-    /// after this commits; on error the transaction rolls back and destruction
-    /// can be retried without stranded subscriptions, tasks, or child links.
-    pub fn prepare_ephemeral_room_destruction(&self, room_id: &str) -> Result<(), StoreError> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        detach_children_and_delete_room_artifacts(&tx, room_id)?;
         tx.commit()?;
         Ok(())
     }
@@ -1600,7 +1587,6 @@ fn map_room_row(row: &rusqlite::Row) -> rusqlite::Result<Room> {
         name: row.get(1)?,
         description: row.get(2)?,
         parent_id: row.get(3)?,
-        ephemeral: false,
         created_at: parse_timestamp(&row.get::<_, String>(5)?),
         created_by: row.get(4)?,
         visibility: row
@@ -2145,96 +2131,6 @@ mod tests {
 
         let reopened = Store::open(&path).unwrap();
         assert_eq!(reopened.get_room("child").unwrap().unwrap().parent_id, None);
-    }
-
-    #[test]
-    fn ephemeral_cleanup_failure_rolls_back_children_and_artifacts_then_retries() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ephemeral-cleanup-retry.db");
-        {
-            // A legacy rooms table without a parent foreign key can contain a
-            // durable child of an in-memory parent. This is exactly the state
-            // destruction must repair safely after an upgrade.
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE rooms (
-                    room_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
-                    description TEXT, parent_id TEXT, created_by TEXT,
-                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                    visibility TEXT NOT NULL DEFAULT 'private', owner_key TEXT,
-                    encrypted INTEGER NOT NULL DEFAULT 0
-                 );",
-            )
-            .unwrap();
-        }
-        let store = Store::open(&path).unwrap();
-        store
-            .create_room_with_visibility(
-                "durable-child",
-                "Durable Child",
-                None,
-                Some("ephemeral-parent"),
-                Some("creator"),
-                "private",
-                Some("owner-key"),
-                false,
-            )
-            .unwrap();
-        store
-            .create_subscription(
-                "ephemeral-sub",
-                "ephemeral-parent",
-                "owner-key",
-                "https://example.com/hook",
-                "secret",
-                &[],
-                None,
-                None,
-                false,
-                0,
-            )
-            .unwrap();
-        store
-            .conn
-            .lock()
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER fail_ephemeral_cleanup
-                 BEFORE DELETE ON subscriptions
-                 WHEN OLD.room_id = 'ephemeral-parent'
-                 BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END;",
-            )
-            .unwrap();
-
-        assert!(store
-            .prepare_ephemeral_room_destruction("ephemeral-parent")
-            .is_err());
-        assert_eq!(
-            store
-                .get_room("durable-child")
-                .unwrap()
-                .unwrap()
-                .parent_id
-                .as_deref(),
-            Some("ephemeral-parent"),
-            "child detachment must roll back with artifact cleanup"
-        );
-        assert!(store.get_subscription("ephemeral-sub").unwrap().is_some());
-
-        store
-            .conn
-            .lock()
-            .unwrap()
-            .execute_batch("DROP TRIGGER fail_ephemeral_cleanup;")
-            .unwrap();
-        store
-            .prepare_ephemeral_room_destruction("ephemeral-parent")
-            .unwrap();
-        assert_eq!(
-            store.get_room("durable-child").unwrap().unwrap().parent_id,
-            None
-        );
-        assert!(store.get_subscription("ephemeral-sub").unwrap().is_none());
     }
 
     #[test]

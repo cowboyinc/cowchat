@@ -54,7 +54,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &format!("lang-vote-{run_id}"),
             Some("Vote on language choice"),
             None,
-            false,
         )
         .await?;
     let room_id = &room.room_id;

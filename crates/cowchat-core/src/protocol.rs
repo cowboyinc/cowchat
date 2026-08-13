@@ -212,7 +212,6 @@ mod tests {
             name: "private-room".into(),
             description: None,
             parent_id: None,
-            ephemeral: false,
             created_at: chrono::Utc::now(),
             created_by: Some("creator".into()),
             visibility: "private".into(),

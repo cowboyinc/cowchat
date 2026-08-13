@@ -72,7 +72,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &format!("sprint-{run_id}"),
             Some("Sprint planning session"),
             None,
-            false,
         )
         .await?;
     let room_id = &room.room_id;

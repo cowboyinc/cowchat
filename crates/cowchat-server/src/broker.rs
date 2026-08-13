@@ -1,7 +1,6 @@
 use cowchat_core::{ChatMessage, Frame, FrameType};
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -58,12 +57,9 @@ impl RoomLifecycleState {
     }
 }
 
-/// Result of a leave: caller uses these to decide whether to clean up and what to broadcast.
+/// Result of a leave: caller uses these to decide what to broadcast.
 pub struct LeaveOutcome {
     pub now_empty: bool,
-    /// The room metadata was removed and its lifecycle was tombstoned as part
-    /// of this leave operation.
-    pub room_destroyed: bool,
     /// Set when this leave caused the holder to change. None means holder is unchanged
     /// OR the room is now empty (check `now_empty` to disambiguate).
     pub new_holder: Option<String>,
@@ -93,8 +89,6 @@ pub struct Broker {
     /// Current turn-token holder per room: room_id -> agent_id.
     /// Absence = room is empty (no holder).
     turn_holders: DashMap<String, String>,
-    /// Per-room monotonic seq counter for ephemeral rooms (permanent rooms use SQLite).
-    ephemeral_seqs: DashMap<String, AtomicI64>,
     /// UUIDs are never reused. A lifecycle tombstone closes the race where a
     /// join/reconnect observes a room immediately before its durable deletion
     /// and would otherwise recreate phantom in-memory membership afterwards.
@@ -112,7 +106,6 @@ impl Broker {
             agents,
             room_members,
             turn_holders: DashMap::new(),
-            ephemeral_seqs: DashMap::new(),
             room_lifecycle: Mutex::new(RoomLifecycleState::new()),
         }
     }
@@ -123,33 +116,6 @@ impl Broker {
 
     pub fn lock_room_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
         self.room_mutation.lock().unwrap()
-    }
-
-    /// Allocate the next seq for an ephemeral room. Starts at 1.
-    pub fn next_ephemeral_seq<F>(&self, room_id: &str, room_exists: F) -> Option<i64>
-    where
-        F: FnOnce() -> bool,
-    {
-        let mut lifecycle = self.room_lifecycle.lock().unwrap();
-        lifecycle.prune(Instant::now());
-        if lifecycle.tombstones.contains_key(room_id) || !room_exists() {
-            return None;
-        }
-        let entry = self
-            .ephemeral_seqs
-            .entry(room_id.to_string())
-            .or_insert_with(|| AtomicI64::new(0));
-        let next = entry.fetch_add(1, Ordering::Relaxed) + 1;
-        drop(lifecycle);
-        Some(next)
-    }
-
-    /// Read the current seq for an ephemeral room without advancing it.
-    pub fn ephemeral_room_tip(&self, room_id: &str) -> i64 {
-        self.ephemeral_seqs
-            .get(room_id)
-            .map(|c| c.load(Ordering::Relaxed))
-            .unwrap_or(0)
     }
 
     /// Broadcast a message to all members of a room, except the sender.
@@ -228,9 +194,8 @@ impl Broker {
         F: FnOnce() -> bool,
     {
         // Existence validation and admission share the lifecycle lock with
-        // persistent destruction and last-leave ephemeral destruction. UUIDs
-        // are never reused, so a failed authoritative lookup cannot later
-        // become the same room again.
+        // room destruction. UUIDs are never reused, so a failed authoritative
+        // lookup cannot later become the same room again.
         let mut lifecycle = self.room_lifecycle.lock().unwrap();
         lifecycle.prune(Instant::now());
         if lifecycle.tombstones.contains_key(room_id) || !room_exists() {
@@ -253,25 +218,9 @@ impl Broker {
         Ok(JoinOutcome { new_holder })
     }
 
-    /// Remove an agent from a room and update turn-token state.
+    /// Remove an agent from a room and update turn-token state. Leaving never
+    /// destroys the room — rooms are removed only by explicit destroy.
     pub fn leave_room(&self, agent_id: &str, room_id: &str) -> LeaveOutcome {
-        self.leave_room_and_destroy_if_empty(agent_id, room_id, || None::<()>)
-            .0
-    }
-
-    /// Remove an agent and, if it was the last member, atomically remove
-    /// ephemeral metadata supplied by the caller and tombstone the room. The
-    /// callback runs while the same lifecycle lock used by `join_room` is held,
-    /// so a join either commits before the empty check or fails afterwards.
-    pub fn leave_room_and_destroy_if_empty<T, F>(
-        &self,
-        agent_id: &str,
-        room_id: &str,
-        remove_ephemeral_room: F,
-    ) -> (LeaveOutcome, Option<T>)
-    where
-        F: FnOnce() -> Option<T>,
-    {
         let mut lifecycle = self.room_lifecycle.lock().unwrap();
         lifecycle.prune(Instant::now());
         let (now_empty, was_holder) = {
@@ -288,18 +237,6 @@ impl Broker {
             }
             (now_empty, was_holder)
         };
-
-        let removed_room = if now_empty {
-            remove_ephemeral_room()
-        } else {
-            None
-        };
-        let room_destroyed = removed_room.is_some();
-        if room_destroyed {
-            lifecycle.tombstone(room_id);
-            self.room_members.remove(room_id);
-            self.ephemeral_seqs.remove(room_id);
-        }
 
         let (new_holder, holder_changed) = if was_holder {
             if now_empty {
@@ -322,15 +259,11 @@ impl Broker {
         };
 
         drop(lifecycle);
-        (
-            LeaveOutcome {
-                now_empty,
-                room_destroyed,
-                new_holder,
-                holder_changed,
-            },
-            removed_room,
-        )
+        LeaveOutcome {
+            now_empty,
+            new_holder,
+            holder_changed,
+        }
     }
 
     /// Remove an agent from all rooms. Returns one outcome per affected room.
@@ -420,7 +353,6 @@ impl Broker {
             .map(|(_, members)| members)
             .unwrap_or_default();
         self.turn_holders.remove(room_id);
-        self.ephemeral_seqs.remove(room_id);
         drop(lifecycle);
         Ok((deleted, members))
     }
@@ -522,38 +454,6 @@ mod tests {
             broker.join_room("late", "doomed", || true).unwrap_err(),
             JoinRoomError::Destroyed
         );
-        assert_eq!(broker.next_ephemeral_seq("doomed", || true), None);
-    }
-
-    #[test]
-    fn last_leave_tombstone_serializes_a_waiting_join() {
-        let broker = Arc::new(Broker::new(
-            Arc::new(DashMap::new()),
-            Arc::new(DashMap::new()),
-        ));
-        broker.join_room("last", "ephemeral", || true).unwrap();
-
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
-        let leave_broker = broker.clone();
-        let leave = std::thread::spawn(move || {
-            leave_broker.leave_room_and_destroy_if_empty("last", "ephemeral", || {
-                entered_tx.send(()).unwrap();
-                continue_rx.recv().unwrap();
-                Some(())
-            })
-        });
-        entered_rx.recv().unwrap();
-
-        let join_broker = broker.clone();
-        let join = std::thread::spawn(move || join_broker.join_room("new", "ephemeral", || true));
-        continue_tx.send(()).unwrap();
-
-        let (outcome, removed) = leave.join().unwrap();
-        assert!(outcome.room_destroyed);
-        assert_eq!(removed, Some(()));
-        assert_eq!(join.join().unwrap().unwrap_err(), JoinRoomError::Destroyed);
-        assert!(broker.get_room_members("ephemeral").is_empty());
     }
 
     #[test]
@@ -581,20 +481,6 @@ mod tests {
         destroy.join().unwrap().unwrap();
         assert_eq!(join.join().unwrap().unwrap_err(), JoinRoomError::Destroyed);
         assert!(broker.get_room_members("persistent").is_empty());
-    }
-
-    #[test]
-    fn join_linearized_before_leave_prevents_ephemeral_destruction() {
-        let broker = Broker::new(Arc::new(DashMap::new()), Arc::new(DashMap::new()));
-        broker.join_room("last", "ephemeral", || true).unwrap();
-        broker.join_room("new", "ephemeral", || true).unwrap();
-
-        let (outcome, removed) =
-            broker.leave_room_and_destroy_if_empty("last", "ephemeral", || Some("must-not-run"));
-        assert!(!outcome.now_empty);
-        assert!(!outcome.room_destroyed);
-        assert_eq!(removed, None);
-        assert_eq!(broker.get_room_members("ephemeral"), vec!["new"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

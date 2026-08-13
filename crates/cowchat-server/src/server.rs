@@ -75,17 +75,11 @@ fn frame_room_id(frame: &Frame) -> Option<&str> {
         })
 }
 
-fn accessible_room(
-    room_id: &str,
-    api_key: &str,
-    no_auth: bool,
-    store: &Store,
-    ephemeral_rooms: &DashMap<String, Room>,
-) -> Option<Room> {
-    ephemeral_rooms
-        .get(room_id)
-        .map(|room| room.clone())
-        .or_else(|| store.get_room(room_id).ok().flatten())
+fn accessible_room(room_id: &str, api_key: &str, no_auth: bool, store: &Store) -> Option<Room> {
+    store
+        .get_room(room_id)
+        .ok()
+        .flatten()
         .filter(|room| can_access_room(room, api_key, no_auth))
 }
 
@@ -114,7 +108,6 @@ pub struct CowchatServer {
     _socket_guard: OwnedSocketPath,
     broker: Arc<Broker>,
     store: Arc<Store>,
-    ephemeral_rooms: Arc<DashMap<String, Room>>,
     vote_mgr: Arc<VoteManager>,
     rate_limiter: Arc<RateLimiter>,
     reconnect_mgr: Arc<ReconnectManager>,
@@ -363,7 +356,6 @@ impl CowchatServer {
         let agents: Arc<DashMap<String, AgentConnection>> = Arc::new(DashMap::new());
         let room_members: Arc<DashMap<String, Vec<String>>> = Arc::new(DashMap::new());
         let broker = Arc::new(Broker::new(agents, room_members));
-        let ephemeral_rooms = Arc::new(DashMap::new());
         let vote_mgr = Arc::new(VoteManager::new(store.clone(), broker.clone()));
         let rate_limiter = Arc::new(RateLimiter::new());
         let reconnect_mgr = Arc::new(ReconnectManager::new());
@@ -388,7 +380,6 @@ impl CowchatServer {
             _socket_guard: socket_guard,
             broker,
             store,
-            ephemeral_rooms,
             vote_mgr,
             rate_limiter,
             reconnect_mgr,
@@ -422,7 +413,6 @@ impl CowchatServer {
         // Spawn UDS accept loop as a task
         let uds_broker = self.broker.clone();
         let uds_store = self.store.clone();
-        let uds_ephemeral = self.ephemeral_rooms.clone();
         let uds_vote_mgr = self.vote_mgr.clone();
         let uds_api_key = self.api_key.clone();
         let uds_no_auth = self.config.no_auth;
@@ -438,7 +428,6 @@ impl CowchatServer {
                         let (read_half, write_half) = tokio::io::split(stream);
                         let broker = uds_broker.clone();
                         let store = uds_store.clone();
-                        let ephemeral = uds_ephemeral.clone();
                         let vote_mgr = uds_vote_mgr.clone();
                         let api_key = uds_api_key.clone();
                         let rate_limiter = uds_rate_limiter.clone();
@@ -451,7 +440,6 @@ impl CowchatServer {
                                 write_half,
                                 broker,
                                 store,
-                                ephemeral,
                                 vote_mgr,
                                 api_key,
                                 uds_no_auth,
@@ -479,7 +467,6 @@ impl CowchatServer {
             log::info!("Listening on TCP: {}", addr);
             let tcp_broker = self.broker.clone();
             let tcp_store = self.store.clone();
-            let tcp_ephemeral = self.ephemeral_rooms.clone();
             let tcp_vote_mgr = self.vote_mgr.clone();
             let tcp_api_key = self.api_key.clone();
             let tcp_no_auth = self.config.no_auth;
@@ -500,7 +487,6 @@ impl CowchatServer {
                             let (read_half, write_half) = tokio::io::split(stream);
                             let broker = tcp_broker.clone();
                             let store = tcp_store.clone();
-                            let ephemeral = tcp_ephemeral.clone();
                             let vote_mgr = tcp_vote_mgr.clone();
                             let api_key = tcp_api_key.clone();
                             let rate_limiter = tcp_rate_limiter.clone();
@@ -513,7 +499,6 @@ impl CowchatServer {
                                     write_half,
                                     broker,
                                     store,
-                                    ephemeral,
                                     vote_mgr,
                                     api_key,
                                     tcp_no_auth,
@@ -543,7 +528,6 @@ impl CowchatServer {
             let app_state = crate::web::AppState {
                 broker: self.broker.clone(),
                 store: self.store.clone(),
-                ephemeral_rooms: self.ephemeral_rooms.clone(),
                 vote_mgr: self.vote_mgr.clone(),
                 rate_limiter: self.rate_limiter.clone(),
                 no_auth: self.config.no_auth,
@@ -673,7 +657,6 @@ pub async fn connection_loop<R, W>(
     mut write_half: W,
     broker: Arc<Broker>,
     store: Arc<Store>,
-    ephemeral_rooms: Arc<DashMap<String, Room>>,
     vote_mgr: Arc<VoteManager>,
     api_key: String,
     // Server-wide `--no-auth`; unlike `allow_keyless`, this intentionally
@@ -871,28 +854,15 @@ where
                         .expect("a newly acquired reconnect lease has a stash");
                     let mut rooms = stashed.rooms;
                     rooms.retain(|room_id| {
-                        accessible_room(
-                            room_id,
-                            &authenticated_key,
-                            no_auth,
-                            &store,
-                            &ephemeral_rooms,
-                        )
-                        .is_some()
+                        accessible_room(room_id, &authenticated_key, no_auth, &store).is_some()
                     });
                     reconnected_rooms = Some(rooms);
                     missed_messages = stashed.missed_messages;
                     missed_messages.retain(|frame| {
                         frame_room_id(frame)
                             .map(|room_id| {
-                                accessible_room(
-                                    room_id,
-                                    &authenticated_key,
-                                    no_auth,
-                                    &store,
-                                    &ephemeral_rooms,
-                                )
-                                .is_some()
+                                accessible_room(room_id, &authenticated_key, no_auth, &store)
+                                    .is_some()
                             })
                             .unwrap_or(true)
                     });
@@ -954,14 +924,8 @@ where
                             .rooms_for_agent(&agent_id)
                             .into_iter()
                             .filter(|room_id| {
-                                accessible_room(
-                                    room_id,
-                                    &authenticated_key,
-                                    no_auth,
-                                    &store,
-                                    &ephemeral_rooms,
-                                )
-                                .is_some()
+                                accessible_room(room_id, &authenticated_key, no_auth, &store)
+                                    .is_some()
                             })
                             .collect(),
                     );
@@ -1092,8 +1056,7 @@ where
     if let Some(rooms) = takeover_rooms {
         for room_id in &rooms {
             let _ = broker.join_room(&agent_id, room_id, || {
-                accessible_room(room_id, &agent_api_key, no_auth, &store, &ephemeral_rooms)
-                    .is_some()
+                accessible_room(room_id, &agent_api_key, no_auth, &store).is_some()
             });
         }
     }
@@ -1103,8 +1066,7 @@ where
         for room_id in &rooms {
             if broker
                 .join_room(&agent_id, room_id, || {
-                    accessible_room(room_id, &agent_api_key, no_auth, &store, &ephemeral_rooms)
-                        .is_some()
+                    accessible_room(room_id, &agent_api_key, no_auth, &store).is_some()
                 })
                 .is_err()
             {
@@ -1140,15 +1102,12 @@ where
     }
     missed_messages.retain(|frame| {
         frame_room_id(frame)
-            .map(|room_id| {
-                accessible_room(room_id, &agent_api_key, no_auth, &store, &ephemeral_rooms)
-                    .is_some()
-            })
+            .map(|room_id| accessible_room(room_id, &agent_api_key, no_auth, &store).is_some())
             .unwrap_or(true)
     });
     restored_rooms.retain(|room_id| {
         broker.is_agent_in_room(&agent_id, room_id)
-            && accessible_room(room_id, &agent_api_key, no_auth, &store, &ephemeral_rooms).is_some()
+            && accessible_room(room_id, &agent_api_key, no_auth, &store).is_some()
     });
 
     let mut ok_payload = serde_json::json!({
@@ -1191,46 +1150,7 @@ where
             .is_some();
         if removed_own_connection {
             for room_id in broker.rooms_for_agent(&agent_id) {
-                let _room_guard = broker.lock_room_mutation();
-                let mut artifact_cleanup_error = None;
-                let (outcome, removed_room) =
-                    broker.leave_room_and_destroy_if_empty(&agent_id, &room_id, || {
-                        match crate::handler::remove_ephemeral_room_after_durable_cleanup(
-                            &store,
-                            &ephemeral_rooms,
-                            &room_id,
-                        ) {
-                            Ok(removed) => removed,
-                            Err(error) => {
-                                artifact_cleanup_error = Some(error);
-                                None
-                            }
-                        }
-                    });
-                if let Some(error) = artifact_cleanup_error {
-                    log::error!(
-                        "Ephemeral room {} cleanup failed; leaving it retryable: {}",
-                        room_id,
-                        error
-                    );
-                }
-                if outcome.room_destroyed {
-                    if let Some(room) = removed_room {
-                        vote_mgr.forget_room(&room_id);
-                        task_mgr.forget_room(&room_id);
-                        reconnect_mgr.forget_room(&room_id);
-                        if let Some(owner_key) = room.owner_key.as_deref() {
-                            rate_limiter.remove_room(owner_key);
-                        }
-                        let destroyed = Frame::event(
-                            FrameType::RoomDestroyed,
-                            serde_json::json!({"room_id": room_id}),
-                        );
-                        crate::handler::broadcast_room_destroyed(
-                            &broker, &room, no_auth, &destroyed,
-                        );
-                    }
-                }
+                broker.leave_room(&agent_id, &room_id);
             }
         }
         drop(failed_registration_guard);
@@ -1252,8 +1172,7 @@ where
                     continue;
                 }
                 if frame_room_id(&frame).is_some_and(|room_id| {
-                    accessible_room(room_id, &agent_api_key, no_auth, &store, &ephemeral_rooms)
-                        .is_none()
+                    accessible_room(room_id, &agent_api_key, no_auth, &store).is_none()
                 }) {
                     continue;
                 }
@@ -1339,7 +1258,6 @@ where
                     &agent_name,
                     &broker,
                     &store,
-                    &ephemeral_rooms,
                     &vote_mgr,
                     &agent_api_key,
                     &rate_limiter,
@@ -1419,9 +1337,8 @@ where
     // Collect room memberships BEFORE leaving them (for stash)
     let agent_rooms: HashSet<String> = broker.rooms_for_agent(&agent_id).into_iter().collect();
 
-    // Stash for reconnect (only for permanent rooms — don't stash ephemeral-only agents)
-    let has_permanent_rooms = agent_rooms.iter().any(|r| !ephemeral_rooms.contains_key(r));
-    if has_permanent_rooms {
+    // Stash for reconnect
+    if !agent_rooms.is_empty() {
         reconnect_mgr.stash(
             agent_id.clone(),
             agent_name.clone(),
@@ -1430,33 +1347,9 @@ where
         );
     }
 
-    // Leave all rooms and clean up ephemeral rooms. Each metadata mutation and
-    // its lifecycle event share the room guard with rename/explicit destroy,
-    // so reconnect and live clients observe one consistent order.
+    // Leave all rooms
     for room_id in &agent_rooms {
-        let _room_guard = broker.lock_room_mutation();
-        let mut artifact_cleanup_error = None;
-        let (outcome, removed_room) =
-            broker.leave_room_and_destroy_if_empty(&agent_id, room_id, || {
-                match crate::handler::remove_ephemeral_room_after_durable_cleanup(
-                    &store,
-                    &ephemeral_rooms,
-                    room_id,
-                ) {
-                    Ok(removed) => removed,
-                    Err(error) => {
-                        artifact_cleanup_error = Some(error);
-                        None
-                    }
-                }
-            });
-        if let Some(error) = artifact_cleanup_error {
-            log::error!(
-                "Ephemeral room {} cleanup failed; leaving it retryable: {}",
-                room_id,
-                error
-            );
-        }
+        let outcome = broker.leave_room(&agent_id, room_id);
 
         // Broadcast leave event
         let event = Frame::event(
@@ -1479,24 +1372,6 @@ where
         // Tell the remaining members so they know whose turn it is now.
         if outcome.holder_changed && !outcome.now_empty {
             crate::handler::broadcast_turn_changed(&broker, room_id, "disconnected");
-        }
-
-        // Destroy empty ephemeral rooms
-        if outcome.room_destroyed {
-            if let Some(room) = &removed_room {
-                vote_mgr.forget_room(room_id);
-                task_mgr.forget_room(room_id);
-                reconnect_mgr.forget_room(room_id);
-                if let Some(owner_key) = room.owner_key.as_deref() {
-                    rate_limiter.remove_room(owner_key);
-                }
-                let destroy = Frame::event(
-                    FrameType::RoomDestroyed,
-                    serde_json::json!({"room_id": room_id}),
-                );
-                crate::handler::broadcast_room_destroyed(&broker, room, no_auth, &destroy);
-                log::info!("Ephemeral room {} destroyed (agent disconnected)", room_id);
-            }
         }
     }
 
@@ -1881,8 +1756,7 @@ mod local_auth_tests {
         crate::handler::broadcast_room_destroyed(&broker, &room, false, &destroyed);
 
         let would_report_restored = broker.is_agent_in_room("stable", "pending-room")
-            && accessible_room("pending-room", "owner-key", false, &store, &DashMap::new())
-                .is_some();
+            && accessible_room("pending-room", "owner-key", false, &store).is_some();
         assert!(!would_report_restored);
         let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await

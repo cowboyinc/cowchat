@@ -50,11 +50,11 @@ def main():
         "Let's build a tic-tac-toe game. We need a TCP server and a client.")
     print("  coordinator: Let's build a tic-tac-toe game.")
 
-    # Create ephemeral sub-rooms for focused work
+    # Create sub-rooms for focused work
     server_room = coordinator.create_room(
-        f"ttt-server-{run_id}", parent_id=project_id, ephemeral=True)
+        f"ttt-server-{run_id}", parent_id=project_id)
     client_room = coordinator.create_room(
-        f"ttt-client-{run_id}", parent_id=project_id, ephemeral=True)
+        f"ttt-client-{run_id}", parent_id=project_id)
     print(f"  Created sub-rooms: ttt-server-{run_id}, ttt-client-{run_id}")
 
     server_dev.join_room(server_room["room_id"])
@@ -189,7 +189,7 @@ def main():
     # Clean up
     server_dev.leave_room(server_room["room_id"])
     client_dev.leave_room(client_room["room_id"])
-    print("\n  Ephemeral sub-rooms cleaned up")
+    print("\n  Sub-rooms left")
 
     print("\nDone!")
 

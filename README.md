@@ -12,7 +12,7 @@ accounts are optional, not required.
 When multiple AI agents work on the same codebase, they need a shared place to
 coordinate. Cowchat provides:
 
-- Rooms and ephemeral sub-rooms for organizing work
+- Rooms and sub-rooms for organizing work
 - Persisted SQLite message history
 - Sealed-ballot voting that avoids anchoring bias
 - Leader elections and recorded decisions

@@ -210,7 +210,7 @@ async fn test_keyless_local_and_authenticated_private_rooms_are_isolated() {
     let mut authenticated_events = authenticated.subscribe();
 
     let keyless_room = keyless_owner
-        .create_room("keyless-private", None, None, false)
+        .create_room("keyless-private", None, None)
         .await
         .unwrap();
     assert!(
@@ -295,7 +295,7 @@ async fn test_keyless_local_and_authenticated_private_rooms_are_isolated() {
     );
 
     let authenticated_room = authenticated
-        .create_room("authenticated-private", None, None, false)
+        .create_room("authenticated-private", None, None)
         .await
         .unwrap();
     assert!(
@@ -326,22 +326,27 @@ async fn test_keyless_local_and_authenticated_private_rooms_are_isolated() {
         .iter()
         .any(|room| room.room_id == authenticated_room.room_id));
 
-    let ephemeral = keyless_owner
-        .create_room("keyless-ephemeral", None, None, true)
+    let keyless_second = keyless_owner
+        .create_room("keyless-second", None, None)
         .await
         .unwrap();
-    keyless_owner.join_room(&ephemeral.room_id).await.unwrap();
-    keyless_owner.leave_room(&ephemeral.room_id).await.unwrap();
-    assert!(
-        receives_room_event(
-            &mut keyless_events,
-            FrameType::RoomDestroyed,
-            &ephemeral.room_id,
-            Duration::from_secs(2),
-        )
+    keyless_owner
+        .join_room(&keyless_second.room_id)
         .await
-    );
-    assert!(authenticated.room_info(&ephemeral.room_id).await.is_err());
+        .unwrap();
+    keyless_owner
+        .leave_room(&keyless_second.room_id)
+        .await
+        .unwrap();
+    // Leaving never destroys a room; it stays, still invisible to other keys.
+    assert!(keyless_owner
+        .room_info(&keyless_second.room_id)
+        .await
+        .is_ok());
+    assert!(authenticated
+        .room_info(&keyless_second.room_id)
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -430,11 +435,10 @@ async fn test_create_and_join_room() {
     let client = connect_agent(&addr, &key, "agent-a").await;
 
     let room = client
-        .create_room("test-room", Some("A test room"), None, false)
+        .create_room("test-room", Some("A test room"), None)
         .await
         .unwrap();
     assert_eq!(room.name, "test-room");
-    assert!(!room.ephemeral);
 
     client.join_room(&room.room_id).await.unwrap();
 
@@ -518,11 +522,8 @@ async fn test_seq_monotonic_per_room() {
     let client = connect_agent(&addr, &key, "agent-a").await;
     client.join_room("lobby").await.unwrap();
 
-    // Create a second permanent room to confirm seqs are independent.
-    let other = client
-        .create_room("other-room", None, None, false)
-        .await
-        .unwrap();
+    // Create a second room to confirm seqs are independent.
+    let other = client.create_room("other-room", None, None).await.unwrap();
     client.join_room(&other.room_id).await.unwrap();
 
     let m1 = client
@@ -548,10 +549,7 @@ async fn test_seq_monotonic_per_room() {
     assert_eq!(client.room_tip("lobby").await.unwrap(), 3);
     assert_eq!(client.room_tip(&other.room_id).await.unwrap(), 1);
 
-    let new_room = client
-        .create_room("empty-room", None, None, false)
-        .await
-        .unwrap();
+    let new_room = client.create_room("empty-room", None, None).await.unwrap();
     assert_eq!(client.room_tip(&new_room.room_id).await.unwrap(), 0);
 }
 
@@ -642,59 +640,37 @@ async fn test_join_silent_no_history_change() {
 }
 
 #[tokio::test]
-async fn test_ephemeral_room_seq() {
+async fn test_room_persists_after_all_members_leave() {
     let (_handle, addr, key, _tmp) = start_test_server().await;
 
     let agent_a = connect_agent(&addr, &key, "agent-a").await;
     let agent_b = connect_agent(&addr, &key, "agent-b").await;
 
     let room = agent_a
-        .create_room("ephem-seq", None, None, true)
+        .create_room("temp-collab", None, None)
         .await
         .unwrap();
-    agent_a.join_room(&room.room_id).await.unwrap();
-    agent_b.join_room(&room.room_id).await.unwrap();
-
-    let m1 = agent_a
-        .send_message(&room.room_id, "hi", None, vec![])
-        .await
-        .unwrap();
-    let m2 = agent_b
-        .send_message(&room.room_id, "hey", None, vec![])
-        .await
-        .unwrap();
-
-    assert_eq!(m1.seq, 1);
-    assert_eq!(m2.seq, 2);
-    assert_eq!(agent_a.room_tip(&room.room_id).await.unwrap(), 2);
-}
-
-#[tokio::test]
-async fn test_ephemeral_room_lifecycle() {
-    let (_handle, addr, key, _tmp) = start_test_server().await;
-
-    let agent_a = connect_agent(&addr, &key, "agent-a").await;
-    let agent_b = connect_agent(&addr, &key, "agent-b").await;
-
-    let room = agent_a
-        .create_room("temp-collab", None, None, true)
-        .await
-        .unwrap();
-    assert!(room.ephemeral);
     let room_id = room.room_id.clone();
 
     agent_a.join_room(&room_id).await.unwrap();
     agent_b.join_room(&room_id).await.unwrap();
 
     agent_a
-        .send_message(&room_id, "ephemeral msg", None, vec![])
+        .send_message(&room_id, "still here later", None, vec![])
         .await
         .unwrap();
 
     agent_a.leave_room(&room_id).await.unwrap();
     agent_b.leave_room(&room_id).await.unwrap();
 
+    // Rooms are only removed by explicit destroy; leaving never destroys.
     sleep(Duration::from_millis(50)).await;
+    let rooms = agent_a.list_rooms(None).await.unwrap();
+    assert!(rooms.iter().any(|r| r.room_id == room_id));
+    let history = agent_a.get_history(&room_id, 50, None).await.unwrap();
+    assert_eq!(history.len(), 1);
+
+    agent_a.destroy_room(&room_id).await.unwrap();
     let rooms = agent_a.list_rooms(None).await.unwrap();
     assert!(!rooms.iter().any(|r| r.room_id == room_id));
 }
@@ -705,17 +681,12 @@ async fn test_room_hierarchy() {
     let client = connect_agent(&addr, &key, "agent-a").await;
 
     let parent = client
-        .create_room("project-alpha", Some("Main project"), None, false)
+        .create_room("project-alpha", Some("Main project"), None)
         .await
         .unwrap();
 
     let child = client
-        .create_room(
-            "alpha-testing",
-            Some("Testing"),
-            Some(&parent.room_id),
-            false,
-        )
+        .create_room("alpha-testing", Some("Testing"), Some(&parent.room_id))
         .await
         .unwrap();
     assert_eq!(child.parent_id, Some(parent.room_id.clone()));
@@ -796,10 +767,7 @@ async fn test_mention_is_constrained_to_room_members() {
 
     agent_a.join_room("lobby").await.unwrap();
 
-    let room = agent_b
-        .create_room("other-room", None, None, false)
-        .await
-        .unwrap();
+    let room = agent_b.create_room("other-room", None, None).await.unwrap();
     agent_b.join_room(&room.room_id).await.unwrap();
 
     let mut events_b = agent_b.subscribe();
@@ -1290,7 +1258,7 @@ async fn test_leader_decision() {
 
     // Create a room and be the only member
     let room = agent_a
-        .create_room("decision-room", None, None, false)
+        .create_room("decision-room", None, None)
         .await
         .unwrap();
     agent_a.join_room(&room.room_id).await.unwrap();
@@ -1561,7 +1529,7 @@ async fn test_three_agent_task_coordination() {
 
     // --- Step 1: Create project room and join ---
     let room = architect
-        .create_room("api-design", Some("API design coordination"), None, false)
+        .create_room("api-design", Some("API design coordination"), None)
         .await
         .unwrap();
     let room_id = room.room_id.clone();
@@ -2761,7 +2729,7 @@ async fn test_e2e_encrypted_room() {
 
     // Alice creates a persistent end-to-end encrypted room.
     let room = alice
-        .create_room_with_options("vault", None, None, false, false, true)
+        .create_room_with_options("vault", None, None, false, true)
         .await
         .unwrap();
     assert!(room.encrypted, "room should be marked encrypted");
@@ -3013,7 +2981,7 @@ async fn test_private_room_reads_and_creation_events_are_key_scoped() {
     let outsider = connect_agent(&addr, key_b, "outsider").await;
     let mut outsider_events = outsider.subscribe();
     let room = owner
-        .create_room("key-private-room", None, None, false)
+        .create_room("key-private-room", None, None)
         .await
         .unwrap();
     owner.join_room(&room.room_id).await.unwrap();
@@ -3058,18 +3026,18 @@ async fn test_private_room_reads_and_creation_events_are_key_scoped() {
         "private RoomCreated must not leak across API keys"
     );
 
-    let ephemeral = owner
-        .create_room("key-private-ephemeral", None, None, true)
+    let doomed = owner
+        .create_room("key-private-doomed", None, None)
         .await
         .unwrap();
-    owner.join_room(&ephemeral.room_id).await.unwrap();
-    owner.leave_room(&ephemeral.room_id).await.unwrap();
+    owner.join_room(&doomed.room_id).await.unwrap();
+    owner.destroy_room(&doomed.room_id).await.unwrap();
     let leaked_destroy = tokio::time::timeout(Duration::from_millis(200), async {
         loop {
             if let Ok(event) = outsider_events.recv().await {
                 if event.frame.frame_type == FrameType::RoomDestroyed
                     && event.frame.payload.get("room_id").and_then(|v| v.as_str())
-                        == Some(ephemeral.room_id.as_str())
+                        == Some(doomed.room_id.as_str())
                 {
                     return true;
                 }
@@ -3120,7 +3088,7 @@ async fn test_persistent_room_rename_is_authorized_scoped_and_reconnect_visible(
             .unwrap();
 
     let room = owner
-        .create_room("Persistent Old", None, None, false)
+        .create_room("Persistent Old", None, None)
         .await
         .unwrap();
     stashed.join_room(&room.room_id).await.unwrap();
@@ -3264,7 +3232,7 @@ async fn test_persistent_room_rename_is_authorized_scoped_and_reconnect_visible(
 }
 
 #[tokio::test]
-async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
+async fn test_public_room_rename_and_name_invariants() {
     let (_handle, addr, key_a, tmp) = start_test_server().await;
     let key_b = "rename-public-observer-key";
     rusqlite::Connection::open(tmp.path().join("test.db"))
@@ -3274,10 +3242,9 @@ async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
             [key_b],
         )
         .unwrap();
-    let owner =
-        CowchatClient::connect_tcp(&addr, &key_a, "owner", Some("ephemeral-renamer"), vec![])
-            .await
-            .unwrap();
+    let owner = CowchatClient::connect_tcp(&addr, &key_a, "owner", Some("public-renamer"), vec![])
+        .await
+        .unwrap();
     let observer = CowchatClient::connect_tcp(
         &addr,
         key_b,
@@ -3289,18 +3256,11 @@ async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
     .unwrap();
 
     let persistent = owner
-        .create_room("Persistent Conflict", None, None, false)
+        .create_room("Persistent Conflict", None, None)
         .await
         .unwrap();
     let denied_child = observer
-        .create_room_with_options(
-            "Unauthorized Ephemeral Child",
-            None,
-            Some(&persistent.room_id),
-            true,
-            false,
-            false,
-        )
+        .create_room("Unauthorized Child", None, Some(&persistent.room_id))
         .await
         .unwrap_err();
     match denied_child {
@@ -3310,14 +3270,7 @@ async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
         other => panic!("expected access_denied, got {other:?}"),
     }
     let missing_parent = owner
-        .create_room_with_options(
-            "Dangling Ephemeral Child",
-            None,
-            Some("missing-parent"),
-            true,
-            false,
-            false,
-        )
+        .create_room("Dangling Child", None, Some("missing-parent"))
         .await
         .unwrap_err();
     match missing_parent {
@@ -3326,14 +3279,14 @@ async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
         }
         other => panic!("expected room_not_found, got {other:?}"),
     }
-    let ephemeral = owner
-        .create_room_with_options("  Ephemeral Old  ", None, None, true, true, false)
+    let public = owner
+        .create_room_with_options("  Public Old  ", None, None, true, false)
         .await
         .unwrap();
-    assert_eq!(ephemeral.name, "Ephemeral Old");
+    assert_eq!(public.name, "Public Old");
 
     let duplicate = owner
-        .create_room("Ephemeral Old", None, None, false)
+        .create_room("Public Old", None, None)
         .await
         .unwrap_err();
     match duplicate {
@@ -3343,7 +3296,7 @@ async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
         other => panic!("expected room_name_taken, got {other:?}"),
     }
     let duplicate = owner
-        .create_room("Persistent Conflict", None, None, true)
+        .create_room("Persistent Conflict", None, None)
         .await
         .unwrap_err();
     match duplicate {
@@ -3355,7 +3308,7 @@ async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
 
     for invalid in ["   ".to_string(), "bad\nname".to_string(), "🦀".repeat(101)] {
         let error = owner
-            .rename_room(&ephemeral.room_id, &invalid)
+            .rename_room(&public.room_id, &invalid)
             .await
             .unwrap_err();
         match error {
@@ -3366,7 +3319,7 @@ async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
         }
     }
     let conflict = owner
-        .rename_room(&ephemeral.room_id, &persistent.name)
+        .rename_room(&public.room_id, &persistent.name)
         .await
         .unwrap_err();
     match conflict {
@@ -3378,16 +3331,15 @@ async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
 
     let mut observer_events = observer.subscribe();
     let updated = owner
-        .rename_room(&ephemeral.room_id, "  Ephemeral Renamed  ")
+        .rename_room(&public.room_id, "  Public Renamed  ")
         .await
         .unwrap();
-    assert!(updated.ephemeral);
-    assert_eq!(updated.name, "Ephemeral Renamed");
+    assert_eq!(updated.name, "Public Renamed");
     let event = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let event = observer_events.recv().await.unwrap();
             if event.frame.frame_type == FrameType::RoomUpdated
-                && event.frame.payload["room_id"] == ephemeral.room_id
+                && event.frame.payload["room_id"] == public.room_id
             {
                 break event.frame;
             }
@@ -3395,22 +3347,16 @@ async fn test_ephemeral_room_rename_and_cross_store_name_invariants() {
     })
     .await
     .expect("public room_updated reaches another API key");
-    assert_eq!(event.payload["name"], "Ephemeral Renamed");
+    assert_eq!(event.payload["name"], "Public Renamed");
     assert!(owner
         .list_rooms(None)
         .await
         .unwrap()
         .iter()
-        .any(|room| room.room_id == ephemeral.room_id && room.name == "Ephemeral Renamed"));
+        .any(|room| room.room_id == public.room_id && room.name == "Public Renamed"));
 
-    for (index, invalid) in ["".to_string(), "bad\tname".to_string(), "界".repeat(101)]
-        .into_iter()
-        .enumerate()
-    {
-        let error = owner
-            .create_room(&invalid, None, None, index % 2 == 0)
-            .await
-            .unwrap_err();
+    for invalid in ["".to_string(), "bad\tname".to_string(), "界".repeat(101)] {
+        let error = owner.create_room(&invalid, None, None).await.unwrap_err();
         match error {
             cowchat_client::ClientError::Server { code, .. } => {
                 assert_eq!(code, cowchat_core::ErrorCode::InvalidPayload)
@@ -3450,7 +3396,7 @@ async fn test_explicit_room_destruction_is_creator_only_scoped_and_complete() {
             .unwrap();
 
     let room = owner
-        .create_room("explicit-destroy", None, None, false)
+        .create_room("explicit-destroy", None, None)
         .await
         .unwrap();
     assert_eq!(room.created_by.as_deref(), Some("destroy-owner"));
@@ -3590,45 +3536,6 @@ async fn test_explicit_room_destruction_is_creator_only_scoped_and_complete() {
 }
 
 #[tokio::test]
-async fn test_explicit_ephemeral_destruction_cleans_durable_subscriptions() {
-    let (_handle, addr, key, _tmp) = start_test_server().await;
-    let owner = CowchatClient::connect_tcp(
-        &addr,
-        &key,
-        "ephemeral-owner",
-        Some("ephemeral-destroy-owner"),
-        vec![],
-    )
-    .await
-    .unwrap();
-    let room = owner
-        .create_room("explicit-ephemeral-destroy", None, None, true)
-        .await
-        .unwrap();
-    owner
-        .create_subscription(
-            &room.room_id,
-            "http://127.0.0.1:9/hook",
-            "secret",
-            vec![],
-            None,
-            None,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-
-    owner.destroy_room(&room.room_id).await.unwrap();
-    assert!(owner.join_room(&room.room_id).await.is_err());
-    assert!(owner
-        .list_subscriptions(Some(&room.room_id))
-        .await
-        .unwrap()
-        .is_empty());
-}
-
-#[tokio::test]
 async fn test_legacy_ownerless_private_room_fails_closed() {
     let (_handle, addr, key, tmp) = start_test_server().await;
     rusqlite::Connection::open(tmp.path().join("test.db"))
@@ -3666,7 +3573,7 @@ async fn test_nonmember_cannot_cast_room_vote() {
     let owner = connect_agent(&addr, &key, "owner").await;
     let outsider = connect_agent(&addr, &key, "outsider").await;
     let room = owner
-        .create_room_with_options("public-vote-room", None, None, false, true, false)
+        .create_room_with_options("public-vote-room", None, None, true, false)
         .await
         .unwrap();
     owner.join_room(&room.room_id).await.unwrap();
@@ -3691,10 +3598,7 @@ async fn test_nonmember_cannot_cast_room_vote() {
 async fn test_message_size_cap() {
     let (_handle, addr, key, _tmp) = start_test_server().await;
     let agent = connect_agent(&addr, &key, "bigmouth").await;
-    let room = agent
-        .create_room("sizetest", None, None, false)
-        .await
-        .unwrap();
+    let room = agent.create_room("sizetest", None, None).await.unwrap();
     agent.join_room(&room.room_id).await.unwrap();
 
     // A normal-sized message passes (free tier cap is 64 KiB).

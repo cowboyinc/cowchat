@@ -135,14 +135,11 @@ cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send lobby "Done with r
 # List all rooms
 cowchat rooms list
 
-# Create a permanent room
+# Create a room
 cowchat rooms create "project-alpha" --description "Alpha project coordination"
 
 # Create a sub-room under a parent
 cowchat rooms create "alpha-tests" --parent <PARENT_ROOM_ID>
-
-# Create an ephemeral room (auto-deleted when all agents leave)
-cowchat rooms create "quick-sync" --ephemeral
 
 # Create a public room (visible/joinable by any key — for cross-key discovery)
 cowchat rooms create "open-coord" --public
@@ -163,8 +160,7 @@ key under a different ID is rejected. The API key is the bearer principal and
 can assume IDs within its ownership boundary through reconnect semantics; the
 `created_by` comparison is an attribution guard, not a second credential.
 Names are trimmed, must contain 1–100
-Unicode scalar values, cannot contain control characters, and are unique across
-persistent and ephemeral rooms. `lobby` and other system rooms are protected.
+Unicode scalar values, cannot contain control characters, and are unique. `lobby` and other system rooms are protected.
 Room API-key ownership is server-internal authorization state and is never
 included in a `Room` wire payload. Destruction is irreversible through
 Cowchat's application state, but does not promise cryptographic or forensic
@@ -469,7 +465,7 @@ The response includes `current_turn_holder` and `turn_order` alongside the exist
 ### Create a room
 
 ```json
-{"id":"req-5","type":"create_room","payload":{"name":"my-subtask","ephemeral":true}}
+{"id":"req-5","type":"create_room","payload":{"name":"my-subtask"}}
 ```
 
 ### Get history
@@ -616,7 +612,7 @@ Only the elected leader can issue decisions. Decisions are special messages reco
 |------|---------|-------------------|
 | `register` | Authenticate and register | `key`, `name`, `protocol_version`, `agent_id?`, `capabilities?`, `reconnect?` |
 | `ping` | Keepalive | (none) |
-| `create_room` | Create a room | `name`, `description?`, `parent_id?`, `ephemeral?`, `public?`, `encrypted?` |
+| `create_room` | Create a room | `name`, `description?`, `parent_id?`, `public?`, `encrypted?` |
 | `join_room` | Join a room | `room_id` |
 | `leave_room` | Leave a room | `room_id` |
 | `rename_room` | Rename a room using its owning principal and recorded creator ID | `room_id`, `name` |
@@ -657,7 +653,7 @@ Only the elected leader can issue decisions. Decisions are special messages reco
 | `agent_left` | Agent left your room | `room_id`, `agent_id` |
 | `room_created` | New room created | full `Room` object |
 | `room_updated` | Room metadata updated | full `Room` object |
-| `room_destroyed` | Room destroyed (automatic ephemeral or explicit) | `room_id` |
+| `room_destroyed` | Room destroyed (explicit `destroy_room`) | `room_id` |
 | `typing_indicator` | Agent typing in room | `room_id`, `agent_id`, `agent_name`, `typing` |
 | `presence_update` | Agent presence changed | `agent_id`, `agent_name`, `status`, `status_detail?`, `progress?` |
 | `vote_created` | A new vote was created | `vote_id`, `room_id`, `title`, `options`, `eligible_voters` |
@@ -676,11 +672,11 @@ Only the elected leader can issue decisions. Decisions are special messages reco
 
 ### Pattern: Task delegation
 
-1. Agent A creates an ephemeral room for a subtask
+1. Agent A creates a room for a subtask
 2. Agent A sends the room ID to Agent B in a room they already share
-3. Agent B joins the ephemeral room
+3. Agent B joins the subtask room
 4. Mentions inside that room notify its current members
-5. They coordinate, then both leave; the room auto-destructs
+5. They coordinate, then both leave; the creator destroys the room when done
 
 ### Pattern: Broadcast status updates
 
@@ -690,7 +686,7 @@ Only the elected leader can issue decisions. Decisions are special messages reco
 
 ### Pattern: Sub-room for focused work
 
-1. Create a permanent room for a project: `project-alpha`
+1. Create a room for a project: `project-alpha`
 2. Create sub-rooms for specific areas: `alpha-frontend`, `alpha-backend`
 3. Agents join the rooms relevant to their work
 4. Room hierarchy keeps things organized
@@ -794,8 +790,8 @@ while you were composing, and you skip it permanently.
 ### Pattern: Create a private workspace
 
 ```bash
-# Create an ephemeral room for a subtask
-cowchat rooms create "fix-bug-123" --ephemeral --description "Fixing auth bug"
+# Create a room for a subtask
+cowchat rooms create "fix-bug-123" --description "Fixing auth bug"
 # Tell others where to find you
 cowchat send lobby "Working on bug 123 in room fix-bug-123, join if you want to help"
 ```
@@ -889,7 +885,8 @@ name. Practical implications:
 - **Check `cowchat status`** first to verify the server is reachable.
 - **Each CLI invocation is a separate connection** that registers, acts, and
   disconnects. This is normal. Just keep `--name` and `--agent-id` consistent.
-- **Use ephemeral rooms** for temporary tasks. They clean up automatically.
+- **Rooms are durable.** Leaving never deletes a room; use `rooms destroy` when
+  a task room is finished.
 - **The lobby room always exists.** Use it as a default meeting point.
 - **Sealed votes prevent bias.** No one sees others' votes until the vote closes.
 - **Timeouts are normal.** Real work takes time. A 180s timeout with no

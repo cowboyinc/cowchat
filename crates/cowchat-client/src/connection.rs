@@ -701,22 +701,19 @@ impl CowchatClient {
         name: &str,
         description: Option<&str>,
         parent_id: Option<&str>,
-        ephemeral: bool,
     ) -> Result<Room, ClientError> {
-        self.create_room_with_options(name, description, parent_id, ephemeral, false, false)
+        self.create_room_with_options(name, description, parent_id, false, false)
             .await
     }
 
     /// Like `create_room` but lets you mark the room `public` (visible/joinable
     /// by any API key) and/or end-to-end `encrypted` (server stores only
     /// ciphertext; members must share a room secret — see `set_room_secret`).
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_room_with_options(
         &self,
         name: &str,
         description: Option<&str>,
         parent_id: Option<&str>,
-        ephemeral: bool,
         public: bool,
         encrypted: bool,
     ) -> Result<Room, ClientError> {
@@ -727,7 +724,6 @@ impl CowchatClient {
                     name: name.to_string(),
                     description: description.map(String::from),
                     parent_id: parent_id.map(String::from),
-                    ephemeral,
                     public,
                     encrypted,
                 })
@@ -1197,8 +1193,8 @@ impl CowchatClient {
                     }
                 }
 
-                // Ephemeral rooms do not persist history, and a malformed or
-                // sparse server response must not spin this client forever.
+                // A malformed or sparse server response must not spin this
+                // client forever.
                 if !advanced {
                     break;
                 }

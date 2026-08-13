@@ -31,7 +31,6 @@ pub struct Room {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
-    pub ephemeral: bool,
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
@@ -75,8 +74,7 @@ pub struct ChatMessage {
     #[serde(default)]
     pub metadata: serde_json::Value,
     pub timestamp: DateTime<Utc>,
-    /// Per-room monotonic sequence number assigned by the server.
-    /// Permanent rooms persist this to SQLite; ephemeral rooms maintain it in-memory.
+    /// Per-room monotonic sequence number assigned by the server, persisted to SQLite.
     /// Use this with `room_tip` and `--since-seq` to detect "have I seen the latest?".
     #[serde(default)]
     pub seq: i64,
@@ -109,8 +107,6 @@ pub struct CreateRoomPayload {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
-    #[serde(default)]
-    pub ephemeral: bool,
     /// If true, room is public (any API key can join). Default: private.
     #[serde(default)]
     pub public: bool,

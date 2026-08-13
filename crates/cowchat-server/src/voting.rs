@@ -22,7 +22,6 @@ pub struct ActiveVote {
     pub ballots: Vec<(String, String, usize)>, // (agent_id, agent_name, option_index)
     pub eligible_voters: usize,
     pub eligible_agents: HashSet<String>,
-    pub is_ephemeral: bool, // true if in an ephemeral room
 }
 
 /// Tracks an active election (in the nomination window).
@@ -71,7 +70,6 @@ impl VoteManager {
                     ballots,
                     eligible_voters: meta.eligible_voters,
                     eligible_agents,
-                    is_ephemeral: false,
                 };
                 manager.active_votes.insert(meta.vote_id.clone(), vote);
                 if let Some(closes_at) = meta.closes_at {
@@ -112,7 +110,6 @@ impl VoteManager {
         created_by: String,
         duration_secs: Option<u64>,
         eligible_agents: Vec<String>,
-        is_ephemeral: bool,
         broker: Arc<Broker>,
         store: Arc<Store>,
     ) -> ActiveVote {
@@ -131,7 +128,6 @@ impl VoteManager {
             ballots: Vec::new(),
             eligible_voters: eligible_agents.len(),
             eligible_agents: eligible_agents.into_iter().collect(),
-            is_ephemeral,
         };
 
         self.active_votes.insert(vote_id.clone(), vote.clone());
@@ -382,10 +378,7 @@ async fn close_and_broadcast_vote(vote: ActiveVote, broker: &Arc<Broker>, store:
         eligible_voters: vote.eligible_voters,
     };
 
-    // Persist to SQLite if not ephemeral
-    if !vote.is_ephemeral {
-        let _ = store.close_vote(&vote.vote_id);
-    }
+    let _ = store.close_vote(&vote.vote_id);
 
     let event = Frame::event(
         FrameType::VoteResult,
@@ -422,7 +415,6 @@ mod tests {
             "creator".into(),
             None,
             vec!["creator".into()],
-            true,
             broker,
             store,
         );

@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let run_id = &uuid::Uuid::new_v4().to_string()[..6];
     let room_name = format!("tictactoe-{run_id}");
     let project = coordinator
-        .create_room(&room_name, Some("Tic-tac-toe game project"), None, false)
+        .create_room(&room_name, Some("Tic-tac-toe game project"), None)
         .await?;
     let project_id = project.room_id.clone();
     println!("\n  Created project room: {room_name} ({project_id})");
@@ -95,22 +95,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("  coordinator: Let's build a tic-tac-toe game.");
 
-    // Create ephemeral sub-rooms for focused work
+    // Create sub-rooms for focused work
     let server_room = coordinator
-        .create_room(
-            &format!("ttt-server-{run_id}"),
-            None,
-            Some(&project_id),
-            true,
-        )
+        .create_room(&format!("ttt-server-{run_id}"), None, Some(&project_id))
         .await?;
     let client_room = coordinator
-        .create_room(
-            &format!("ttt-client-{run_id}"),
-            None,
-            Some(&project_id),
-            true,
-        )
+        .create_room(&format!("ttt-client-{run_id}"), None, Some(&project_id))
         .await?;
     println!(
         "  Created sub-rooms: ttt-server-{run_id} ({}), ttt-client-{run_id} ({})",
@@ -327,12 +317,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Clean up — leave ephemeral sub-rooms (they auto-destruct)
+    // Clean up — leave the sub-rooms
     server_dev.leave_room(&server_room.room_id).await?;
     client_dev.leave_room(&client_room.room_id).await?;
     coordinator.leave_room(&server_room.room_id).await.ok(); // coordinator may not have joined
     coordinator.leave_room(&client_room.room_id).await.ok();
-    println!("\n  Ephemeral sub-rooms cleaned up");
+    println!("\n  Sub-rooms left");
 
     println!("\nDone!");
     Ok(())

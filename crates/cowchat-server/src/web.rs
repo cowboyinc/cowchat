@@ -8,8 +8,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use cowchat_core::Room;
-use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use rust_embed::Embed;
 use std::sync::Arc;
@@ -64,7 +62,6 @@ struct WebAssets;
 pub struct AppState {
     pub broker: Arc<Broker>,
     pub store: Arc<Store>,
-    pub ephemeral_rooms: Arc<DashMap<String, Room>>,
     pub vote_mgr: Arc<VoteManager>,
     pub rate_limiter: Arc<RateLimiter>,
     pub no_auth: bool,
@@ -190,7 +187,6 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
     // Task 3: Run the existing connection_loop on the server side of the duplex
     let broker = state.broker;
     let store = state.store;
-    let ephemeral_rooms = state.ephemeral_rooms;
     let vote_mgr = state.vote_mgr;
     let rate_limiter = state.rate_limiter;
     let api_key = state.api_key;
@@ -207,7 +203,6 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
             server_write,
             broker,
             store,
-            ephemeral_rooms,
             vote_mgr,
             api_key,
             no_auth,
@@ -351,29 +346,20 @@ fn signup_bucket(peer: SocketAddr, headers: &HeaderMap, trusted_proxies: &[IpAdd
 async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
     let agent_count = state.broker.agents.len();
     let rooms = state.store.list_rooms(None).unwrap_or_default();
-    let ephemeral_count = state.ephemeral_rooms.len();
 
     Json(serde_json::json!({
         "status": "ok",
         "agents_connected": agent_count,
-        "rooms": rooms.len() + ephemeral_count,
+        "rooms": rooms.len(),
     }))
 }
 
 async fn api_list_rooms(State(state): State<AppState>) -> impl IntoResponse {
     // Public API: only show public rooms
-    let mut rooms = state
+    let rooms = state
         .store
         .list_rooms_for_key(None, None)
         .unwrap_or_default();
-
-    // Include public ephemeral rooms
-    for entry in state.ephemeral_rooms.iter() {
-        let room = entry.value();
-        if room.visibility == "public" {
-            rooms.push(room.clone());
-        }
-    }
 
     Json(serde_json::json!({"rooms": rooms}))
 }
@@ -474,6 +460,7 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
 mod tests {
     use super::*;
     use cowchat_core::{ErrorCode, ErrorPayload, Frame, FrameType, RegisterPayload};
+    use dashmap::DashMap;
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
     fn test_state() -> AppState {
@@ -485,7 +472,6 @@ mod tests {
         AppState {
             broker: broker.clone(),
             store: store.clone(),
-            ephemeral_rooms: Arc::new(DashMap::new()),
             vote_mgr: Arc::new(VoteManager::new(store.clone(), broker)),
             rate_limiter: Arc::new(RateLimiter::new()),
             no_auth: false,

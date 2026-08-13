@@ -380,7 +380,7 @@ class Agent:
     # -- Rooms --
 
     def create_room(self, name: str, description: Optional[str] = None,
-                    parent_id: Optional[str] = None, ephemeral: bool = False,
+                    parent_id: Optional[str] = None,
                     public: bool = False, encrypted: bool = False) -> dict:
         """Create a room. Returns the room payload (room_id, name, etc.).
 
@@ -391,7 +391,7 @@ class Agent:
         """
         return self._request("create_room", {
             "name": name, "description": description,
-            "parent_id": parent_id, "ephemeral": ephemeral,
+            "parent_id": parent_id,
             "public": public, "encrypted": encrypted,
         })["payload"]
 
