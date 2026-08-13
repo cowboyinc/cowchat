@@ -15,9 +15,19 @@ final class UpdateChecker: ObservableObject {
     static let latestReleaseURL = URL(
         string: "https://api.github.com/repos/cowboyinc/cowchat/releases/latest")!
     static let skippedVersionKey = "cowchat.update.skipped-version"
+    /// The cask copies the app into /Applications, so a manual DMG drag would
+    /// leave Homebrew's metadata stale. Brew-managed installs get this command
+    /// to copy instead of a direct download.
+    static let brewUpgradeCommand = "brew upgrade --cask cowchat"
+    nonisolated static let defaultCaskroomPaths = [
+        "/opt/homebrew/Caskroom/cowchat",
+        "/usr/local/Caskroom/cowchat",
+    ]
 
     /// Non-nil when a newer, non-skipped release is available; drives the prompt.
     @Published var availableRelease: Release?
+
+    let isBrewManagedInstall: Bool
 
     private let defaults: UserDefaults
     private let currentVersion: String?
@@ -25,10 +35,24 @@ final class UpdateChecker: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         currentVersion: String? = Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+        isBrewManagedInstall: Bool = UpdateChecker.detectBrewManagedInstall()
     ) {
         self.defaults = defaults
         self.currentVersion = currentVersion
+        self.isBrewManagedInstall = isBrewManagedInstall
+    }
+
+    /// A plain directory check — never invokes brew.
+    nonisolated static func detectBrewManagedInstall(
+        caskroomPaths: [String] = defaultCaskroomPaths,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        caskroomPaths.contains { path in
+            var isDirectory: ObjCBool = false
+            return fileManager.fileExists(atPath: path, isDirectory: &isDirectory)
+                && isDirectory.boolValue
+        }
     }
 
     /// Best-effort: any network or parse failure means no prompt.

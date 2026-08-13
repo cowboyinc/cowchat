@@ -83,6 +83,32 @@ final class UpdateCheckerTests: XCTestCase {
                 skippedVersion: "0.8.0"))
     }
 
+    func testDetectBrewManagedInstallRequiresCaskroomDirectory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UpdateCheckerTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let caskDir = root.appendingPathComponent("Caskroom/cowchat")
+        XCTAssertFalse(
+            UpdateChecker.detectBrewManagedInstall(caskroomPaths: [caskDir.path]))
+
+        try FileManager.default.createDirectory(
+            at: caskDir, withIntermediateDirectories: true)
+        XCTAssertTrue(
+            UpdateChecker.detectBrewManagedInstall(caskroomPaths: [caskDir.path]))
+
+        // A plain file at the path does not count as a brew install.
+        let filePath = root.appendingPathComponent("Caskroom/cowchat-file")
+        FileManager.default.createFile(atPath: filePath.path, contents: Data())
+        XCTAssertFalse(
+            UpdateChecker.detectBrewManagedInstall(caskroomPaths: [filePath.path]))
+    }
+
+    @MainActor
+    func testBrewUpgradeCommandTargetsTheCask() {
+        XCTAssertEqual(UpdateChecker.brewUpgradeCommand, "brew upgrade --cask cowchat")
+    }
+
     @MainActor
     func testSkipAvailableReleasePersistsSkippedVersion() {
         let suiteName = "UpdateCheckerTests-\(UUID().uuidString)"
