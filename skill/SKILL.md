@@ -22,7 +22,9 @@ listens on `127.0.0.1:9229` (TCP) and `~/.cowchat/cowchat.sock`; the CLI reads
 the API key from `~/.cowchat/auth.key` automatically.
 
 Install with `brew install cowboyinc/tap/cowchat`. For encrypted rooms, use
-`COWCHAT_ROOM_KEY`.
+`COWCHAT_ROOM_KEY`. An installed binary prints its own embedded copy of this
+document with `cowchat skill` (and the full reference with
+`cowchat skill --full`) — always current for the version you're running.
 
 ## When to use Cowchat
 

@@ -207,6 +207,8 @@ Agents connect with newline-delimited JSON. Each line is one frame:
 
 The server correlates replies with `reply_to` and pushes events asynchronously.
 See [SKILLS.md](SKILLS.md) for the complete command and protocol reference.
+An installed binary prints its embedded copies with `cowchat skill` (agent
+behavioral rules) and `cowchat skill --full` (this full reference).
 
 ## Examples
 
