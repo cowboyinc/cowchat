@@ -53,7 +53,8 @@ private final class TestCloudAccountIDGenerator {
 }
 
 private enum TestConnectionPreferenceKeys {
-    static let selectedKind = "CowchatMac.connection.selectedKind"
+    static let globalEnabled = "CowchatMac.connection.globalRoomsEnabled"
+    static let legacySelectedKind = "CowchatMac.connection.selectedKind"
     static let cloudURL = "CowchatMac.connection.cloudURL"
     static let cloudAccountID = "CowchatMac.connection.cloudAccountID"
     static let pendingCloudAccountID = "CowchatMac.connection.pendingCloudAccountID"
@@ -146,7 +147,7 @@ final class ConnectionProfileTests: XCTestCase {
         )
 
         XCTAssertEqual(profile.kind, .cowchatCloud)
-        XCTAssertEqual(profile.displayName, "Cowchat Cloud")
+        XCTAssertEqual(profile.displayName, "Global")
         XCTAssertEqual(profile.endpointDescription, "wss://cloud.example/ws")
         XCTAssertFalse(profile.endpointDescription.contains(profile.apiKey))
         XCTAssertFalse(profile.description.contains(profile.apiKey))
@@ -188,15 +189,16 @@ final class ConnectionProfileTests: XCTestCase {
         XCTAssertThrowsError(try fixture.preferences.save(unavailable)) { error in
             XCTAssertEqual(error as? ConnectionProfileError, .missingAPIKey)
         }
-        XCTAssertEqual(try? fixture.preferences.loadSelectedKind(), .local)
+        XCTAssertFalse(fixture.preferences.isGlobalEnabled())
         XCTAssertTrue(fixture.credentialStore.credentials.isEmpty)
     }
 
-    func testPreferencesDefaultToLocal() throws {
+    func testPreferencesDefaultToLocalOnly() throws {
         let fixture = makePreferences()
         defer { fixture.cleanup() }
 
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), .local)
+        XCTAssertFalse(fixture.preferences.isGlobalEnabled())
+        XCTAssertNil(try fixture.preferences.loadConfiguredCloudProfile())
     }
 
     func testCloudRoundTripKeepsKeyOutOfUserDefaults() throws {
@@ -210,7 +212,8 @@ final class ConnectionProfileTests: XCTestCase {
 
         let saved = try fixture.preferences.save(profile)
 
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), saved)
+        XCTAssertTrue(fixture.preferences.isGlobalEnabled())
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), saved)
         XCTAssertNotNil(saved.cloudAccountID)
         XCTAssertEqual(
             saved.persistentIdentityScope,
@@ -242,7 +245,7 @@ final class ConnectionProfileTests: XCTestCase {
             fixture.preferences.loadSavedCloudURL(),
             "wss://attacker.example/ws"
         )
-        XCTAssertThrowsError(try fixture.preferences.loadSelectedProfile()) { error in
+        XCTAssertThrowsError(try fixture.preferences.loadConfiguredCloudProfile()) { error in
             XCTAssertEqual(error as? ConnectionProfileError, .cloudEndpointBindingMismatch)
         }
         XCTAssertEqual(
@@ -254,7 +257,7 @@ final class ConnectionProfileTests: XCTestCase {
             "wss://trusted.example/ws",
             forKey: "CowchatMac.connection.cloudURL"
         )
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), saved)
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), saved)
     }
 
     func testLegacyUnboundCredentialFailsClosedUntilExplicitlyResaved() throws {
@@ -263,10 +266,6 @@ final class ConnectionProfileTests: XCTestCase {
             "22222222-2222-4222-8222-222222222222",
         ])
         defer { fixture.cleanup() }
-        fixture.defaults.set(
-            ConnectionProfile.Kind.cowchatCloud.rawValue,
-            forKey: "CowchatMac.connection.selectedKind"
-        )
         fixture.defaults.set(
             "wss://legacy.example/ws",
             forKey: "CowchatMac.connection.cloudURL"
@@ -281,7 +280,7 @@ final class ConnectionProfileTests: XCTestCase {
             fixture.preferences.loadSavedCloudURL(),
             "wss://legacy.example/ws"
         )
-        XCTAssertThrowsError(try fixture.preferences.loadSelectedProfile()) { error in
+        XCTAssertThrowsError(try fixture.preferences.loadConfiguredCloudProfile()) { error in
             XCTAssertEqual(
                 error as? ConnectionProfileError,
                 .legacyCloudCredentialRequiresResave
@@ -296,10 +295,10 @@ final class ConnectionProfileTests: XCTestCase {
         )
         XCTAssertEqual(migrated.cloudAccountID, accountID)
         XCTAssertNotEqual(fixture.credentialStore.credentials[accountID], "legacy-raw-key")
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), migrated)
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), migrated)
     }
 
-    func testSelectingLocalPreservesConfiguredCloudProfile() throws {
+    func testSavingLocalLeavesGlobalConfigurationAlone() throws {
         let fixture = makePreferences()
         defer { fixture.cleanup() }
         let cloud = try ConnectionProfile.cowchatCloud(
@@ -310,11 +309,11 @@ final class ConnectionProfileTests: XCTestCase {
         let savedCloud = try fixture.preferences.save(cloud)
         try fixture.preferences.save(.local)
 
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), .local)
+        XCTAssertTrue(fixture.preferences.isGlobalEnabled())
         XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), savedCloud)
     }
 
-    func testClearingCloudConfigurationFailsBackToLocal() throws {
+    func testClearingCloudConfigurationDisablesGlobalRooms() throws {
         let fixture = makePreferences()
         defer { fixture.cleanup() }
         try fixture.preferences.save(
@@ -326,9 +325,43 @@ final class ConnectionProfileTests: XCTestCase {
 
         try fixture.preferences.clearCloudConfiguration()
 
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), .local)
+        XCTAssertFalse(fixture.preferences.isGlobalEnabled())
         XCTAssertNil(try fixture.preferences.loadConfiguredCloudProfile())
         XCTAssertTrue(fixture.credentialStore.credentials.isEmpty)
+    }
+
+    func testGlobalEnabledFlagPersistsAndMigratesLegacyKindSelection() {
+        let fixture = makePreferences()
+        defer { fixture.cleanup() }
+
+        // Pre-0.8 cloud selection turns into "global rooms on", one-shot.
+        fixture.defaults.set(
+            ConnectionProfile.Kind.cowchatCloud.rawValue,
+            forKey: TestConnectionPreferenceKeys.legacySelectedKind
+        )
+        XCTAssertTrue(fixture.preferences.isGlobalEnabled())
+        XCTAssertNil(
+            fixture.defaults.string(
+                forKey: TestConnectionPreferenceKeys.legacySelectedKind
+            )
+        )
+        XCTAssertTrue(fixture.defaults.bool(forKey: TestConnectionPreferenceKeys.globalEnabled))
+
+        fixture.preferences.setGlobalEnabled(false)
+        XCTAssertFalse(fixture.preferences.isGlobalEnabled())
+
+        // A legacy local selection (or an unrecognized value) maps to off and
+        // never resurrects a cloud connection.
+        fixture.defaults.set(
+            "remote-ish",
+            forKey: TestConnectionPreferenceKeys.legacySelectedKind
+        )
+        XCTAssertFalse(fixture.preferences.isGlobalEnabled())
+        XCTAssertNil(
+            fixture.defaults.string(
+                forKey: TestConnectionPreferenceKeys.legacySelectedKind
+            )
+        )
     }
 
     func testOpaqueCloudAccountIDIsStableUntilEndpointOrKeyChanges() throws {
@@ -373,7 +406,7 @@ final class ConnectionProfileTests: XCTestCase {
         XCTAssertNotEqual(changedEndpoint.cloudAccountID, changedKey.cloudAccountID)
         XCTAssertFalse(changedEndpoint.cloudAccountID!.contains("secret"))
         XCTAssertEqual(Set(fixture.credentialStore.credentials.keys), [ids[2]])
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), changedEndpoint)
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), changedEndpoint)
 
         // Saving unchanged credentials still executes the Keychain update path so an
         // existing item receives the current accessibility policy.
@@ -402,7 +435,7 @@ final class ConnectionProfileTests: XCTestCase {
             forKey: TestConnectionPreferenceKeys.pendingCloudAccountID
         )
 
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), original)
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), original)
         XCTAssertEqual(Set(fixture.credentialStore.credentials.keys), [activeAccountID])
         XCTAssertNil(
             fixture.defaults.string(
@@ -443,12 +476,8 @@ final class ConnectionProfileTests: XCTestCase {
             activeAccountID,
             forKey: TestConnectionPreferenceKeys.pendingCloudAccountID
         )
-        fixture.defaults.set(
-            ConnectionProfile.Kind.cowchatCloud.rawValue,
-            forKey: TestConnectionPreferenceKeys.selectedKind
-        )
 
-        let loaded = try fixture.preferences.loadSelectedProfile()
+        let loaded = try XCTUnwrap(fixture.preferences.loadConfiguredCloudProfile())
 
         XCTAssertEqual(loaded.endpointURL?.absoluteString, "wss://other.example/ws")
         XCTAssertEqual(loaded.apiKey, "new-key")
@@ -489,7 +518,7 @@ final class ConnectionProfileTests: XCTestCase {
         )
         fixture.credentialStore.deletionFailuresRemaining[pendingAccountID] = 1
 
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), original)
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), original)
         XCTAssertEqual(
             Set(fixture.credentialStore.credentials.keys),
             [activeAccountID, pendingAccountID]
@@ -502,7 +531,7 @@ final class ConnectionProfileTests: XCTestCase {
         )
         XCTAssertEqual(fixture.credentialStore.deletionAttempts[pendingAccountID], 1)
 
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), original)
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), original)
         XCTAssertEqual(Set(fixture.credentialStore.credentials.keys), [activeAccountID])
         XCTAssertNil(
             fixture.defaults.string(
@@ -538,7 +567,7 @@ final class ConnectionProfileTests: XCTestCase {
         )
 
         XCTAssertEqual(saved.cloudAccountID, pendingAccountID)
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), saved)
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), saved)
         XCTAssertEqual(Set(fixture.credentialStore.credentials.keys), [pendingAccountID])
         XCTAssertNil(
             fixture.defaults.string(
@@ -576,7 +605,7 @@ final class ConnectionProfileTests: XCTestCase {
             ),
             [ids[0]]
         )
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), current)
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), current)
         XCTAssertEqual(Set(fixture.credentialStore.credentials.keys), [ids[1]])
         XCTAssertNil(
             fixture.defaults.stringArray(
@@ -637,61 +666,30 @@ final class ConnectionProfileTests: XCTestCase {
         XCTAssertNil(try fixture.preferences.loadConfiguredCloudProfile())
     }
 
-    func testSelectedCloudModeRemainsObservableWhenConfigurationIsMissing() throws {
-        let fixture = makePreferences()
-        defer { fixture.cleanup() }
-        fixture.defaults.set(
-            ConnectionProfile.Kind.cowchatCloud.rawValue,
-            forKey: "CowchatMac.connection.selectedKind"
-        )
-
-        XCTAssertEqual(try fixture.preferences.loadSelectedKind(), .cowchatCloud)
-        XCTAssertThrowsError(try fixture.preferences.loadSelectedProfile()) { error in
-            XCTAssertEqual(error as? ConnectionProfileError, .cloudNotConfigured)
-        }
-    }
-
     func testPartialCloudConfigurationReportsItsSpecificError() throws {
         let fixture = makePreferences()
         defer { fixture.cleanup() }
-        fixture.defaults.set(
-            ConnectionProfile.Kind.cowchatCloud.rawValue,
-            forKey: "CowchatMac.connection.selectedKind"
-        )
         fixture.defaults.set(
             "wss://cloud.example/ws",
             forKey: "CowchatMac.connection.cloudURL"
         )
 
-        XCTAssertEqual(try fixture.preferences.loadSelectedKind(), .cowchatCloud)
-        XCTAssertThrowsError(try fixture.preferences.loadSelectedProfile()) { error in
+        XCTAssertThrowsError(try fixture.preferences.loadConfiguredCloudProfile()) { error in
             XCTAssertEqual(error as? ConnectionProfileError, .missingCloudAccountID)
         }
     }
 
-    func testInvalidSelectedModeDoesNotSilentlyBecomeLocal() {
+    func testOrphanedPendingCredentialIsCleanedUpEvenWithoutActiveConfig() {
         let fixture = makePreferences()
         defer { fixture.cleanup() }
         let pendingAccountID = "22222222-2222-4222-8222-222222222222"
-        fixture.defaults.set("remote-ish", forKey: "CowchatMac.connection.selectedKind")
         fixture.defaults.set(
             pendingAccountID,
             forKey: TestConnectionPreferenceKeys.pendingCloudAccountID
         )
         fixture.credentialStore.seedCredential("pending-key", for: pendingAccountID)
 
-        XCTAssertThrowsError(try fixture.preferences.loadSelectedKind()) { error in
-            XCTAssertEqual(
-                error as? ConnectionProfileError,
-                .invalidSelectedKind("remote-ish")
-            )
-        }
-        XCTAssertThrowsError(try fixture.preferences.loadSelectedProfile()) { error in
-            XCTAssertEqual(
-                error as? ConnectionProfileError,
-                .invalidSelectedKind("remote-ish")
-            )
-        }
+        XCTAssertNil(try? fixture.preferences.loadConfiguredCloudProfile())
         XCTAssertTrue(fixture.credentialStore.credentials.isEmpty)
         XCTAssertNil(
             fixture.defaults.string(
@@ -700,7 +698,7 @@ final class ConnectionProfileTests: XCTestCase {
         )
     }
 
-    func testSelectedCloudModeSurvivesInjectedCredentialReadFailure() throws {
+    func testConfiguredGlobalSurvivesInjectedCredentialReadFailure() throws {
         let fixture = makePreferences()
         defer { fixture.cleanup() }
         let saved = try fixture.preferences.save(
@@ -711,14 +709,14 @@ final class ConnectionProfileTests: XCTestCase {
         )
         fixture.credentialStore.readFailure = .read
 
-        XCTAssertEqual(try fixture.preferences.loadSelectedKind(), .cowchatCloud)
+        XCTAssertTrue(fixture.preferences.isGlobalEnabled())
         XCTAssertEqual(fixture.preferences.loadSavedCloudURL(), "wss://cloud.example/ws")
-        XCTAssertThrowsError(try fixture.preferences.loadSelectedProfile()) { error in
+        XCTAssertThrowsError(try fixture.preferences.loadConfiguredCloudProfile()) { error in
             XCTAssertEqual(error as? TestCredentialStoreFailure, .read)
         }
 
         fixture.credentialStore.readFailure = nil
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), saved)
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), saved)
     }
 
     func testInjectedCredentialReadFailurePreventsProfileReplacement() throws {
@@ -749,7 +747,7 @@ final class ConnectionProfileTests: XCTestCase {
         XCTAssertEqual(fixture.credentialStore.setCalls.count, writesBeforeFailure)
 
         fixture.credentialStore.readFailure = nil
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), original)
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), original)
     }
 
     func testInjectedCredentialWriteFailureLeavesExistingProfileIntact() throws {
@@ -785,8 +783,8 @@ final class ConnectionProfileTests: XCTestCase {
         )
 
         fixture.credentialStore.writeFailure = nil
-        XCTAssertEqual(try fixture.preferences.loadSelectedKind(), .cowchatCloud)
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), original)
+        XCTAssertTrue(fixture.preferences.isGlobalEnabled())
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile(), original)
         XCTAssertEqual(Set(fixture.credentialStore.credentials.keys), [original.cloudAccountID!])
         XCTAssertNil(
             fixture.defaults.string(
@@ -811,7 +809,7 @@ final class ConnectionProfileTests: XCTestCase {
             XCTAssertEqual(error as? TestCredentialStoreFailure, .write)
         }
 
-        XCTAssertEqual(try fixture.preferences.loadSelectedKind(), .local)
+        XCTAssertFalse(fixture.preferences.isGlobalEnabled())
         XCTAssertNil(try fixture.preferences.loadConfiguredCloudProfile())
         XCTAssertTrue(fixture.credentialStore.credentials.isEmpty)
         XCTAssertNotNil(
@@ -821,7 +819,7 @@ final class ConnectionProfileTests: XCTestCase {
         )
 
         fixture.credentialStore.writeFailure = nil
-        XCTAssertEqual(try fixture.preferences.loadSelectedProfile(), .local)
+        XCTAssertNil(try fixture.preferences.loadConfiguredCloudProfile())
         XCTAssertNil(
             fixture.defaults.string(
                 forKey: TestConnectionPreferenceKeys.pendingCloudAccountID

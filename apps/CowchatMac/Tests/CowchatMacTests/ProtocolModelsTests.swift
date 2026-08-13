@@ -11,7 +11,6 @@ final class ProtocolModelsTests: XCTestCase {
         {
           "room_id":"lobby",
           "name":"lobby",
-          "ephemeral":false,
           "created_at":"2026-07-11T12:00:00Z",
           "visibility":"public",
           "member_count":3
@@ -139,7 +138,6 @@ final class ProtocolModelsTests: XCTestCase {
           "room_id":"room-1",
           "name":"Design",
           "description":"UI work",
-          "ephemeral":true,
           "created_at":"2026-07-11T12:00:00Z",
           "visibility":"private",
           "member_count":2,
@@ -153,7 +151,6 @@ final class ProtocolModelsTests: XCTestCase {
         XCTAssertEqual(room.lastActivity, "2026-08-04T21:30:00Z")
         XCTAssertEqual(room.description, "UI work")
         XCTAssertEqual(room.memberCount, 2)
-        XCTAssertTrue(room.ephemeral)
         XCTAssertTrue(room.encrypted)
     }
 

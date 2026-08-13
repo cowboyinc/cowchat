@@ -161,37 +161,6 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    convenience init() {
-        let credentialStore = KeychainCowchatCredentialStore()
-        let preferences = ConnectionProfilePreferences(
-            defaults: .standard,
-            credentialStore: credentialStore
-        )
-        let profile: ConnectionProfile
-        let configurationError: Error?
-        do {
-            profile = try preferences.loadSelectedProfile()
-            configurationError = nil
-        } catch {
-            configurationError = error
-            if (try? preferences.loadSelectedKind()) == .cowchatCloud {
-                profile = .unavailableCowchatCloud(
-                    urlString: preferences.loadSavedCloudURL()
-                )
-            } else {
-                profile = .local
-            }
-        }
-        self.init(
-            connection: CowchatConnection(profile: profile),
-            defaults: .standard,
-            connectionProfile: profile,
-            connectionPreferences: preferences,
-            localServerSupervisor: LocalServerSupervisor(),
-            connectionConfigurationError: configurationError
-        )
-    }
-
     init(
         connection: any CowchatConnectionProtocol,
         defaults: UserDefaults = .standard,
@@ -422,7 +391,6 @@ final class ChatStore: ObservableObject {
                 name: "General",
                 description: "Where your agents meet and work together",
                 parentID: nil,
-                ephemeral: false,
                 isPublic: true
             )
             guard expectedProfileGeneration == profileGeneration else { return }
@@ -451,14 +419,6 @@ final class ChatStore: ObservableObject {
         connectionProfile.kind == .local
     }
 
-    var isCowchatCloudConfigured: Bool {
-        (try? configuredCowchatCloudProfile()) != nil
-    }
-
-    var connectionTargetDescription: String {
-        connectionProfile.displayName
-    }
-
     /// The paste-into-an-agent prompt that connects an agent to a specific
     /// room. Single source of truth for the connect state, the room-actions
     /// menu, and the quiet-room call to action.
@@ -474,35 +434,7 @@ final class ChatStore: ObservableObject {
 
     var agentConnectionInstruction: String {
         if isLocalConnection { return "connect to the local server" }
-        return "connect to Cowchat Cloud at \(connectionProfile.endpointDescription) using your Cowchat Cloud API key"
-    }
-
-    func configuredCowchatCloudValues() -> (url: String, apiKey: String) {
-        do {
-            guard let profile = try configuredCowchatCloudProfile() else {
-                return (connectionPreferences?.loadSavedCloudURL() ?? "", "")
-            }
-            return (profile.endpointURL?.absoluteString ?? "", profile.apiKey)
-        } catch {
-            errorMessage = error.localizedDescription
-            return (connectionPreferences?.loadSavedCloudURL() ?? "", "")
-        }
-    }
-
-    func useLocalConnection() {
-        _ = activate(profile: .local)
-    }
-
-    func useCowchatCloud() {
-        do {
-            guard let profile = try configuredCowchatCloudProfile() else {
-                errorMessage = "Add your Cowchat Cloud URL and API key in Settings first."
-                return
-            }
-            _ = activate(profile: profile)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        return "connect to the Cowchat server at \(connectionProfile.endpointDescription) using your Cowchat API key"
     }
 
     /// Retries a user-selected connection immediately. For Local this is the
@@ -542,6 +474,19 @@ final class ChatStore: ObservableObject {
             errorMessage = error.localizedDescription
             return false
         }
+    }
+
+    /// Tears down this store's transport when the workspace drops the server
+    /// (e.g. global rooms turned off). The store is discarded afterwards.
+    func shutdownForRemoval() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        connectionAttemptTask?.cancel()
+        connectionAttemptTask = nil
+        connectionAttemptGeneration += 1
+        profileGeneration += 1
+        connection.disconnect()
+        connectionStatus = .disconnected
     }
 
     func stopOwnedLocalServer() {
@@ -588,19 +533,17 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    private func configuredCowchatCloudProfile() throws -> ConnectionProfile? {
-        guard let connectionPreferences else { return nil }
-        return try connectionPreferences.loadConfiguredCloudProfile()
-    }
-
     /// Startup can preserve a selected Cloud target while Keychain is temporarily
     /// unavailable. An explicit reconnect is the user-approved point to retry that
     /// persisted read; background reconnects keep the original fail-closed state.
     private func reloadSelectedProfileForReconnectIfNeeded() {
         guard connectionConfigurationError != nil || !connectionProfile.isConnectable,
+              connectionProfile.kind == .cowchatCloud,
               let connectionPreferences else { return }
         do {
-            let reloadedProfile = try connectionPreferences.loadSelectedProfile()
+            guard let reloadedProfile = try connectionPreferences.loadConfiguredCloudProfile() else {
+                throw ConnectionProfileError.cloudNotConfigured
+            }
             connectionConfigurationError = nil
             errorMessage = nil
             guard reloadedProfile != connectionProfile else { return }
@@ -924,7 +867,7 @@ final class ChatStore: ObservableObject {
         roomHistoryTaskGeneration = nil
     }
 
-    func createRoom(name: String, description: String, ephemeral: Bool, isPublic: Bool) async -> Bool {
+    func createRoom(name: String, description: String, isPublic: Bool) async -> Bool {
         let expectedProfileGeneration = profileGeneration
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedName.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
@@ -936,7 +879,6 @@ final class ChatStore: ObservableObject {
                 name: trimmedName,
                 description: description.trimmingCharacters(in: .whitespacesAndNewlines),
                 parentID: createRoomParentID,
-                ephemeral: ephemeral,
                 isPublic: isPublic
             )
             guard expectedProfileGeneration == profileGeneration else { return false }
@@ -1843,7 +1785,6 @@ final class ChatStore: ObservableObject {
             name: room.name,
             description: room.description,
             parentID: room.parentID,
-            ephemeral: room.ephemeral,
             createdAt: room.createdAt,
             createdBy: room.createdBy,
             visibility: room.visibility,

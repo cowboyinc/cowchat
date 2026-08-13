@@ -63,7 +63,6 @@ protocol CowchatConnectionProtocol: AnyObject {
         name: String,
         description: String?,
         parentID: String?,
-        ephemeral: Bool,
         isPublic: Bool
     ) async throws -> Room
     func rename(roomID: String, name: String) async throws -> Room
@@ -219,12 +218,10 @@ final class CowchatConnection: CowchatConnectionProtocol {
         name: String,
         description: String?,
         parentID: String?,
-        ephemeral: Bool,
         isPublic: Bool
     ) async throws -> Room {
         var payload: Payload = [
             "name": name,
-            "ephemeral": ephemeral,
             "public": isPublic,
             "encrypted": false,
         ]

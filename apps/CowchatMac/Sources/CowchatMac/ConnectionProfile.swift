@@ -9,7 +9,6 @@ enum ConnectionProfileError: LocalizedError, Equatable {
     case missingCloudURL
     case missingCloudAccountID
     case invalidCloudAccountID
-    case invalidSelectedKind(String)
     case cloudAccountIDGenerationFailed
     case cloudAccountIDPersistenceFailed
     case cloudEndpointBindingMismatch
@@ -31,8 +30,6 @@ enum ConnectionProfileError: LocalizedError, Equatable {
             return "The saved Cowchat Cloud account identifier is missing."
         case .invalidCloudAccountID:
             return "The saved Cowchat Cloud account identifier is invalid."
-        case let .invalidSelectedKind(kind):
-            return "The saved Cowchat connection mode is invalid: \(kind)."
         case .cloudAccountIDGenerationFailed:
             return "Cowchat could not create a secure Cloud account identifier."
         case .cloudAccountIDPersistenceFailed:
@@ -50,6 +47,10 @@ struct ConnectionProfile: Equatable, CustomStringConvertible, CustomDebugStringC
         case local
         case cowchatCloud
     }
+
+    /// Cowboy's hosted global server. The settings UI offers this endpoint by
+    /// default; only an API key is required to join.
+    static let defaultGlobalURLString = "wss://chat.cowchat.cowboy.inc/ws"
 
     static let local = ConnectionProfile(
         kind: .local,
@@ -89,7 +90,7 @@ struct ConnectionProfile: Equatable, CustomStringConvertible, CustomDebugStringC
     var displayName: String {
         switch kind {
         case .local: return "Local"
-        case .cowchatCloud: return "Cowchat Cloud"
+        case .cowchatCloud: return "Global"
         }
     }
 
@@ -310,7 +311,10 @@ final class ConnectionProfilePreferences {
     }
 
     private enum Keys {
-        static let selectedKind = "CowchatMac.connection.selectedKind"
+        static let globalEnabled = "CowchatMac.connection.globalRoomsEnabled"
+        /// Pre-0.8 installs stored an either/or connection mode here. It maps
+        /// onto `globalEnabled` on first read and is then removed.
+        static let legacySelectedKind = "CowchatMac.connection.selectedKind"
         static let cloudURL = "CowchatMac.connection.cloudURL"
         static let cloudAccountID = "CowchatMac.connection.cloudAccountID"
         static let pendingCloudAccountID = "CowchatMac.connection.pendingCloudAccountID"
@@ -333,28 +337,22 @@ final class ConnectionProfilePreferences {
         self.makeCloudAccountID = makeCloudAccountID
     }
 
-    func loadSelectedKind() throws -> ConnectionProfile.Kind {
-        guard let rawKind = defaults.string(forKey: Keys.selectedKind) else {
-            return .local
+    /// Whether global rooms are shown alongside local rooms. Migrates the
+    /// pre-0.8 either/or connection mode on first read: a Cloud selection
+    /// becomes "global rooms on".
+    func isGlobalEnabled() -> Bool {
+        if let legacyKind = defaults.string(forKey: Keys.legacySelectedKind) {
+            let enabled = legacyKind == ConnectionProfile.Kind.cowchatCloud.rawValue
+            defaults.set(enabled, forKey: Keys.globalEnabled)
+            defaults.removeObject(forKey: Keys.legacySelectedKind)
+            return enabled
         }
-        guard let kind = ConnectionProfile.Kind(rawValue: rawKind) else {
-            throw ConnectionProfileError.invalidSelectedKind(rawKind)
-        }
-        return kind
+        return defaults.bool(forKey: Keys.globalEnabled)
     }
 
-    func loadSelectedProfile() throws -> ConnectionProfile {
-        let activeAccountID = storedCloudAccountID()
-        retryPendingCredentialCleanup(excluding: activeAccountID)
-        retryRetiredCredentialCleanup(excluding: activeAccountID)
-        let selectedKind = try loadSelectedKind()
-        guard selectedKind == .cowchatCloud else {
-            return .local
-        }
-        guard let profile = try loadConfiguredCloudProfile(retryingCleanup: false) else {
-            throw ConnectionProfileError.cloudNotConfigured
-        }
-        return profile
+    func setGlobalEnabled(_ enabled: Bool) {
+        defaults.removeObject(forKey: Keys.legacySelectedKind)
+        defaults.set(enabled, forKey: Keys.globalEnabled)
     }
 
     /// Reads the non-secret endpoint without touching Keychain. This lets startup keep
@@ -423,7 +421,6 @@ final class ConnectionProfilePreferences {
             let activeAccountID = storedCloudAccountID()
             retryPendingCredentialCleanup(excluding: activeAccountID)
             retryRetiredCredentialCleanup(excluding: activeAccountID)
-            defaults.set(ConnectionProfile.Kind.local.rawValue, forKey: Keys.selectedKind)
             return .local
         case .cowchatCloud:
             guard let endpointURL = profile.endpointURL else {
@@ -463,7 +460,7 @@ final class ConnectionProfilePreferences {
             }
             defaults.set(endpointURL.absoluteString, forKey: Keys.cloudURL)
             defaults.set(accountID, forKey: Keys.cloudAccountID)
-            defaults.set(ConnectionProfile.Kind.cowchatCloud.rawValue, forKey: Keys.selectedKind)
+            setGlobalEnabled(true)
             try synchronizeDefaultsForCloudAccountID()
             retryPendingCredentialCleanup(excluding: accountID)
             retryRetiredCredentialCleanup(excluding: accountID)
@@ -482,9 +479,7 @@ final class ConnectionProfilePreferences {
         }
         defaults.removeObject(forKey: Keys.cloudURL)
         defaults.removeObject(forKey: Keys.cloudAccountID)
-        if defaults.string(forKey: Keys.selectedKind) == ConnectionProfile.Kind.cowchatCloud.rawValue {
-            defaults.set(ConnectionProfile.Kind.local.rawValue, forKey: Keys.selectedKind)
-        }
+        setGlobalEnabled(false)
         retryRetiredCredentialCleanup(excluding: nil)
         retryPendingCredentialCleanup(excluding: nil)
     }

@@ -52,7 +52,6 @@ final class LocalServerIntegrationTests: XCTestCase {
             name: "mac-restoration-\(UUID().uuidString)",
             description: "Reconnect integration test",
             parentID: nil,
-            ephemeral: false,
             isPublic: false
         )
         try await connection.join(roomID: room.id)
@@ -93,7 +92,6 @@ final class LocalServerIntegrationTests: XCTestCase {
             name: "mac-ui-test-\(UUID().uuidString)",
             description: "Temporary integration test",
             parentID: nil,
-            ephemeral: true,
             isPublic: false
         )
         try await connection.join(roomID: room.roomID)
@@ -105,6 +103,7 @@ final class LocalServerIntegrationTests: XCTestCase {
         XCTAssertEqual(message.roomID, room.roomID)
         XCTAssertEqual(message.content, "hello from SwiftUI")
         XCTAssertEqual(message.seq, 1)
+        try await connection.destroy(roomID: room.roomID)
         connection.disconnect()
     }
 
@@ -123,7 +122,6 @@ final class LocalServerIntegrationTests: XCTestCase {
             name: "mac-lifecycle-\(UUID().uuidString)",
             description: "Temporary lifecycle integration test",
             parentID: nil,
-            ephemeral: true,
             isPublic: false
         )
         let renamed = try await connection.rename(

@@ -10,7 +10,6 @@ final class RoomReadStateTests: XCTestCase {
             name: name,
             description: nil,
             parentID: nil,
-            ephemeral: false,
             createdAt: activity,
             createdBy: nil,
             visibility: "public",

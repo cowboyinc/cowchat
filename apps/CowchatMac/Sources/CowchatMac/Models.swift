@@ -19,7 +19,6 @@ struct Room: Codable, Identifiable, Hashable {
     let name: String
     let description: String?
     let parentID: String?
-    let ephemeral: Bool
     let createdAt: String
     let createdBy: String?
     let visibility: String
@@ -33,7 +32,6 @@ struct Room: Codable, Identifiable, Hashable {
         case roomID = "room_id"
         case name, description
         case parentID = "parent_id"
-        case ephemeral
         case createdAt = "created_at"
         case createdBy = "created_by"
         case visibility
@@ -47,7 +45,6 @@ struct Room: Codable, Identifiable, Hashable {
         name: String,
         description: String?,
         parentID: String?,
-        ephemeral: Bool,
         createdAt: String,
         createdBy: String?,
         visibility: String,
@@ -59,7 +56,6 @@ struct Room: Codable, Identifiable, Hashable {
         self.name = name
         self.description = description
         self.parentID = parentID
-        self.ephemeral = ephemeral
         self.createdAt = createdAt
         self.createdBy = createdBy
         self.visibility = visibility
@@ -74,7 +70,6 @@ struct Room: Codable, Identifiable, Hashable {
         name = try values.decode(String.self, forKey: .name)
         description = try values.decodeIfPresent(String.self, forKey: .description)
         parentID = try values.decodeIfPresent(String.self, forKey: .parentID)
-        ephemeral = try values.decodeIfPresent(Bool.self, forKey: .ephemeral) ?? false
         createdAt = try values.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
         createdBy = try values.decodeIfPresent(String.self, forKey: .createdBy)
         visibility = try values.decodeIfPresent(String.self, forKey: .visibility) ?? "private"
@@ -89,7 +84,6 @@ struct Room: Codable, Identifiable, Hashable {
             name: name,
             description: description,
             parentID: parentID,
-            ephemeral: ephemeral,
             createdAt: createdAt,
             createdBy: createdBy,
             visibility: visibility,
@@ -105,7 +99,6 @@ struct Room: Codable, Identifiable, Hashable {
             name: name,
             description: description,
             parentID: parentID,
-            ephemeral: ephemeral,
             createdAt: createdAt,
             createdBy: createdBy,
             visibility: visibility,
