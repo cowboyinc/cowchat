@@ -1268,6 +1268,10 @@ final class RoomTransitionTests: XCTestCase {
             ["claude", "codex"]
         )
         XCTAssertEqual(
+            store.recentAgentNames[room.id],
+            ["claude": "Claude", "codex": "Codex"]
+        )
+        XCTAssertEqual(
             ChatPresencePresentation.summary(
                 members: [],
                 currentAgentID: store.agentID,
