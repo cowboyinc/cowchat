@@ -10,6 +10,103 @@ enum LobbyPresentation {
 }
 
 enum ChatPresencePresentation {
+    struct Agent: Identifiable, Equatable {
+        enum Activity: Equatable {
+            case active
+            case recent
+            case connected
+
+            var label: String {
+                switch self {
+                case .active: return "Active now"
+                case .recent: return "Active recently"
+                case .connected: return "Connected"
+                }
+            }
+
+            fileprivate var sortOrder: Int {
+                switch self {
+                case .active: return 0
+                case .recent: return 1
+                case .connected: return 2
+                }
+            }
+        }
+
+        let id: String
+        let name: String
+        let activity: Activity
+        let statusDetail: String?
+        let progress: Int?
+
+        var statusText: String {
+            var parts = [activity.label]
+            if let statusDetail = statusDetail?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !statusDetail.isEmpty {
+                parts.append(statusDetail)
+            }
+            if let progress {
+                parts.append("\(min(max(progress, 0), 100))%")
+            }
+            return parts.joined(separator: " · ")
+        }
+    }
+
+    static func agents(
+        members: [AgentPresence],
+        currentAgentID: String,
+        recentActivityByAgent: [String: Date]? = nil,
+        recentAgentNames: [String: String]? = nil,
+        now: Date = Date(),
+        recentWindow: TimeInterval = 120,
+        connectionStatus: ConnectionStatus = .connected
+    ) -> [Agent] {
+        guard connectionStatus.isConnected else { return [] }
+
+        let recentActivityByAgent = recentActivityByAgent ?? [:]
+        let recentAgentNames = recentAgentNames ?? [:]
+        var agentsByID: [String: Agent] = [:]
+
+        for member in members where member.id != currentAgentID {
+            let status = member.status?.lowercased()
+            let isActive = status == "working" || status == "thinking"
+            let isRecent = recentActivityByAgent[member.id].map {
+                now.timeIntervalSince($0) < recentWindow
+            } ?? false
+            let activity: Agent.Activity = isActive ? .active : (isRecent ? .recent : .connected)
+            let preferredName = member.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            agentsByID[member.id] = Agent(
+                id: member.id,
+                name: preferredName.isEmpty ? (recentAgentNames[member.id] ?? member.id) : preferredName,
+                activity: activity,
+                statusDetail: member.statusDetail,
+                progress: member.progress
+            )
+        }
+
+        for (agentID, timestamp) in recentActivityByAgent
+        where agentID != currentAgentID
+            && now.timeIntervalSince(timestamp) < recentWindow
+            && agentsByID[agentID] == nil {
+            let knownName = recentAgentNames[agentID]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayName = knownName.flatMap { $0.isEmpty ? nil : $0 } ?? agentID
+            agentsByID[agentID] = Agent(
+                id: agentID,
+                name: displayName,
+                activity: .recent,
+                statusDetail: nil,
+                progress: nil
+            )
+        }
+
+        return agentsByID.values.sorted { lhs, rhs in
+            if lhs.activity.sortOrder != rhs.activity.sortOrder {
+                return lhs.activity.sortOrder < rhs.activity.sortOrder
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
     static func summary(
         members: [AgentPresence],
         currentAgentID: String,

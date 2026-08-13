@@ -34,6 +34,7 @@ final class ChatStore: ObservableObject {
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
     @Published private(set) var lastThinkingAt: [String: [String: Date]] = [:]
     @Published private(set) var recentAgentActivityAt: [String: [String: Date]] = [:]
+    @Published private(set) var recentAgentNames: [String: [String: String]] = [:]
     @Published var roomReadyNotice: Room?
     @Published var secondAgentHintRoom: Room?
     @Published var roomBeingRenamed: Room?
@@ -741,6 +742,7 @@ final class ChatStore: ObservableObject {
         roomMessagePreviews = [:]
         lastThinkingAt = [:]
         recentAgentActivityAt = [:]
+        recentAgentNames = [:]
         roomReadyNotice = nil
         secondAgentHintRoom = nil
         secondAgentHintShownRoomIDs = []
@@ -1518,7 +1520,13 @@ final class ChatStore: ObservableObject {
         if status == "working" || status == "thinking" {
             let now = Date()
             lastThinkingAt[roomID, default: [:]][agentID] = now
-            recordRecentAgentActivity(agentID: agentID, roomID: roomID, at: now, now: now)
+            recordRecentAgentActivity(
+                agentID: agentID,
+                agentName: payload["agent_name"] as? String,
+                roomID: roomID,
+                at: now,
+                now: now
+            )
         } else {
             lastThinkingAt[roomID]?.removeValue(forKey: agentID)
             if lastThinkingAt[roomID]?.isEmpty == true {
@@ -1529,6 +1537,7 @@ final class ChatStore: ObservableObject {
 
     private func recordHistoricalAgentActivity(in messages: [ChatMessage], now: Date) {
         var updated = recentAgentActivityAt
+        var updatedNames = recentAgentNames
         pruneRecentAgentActivity(&updated, now: now)
         for message in messages where message.agentID != agentID {
             let timestamp = min(message.timestamp.cowchatDate ?? now, now)
@@ -1537,14 +1546,20 @@ final class ChatStore: ObservableObject {
             if timestamp > previous {
                 updated[message.roomID, default: [:]][message.agentID] = timestamp
             }
+            if !message.agentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                updatedNames[message.roomID, default: [:]][message.agentID] = message.agentName
+            }
         }
+        pruneRecentAgentNames(&updatedNames, matching: updated)
         recentAgentActivityAt = updated
+        recentAgentNames = updatedNames
     }
 
     private func recordLiveAgentActivity(_ message: ChatMessage, receivedAt: Date) {
         guard message.agentID != agentID else { return }
         recordRecentAgentActivity(
             agentID: message.agentID,
+            agentName: message.agentName,
             roomID: message.roomID,
             at: receivedAt,
             now: receivedAt
@@ -1553,22 +1568,31 @@ final class ChatStore: ObservableObject {
 
     private func recordRecentAgentActivity(
         agentID: String,
+        agentName: String?,
         roomID: String,
         at timestamp: Date,
         now: Date
     ) {
         var updated = recentAgentActivityAt
+        var updatedNames = recentAgentNames
         pruneRecentAgentActivity(&updated, now: now)
+        pruneRecentAgentNames(&updatedNames, matching: updated)
         let timestamp = min(timestamp, now)
         guard now.timeIntervalSince(timestamp) < 600 else {
             recentAgentActivityAt = updated
+            recentAgentNames = updatedNames
             return
         }
         let previous = updated[roomID]?[agentID] ?? .distantPast
         if timestamp > previous {
             updated[roomID, default: [:]][agentID] = timestamp
         }
+        if let agentName = agentName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !agentName.isEmpty {
+            updatedNames[roomID, default: [:]][agentID] = agentName
+        }
         recentAgentActivityAt = updated
+        recentAgentNames = updatedNames
     }
 
     private func pruneRecentAgentActivity(
@@ -1581,6 +1605,24 @@ final class ChatStore: ObservableObject {
                 activity.removeValue(forKey: roomID)
             } else {
                 activity[roomID] = recent
+            }
+        }
+    }
+
+    private func pruneRecentAgentNames(
+        _ names: inout [String: [String: String]],
+        matching activity: [String: [String: Date]]
+    ) {
+        for (roomID, roomNames) in names {
+            guard let roomActivity = activity[roomID] else {
+                names.removeValue(forKey: roomID)
+                continue
+            }
+            let liveNames = roomNames.filter { roomActivity[$0.key] != nil }
+            if liveNames.isEmpty {
+                names.removeValue(forKey: roomID)
+            } else {
+                names[roomID] = liveNames
             }
         }
     }
@@ -1882,6 +1924,7 @@ final class ChatStore: ObservableObject {
         previewActivityByRoomID.removeValue(forKey: roomID)
         lastThinkingAt.removeValue(forKey: roomID)
         recentAgentActivityAt.removeValue(forKey: roomID)
+        recentAgentNames.removeValue(forKey: roomID)
         memberCountIncludesCurrentAgentRoomIDs.remove(roomID)
         if roomReadyNotice?.id == roomID { roomReadyNotice = nil }
         if secondAgentHintRoom?.id == roomID { secondAgentHintRoom = nil }

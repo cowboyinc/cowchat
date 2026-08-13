@@ -193,6 +193,40 @@ final class RoomSidebarPresentationTests: XCTestCase {
         )
     }
 
+    func testChatPresenceAgentsNamesActiveRecentAndConnectedCollaborators() {
+        let now = Date()
+        let members = [
+            AgentPresence(agentID: "claude", name: "Claude", status: "working"),
+            AgentPresence(agentID: "reviewer", name: "Reviewer"),
+            AgentPresence(agentID: "cowchat-mac", name: "Cowchat Mac", status: "working"),
+        ]
+
+        let agents = ChatPresencePresentation.agents(
+            members: members,
+            currentAgentID: "cowchat-mac",
+            recentActivityByAgent: ["codex": now.addingTimeInterval(-30)],
+            recentAgentNames: ["codex": "Codex"],
+            now: now
+        )
+
+        XCTAssertEqual(agents.map(\.name), ["Claude", "Codex", "Reviewer"])
+        XCTAssertEqual(agents.map(\.activity), [.active, .recent, .connected])
+        XCTAssertEqual(agents.map(\.statusText), ["Active now", "Active recently", "Connected"])
+    }
+
+    func testChatPresenceAgentsFallsBackToAgentIDWhenARecentNameIsUnavailable() {
+        let now = Date()
+
+        let agents = ChatPresencePresentation.agents(
+            members: [],
+            currentAgentID: "cowchat-mac",
+            recentActivityByAgent: ["agent-123": now],
+            now: now
+        )
+
+        XCTAssertEqual(agents.map(\.name), ["agent-123"])
+    }
+
     func testChatPresenceNeverClaimsCachedMembersAreLiveWhileOfflineOrConnecting() {
         let members = [AgentPresence(agentID: "cowchat-mac", name: "Cowchat Mac")]
 

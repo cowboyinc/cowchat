@@ -1034,6 +1034,9 @@ private struct ChatRoomView: View {
     @Binding var isSidebarVisible: Bool
     @State private var isComposerExpanded = false
     @State private var isFieldHovering = false
+    @State private var isComposerFocused = false
+    @State private var composerContentHeight = ComposerTextField.naturalHeight
+    @State private var isPresencePopoverPresented = false
     @State private var isDestroyConfirmationPresented = false
     @State private var isDestroyingRoom = false
     @State private var isMessageListNearBottom = true
@@ -1173,13 +1176,33 @@ private struct ChatRoomView: View {
                 }
                 TimelineView(.periodic(from: .now, by: 10)) { timeline in
                     let summary = presenceSummary(at: timeline.date)
-                    Text(summary)
-                        .gallopText(
-                            .caption,
-                            color: summary.contains("active")
-                                ? SemanticColor.warning : SemanticColor.textTertiary
-                        )
-                        .lineLimit(1)
+                    let agents = presenceAgents(at: timeline.date)
+                    Button {
+                        isPresencePopoverPresented.toggle()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text(summary)
+                                .gallopText(
+                                    .caption,
+                                    color: summary.contains("active")
+                                        ? SemanticColor.warning : SemanticColor.textTertiary
+                                )
+                                .lineLimit(1)
+                            GallopIconView(
+                                icon: .chevronDownExtraSmall,
+                                fallbackSystemName: "chevron.down",
+                                size: 9
+                            )
+                            .foregroundStyle(SemanticColor.iconSubtle)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show agents in \(room.name)")
+                    .accessibilityLabel("Show agents in \(room.name)")
+                    .popover(isPresented: $isPresencePopoverPresented, arrowEdge: .top) {
+                        AgentPresencePopover(summary: summary, agents: agents)
+                    }
                 }
             }
 
@@ -1206,6 +1229,17 @@ private struct ChatRoomView: View {
             fallbackMemberCountIncludesCurrentAgent:
                 store.fallbackMemberCountIncludesCurrentAgent(in: room.id),
             recentActivityByAgent: store.recentAgentActivityAt[room.id],
+            now: now,
+            connectionStatus: store.connectionStatus
+        )
+    }
+
+    private func presenceAgents(at now: Date) -> [ChatPresencePresentation.Agent] {
+        ChatPresencePresentation.agents(
+            members: store.roomMembers,
+            currentAgentID: store.agentID,
+            recentActivityByAgent: store.recentAgentActivityAt[room.id],
+            recentAgentNames: store.recentAgentNames[room.id],
             now: now,
             connectionStatus: store.connectionStatus
         )
@@ -1397,9 +1431,11 @@ private struct ChatRoomView: View {
                     .padding(.bottom, 8)
             }
 
-            HStack(spacing: 8) {
+            HStack(alignment: .bottom, spacing: 8) {
                 ComposerTextField(
                     text: $store.draft,
+                    measuredHeight: $composerContentHeight,
+                    isFocused: $isComposerFocused,
                     placeholder: "Message \(room.name)",
                     isEnabled: !room.encrypted,
                     onSubmit: store.sendDraft,
@@ -1407,16 +1443,23 @@ private struct ChatRoomView: View {
                         withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
                     }
                 )
-                .frame(height: ComposerTextField.naturalHeight)
+                .frame(height: composerContentHeight)
                 .padding(.horizontal, 16)
-                .frame(height: 44)
+                .frame(height: composerFieldHeight)
                 .background(
-                    isFieldHovering ? SemanticColor.textfieldHover : SemanticColor.textfieldDefault,
+                    isComposerFocused
+                        ? SemanticColor.textfieldFocus
+                        : (isFieldHovering ? SemanticColor.textfieldHover : SemanticColor.textfieldDefault),
                     in: RoundedRectangle(cornerRadius: 22, style: .continuous)
                 )
                 .overlay {
                     RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(isFieldHovering ? SemanticColor.borderHover : SemanticColor.borderDefault, lineWidth: 1)
+                        .stroke(
+                            isComposerFocused
+                                ? SemanticColor.borderFocus
+                                : (isFieldHovering ? SemanticColor.borderHover : SemanticColor.borderDefault),
+                            lineWidth: isComposerFocused ? 2 : 1
+                        )
                 }
                 .onHover { isFieldHovering = $0 }
 
@@ -1441,6 +1484,10 @@ private struct ChatRoomView: View {
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
         .background(SemanticColor.surface500)
+    }
+
+    private var composerFieldHeight: CGFloat {
+        composerContentHeight + (44 - ComposerTextField.naturalHeight)
     }
 
     private var canSend: Bool {
@@ -1797,6 +1844,69 @@ struct ExpandableMessageText: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityValue(source.isEmpty ? "Empty" : source)
+    }
+}
+
+private struct AgentPresencePopover: View {
+    let summary: String
+    let agents: [ChatPresencePresentation.Agent]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Agents in this room")
+                .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
+            Text(summary)
+                .gallopText(.caption, color: SemanticColor.textTertiary)
+                .padding(.top, 2)
+                .padding(.bottom, 10)
+
+            Divider()
+
+            if agents.isEmpty {
+                Text(emptyMessage)
+                    .gallopText(.bodyS, color: SemanticColor.textTertiary)
+                    .padding(.vertical, 12)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(agents) { agent in
+                        HStack(spacing: 9) {
+                            AgentAvatar(name: agent.name, size: 28)
+
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(agent.name)
+                                    .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
+                                    .lineLimit(1)
+                                Text(agent.statusText)
+                                    .gallopText(.caption, color: statusColor(for: agent.activity))
+                                    .lineLimit(2)
+                            }
+
+                            Spacer(minLength: 0)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(width: 280)
+    }
+
+    private var emptyMessage: String {
+        switch summary {
+        case "Offline": return "Reconnect to see who is in the room."
+        case "Connecting…": return "Connecting to room presence…"
+        case "No agents connected": return "No other agents are in the room."
+        default: return "Agent details are still loading."
+        }
+    }
+
+    private func statusColor(for activity: ChatPresencePresentation.Agent.Activity) -> Color {
+        switch activity {
+        case .active, .recent: return SemanticColor.warning
+        case .connected: return SemanticColor.success
+        }
     }
 }
 
