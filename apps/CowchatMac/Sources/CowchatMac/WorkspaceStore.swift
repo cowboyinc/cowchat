@@ -1,6 +1,26 @@
 import Combine
 import Foundation
 
+enum GlobalSignupError: LocalizedError, Equatable {
+    case signupClosed
+    case rateLimited
+    case malformedResponse
+    case serverError(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .signupClosed:
+            return "This server doesn't hand out keys automatically. Paste an API key instead."
+        case .rateLimited:
+            return "The server is limiting new keys from your network. Try again later or paste an existing API key."
+        case .malformedResponse:
+            return "The server's signup reply was malformed."
+        case let .serverError(status):
+            return "The server could not create an API key (HTTP \(status))."
+        }
+    }
+}
+
 /// Owns one always-on local `ChatStore` and, when global rooms are enabled, a
 /// second store connected to the global server. Both stay connected at once;
 /// the sidebar shows their rooms side by side and the chat pane binds to
@@ -36,6 +56,7 @@ final class WorkspaceStore: ObservableObject {
 
     private let preferences: ConnectionProfilePreferences
     private let defaults: UserDefaults
+    private let requestAPIKey: (URL) async throws -> String
     private var storeChangeSubscriptions: Set<AnyCancellable> = []
 
     var activeStore: ChatStore {
@@ -51,12 +72,14 @@ final class WorkspaceStore: ObservableObject {
         local: ChatStore,
         preferences: ConnectionProfilePreferences,
         defaults: UserDefaults = .standard,
-        global: ChatStore? = nil
+        global: ChatStore? = nil,
+        requestAPIKey: @escaping (URL) async throws -> String = WorkspaceStore.requestAPIKeyOverHTTP
     ) {
         self.local = local
         self.preferences = preferences
         self.defaults = defaults
         self.global = global
+        self.requestAPIKey = requestAPIKey
         rebindStoreChangeForwarding()
     }
 
@@ -120,6 +143,65 @@ final class WorkspaceStore: ObservableObject {
             return (profile.endpointURL?.absoluteString ?? savedOrDefaultGlobalURL(), profile.apiKey)
         } catch {
             return (savedOrDefaultGlobalURL(), "")
+        }
+    }
+
+    /// Connects to a global server, minting an API key from its self-serve
+    /// signup endpoint when the user left the key field empty.
+    @discardableResult
+    func connectToGlobal(url: String, apiKey: String) async -> Bool {
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedKey.isEmpty else {
+            return saveGlobalConfiguration(url: url, apiKey: trimmedKey)
+        }
+        globalSetupError = nil
+        guard let signupURL = Self.signupURL(forCloudURLString: url) else {
+            globalSetupError = ConnectionProfileError.invalidCloudURL.localizedDescription
+            return false
+        }
+        do {
+            let mintedKey = try await requestAPIKey(signupURL)
+            return saveGlobalConfiguration(url: url, apiKey: mintedKey)
+        } catch {
+            globalSetupError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// `wss://host[:port]/…` → `https://host[:port]/api/keys`.
+    nonisolated static func signupURL(forCloudURLString urlString: String) -> URL? {
+        guard let profile = try? ConnectionProfile.cowchatCloud(
+            urlString: urlString,
+            apiKey: "placeholder-for-validation"
+        ), let endpointURL = profile.endpointURL,
+            var components = URLComponents(url: endpointURL, resolvingAgainstBaseURL: false)
+        else { return nil }
+        components.scheme = "https"
+        components.path = "/api/keys"
+        return components.url
+    }
+
+    nonisolated static func requestAPIKeyOverHTTP(_ signupURL: URL) async throws -> String {
+        var request = URLRequest(url: signupURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["label": "Cowchat Mac"])
+        request.timeoutInterval = 15
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        switch status {
+        case 201:
+            guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let key = payload["api_key"] as? String, !key.isEmpty else {
+                throw GlobalSignupError.malformedResponse
+            }
+            return key
+        case 401, 403:
+            throw GlobalSignupError.signupClosed
+        case 429:
+            throw GlobalSignupError.rateLimited
+        default:
+            throw GlobalSignupError.serverError(status)
         }
     }
 

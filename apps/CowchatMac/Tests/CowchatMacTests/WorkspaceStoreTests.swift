@@ -126,6 +126,91 @@ final class WorkspaceStoreTests: XCTestCase {
         )
     }
 
+    func testSignupURLDerivesFromCloudURL() {
+        XCTAssertEqual(
+            WorkspaceStore.signupURL(forCloudURLString: "wss://chat.cowchat.cowboy.inc/ws")?
+                .absoluteString,
+            "https://chat.cowchat.cowboy.inc/api/keys"
+        )
+        XCTAssertEqual(
+            WorkspaceStore.signupURL(forCloudURLString: "wss://cloud.example:8443/ws")?
+                .absoluteString,
+            "https://cloud.example:8443/api/keys"
+        )
+        XCTAssertNil(WorkspaceStore.signupURL(forCloudURLString: "http://cloud.example/ws"))
+        XCTAssertNil(WorkspaceStore.signupURL(forCloudURLString: "not a url"))
+    }
+
+    @MainActor
+    func testConnectToGlobalMintsAKeyWhenFieldIsEmpty() async {
+        var requestedURLs: [URL] = []
+        let fixture = makeWorkspace(withGlobal: false) { url in
+            requestedURLs.append(url)
+            return "minted-key"
+        }
+        defer { fixture.cleanup() }
+
+        let connected = await fixture.workspace.connectToGlobal(
+            url: "wss://cloud.invalid/ws",
+            apiKey: "   "
+        )
+
+        XCTAssertTrue(connected)
+        XCTAssertEqual(
+            requestedURLs.map(\.absoluteString),
+            ["https://cloud.invalid/api/keys"]
+        )
+        XCTAssertNotNil(fixture.workspace.global)
+        XCTAssertTrue(fixture.preferences.isGlobalEnabled())
+        XCTAssertEqual(
+            try fixture.preferences.loadConfiguredCloudProfile()?.apiKey,
+            "minted-key"
+        )
+    }
+
+    @MainActor
+    func testConnectToGlobalUsesPastedKeyWithoutMinting() async {
+        var mintCalls = 0
+        let fixture = makeWorkspace(withGlobal: false) { _ in
+            mintCalls += 1
+            return "should-not-be-used"
+        }
+        defer { fixture.cleanup() }
+
+        let connected = await fixture.workspace.connectToGlobal(
+            url: "wss://cloud.invalid/ws",
+            apiKey: "pasted-key"
+        )
+
+        XCTAssertTrue(connected)
+        XCTAssertEqual(mintCalls, 0)
+        XCTAssertEqual(
+            try fixture.preferences.loadConfiguredCloudProfile()?.apiKey,
+            "pasted-key"
+        )
+    }
+
+    @MainActor
+    func testConnectToGlobalSurfacesSignupFailureInline() async {
+        let fixture = makeWorkspace(withGlobal: false) { _ in
+            throw GlobalSignupError.signupClosed
+        }
+        defer { fixture.cleanup() }
+
+        let connected = await fixture.workspace.connectToGlobal(
+            url: "wss://cloud.invalid/ws",
+            apiKey: ""
+        )
+
+        XCTAssertFalse(connected)
+        XCTAssertNil(fixture.workspace.global)
+        XCTAssertEqual(
+            fixture.workspace.globalSetupError,
+            GlobalSignupError.signupClosed.localizedDescription
+        )
+        XCTAssertFalse(fixture.preferences.isGlobalEnabled())
+    }
+
     @MainActor
     func testConfiguredGlobalValuesDefaultToCowboysServer() {
         let fixture = makeWorkspace(withGlobal: false)
@@ -138,7 +223,12 @@ final class WorkspaceStoreTests: XCTestCase {
     }
 
     @MainActor
-    private func makeWorkspace(withGlobal: Bool) -> (
+    private func makeWorkspace(
+        withGlobal: Bool,
+        requestAPIKey: @escaping (URL) async throws -> String = { _ in
+            throw GlobalSignupError.signupClosed
+        }
+    ) -> (
         workspace: WorkspaceStore,
         preferences: ConnectionProfilePreferences,
         cleanup: () -> Void
@@ -173,7 +263,8 @@ final class WorkspaceStoreTests: XCTestCase {
                 local: local,
                 preferences: preferences,
                 defaults: defaults,
-                global: global
+                global: global,
+                requestAPIKey: requestAPIKey
             ),
             preferences,
             { defaults.removePersistentDomain(forName: suiteName) }

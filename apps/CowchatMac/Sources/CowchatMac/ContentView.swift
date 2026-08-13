@@ -2123,6 +2123,7 @@ private struct SettingsView: View {
     @State private var selectedPage = SettingsPage.connection
     @State private var cloudURL = ""
     @State private var cloudAPIKey = ""
+    @State private var isConnectingGlobal = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -2235,7 +2236,7 @@ private struct SettingsView: View {
                         serverStatusBadge(for: global)
                     }
                 }
-                Text("Cowboy runs a shared Cowchat server for everyone. Paste an API key and its rooms appear in the sidebar alongside your local rooms.")
+                Text("Cowboy runs a shared Cowchat server for everyone. Connect and its rooms appear in the sidebar alongside your local rooms — a key is created for you automatically, or paste your own.")
                     .gallopText(.bodyM, color: SemanticColor.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
                 TextField(ConnectionProfile.defaultGlobalURLString, text: $cloudURL)
@@ -2247,7 +2248,7 @@ private struct SettingsView: View {
                     .overlay {
                         Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
                     }
-                SecureField("API key", text: $cloudAPIKey)
+                SecureField("API key (optional — created automatically)", text: $cloudAPIKey)
                     .textFieldStyle(.plain)
                     .gallopText(.bodyM, color: SemanticColor.textPrimary)
                     .padding(.horizontal, 13)
@@ -2297,10 +2298,7 @@ private struct SettingsView: View {
                                 workspace.disableGlobalRooms()
                             }
                     }
-                    Button(
-                        workspace.isGlobalEnabled ? "Save and reconnect" : "Connect",
-                        action: saveCloudConfiguration
-                    )
+                    Button(connectButtonTitle, action: saveCloudConfiguration)
                         .buttonStyle(.plain)
                         .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
                         .padding(.horizontal, 16)
@@ -2309,7 +2307,7 @@ private struct SettingsView: View {
                         .disabled(!canSaveCloudConfiguration)
                         .opacity(canSaveCloudConfiguration ? 1 : 0.45)
                         .macAccessibleAction(
-                            label: workspace.isGlobalEnabled ? "Save and reconnect" : "Connect",
+                            label: connectButtonTitle,
                             isEnabled: canSaveCloudConfiguration,
                             action: saveCloudConfiguration
                         )
@@ -2485,7 +2483,12 @@ private struct SettingsView: View {
 
     private var canSaveCloudConfiguration: Bool {
         !cloudURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !cloudAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !isConnectingGlobal
+    }
+
+    private var connectButtonTitle: String {
+        if isConnectingGlobal { return "Connecting…" }
+        return workspace.isGlobalEnabled ? "Save and reconnect" : "Connect"
     }
 
     private func loadCloudConfiguration() {
@@ -2496,8 +2499,12 @@ private struct SettingsView: View {
 
     private func saveCloudConfiguration() {
         guard canSaveCloudConfiguration else { return }
-        if workspace.saveGlobalConfiguration(url: cloudURL, apiKey: cloudAPIKey) {
-            loadCloudConfiguration()
+        isConnectingGlobal = true
+        Task {
+            if await workspace.connectToGlobal(url: cloudURL, apiKey: cloudAPIKey) {
+                loadCloudConfiguration()
+            }
+            isConnectingGlobal = false
         }
     }
 
