@@ -925,18 +925,21 @@ private struct ChatRoomView: View {
         return store.rooms.first { $0.id == parentID }
     }
 
-    private var paneState: RoomPaneState {
+    private func paneState(at now: Date) -> RoomPaneState {
         RoomPaneState.state(
             connectionStatus: store.connectionStatus,
             isLoadingMessages: store.isLoadingMessages,
             hasMessages: !store.messages.isEmpty,
-            hasOtherMembers: store.roomMembers.contains { $0.id != store.agentID }
+            hasOtherMembers: ChatPresencePresentation.hasCollaboratorSignal(
+                members: store.roomMembers,
+                currentAgentID: store.agentID,
+                fallbackMemberCount: room.memberCount,
+                fallbackMemberCountIncludesCurrentAgent:
+                    store.fallbackMemberCountIncludesCurrentAgent(in: room.id),
+                recentActivityByAgent: store.recentAgentActivityAt[room.id],
+                now: now
+            )
         )
-    }
-
-    private var connectVariant: RoomPaneState.ConnectVariant? {
-        if case .connectPrompt(let variant) = paneState { return variant }
-        return nil
     }
 
     var body: some View {
@@ -950,15 +953,20 @@ private struct ChatRoomView: View {
                         .controlSize(.small)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                if let connectVariant {
-                    RoomConnectStateView(
-                        roomName: room.name,
-                        prompt: store.connectPrompt(for: room),
-                        variant: connectVariant
-                    )
-                } else if paneState == .quiet {
-                    quietRoom
-                        .allowsHitTesting(true)
+                TimelineView(.periodic(from: .now, by: 10)) { timeline in
+                    let state = paneState(at: timeline.date)
+                    ZStack {
+                        if case .connectPrompt(let variant) = state {
+                            RoomConnectStateView(
+                                roomName: room.name,
+                                prompt: store.connectPrompt(for: room),
+                                variant: variant
+                            )
+                        } else if state == .quiet {
+                            quietRoom
+                                .allowsHitTesting(true)
+                        }
+                    }
                 }
                 composer
             }
@@ -1038,13 +1046,16 @@ private struct ChatRoomView: View {
                             .foregroundStyle(SemanticColor.iconTertiary)
                     }
                 }
-                Text(connectVariant != nil ? "No agents here yet" : presenceSummary)
-                    .gallopText(
-                        .caption,
-                        color: connectVariant == nil && presenceSummary.contains("active")
-                            ? SemanticColor.warning : SemanticColor.textTertiary
-                    )
-                    .lineLimit(1)
+                TimelineView(.periodic(from: .now, by: 10)) { timeline in
+                    let summary = presenceSummary(at: timeline.date)
+                    Text(summary)
+                        .gallopText(
+                            .caption,
+                            color: summary.contains("active")
+                                ? SemanticColor.warning : SemanticColor.textTertiary
+                        )
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
@@ -1061,12 +1072,16 @@ private struct ChatRoomView: View {
         pasteboard.setString(store.connectPrompt(for: room), forType: .string)
     }
 
-    private var presenceSummary: String {
+    private func presenceSummary(at now: Date) -> String {
         ChatPresencePresentation.summary(
             members: store.roomMembers,
             currentAgentID: store.agentID,
             fallbackMemberCount: room.memberCount,
-            isConnected: store.connectionStatus.isConnected
+            fallbackMemberCountIncludesCurrentAgent:
+                store.fallbackMemberCountIncludesCurrentAgent(in: room.id),
+            recentActivityByAgent: store.recentAgentActivityAt[room.id],
+            now: now,
+            connectionStatus: store.connectionStatus
         )
     }
 
@@ -1452,16 +1467,69 @@ private struct OpenInAppAccessibility: ViewModifier {
     }
 }
 
-private struct ExpandableMessageText: View {
+enum MessageRenderPlan: Equatable {
+    // Rich block rendering is intentionally bounded. Heading-heavy or
+    // machine-generated output can otherwise create tens of thousands of
+    // SwiftUI children in one message row.
+    static let richTextByteLimit = 128 * 1_024
+    static let richTextLineBreakLimit = 320
+
+    case structured([MessageContentSegment])
+    case plainText(String)
+
+    static func make(for source: String) -> MessageRenderPlan {
+        if source.utf8.count > richTextByteLimit
+            || reachesLineBreakLimit(in: source) {
+            return .plainText(source)
+        }
+        return .structured(MessageContentParser.segments(in: source))
+    }
+
+    var renderedElementCount: Int {
+        switch self {
+        case .structured(let segments): segments.count
+        case .plainText: 1
+        }
+    }
+
+    private static func reachesLineBreakLimit(in source: String) -> Bool {
+        var count = 0
+        for character in source where character.isNewline {
+            count += 1
+            if count >= richTextLineBreakLimit { return true }
+        }
+        return false
+    }
+}
+
+struct ExpandableMessageText: View {
     let content: String
-    var textColor: Color = SemanticColor.textSecondary
+    var textColor: Color
     @State private var isExpanded = false
+    @State private var expandedPlan: MessageRenderPlan?
+    private let collapsedPreview: MessagePreview.CollapsedPreview
+    private let collapsedPlan: MessageRenderPlan
+    private let makeRenderPlan: (String) -> MessageRenderPlan
+
+    init(
+        content: String,
+        textColor: Color = SemanticColor.textSecondary,
+        makeRenderPlan: @escaping (String) -> MessageRenderPlan = MessageRenderPlan.make
+    ) {
+        self.content = content
+        self.textColor = textColor
+        self.makeRenderPlan = makeRenderPlan
+
+        let preview = MessagePreview.collapsedPreview(for: content)
+        collapsedPreview = preview
+        collapsedPlan = makeRenderPlan(preview.source)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if showsResponseControl {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
+                    toggleExpansion()
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "bubble.left")
@@ -1481,33 +1549,79 @@ private struct ExpandableMessageText: View {
                     label: isExpanded ? "Hide full response" : "Show full response",
                     value: isExpanded ? "expanded" : "collapsed"
                 ) {
-                    withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
+                    toggleExpansion()
                 }
             }
 
-            ForEach(MessageContentParser.segments(in: displayedContent)) { segment in
-                switch segment.kind {
-                case .prose:
-                    Text(markdown(segment.text))
-                        .textSelection(.enabled)
-                        .gallopText(.bodyL, color: textColor)
-                        .fixedSize(horizontal: false, vertical: true)
-                case .code:
-                    ScrollView(.horizontal) {
-                        Text(segment.text)
+            renderedContent(isExpanded ? (expandedPlan ?? collapsedPlan) : collapsedPlan)
+
+            if !isExpanded, collapsedPreview.isTruncated {
+                Text("…")
+                    .gallopText(.bodyL, color: textColor)
+                    .accessibilityLabel("Content continues")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func renderedContent(_ plan: MessageRenderPlan) -> some View {
+        switch plan {
+        case .plainText(let source):
+            Text(source)
+                .textSelection(.enabled)
+                .gallopText(.bodyL, color: textColor)
+                .fixedSize(horizontal: false, vertical: true)
+        case .structured(let segments):
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(segments) { segment in
+                    switch segment.kind {
+                    case .prose:
+                        Text(MessageContentParser.attributedInline(segment.text))
                             .textSelection(.enabled)
-                            .gallopText(.code, color: SemanticColor.textSecondary)
-                            .fixedSize(horizontal: true, vertical: true)
-                            .padding(12)
-                    }
-                    .scrollIndicators(.hidden)
-                    .background(
-                        SemanticColor.surface400,
-                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(SemanticColor.borderDefault, lineWidth: 1)
+                            .gallopText(.bodyL, color: textColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                    case .heading(let level):
+                        Text(MessageContentParser.attributedInline(segment.text))
+                            .textSelection(.enabled)
+                            .gallopText(headingStyle(for: level), color: textColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isHeader)
+                    case .unorderedList, .orderedList:
+                        Text(MessageContentParser.attributedInline(segment.text))
+                            .textSelection(.enabled)
+                            .gallopText(.bodyL, color: textColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 4)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(
+                                segment.kind == .unorderedList ? "Bulleted list" : "Numbered list"
+                            )
+                            .accessibilityValue(accessibleText(segment.text))
+                    case .blockQuote:
+                        HStack(alignment: .top, spacing: 10) {
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(SemanticColor.borderDefault)
+                                .frame(width: 3)
+                            Text(MessageContentParser.attributedInline(segment.text))
+                                .textSelection(.enabled)
+                                .gallopText(.bodyL, color: textColor)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Block quote")
+                        .accessibilityValue(accessibleText(segment.text))
+                    case .table:
+                        monospacedBlock(
+                            segment.text,
+                            style: .codeSm,
+                            accessibilityLabel: "Table"
+                        )
+                    case .code:
+                        monospacedBlock(
+                            segment.text,
+                            style: .code,
+                            accessibilityLabel: "Code block"
+                        )
                     }
                 }
             }
@@ -1518,12 +1632,45 @@ private struct ExpandableMessageText: View {
         MessagePreview.needsDisclosure(for: content)
     }
 
-    private var displayedContent: String {
-        isExpanded ? content : MessagePreview.collapsedContent(for: content)
+    private func toggleExpansion() {
+        if !isExpanded, expandedPlan == nil {
+            expandedPlan = makeRenderPlan(content)
+        }
+        withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
     }
 
-    private func markdown(_ source: String) -> AttributedString {
-        (try? AttributedString(markdown: source)) ?? AttributedString(source)
+    private func headingStyle(for level: Int) -> GallopTextStyle {
+        level <= 2 ? .h4 : .h5
+    }
+
+    private func accessibleText(_ source: String) -> String {
+        String(MessageContentParser.attributedInline(source).characters)
+    }
+
+    private func monospacedBlock(
+        _ source: String,
+        style: GallopTextStyle,
+        accessibilityLabel: String
+    ) -> some View {
+        ScrollView(.horizontal) {
+            Text(source.isEmpty ? " " : source)
+                .textSelection(.enabled)
+                .gallopText(style, color: SemanticColor.textSecondary)
+                .fixedSize(horizontal: true, vertical: true)
+                .padding(12)
+        }
+        .scrollIndicators(.hidden)
+        .background(
+            SemanticColor.surface400,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(SemanticColor.borderDefault, lineWidth: 1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(source.isEmpty ? "Empty" : source)
     }
 }
 

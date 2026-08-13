@@ -82,4 +82,26 @@ final class RoomPaneStateTests: XCTestCase {
         )
     }
 
+    func testThinkingOnlyRecentActivityDoesNotRenderAgentlessConnectPrompt() {
+        let now = Date()
+        let hasCollaboratorSignal = ChatPresencePresentation.hasCollaboratorSignal(
+            members: [],
+            currentAgentID: "cowchat-mac",
+            fallbackMemberCount: 0,
+            recentActivityByAgent: ["claude": now.addingTimeInterval(-30)],
+            now: now
+        )
+
+        XCTAssertTrue(hasCollaboratorSignal)
+        XCTAssertEqual(
+            RoomPaneState.state(
+                connectionStatus: .connected,
+                isLoadingMessages: false,
+                hasMessages: false,
+                hasOtherMembers: hasCollaboratorSignal
+            ),
+            .quiet
+        )
+    }
+
 }

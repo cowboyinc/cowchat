@@ -22,6 +22,10 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
     var destroyShouldFailAfterEvent = false
     var renamedRooms: [(String, String)] = []
     var blocksListRooms = false
+    var blocksListAgents = false
+    var capturesListAgentRequests = false
+    var listAgentRequests: [String] = []
+    var capturesHistoryRequests = false
     var blockedHistoryLimit: Int?
     var blocksSend = false
     var sendShouldFail = false
@@ -36,6 +40,9 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
     private var destroyContinuation: CheckedContinuation<Void, Never>?
     private var joinContinuation: CheckedContinuation<Void, Never>?
     private var listRoomsContinuation: CheckedContinuation<Void, Never>?
+    private var listAgentsContinuation: CheckedContinuation<Void, Never>?
+    private var capturedListAgentContinuations: [Int: CheckedContinuation<[AgentPresence], Error>] = [:]
+    private var capturedHistoryContinuations: [Int: CheckedContinuation<[ChatMessage], Error>] = [:]
     private var historyContinuation: CheckedContinuation<Void, Never>?
     private var sendContinuations: [String: CheckedContinuation<Void, Never>] = [:]
 
@@ -76,7 +83,32 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         }
         return listedRooms
     }
-    func listAgents(roomID: String) async throws -> [AgentPresence] { agentsByRoom[roomID] ?? [] }
+    func listAgents(roomID: String) async throws -> [AgentPresence] {
+        listAgentRequests.append(roomID)
+        let requestNumber = listAgentRequests.count
+        if capturesListAgentRequests {
+            return try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await withCheckedThrowingContinuation { continuation in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        capturedListAgentContinuations[requestNumber] = continuation
+                    }
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    self?.capturedListAgentContinuations
+                        .removeValue(forKey: requestNumber)?
+                        .resume(throwing: CancellationError())
+                }
+            }
+        }
+        if blocksListAgents {
+            await withCheckedContinuation { listAgentsContinuation = $0 }
+        }
+        return agentsByRoom[roomID] ?? []
+    }
     func createRoom(
         name: String,
         description: String?,
@@ -134,6 +166,25 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
     func leave(roomID: String) async throws { operations.append("leave:\(roomID)") }
     func history(roomID: String, limit: Int, before: String?) async throws -> [ChatMessage] {
         historyRequests.append((roomID, limit, before))
+        let requestNumber = historyRequests.count
+        if capturesHistoryRequests {
+            return try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await withCheckedThrowingContinuation { continuation in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        capturedHistoryContinuations[requestNumber] = continuation
+                    }
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    self?.capturedHistoryContinuations
+                        .removeValue(forKey: requestNumber)?
+                        .resume(throwing: CancellationError())
+                }
+            }
+        }
         if blockedHistoryLimit == limit {
             blockedHistoryLimit = nil
             await withCheckedContinuation { historyContinuation = $0 }
@@ -196,6 +247,26 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         blocksListRooms = false
         listRoomsContinuation?.resume()
         listRoomsContinuation = nil
+    }
+
+    func resumeBlockedListAgents() {
+        blocksListAgents = false
+        listAgentsContinuation?.resume()
+        listAgentsContinuation = nil
+    }
+
+    func completeListAgentRequest(
+        _ requestNumber: Int,
+        with result: Result<[AgentPresence], Error>
+    ) {
+        capturedListAgentContinuations.removeValue(forKey: requestNumber)?.resume(with: result)
+    }
+
+    func completeHistoryRequest(
+        _ requestNumber: Int,
+        with result: Result<[ChatMessage], Error>
+    ) {
+        capturedHistoryContinuations.removeValue(forKey: requestNumber)?.resume(with: result)
     }
 
     func resumeBlockedHistory() {
@@ -264,12 +335,19 @@ private final class MockLocalServerSupervisor: LocalServerSupervising {
 
 final class RoomTransitionTests: XCTestCase {
     @MainActor
-    private func makeStore(connection: MockRoomConnection) -> ChatStore {
+    private func makeStore(
+        connection: MockRoomConnection,
+        memberRefreshRetryDelayNanoseconds: UInt64 = 2_000_000_000
+    ) -> ChatStore {
         let suiteName = "RoomTransitionTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
-        return ChatStore(connection: connection, defaults: defaults)
+        return ChatStore(
+            connection: connection,
+            defaults: defaults,
+            memberRefreshRetryDelayNanoseconds: memberRefreshRetryDelayNanoseconds
+        )
     }
 
     @MainActor
@@ -1014,6 +1092,579 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
+    func testJoiningRoomPublishesMembersBeforeSlowHistoryFinishes() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let collaborator = try decodeAgent(id: "collaborator", name: "Claude")
+        let connection = MockRoomConnection()
+        connection.agentsByRoom[room.id] = [collaborator]
+        connection.blockedHistoryLimit = 100
+        let store = makeStore(connection: connection)
+        store.rooms = [room]
+        store.connectionStatus = .connected
+
+        let selection = Task { await store.select(room: room) }
+        while !connection.historyRequests.contains(where: { $0.roomID == room.id && $0.limit == 100 }) {
+            await Task.yield()
+        }
+        for _ in 0..<100 where store.roomMembers.isEmpty {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(store.roomMembers.map(\.id), [collaborator.id])
+
+        connection.resumeBlockedHistory()
+        await selection.value
+    }
+
+    @MainActor
+    func testJoiningRoomPublishesHistoryBeforeSlowMemberRefreshFinishes() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let message = try decodeMessage(
+            id: "existing-message",
+            roomID: room.id,
+            content: "Existing history",
+            timestamp: "2026-08-04T12:00:00Z",
+            sequence: 1
+        )
+        let connection = MockRoomConnection()
+        connection.historiesByRoom[room.id] = [message]
+        connection.blocksListAgents = true
+        let store = makeStore(connection: connection)
+        store.rooms = [room]
+        store.connectionStatus = .connected
+
+        let selection = Task { await store.select(room: room) }
+        for _ in 0..<100 where store.messages.isEmpty {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(store.messages.map(\.id), [message.id])
+        XCTAssertFalse(store.isLoadingMessages)
+
+        connection.resumeBlockedListAgents()
+        await selection.value
+    }
+
+    @MainActor
+    func testFreshJoinDoesNotSubtractMacFromPreJoinFallbackCount() async throws {
+        let room = try decodeRoom(id: "room", name: "room", memberCount: 1)
+        let connection = MockRoomConnection()
+        connection.blocksListAgents = true
+        let store = makeStore(connection: connection)
+        store.rooms = [room]
+        store.connectionStatus = .connected
+
+        let selection = Task { await store.select(room: room) }
+        while connection.listAgentRequests.isEmpty { await Task.yield() }
+
+        XCTAssertTrue(connection.operations.contains("join:\(room.id)"))
+        XCTAssertFalse(store.fallbackMemberCountIncludesCurrentAgent(in: room.id))
+        XCTAssertEqual(store.rooms.first?.memberCount, 1)
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: store.roomMembers,
+                currentAgentID: store.agentID,
+                fallbackMemberCount: store.rooms.first?.memberCount,
+                fallbackMemberCountIncludesCurrentAgent:
+                    store.fallbackMemberCountIncludesCurrentAgent(in: room.id)
+            ),
+            "1 agent connected"
+        )
+
+        connection.resumeBlockedListAgents()
+        await selection.value
+    }
+
+    @MainActor
+    func testRoomRefreshReconcilesMembersForSelectedRoomWithHistory() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let collaborator = try decodeAgent(id: "collaborator", name: "Claude")
+        let connection = MockRoomConnection()
+        connection.listedRooms = [room]
+        connection.historiesByRoom[room.id] = [
+            try decodeMessage(
+                id: "existing-message",
+                roomID: room.id,
+                content: "Existing history",
+                timestamp: "2026-08-04T12:00:00Z",
+                sequence: 1
+            ),
+        ]
+        let store = makeStore(connection: connection)
+
+        await store.connect()
+        XCTAssertEqual(store.messages.count, 1)
+        XCTAssertTrue(store.roomMembers.isEmpty)
+
+        connection.agentsByRoom[room.id] = [collaborator]
+        try await store.refreshRooms()
+
+        XCTAssertEqual(store.roomMembers.map(\.id), [collaborator.id])
+    }
+
+    @MainActor
+    func testUnknownWorkingPresenceRecordsActivityAndRepairsMemberSnapshot() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let collaborator = AgentPresence(
+            agentID: "collaborator",
+            name: "Claude",
+            status: "working"
+        )
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+        connection.agentsByRoom[room.id] = [collaborator]
+        let requestsBeforePresence = connection.listAgentRequests.count
+
+        connection.onEvent?("presence_update", [
+            "agent_id": collaborator.id,
+            "agent_name": collaborator.name,
+            "status": "working",
+        ])
+        for _ in 0..<100 where !store.roomMembers.contains(where: { $0.id == collaborator.id }) {
+            await Task.yield()
+        }
+
+        XCTAssertGreaterThan(connection.listAgentRequests.count, requestsBeforePresence)
+        XCTAssertNotNil(store.recentAgentActivityAt[room.id]?[collaborator.id])
+        XCTAssertEqual(store.roomMembers.map(\.id), [collaborator.id])
+    }
+
+    @MainActor
+    func testRecentActivityIsRestoredFromOneShotMessageHistory() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let now = Date()
+        let connection = MockRoomConnection()
+        connection.historiesByRoom[room.id] = [
+            try decodeMessage(
+                id: "normal-message",
+                roomID: room.id,
+                content: "Starting the review",
+                timestamp: ISO8601DateFormatter().string(from: now.addingTimeInterval(-30)),
+                sequence: 1,
+                agentID: "claude",
+                agentName: "Claude"
+            ),
+            try decodeMessage(
+                id: "thinking-message",
+                roomID: room.id,
+                content: "Reviewing",
+                timestamp: ISO8601DateFormatter().string(from: now.addingTimeInterval(-20)),
+                sequence: 2,
+                agentID: "codex",
+                agentName: "Codex",
+                metadataType: "thinking"
+            ),
+        ]
+        let store = makeStore(connection: connection)
+        store.rooms = [room]
+        store.connectionStatus = .connected
+
+        await store.select(room: room)
+
+        XCTAssertEqual(store.messages.map(\.id), ["normal-message"])
+        XCTAssertEqual(
+            Set(store.recentAgentActivityAt[room.id].map { Array($0.keys) } ?? []),
+            ["claude", "codex"]
+        )
+        XCTAssertEqual(
+            ChatPresencePresentation.summary(
+                members: [],
+                currentAgentID: store.agentID,
+                fallbackMemberCount: 0,
+                fallbackMemberCountIncludesCurrentAgent: true,
+                recentActivityByAgent: store.recentAgentActivityAt[room.id],
+                now: now
+            ),
+            "2 agents active recently"
+        )
+    }
+
+    @MainActor
+    func testNormalMessageDoesNotEraseRecentWorkingPresence() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let now = Date()
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+
+        connection.onEvent?("presence_update", [
+            "agent_id": "collaborator",
+            "agent_name": "Claude",
+            "status": "working",
+        ])
+        connection.onEvent?("message_received", [
+            "message_id": "message",
+            "room_id": room.id,
+            "agent_id": "collaborator",
+            "agent_name": "Claude",
+            "content": "Still working",
+            "timestamp": ISO8601DateFormatter().string(from: now),
+            "seq": 1,
+        ])
+
+        XCTAssertNotNil(store.recentAgentActivityAt[room.id]?["collaborator"])
+        XCTAssertNil(store.lastThinkingAt[room.id]?["collaborator"])
+    }
+
+    @MainActor
+    func testMemberRefreshCoalescesPresenceChurnAndAppliesOneDirtyRerun() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let existingMessage = try decodeMessage(
+            id: "existing",
+            roomID: room.id,
+            content: "Existing history",
+            timestamp: "2026-08-04T12:00:00Z",
+            sequence: 1
+        )
+        let olderAgent = try decodeAgent(id: "older", name: "Older")
+        let newerAgent = try decodeAgent(id: "newer", name: "Newer")
+        let connection = MockRoomConnection()
+        connection.historiesByRoom[room.id] = [existingMessage]
+        let store = makeStore(connection: connection)
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+        connection.capturesListAgentRequests = true
+
+        let firstRequest = connection.listAgentRequests.count + 1
+        for index in 0..<25 {
+            connection.onEvent?("presence_update", [
+                "agent_id": "unknown-\(index)",
+                "agent_name": "Unknown \(index)",
+                "status": "working",
+            ])
+        }
+        while connection.listAgentRequests.count < firstRequest { await Task.yield() }
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(connection.listAgentRequests.count, firstRequest)
+
+        for index in 25..<50 {
+            connection.onEvent?("presence_update", [
+                "agent_id": "unknown-\(index)",
+                "agent_name": "Unknown \(index)",
+                "status": "working",
+            ])
+        }
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(connection.listAgentRequests.count, firstRequest)
+
+        connection.completeListAgentRequest(firstRequest, with: .success([olderAgent]))
+        let dirtyRerun = firstRequest + 1
+        while connection.listAgentRequests.count < dirtyRerun { await Task.yield() }
+        XCTAssertEqual(connection.listAgentRequests.count, dirtyRerun)
+
+        connection.completeListAgentRequest(dirtyRerun, with: .success([newerAgent]))
+        for _ in 0..<100 where store.roomMembers.map(\.id) != [newerAgent.id] {
+            await Task.yield()
+        }
+        XCTAssertEqual(store.roomMembers.map(\.id), [newerAgent.id])
+        XCTAssertEqual(connection.listAgentRequests.count, dirtyRerun)
+    }
+
+    @MainActor
+    func testMemberRefreshRetriesOneTransientFailureAndAppliesTheResult() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let existingMessage = try decodeMessage(
+            id: "existing",
+            roomID: room.id,
+            content: "Existing history",
+            timestamp: "2026-08-04T12:00:00Z",
+            sequence: 1
+        )
+        let collaborator = try decodeAgent(id: "collaborator", name: "Claude")
+        let connection = MockRoomConnection()
+        connection.historiesByRoom[room.id] = [existingMessage]
+        let store = makeStore(
+            connection: connection,
+            memberRefreshRetryDelayNanoseconds: 0
+        )
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+        connection.capturesListAgentRequests = true
+
+        let firstRequest = connection.listAgentRequests.count + 1
+        connection.onEvent?("agent_joined", ["room_id": room.id])
+        while connection.listAgentRequests.count < firstRequest { await Task.yield() }
+        connection.completeListAgentRequest(
+            firstRequest,
+            with: .failure(CowchatConnectionError.timeout)
+        )
+
+        let retryRequest = firstRequest + 1
+        while connection.listAgentRequests.count < retryRequest { await Task.yield() }
+        connection.completeListAgentRequest(retryRequest, with: .success([collaborator]))
+        for _ in 0..<100 where store.roomMembers.map(\.id) != [collaborator.id] {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(store.roomMembers.map(\.id), [collaborator.id])
+        XCTAssertEqual(connection.listAgentRequests.count, retryRequest)
+    }
+
+    @MainActor
+    func testMemberRefreshFailureGetsOnlyOneAutomaticRetry() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let existingMessage = try decodeMessage(
+            id: "existing",
+            roomID: room.id,
+            content: "Existing history",
+            timestamp: "2026-08-04T12:00:00Z",
+            sequence: 1
+        )
+        let connection = MockRoomConnection()
+        connection.historiesByRoom[room.id] = [existingMessage]
+        let store = makeStore(
+            connection: connection,
+            memberRefreshRetryDelayNanoseconds: 0
+        )
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+        connection.capturesListAgentRequests = true
+
+        let firstRequest = connection.listAgentRequests.count + 1
+        connection.onEvent?("agent_joined", ["room_id": room.id])
+        while connection.listAgentRequests.count < firstRequest { await Task.yield() }
+        connection.completeListAgentRequest(
+            firstRequest,
+            with: .failure(CowchatConnectionError.timeout)
+        )
+
+        let retryRequest = firstRequest + 1
+        while connection.listAgentRequests.count < retryRequest { await Task.yield() }
+        connection.completeListAgentRequest(
+            retryRequest,
+            with: .failure(CowchatConnectionError.timeout)
+        )
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertEqual(connection.listAgentRequests.count, retryRequest)
+        XCTAssertTrue(store.roomMembers.isEmpty)
+    }
+
+    @MainActor
+    func testRoomSwitchStartsNewMemberRefreshBeforeOldRequestCompletes() async throws {
+        let roomA = try decodeRoom(id: "A", name: "A")
+        let roomB = try decodeRoom(id: "B", name: "B")
+        let memberB = try decodeAgent(id: "member-b", name: "Member B")
+        let connection = MockRoomConnection()
+        connection.historiesByRoom = [
+            roomA.id: [
+                try decodeMessage(
+                    id: "message-a",
+                    roomID: roomA.id,
+                    content: "A",
+                    timestamp: "2026-08-04T12:00:00Z",
+                    sequence: 1
+                ),
+            ],
+            roomB.id: [
+                try decodeMessage(
+                    id: "message-b",
+                    roomID: roomB.id,
+                    content: "B",
+                    timestamp: "2026-08-04T12:00:01Z",
+                    sequence: 2
+                ),
+            ],
+        ]
+        let store = makeStore(connection: connection)
+        store.rooms = [roomA, roomB]
+        store.connectionStatus = .connected
+        connection.capturesListAgentRequests = true
+
+        let staleSelection = Task { await store.select(room: roomA) }
+        let staleRequest = 1
+        for _ in 0..<100 where connection.listAgentRequests.count < staleRequest {
+            await Task.yield()
+        }
+        XCTAssertEqual(connection.listAgentRequests.count, staleRequest)
+
+        let selection = Task { await store.select(room: roomB) }
+        let newRoomRequest = staleRequest + 1
+        for _ in 0..<100 where connection.listAgentRequests.count < newRoomRequest {
+            await Task.yield()
+        }
+        let startedBeforeStaleRequestCompleted =
+            connection.listAgentRequests.count >= newRoomRequest
+        XCTAssertTrue(
+            startedBeforeStaleRequestCompleted,
+            "the new room must not wait for the stale room's request to time out"
+        )
+        if !startedBeforeStaleRequestCompleted {
+            // Let a regressed implementation unwind so the test reports the
+            // assertion cleanly instead of leaking its captured continuation.
+            connection.completeListAgentRequest(
+                staleRequest,
+                with: .failure(CowchatConnectionError.timeout)
+            )
+            for _ in 0..<100 where connection.listAgentRequests.count < newRoomRequest {
+                await Task.yield()
+            }
+        }
+        guard connection.listAgentRequests.count >= newRoomRequest else {
+            selection.cancel()
+            staleSelection.cancel()
+            return XCTFail("the new room never started its member refresh")
+        }
+        XCTAssertEqual(connection.listAgentRequests[newRoomRequest - 1], roomB.id)
+        connection.completeListAgentRequest(newRoomRequest, with: .success([memberB]))
+        await selection.value
+        await staleSelection.value
+
+        XCTAssertEqual(store.selectedRoomID, roomB.id)
+        XCTAssertEqual(store.roomMembers.map(\.id), [memberB.id])
+        XCTAssertEqual(
+            connection.listAgentRequests.filter { $0 == roomA.id }.count,
+            1
+        )
+    }
+
+    @MainActor
+    func testRoomSwitchCancelsStaleHistoryWithoutSkippingSerializedLeave() async throws {
+        let roomA = try decodeRoom(id: "A", name: "A")
+        let roomB = try decodeRoom(id: "B", name: "B")
+        let messageA = try decodeMessage(
+            id: "message-a",
+            roomID: roomA.id,
+            content: "stale A history",
+            timestamp: "2026-08-04T12:00:00Z",
+            sequence: 1
+        )
+        let messageB = try decodeMessage(
+            id: "message-b",
+            roomID: roomB.id,
+            content: "current B history",
+            timestamp: "2026-08-04T12:00:01Z",
+            sequence: 2
+        )
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        store.rooms = [roomA, roomB]
+        store.connectionStatus = .connected
+        connection.capturesHistoryRequests = true
+
+        let staleSelection = Task { await store.select(room: roomA) }
+        for _ in 0..<100 where connection.historyRequests.isEmpty {
+            await Task.yield()
+        }
+        XCTAssertEqual(connection.historyRequests.first?.roomID, roomA.id)
+
+        let selection = Task { await store.select(room: roomB) }
+        for _ in 0..<100 where connection.historyRequests.count < 2 {
+            await Task.yield()
+        }
+        let startedBeforeStaleHistoryCompleted = connection.historyRequests.count >= 2
+        XCTAssertTrue(
+            startedBeforeStaleHistoryCompleted,
+            "the new room must cancel a stale history request instead of waiting for its timeout"
+        )
+        if !startedBeforeStaleHistoryCompleted {
+            // Let a regressed implementation unwind so the test reports the
+            // assertion cleanly instead of leaking its captured continuation.
+            connection.completeHistoryRequest(1, with: .success([messageA]))
+            for _ in 0..<100 where connection.historyRequests.count < 2 {
+                await Task.yield()
+            }
+        }
+        guard connection.historyRequests.count >= 2 else {
+            selection.cancel()
+            staleSelection.cancel()
+            return XCTFail("the new room never started its history request")
+        }
+
+        XCTAssertEqual(connection.historyRequests[1].roomID, roomB.id)
+        connection.completeHistoryRequest(2, with: .success([messageB]))
+        await selection.value
+        await staleSelection.value
+
+        XCTAssertEqual(connection.operations, ["join:A", "leave:A", "join:B"])
+        XCTAssertEqual(store.selectedRoomID, roomB.id)
+        XCTAssertEqual(store.messages.map(\.id), [messageB.id])
+    }
+
+    @MainActor
+    func testMemberRefreshEventStormDoesNotBypassRetryBackoff() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let connection = MockRoomConnection()
+        let store = makeStore(
+            connection: connection,
+            memberRefreshRetryDelayNanoseconds: 60_000_000_000
+        )
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+        connection.capturesListAgentRequests = true
+
+        let firstRequest = connection.listAgentRequests.count + 1
+        connection.onEvent?("agent_joined", ["room_id": room.id])
+        for _ in 0..<100 where connection.listAgentRequests.count < firstRequest {
+            await Task.yield()
+        }
+        XCTAssertEqual(connection.listAgentRequests.count, firstRequest)
+        connection.completeListAgentRequest(
+            firstRequest,
+            with: .failure(CowchatConnectionError.timeout)
+        )
+        // Let the failed coordinator install its delayed retry before the
+        // next event burst arrives.
+        for _ in 0..<20 { await Task.yield() }
+
+        for index in 0..<50 {
+            connection.onEvent?("presence_update", [
+                "agent_id": "unknown-\(index)",
+                "agent_name": "Unknown \(index)",
+                "status": "working",
+            ])
+        }
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertEqual(
+            connection.listAgentRequests.count,
+            firstRequest,
+            "events during backoff must coalesce into the scheduled retry"
+        )
+        connection.onStatusChange?(.disconnected)
+        if connection.listAgentRequests.count > firstRequest {
+            for request in (firstRequest + 1)...connection.listAgentRequests.count {
+                connection.completeListAgentRequest(
+                    request,
+                    with: .failure(CancellationError())
+                )
+            }
+        }
+    }
+
+    @MainActor
+    func testConnectionFailureInvalidatesInFlightMemberRefresh() async throws {
+        let room = try decodeRoom(id: "room", name: "room")
+        let collaborator = try decodeAgent(id: "collaborator", name: "Claude")
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+        connection.capturesListAgentRequests = true
+
+        let request = connection.listAgentRequests.count + 1
+        connection.onEvent?("agent_joined", ["room_id": room.id])
+        while connection.listAgentRequests.count < request { await Task.yield() }
+
+        connection.onStatusChange?(.failed("offline"))
+        connection.completeListAgentRequest(request, with: .success([collaborator]))
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertTrue(store.roomMembers.isEmpty)
+        XCTAssertFalse(store.connectionStatus.isConnected)
+    }
+
+    @MainActor
     func testSwitchingRoomsRemovesThisClientFromPreviousActiveCount() async throws {
         func room(_ id: String) throws -> Room {
             let data = try JSONSerialization.data(withJSONObject: [
@@ -1033,11 +1684,12 @@ final class RoomTransitionTests: XCTestCase {
         let roomA = try room("A")
         let roomB = try room("B")
         let connection = MockRoomConnection()
+        connection.registration = CowchatRegistration(agentID: agent.id)
+        connection.listedRooms = [roomA, roomB]
         connection.agentsByRoom = ["A": [agent], "B": [agent]]
         let store = makeStore(connection: connection)
-        store.rooms = [roomA, roomB]
-        store.connectionStatus = .connected
 
+        await store.connect()
         await store.select(room: roomA)
         await store.select(room: roomB)
 
@@ -1110,7 +1762,7 @@ final class RoomTransitionTests: XCTestCase {
     /// on them — see cowchat-server/src/handler.rs. `handleEvent` must still
     /// route that event type into the working-signal tracking.
     @MainActor
-    func testLiveThinkingEventUpdatesWorkingSignalWithoutBumpingRoomActivity() throws {
+    func testLiveThinkingUsesReceiptTimeDespiteAgentClockSkew() throws {
         let roomData = Data(#"""
         {
           "room_id":"room",
@@ -1125,7 +1777,7 @@ final class RoomTransitionTests: XCTestCase {
         let connection = MockRoomConnection()
         let store = makeStore(connection: connection)
         store.rooms = [room]
-        let now = Date()
+        let receivedAfter = Date()
 
         connection.onEvent?("thinking", [
             "message_id": "thinking-1",
@@ -1134,11 +1786,18 @@ final class RoomTransitionTests: XCTestCase {
             "agent_name": "Collaborator",
             "content": "still working on it",
             "metadata": ["type": "thinking"],
-            "timestamp": ISO8601DateFormatter().string(from: now),
+            "timestamp": ISO8601DateFormatter().string(
+                from: receivedAfter.addingTimeInterval(-3_600)
+            ),
             "seq": 1,
         ])
 
-        XCTAssertTrue(store.isWorking(room, at: now))
+        let recordedActivity = try XCTUnwrap(
+            store.recentAgentActivityAt[room.id]?["collaborator"]
+        )
+        XCTAssertGreaterThanOrEqual(recordedActivity, receivedAfter)
+        XCTAssertLessThanOrEqual(recordedActivity, Date())
+        XCTAssertTrue(store.isWorking(room, at: Date()))
         XCTAssertTrue(store.messages.isEmpty)
         XCTAssertEqual(store.rooms.first?.lastActivity, "2026-07-12T12:00:00Z")
     }
@@ -1689,7 +2348,7 @@ final class RoomTransitionTests: XCTestCase {
         // The only other member leaves live; refreshMembers empties roomMembers
         // and the room re-enters the connect state.
         connection.agentsByRoom[room.id] = []
-        connection.onEvent?("agent_left", [:])
+        connection.onEvent?("agent_left", ["room_id": room.id])
         for _ in 0..<100 where !store.roomMembers.isEmpty {
             await Task.yield()
         }
@@ -1866,7 +2525,8 @@ final class RoomTransitionTests: XCTestCase {
         id: String,
         name: String,
         createdBy: String? = nil,
-        ephemeral: Bool = false
+        ephemeral: Bool = false,
+        memberCount: Int? = nil
     ) throws -> Room {
         var json: [String: Any] = [
             "room_id": id,
@@ -1876,6 +2536,7 @@ final class RoomTransitionTests: XCTestCase {
             "visibility": "public",
         ]
         if let createdBy { json["created_by"] = createdBy }
+        if let memberCount { json["member_count"] = memberCount }
         return try JSONDecoder().decode(
             Room.self,
             from: JSONSerialization.data(withJSONObject: json)
@@ -1898,19 +2559,26 @@ final class RoomTransitionTests: XCTestCase {
         roomID: String,
         content: String,
         timestamp: String,
-        sequence: Int
+        sequence: Int,
+        agentID: String = "agent",
+        agentName: String = "Agent",
+        metadataType: String? = nil
     ) throws -> ChatMessage {
-        try JSONDecoder().decode(
+        var json: [String: Any] = [
+            "message_id": id,
+            "room_id": roomID,
+            "agent_id": agentID,
+            "agent_name": agentName,
+            "content": content,
+            "timestamp": timestamp,
+            "seq": sequence,
+        ]
+        if let metadataType {
+            json["metadata"] = ["type": metadataType]
+        }
+        return try JSONDecoder().decode(
             ChatMessage.self,
-            from: JSONSerialization.data(withJSONObject: [
-                "message_id": id,
-                "room_id": roomID,
-                "agent_id": "agent",
-                "agent_name": "Agent",
-                "content": content,
-                "timestamp": timestamp,
-                "seq": sequence,
-            ])
+            from: JSONSerialization.data(withJSONObject: json)
         )
     }
 }
