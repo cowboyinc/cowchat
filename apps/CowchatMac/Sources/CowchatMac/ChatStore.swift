@@ -39,9 +39,10 @@ final class ChatStore: ObservableObject {
     @Published var roomBeingRenamed: Room?
     @Published var connectionStatus: ConnectionStatus = .disconnected
     @Published private(set) var connectionProfile: ConnectionProfile
-    /// Session-cached guest API key embedded in connect prompts for shared
-    /// servers, so a pasted prompt works without any key hand-off.
-    @Published private(set) var guestPromptKey: String?
+    /// Cached single-use invite token per room, embedded in connect prompts
+    /// for shared servers. Copying a prompt consumes the token and mints a
+    /// replacement, so every invitation carries its own invite.
+    @Published private(set) var promptInviteTokens: [String: String] = [:]
     @Published var errorMessage: String?
     @Published var isLoadingMessages = false
     @Published var isCreateRoomPresented = false
@@ -98,9 +99,7 @@ final class ChatStore: ObservableObject {
     private var failedDraftRestorationsByRoomID: [String: FailedDraftRestoration] = [:]
     private var sendGeneration = 0
     private var previewActivityByRoomID: [String: String] = [:]
-    private var guestKeyTask: Task<Void, Never>?
-    /// Injectable for tests; production mints over HTTPS.
-    var mintGuestAPIKey: (URL) async throws -> String = WorkspaceStore.requestAPIKeyOverHTTP
+    private var promptInviteMintsInFlight: Set<String> = []
     private(set) var agentID = ""
     let agentName = "Cowchat Mac"
     private var stableAgentID: String
@@ -329,7 +328,6 @@ final class ChatStore: ObservableObject {
             }
             reconnectTask?.cancel()
             reconnectTask = nil
-            ensureGuestPromptKey()
             try await refreshRooms(selectFallbackForMissingSelection: false)
             guard expectedProfileGeneration == profileGeneration else { return }
             if let joinedRoomID,
@@ -435,23 +433,44 @@ final class ChatStore: ObservableObject {
         """
     }
 
+    /// Prompt as displayed (connect state, previews): embeds the room's
+    /// currently cached invite without consuming it.
     func connectPrompt(for room: Room) -> String {
-        Self.connectPromptText(roomName: room.name, connectionInstruction: agentConnectionInstruction)
+        connectPrompt(for: room, inviteToken: promptInviteTokens[room.id])
+    }
+
+    /// Prompt for the copy action: consumes the cached single-use invite so
+    /// the next copy hands out a fresh one, and starts minting the
+    /// replacement immediately.
+    func copyableConnectPrompt(for room: Room) -> String {
+        let token = promptInviteTokens.removeValue(forKey: room.id)
+        ensurePromptInvite(for: room)
+        return connectPrompt(for: room, inviteToken: token)
+    }
+
+    private func connectPrompt(for room: Room, inviteToken: String?) -> String {
+        Self.connectPromptText(
+            roomName: room.name,
+            connectionInstruction: agentConnectionInstruction(inviteToken: inviteToken)
+        )
     }
 
     /// For global rooms the recipient has no credentials, so the prompt
-    /// carries one: a guest API key minted from the server's self-serve
-    /// signup and embedded directly (the share channel is assumed ephemeral;
-    /// key exchange can harden later). Until a guest key exists — or if
-    /// minting failed — the instruction falls back to mint-your-own.
-    var agentConnectionInstruction: String {
+    /// carries a single-use invite: redeeming it vends a fresh API key and
+    /// grants the room. Until an invite exists — or if minting failed — the
+    /// instruction falls back to the open self-serve signup.
+    func agentConnectionInstruction(inviteToken: String?) -> String {
         if isLocalConnection { return "connect to the local server" }
         let endpoint = connectionProfile.endpointDescription
-        if let guestPromptKey {
+        if let inviteToken,
+           let redeemURL = WorkspaceStore.inviteRedeemURL(forCloudURLString: endpoint) {
             return """
-            connect to the shared Cowchat server by passing \
-            `--url \(endpoint) --key \(guestPromptKey)` on every cowchat command \
-            (that key was minted for this invitation)
+            connect to the shared Cowchat server at \(endpoint): redeem your one-time \
+            invite by running `curl -fsS -X POST \(redeemURL.absoluteString) \
+            -H 'Content-Type: application/json' -d '{"token":"\(inviteToken)"}'` — the \
+            `api_key` field of the JSON reply is your key (the invite is single-use; if \
+            it's already spent, ask the sender for a new one) — then pass \
+            `--url \(endpoint) --key <your api_key>` on every cowchat command
             """
         }
         guard let signupURL = WorkspaceStore.signupURL(forCloudURLString: endpoint) else {
@@ -466,26 +485,23 @@ final class ChatStore: ObservableObject {
         """
     }
 
-    /// Mints (once per connected session) the guest key that connect prompts
-    /// embed. Fire-and-forget: prompts fall back to mint-your-own wording
-    /// until it lands. Never called from a view render path — only from
-    /// connect() and copy actions.
-    func ensureGuestPromptKey() {
+    /// Mints the room's next single-use prompt invite. Fire-and-forget:
+    /// prompts fall back to self-serve wording until it lands. Never called
+    /// from a view render path — only from onAppear and copy actions.
+    func ensurePromptInvite(for room: Room) {
         guard connectionProfile.kind == .cowchatCloud,
-              guestPromptKey == nil,
-              guestKeyTask == nil,
-              let signupURL = WorkspaceStore.signupURL(
-                  forCloudURLString: connectionProfile.endpointDescription
-              )
+              connectionStatus.isConnected,
+              promptInviteTokens[room.id] == nil,
+              !promptInviteMintsInFlight.contains(room.id)
         else { return }
         let expectedProfileGeneration = profileGeneration
-        let mint = mintGuestAPIKey
-        guestKeyTask = Task { [weak self] in
-            let key = try? await mint(signupURL)
+        promptInviteMintsInFlight.insert(room.id)
+        Task { [weak self, connection] in
+            let token = try? await connection.createInvite(roomID: room.roomID, singleUse: true)
             guard let self else { return }
-            guestKeyTask = nil
+            promptInviteMintsInFlight.remove(room.id)
             guard expectedProfileGeneration == profileGeneration else { return }
-            if let key { guestPromptKey = key }
+            if let token { promptInviteTokens[room.id] = token }
         }
     }
 
@@ -651,9 +667,8 @@ final class ChatStore: ObservableObject {
     }
 
     private func resetServerBackedState(for profile: ConnectionProfile) {
-        guestKeyTask?.cancel()
-        guestKeyTask = nil
-        guestPromptKey = nil
+        promptInviteMintsInFlight = []
+        promptInviteTokens = [:]
         roomRefreshTask?.cancel()
         roomRefreshTask = nil
         roomLoadTask?.cancel()

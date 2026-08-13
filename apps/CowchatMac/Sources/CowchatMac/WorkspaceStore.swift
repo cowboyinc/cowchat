@@ -174,6 +174,18 @@ final class WorkspaceStore: ObservableObject {
 
     /// `wss://host[:port]/…` → `https://host[:port]/api/keys`.
     nonisolated static func signupURL(forCloudURLString urlString: String) -> URL? {
+        apiURL(forCloudURLString: urlString, path: "/api/keys")
+    }
+
+    /// `wss://host[:port]/…` → `https://host[:port]/api/invites/redeem`.
+    nonisolated static func inviteRedeemURL(forCloudURLString urlString: String) -> URL? {
+        apiURL(forCloudURLString: urlString, path: "/api/invites/redeem")
+    }
+
+    private nonisolated static func apiURL(
+        forCloudURLString urlString: String,
+        path: String
+    ) -> URL? {
         guard let profile = try? ConnectionProfile.cowchatCloud(
             urlString: urlString,
             apiKey: "placeholder-for-validation"
@@ -181,7 +193,7 @@ final class WorkspaceStore: ObservableObject {
             var components = URLComponents(url: endpointURL, resolvingAgainstBaseURL: false)
         else { return nil }
         components.scheme = "https"
-        components.path = "/api/keys"
+        components.path = path
         return components.url
     }
 

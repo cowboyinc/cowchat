@@ -67,6 +67,9 @@ protocol CowchatConnectionProtocol: AnyObject {
     ) async throws -> Room
     func rename(roomID: String, name: String) async throws -> Room
     func destroy(roomID: String) async throws
+    /// Mints a room invite token (`cinv_…`). Single-use invites die on
+    /// first redemption.
+    func createInvite(roomID: String, singleUse: Bool) async throws -> String
     func join(roomID: String) async throws
     func leave(roomID: String) async throws
     func history(
@@ -233,6 +236,17 @@ final class CowchatConnection: CowchatConnectionProtocol {
 
     func destroy(roomID: String) async throws {
         _ = try await request(type: "destroy_room", payload: ["room_id": roomID])
+    }
+
+    func createInvite(roomID: String, singleUse: Bool) async throws -> String {
+        let response = try await request(type: "create_invite", payload: [
+            "room_id": roomID,
+            "single_use": singleUse,
+        ])
+        guard let token = response["token"] as? String, !token.isEmpty else {
+            throw CowchatConnectionError.invalidResponse
+        }
+        return token
     }
 
     func rename(roomID: String, name: String) async throws -> Room {

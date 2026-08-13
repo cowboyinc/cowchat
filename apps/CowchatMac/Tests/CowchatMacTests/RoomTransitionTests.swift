@@ -123,6 +123,12 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         guard let roomToCreate else { fatalError("set roomToCreate before creating") }
         return roomToCreate
     }
+    var invitesToVend: [String] = []
+    func createInvite(roomID: String, singleUse: Bool) async throws -> String {
+        operations.append("invite:\(roomID):\(singleUse ? "single" : "open")")
+        guard !invitesToVend.isEmpty else { throw CancellationError() }
+        return invitesToVend.removeFirst()
+    }
     func destroy(roomID: String) async throws {
         operations.append("destroy:\(roomID)")
         destroyedRoomIDs.append(roomID)

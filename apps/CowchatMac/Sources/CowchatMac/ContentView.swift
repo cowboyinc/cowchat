@@ -1083,8 +1083,10 @@ private struct ChatRoomView: View {
                             RoomConnectStateView(
                                 roomName: room.name,
                                 prompt: store.connectPrompt(for: room),
-                                variant: variant
+                                variant: variant,
+                                makeCopyPrompt: { store.copyableConnectPrompt(for: room) }
                             )
+                            .onAppear { store.ensurePromptInvite(for: room) }
                         } else if state == .quiet {
                             quietRoom
                                 .allowsHitTesting(true)
@@ -1190,12 +1192,10 @@ private struct ChatRoomView: View {
     }
 
     private func copyConnectPrompt() {
-        // Retry a failed guest-key mint so the NEXT copy embeds a key; this
-        // copy ships whatever instruction is ready now.
-        store.ensureGuestPromptKey()
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(store.connectPrompt(for: room), forType: .string)
+        // Consumes the room's cached single-use invite and mints the next.
+        pasteboard.setString(store.copyableConnectPrompt(for: room), forType: .string)
     }
 
     private func presenceSummary(at now: Date) -> String {

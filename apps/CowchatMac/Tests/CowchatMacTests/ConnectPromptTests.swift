@@ -39,71 +39,142 @@ final class ConnectPromptTests: XCTestCase {
         XCTAssertTrue(prompt.contains(instruction))
     }
 
-    /// A global-room prompt must be one-shot for a stranger. With a minted
-    /// guest key it embeds the key outright; before one exists it falls back
-    /// to mint-your-own instructions.
+    /// A global-room prompt must be one-shot for a stranger. With a cached
+    /// single-use invite it embeds the redeem call; before one exists it
+    /// falls back to open self-serve signup instructions.
     @MainActor
-    func testGlobalConnectionInstructionEmbedsAMintedGuestKey() async throws {
+    func testGlobalInstructionEmbedsInviteRedeemCall() throws {
         let store = try makeGlobalStore()
-        store.mintGuestAPIKey = { url in
-            XCTAssertEqual(url.absoluteString, "https://chat.cowchat.cowboy.inc/api/keys")
-            return "guest-key-123"
-        }
 
-        store.ensureGuestPromptKey()
-        while store.guestPromptKey == nil { await Task.yield() }
+        let instruction = store.agentConnectionInstruction(inviteToken: "cinv_abc123")
 
-        let instruction = store.agentConnectionInstruction
         XCTAssertTrue(
-            instruction.contains("--url wss://chat.cowchat.cowboy.inc/ws --key guest-key-123")
+            instruction.contains(
+                "curl -fsS -X POST https://chat.cowchat.cowboy.inc/api/invites/redeem"
+            )
         )
-        XCTAssertFalse(instruction.contains("curl"))
+        XCTAssertTrue(instruction.contains(#"{"token":"cinv_abc123"}"#))
+        XCTAssertTrue(
+            instruction.contains("--url wss://chat.cowchat.cowboy.inc/ws --key <your api_key>")
+        )
+        XCTAssertTrue(instruction.contains("single-use"))
     }
 
     @MainActor
-    func testGlobalConnectionInstructionFallsBackToSelfServeWithoutGuestKey() throws {
+    func testGlobalInstructionFallsBackToSelfServeWithoutInvite() throws {
         let store = try makeGlobalStore()
 
-        let instruction = store.agentConnectionInstruction
+        let instruction = store.agentConnectionInstruction(inviteToken: nil)
 
         XCTAssertTrue(
             instruction.contains("curl -fsS -X POST https://chat.cowchat.cowboy.inc/api/keys")
         )
         XCTAssertTrue(instruction.contains("`api_key`"))
-        XCTAssertTrue(
-            instruction.contains("--url wss://chat.cowchat.cowboy.inc/ws --key <your api_key>")
-        )
         XCTAssertFalse(instruction.contains("using your Cowchat API key"))
     }
 
     @MainActor
-    func testLocalStoreNeverMintsAGuestKey() {
-        let store = ChatStore(
-            connection: CowchatConnection(),
-            defaults: UserDefaults(suiteName: "ConnectPromptTests.\(UUID().uuidString)")!,
-            connectionProfile: .local
-        )
-        store.mintGuestAPIKey = { _ in
-            XCTFail("local stores must not mint guest keys")
-            return "never"
-        }
+    func testCopyConsumesTheCachedInviteAndMintsAReplacement() async throws {
+        let connection = PromptInviteStubConnection()
+        connection.invites = ["cinv_first", "cinv_second"]
+        let store = try makeGlobalStore(connection: connection)
+        store.connectionStatus = .connected
+        let room = makeRoom(id: "room-1", name: "design")
 
-        store.ensureGuestPromptKey()
+        store.ensurePromptInvite(for: room)
+        while store.promptInviteTokens[room.id] == nil { await Task.yield() }
+        XCTAssertEqual(store.promptInviteTokens[room.id], "cinv_first")
 
-        XCTAssertNil(store.guestPromptKey)
-        XCTAssertEqual(store.agentConnectionInstruction, "connect to the local server")
+        // The displayed prompt does not consume.
+        XCTAssertTrue(store.connectPrompt(for: room).contains("cinv_first"))
+        XCTAssertTrue(store.connectPrompt(for: room).contains("cinv_first"))
+
+        // Copying consumes and re-mints.
+        let copied = store.copyableConnectPrompt(for: room)
+        XCTAssertTrue(copied.contains("cinv_first"))
+        while store.promptInviteTokens[room.id] == nil { await Task.yield() }
+        XCTAssertEqual(store.promptInviteTokens[room.id], "cinv_second")
     }
 
     @MainActor
-    private func makeGlobalStore() throws -> ChatStore {
+    func testLocalStoreNeverMintsPromptInvites() {
+        let connection = PromptInviteStubConnection()
+        let store = ChatStore(
+            connection: connection,
+            defaults: UserDefaults(suiteName: "ConnectPromptTests.\(UUID().uuidString)")!,
+            connectionProfile: .local
+        )
+        store.connectionStatus = .connected
+
+        store.ensurePromptInvite(for: makeRoom(id: "r", name: "local-room"))
+
+        XCTAssertTrue(store.promptInviteTokens.isEmpty)
+        XCTAssertFalse(connection.didMint)
+        XCTAssertEqual(
+            store.agentConnectionInstruction(inviteToken: nil),
+            "connect to the local server"
+        )
+    }
+
+    private func makeRoom(id: String, name: String) -> Room {
+        Room(
+            roomID: id,
+            name: name,
+            description: nil,
+            parentID: nil,
+            createdAt: "2026-08-13T12:00:00Z",
+            createdBy: nil,
+            visibility: "public",
+            lastActivity: nil,
+            memberCount: nil,
+            encrypted: false
+        )
+    }
+
+    @MainActor
+    private func makeGlobalStore(
+        connection: (any CowchatConnectionProtocol)? = nil
+    ) throws -> ChatStore {
         let profile = try ConnectionProfile.cowchatCloud(
             urlString: "wss://chat.cowchat.cowboy.inc/ws",
             apiKey: "prompt-test-key"
         )
         return ChatStore(
-            connection: CowchatConnection(profile: profile),
+            connection: connection ?? CowchatConnection(profile: profile),
             defaults: UserDefaults(suiteName: "ConnectPromptTests.\(UUID().uuidString)")!,
             connectionProfile: profile
         )
     }
+}
+
+@MainActor
+private final class PromptInviteStubConnection: CowchatConnectionProtocol {
+    var onEvent: ((String, [String: Any]) -> Void)?
+    var onStatusChange: ((ConnectionStatus) -> Void)?
+    var invites: [String] = []
+    private(set) var didMint = false
+
+    func connect() async throws {}
+    func register(name: String, agentID: String) async throws -> CowchatRegistration {
+        CowchatRegistration(agentID: agentID)
+    }
+    func listRooms() async throws -> [Room] { [] }
+    func listAgents(roomID: String) async throws -> [AgentPresence] { [] }
+    func createRoom(
+        name: String, description: String?, parentID: String?, isPublic: Bool
+    ) async throws -> Room { throw CancellationError() }
+    func rename(roomID: String, name: String) async throws -> Room { throw CancellationError() }
+    func destroy(roomID: String) async throws {}
+    func createInvite(roomID: String, singleUse: Bool) async throws -> String {
+        didMint = true
+        guard !invites.isEmpty else { throw CancellationError() }
+        return invites.removeFirst()
+    }
+    func join(roomID: String) async throws {}
+    func leave(roomID: String) async throws {}
+    func history(roomID: String, limit: Int, before: String?) async throws -> [ChatMessage] { [] }
+    func send(roomID: String, content: String) async throws -> ChatMessage {
+        throw CancellationError()
+    }
+    func disconnect() {}
 }
