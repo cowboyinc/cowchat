@@ -115,6 +115,7 @@ final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
 struct CowchatMacApp: App {
     @NSApplicationDelegateAdaptor(CowchatAppDelegate.self) private var appDelegate
     @StateObject private var store = ChatStore()
+    @StateObject private var updateChecker = UpdateChecker()
     @AppStorage(CowchatOnboarding.completedVersionKey) private var completedOnboardingVersion = 0
 
     var body: some Scene {
@@ -137,6 +138,30 @@ struct CowchatMacApp: App {
                     await store.shutdownOwnedLocalServerForAppTermination()
                 }
                 store.start()
+                await updateChecker.check()
+            }
+            .alert(
+                "Update Available",
+                isPresented: Binding(
+                    get: { updateChecker.availableRelease != nil },
+                    set: { if !$0 { updateChecker.availableRelease = nil } }
+                ),
+                presenting: updateChecker.availableRelease
+            ) { release in
+                Button("Download") {
+                    NSWorkspace.shared.open(release.pageURL)
+                    updateChecker.availableRelease = nil
+                }
+                Button("Skip This Version") {
+                    updateChecker.skipAvailableRelease()
+                }
+                Button("Remind Me Later", role: .cancel) {
+                    updateChecker.availableRelease = nil
+                }
+            } message: { release in
+                Text(
+                    "Cowchat \(release.displayVersion) is available. Updating keeps the app and its bundled server in step with the CLI."
+                )
             }
         }
         .defaultSize(width: 1080, height: 740)
