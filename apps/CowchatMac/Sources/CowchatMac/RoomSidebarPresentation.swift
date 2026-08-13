@@ -14,8 +14,21 @@ enum ChatPresencePresentation {
         members: [AgentPresence],
         currentAgentID: String,
         fallbackMemberCount: Int?,
-        isConnected: Bool
+        fallbackMemberCountIncludesCurrentAgent: Bool = false,
+        recentActivityByAgent: [String: Date]? = nil,
+        now: Date = Date(),
+        recentWindow: TimeInterval = 120,
+        connectionStatus: ConnectionStatus = .connected
     ) -> String {
+        switch connectionStatus {
+        case .connecting:
+            return "Connecting…"
+        case .disconnected, .failed:
+            return "Offline"
+        case .connected:
+            break
+        }
+
         let collaborators = members.filter { $0.id != currentAgentID }
         let active = collaborators.filter {
             guard let status = $0.status?.lowercased() else { return false }
@@ -26,16 +39,87 @@ enum ChatPresencePresentation {
             return "\(names) active"
         }
 
-        let count: Int
-        if !members.isEmpty {
-            count = Set(collaborators.map(\.id)).count
-        } else {
-            count = max((fallbackMemberCount ?? 0) - (isConnected ? 1 : 0), 0)
+        let recentCount = recentCollaboratorCount(
+            recentActivityByAgent: recentActivityByAgent,
+            currentAgentID: currentAgentID,
+            now: now,
+            recentWindow: recentWindow
+        )
+        let connectedCount = connectedCollaboratorCount(
+            members: members,
+            currentAgentID: currentAgentID,
+            fallbackMemberCount: fallbackMemberCount,
+            fallbackMemberCountIncludesCurrentAgent: fallbackMemberCountIncludesCurrentAgent
+        )
+        if recentCount > 0 {
+            let recent = recentCount == 1
+                ? "1 agent active recently"
+                : "\(recentCount) agents active recently"
+            guard connectedCount > 0 else { return recent }
+            return "\(recent) · \(connectedSummary(count: connectedCount))"
         }
+
+        return connectedSummary(count: connectedCount)
+    }
+
+    static func hasCollaboratorSignal(
+        members: [AgentPresence],
+        currentAgentID: String,
+        fallbackMemberCount: Int?,
+        fallbackMemberCountIncludesCurrentAgent: Bool = false,
+        recentActivityByAgent: [String: Date]? = nil,
+        now: Date = Date(),
+        recentWindow: TimeInterval = 120
+    ) -> Bool {
+        connectedCollaboratorCount(
+            members: members,
+            currentAgentID: currentAgentID,
+            fallbackMemberCount: fallbackMemberCount,
+            fallbackMemberCountIncludesCurrentAgent: fallbackMemberCountIncludesCurrentAgent
+        ) > 0 || recentCollaboratorCount(
+            recentActivityByAgent: recentActivityByAgent,
+            currentAgentID: currentAgentID,
+            now: now,
+            recentWindow: recentWindow
+        ) > 0
+    }
+
+    private static func connectedCollaboratorCount(
+        members: [AgentPresence],
+        currentAgentID: String,
+        fallbackMemberCount: Int?,
+        fallbackMemberCountIncludesCurrentAgent: Bool
+    ) -> Int {
+        let observedCount = Set(members.lazy.filter { $0.id != currentAgentID }.map(\.id)).count
+        let currentAgentIsIncluded = fallbackMemberCountIncludesCurrentAgent
+            || members.contains { $0.id == currentAgentID }
+        let fallbackCount = max(
+            (fallbackMemberCount ?? 0) - (currentAgentIsIncluded ? 1 : 0),
+            0
+        )
+        return max(observedCount, fallbackCount)
+    }
+
+    private static func recentCollaboratorCount(
+        recentActivityByAgent: [String: Date]?,
+        currentAgentID: String,
+        now: Date,
+        recentWindow: TimeInterval
+    ) -> Int {
+        Set<String>(
+            (recentActivityByAgent ?? [:]).compactMap { agentID, timestamp in
+                guard agentID != currentAgentID,
+                      now.timeIntervalSince(timestamp) < recentWindow else { return nil }
+                return agentID
+            }
+        ).count
+    }
+
+    private static func connectedSummary(count: Int) -> String {
         switch count {
-        case 0: return "No collaborators"
-        case 1: return "1 collaborator"
-        default: return "\(count) collaborators"
+        case 0: return "No agents connected"
+        case 1: return "1 agent connected"
+        default: return "\(count) agents connected"
         }
     }
 }
@@ -99,7 +183,10 @@ enum RoomSidebarPresentation {
             }
         }
         if message.isThinking {
-            updated[message.roomID, default: [:]][message.agentID] = message.timestamp.cowchatDate ?? now
+            // Live working state is about when this client observed the pulse.
+            // Agent clocks can be skewed far enough that the message timestamp
+            // would otherwise make a just-received pulse look expired.
+            updated[message.roomID, default: [:]][message.agentID] = now
         } else {
             updated[message.roomID]?.removeValue(forKey: message.agentID)
             if updated[message.roomID]?.isEmpty == true {

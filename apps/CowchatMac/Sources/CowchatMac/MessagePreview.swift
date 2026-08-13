@@ -4,16 +4,29 @@ enum MessagePreview {
     static let characterLimit = 1_200
     static let lineLimit = 5
 
-    static func needsDisclosure(for content: String) -> Bool {
-        content.count > characterLimit || content.filter(\.isNewline).count >= lineLimit
+    struct CollapsedPreview: Equatable {
+        let source: String
+        let isTruncated: Bool
     }
 
-    static func collapsedContent(for content: String) -> String {
-        guard needsDisclosure(for: content) else { return content }
+    static func needsDisclosure(for content: String) -> Bool {
+        let content = normalizedLineEndings(in: content)
+        return content.count > characterLimit
+            || content.lazy.filter { $0 == "\n" }.prefix(lineLimit).count == lineLimit
+    }
 
-        var preview = content
-        if content.count > characterLimit {
-            preview = String(content.prefix(characterLimit))
+    /// Returns an exact prefix for rich-text parsing and records truncation
+    /// separately. Keeping the ellipsis out of the Markdown source prevents a
+    /// cutoff next to a fence or inline delimiter from consuming it.
+    static func collapsedPreview(for content: String) -> CollapsedPreview {
+        guard needsDisclosure(for: content) else {
+            return .init(source: content, isTruncated: false)
+        }
+
+        let normalized = normalizedLineEndings(in: content)
+        var preview = normalized
+        if normalized.count > characterLimit {
+            preview = String(normalized.prefix(characterLimit))
         }
 
         let lines = preview.split(separator: "\n", omittingEmptySubsequences: false)
@@ -21,6 +34,11 @@ enum MessagePreview {
             preview = lines.prefix(lineLimit).joined(separator: "\n")
         }
 
-        return preview + "…"
+        return .init(source: preview, isTruncated: preview != normalized)
+    }
+
+    private static func normalizedLineEndings(in source: String) -> String {
+        source.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
     }
 }

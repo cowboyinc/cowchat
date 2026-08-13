@@ -10,6 +10,12 @@ private struct FailedDraftRestoration {
     let content: String
 }
 
+private enum MemberRefreshOutcome {
+    case applied
+    case failed
+    case invalidated
+}
+
 @MainActor
 final class ChatStore: ObservableObject {
     @Published var rooms: [Room] = []
@@ -27,6 +33,7 @@ final class ChatStore: ObservableObject {
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
     @Published private(set) var lastThinkingAt: [String: [String: Date]] = [:]
+    @Published private(set) var recentAgentActivityAt: [String: [String: Date]] = [:]
     @Published var roomReadyNotice: Room?
     @Published var secondAgentHintRoom: Room?
     @Published var roomBeingRenamed: Room?
@@ -41,6 +48,7 @@ final class ChatStore: ObservableObject {
     private let connectionPreferences: ConnectionProfilePreferences?
     private let localServerSupervisor: (any LocalServerSupervising)?
     private let localServerRetryDelaysNanoseconds: [UInt64]
+    private let memberRefreshRetryDelayNanoseconds: UInt64
     private let defaults: UserDefaults
     private var connectionConfigurationError: Error?
     private var connectionAttemptTask: Task<Void, Never>?
@@ -55,6 +63,8 @@ final class ChatStore: ObservableObject {
     private var surfacedSpawnFailureDescription: String?
     private var roomRefreshTask: Task<Void, Never>?
     private var roomLoadTask: Task<Void, Never>?
+    private var roomHistoryTask: Task<[ChatMessage], Error>?
+    private var roomHistoryTaskGeneration: Int?
     private var messageSearchTask: Task<Void, Never>?
     private var setupReadinessTask: Task<Void, Never>?
     private var roomPreviewTask: Task<Void, Never>?
@@ -62,6 +72,16 @@ final class ChatStore: ObservableObject {
     private var activeMessageSearchContext: MessageSearchContext?
     private var completedMessageSearchContext: MessageSearchContext?
     private var setupReadinessGeneration = 0
+    private var memberRefreshGeneration = 0
+    private var lastAppliedMemberRefreshGeneration = 0
+    private var memberRefreshCoordinatorGeneration = 0
+    private var memberRefreshTask: Task<Void, Never>?
+    private var memberRefreshRetryTask: Task<Void, Never>?
+    private var memberRefreshRetryGeneration = 0
+    private var memberRefreshPending = false
+    private var memberRefreshDelayedRetryAvailable = false
+    private var restartSetupReadinessAfterMemberRefresh = false
+    private var memberCountIncludesCurrentAgentRoomIDs: Set<String> = []
     private var joinedRoomID: String?
     private var roomSelectionGeneration = 0
     private var roomMutationGeneration = 0
@@ -82,6 +102,10 @@ final class ChatStore: ObservableObject {
 
     var selectedRoom: Room? {
         rooms.first { $0.roomID == selectedRoomID }
+    }
+
+    func fallbackMemberCountIncludesCurrentAgent(in roomID: String) -> Bool {
+        memberCountIncludesCurrentAgentRoomIDs.contains(roomID)
     }
 
     /// True while the selected room should render the connect state: non-lobby,
@@ -182,7 +206,8 @@ final class ChatStore: ObservableObject {
             400_000_000,
             800_000_000,
             1_600_000_000,
-        ]
+        ],
+        memberRefreshRetryDelayNanoseconds: UInt64 = 2_000_000_000
     ) {
         self.connection = connection
         self.connectionProfile = connectionProfile
@@ -190,6 +215,7 @@ final class ChatStore: ObservableObject {
         self.localServerSupervisor = localServerSupervisor
         self.connectionConfigurationError = connectionConfigurationError
         self.localServerRetryDelaysNanoseconds = localServerRetryDelaysNanoseconds
+        self.memberRefreshRetryDelayNanoseconds = memberRefreshRetryDelayNanoseconds
         self.defaults = defaults
         let hadExistingAgentID = !(defaults.string(forKey: "CowchatMac.agentID") ?? "").isEmpty
         CowchatOnboarding.migrateExistingUser(
@@ -634,14 +660,23 @@ final class ChatStore: ObservableObject {
         roomRefreshTask = nil
         roomLoadTask?.cancel()
         roomLoadTask = nil
+        cancelRoomHistoryLoad()
         messageSearchTask?.cancel()
         messageSearchTask = nil
         setupReadinessTask?.cancel()
         setupReadinessTask = nil
         roomPreviewTask?.cancel()
         roomPreviewTask = nil
+        memberRefreshTask?.cancel()
+        memberRefreshTask = nil
+        cancelMemberRefreshRetry()
+        memberRefreshCoordinatorGeneration += 1
+        memberRefreshPending = false
+        memberRefreshDelayedRetryAvailable = false
+        restartSetupReadinessAfterMemberRefresh = false
         messageSearchGeneration += 1
         setupReadinessGeneration += 1
+        memberRefreshGeneration += 1
         roomSelectionGeneration += 1
         roomMutationGeneration += 1
 
@@ -655,6 +690,7 @@ final class ChatStore: ObservableObject {
         isSearchingMessages = false
         roomMessagePreviews = [:]
         lastThinkingAt = [:]
+        recentAgentActivityAt = [:]
         roomReadyNotice = nil
         secondAgentHintRoom = nil
         secondAgentHintShownRoomIDs = []
@@ -663,6 +699,7 @@ final class ChatStore: ObservableObject {
         isCreateRoomPresented = false
         createRoomParentID = nil
         joinedRoomID = nil
+        memberCountIncludesCurrentAgentRoomIDs = []
         agentID = ""
         isRefreshingRooms = false
         pendingDestructionRoomIDs = []
@@ -705,6 +742,7 @@ final class ChatStore: ObservableObject {
         }
 
         let baseline = roomMutationGeneration
+        let joinedRoomIDAtRequest = joinedRoomID
         var refreshed = try await connection.listRooms()
         guard expectedProfileGeneration == profileGeneration else {
             throw CancellationError()
@@ -718,6 +756,16 @@ final class ChatStore: ObservableObject {
             }
         }
         rooms = refreshed.sorted(by: roomSort)
+        // `list_rooms` is an authoritative server snapshot. It includes this
+        // client only when the registration restored membership before the
+        // request. A later fresh join deliberately clears this marker because
+        // the room count then predates that join.
+        memberCountIncludesCurrentAgentRoomIDs = []
+        if joinedRoomIDAtRequest == joinedRoomID,
+           let joinedRoomID,
+           rooms.contains(where: { $0.id == joinedRoomID }) {
+            memberCountIncludesCurrentAgentRoomIDs.insert(joinedRoomID)
+        }
         reconcileLocalRoomPreferences()
         if !readState.hasSeeded {
             readState.seed(rooms: rooms)
@@ -732,7 +780,10 @@ final class ChatStore: ObservableObject {
         if selectFallbackForMissingSelection,
            let selectedRoomID,
            !rooms.contains(where: { $0.id == selectedRoomID }) {
-            if joinedRoomID == selectedRoomID { joinedRoomID = nil }
+            if joinedRoomID == selectedRoomID {
+                joinedRoomID = nil
+                memberCountIncludesCurrentAgentRoomIDs.remove(selectedRoomID)
+            }
             await selectFallbackRoom(excluding: selectedRoomID)
             guard expectedProfileGeneration == profileGeneration else {
                 throw CancellationError()
@@ -742,11 +793,27 @@ final class ChatStore: ObservableObject {
         if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             scheduleMessageSearch(restartInFlight: false)
         }
+        if selectedRoomID == joinedRoomID {
+            await refreshMembers()
+        }
     }
 
     func select(room: Room) async {
         let expectedProfileGeneration = profileGeneration
         roomSelectionGeneration += 1
+        // Keep join/leave transitions serialized, but release the previous
+        // transition from a stale history request immediately. Cancelling the
+        // whole transition could race a server-side join that already committed
+        // and leave `joinedRoomID` out of sync with actual membership.
+        cancelRoomHistoryLoad()
+        memberRefreshGeneration += 1
+        memberRefreshCoordinatorGeneration += 1
+        memberRefreshTask?.cancel()
+        memberRefreshTask = nil
+        cancelMemberRefreshRetry()
+        memberRefreshPending = false
+        memberRefreshDelayedRetryAvailable = false
+        restartSetupReadinessAfterMemberRefresh = false
         let generation = roomSelectionGeneration
         saveDraft(for: selectedRoomID)
         selectedRoomID = room.roomID
@@ -783,6 +850,10 @@ final class ChatStore: ObservableObject {
                     guard !Task.isCancelled,
                           expectedProfileGeneration == profileGeneration else { return }
                     self.joinedRoomID = room.roomID
+                    // The room model came from before this join. Until a
+                    // member/list-rooms refresh lands, its count contains only
+                    // the peers and must not have this Mac subtracted from it.
+                    memberCountIncludesCurrentAgentRoomIDs.remove(room.roomID)
                 }
                 // A newer selection may have arrived while join was in flight.
                 // The next serialized transition will leave this actual joined
@@ -790,27 +861,28 @@ final class ChatStore: ObservableObject {
                 guard !Task.isCancelled,
                       expectedProfileGeneration == profileGeneration,
                       generation == roomSelectionGeneration else { return }
-                let history = Self.visibleMessages(
-                    in: try await connection.history(roomID: room.roomID, limit: 100)
+                // Presence and history are independent. Start both together so
+                // a slow request cannot keep the other surface stale.
+                let memberRefresh = Task { [weak self] in
+                    guard let self,
+                          expectedProfileGeneration == profileGeneration,
+                          generation == roomSelectionGeneration else { return }
+                    await refreshMembers()
+                }
+                let rawHistory = try await loadRoomHistory(
+                    roomID: room.roomID,
+                    selectionGeneration: generation
                 )
                 guard !Task.isCancelled,
                       expectedProfileGeneration == profileGeneration,
                       generation == roomSelectionGeneration,
                       selectedRoomID == room.roomID else { return }
+                recordHistoricalAgentActivity(in: rawHistory, now: Date())
+                let history = Self.visibleMessages(in: rawHistory)
                 messages = Self.merging(history: history, live: messages)
                 if let latest = messages.last { updateRoomPreview(from: latest) }
-                let members = try await connection.listAgents(roomID: room.roomID)
-                guard !Task.isCancelled,
-                      expectedProfileGeneration == profileGeneration,
-                      generation == roomSelectionGeneration,
-                      selectedRoomID == room.roomID else { return }
-                roomMembers = members.sorted {
-                    $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-                }
-                updateRoomMemberCount(roomID: room.roomID, count: members.count)
-                if hasCollaborator(in: members) {
-                    markSetupRoomReadyIfNeeded(roomID: room.roomID)
-                }
+                isLoadingMessages = false
+                await memberRefresh.value
             } catch {
                 guard !Task.isCancelled,
                       expectedProfileGeneration == profileGeneration,
@@ -826,6 +898,30 @@ final class ChatStore: ObservableObject {
         roomLoadTask = transition
         await transition.value
         startSetupReadinessPolling()
+    }
+
+    private func loadRoomHistory(
+        roomID: String,
+        selectionGeneration: Int
+    ) async throws -> [ChatMessage] {
+        let task = Task { [connection] in
+            try await connection.history(roomID: roomID, limit: 100)
+        }
+        roomHistoryTask = task
+        roomHistoryTaskGeneration = selectionGeneration
+        defer {
+            if roomHistoryTaskGeneration == selectionGeneration {
+                roomHistoryTask = nil
+                roomHistoryTaskGeneration = nil
+            }
+        }
+        return try await task.value
+    }
+
+    private func cancelRoomHistoryLoad() {
+        roomHistoryTask?.cancel()
+        roomHistoryTask = nil
+        roomHistoryTaskGeneration = nil
     }
 
     func createRoom(name: String, description: String, ephemeral: Bool, isPublic: Bool) async -> Bool {
@@ -1052,8 +1148,10 @@ final class ChatStore: ObservableObject {
         switch type {
         case "message_received":
             if let message = try? decode(ChatMessage.self, payload) {
+                let receivedAt = Date()
+                recordLiveAgentActivity(message, receivedAt: receivedAt)
                 lastThinkingAt = RoomSidebarPresentation.updatedThinkingByAgent(
-                    lastThinkingAt, message: message, now: Date()
+                    lastThinkingAt, message: message, now: receivedAt
                 )
                 if message.isThinking {
                     updateRoomActivity(from: message)
@@ -1102,27 +1200,26 @@ final class ChatStore: ObservableObject {
                 }
             }
         case "agent_joined", "agent_left":
-            let expectedProfileGeneration = profileGeneration
-            Task { [weak self] in
-                guard let self,
-                      expectedProfileGeneration == profileGeneration else { return }
-                await refreshMembers()
-                // The last member leaving can put the selected room back into
-                // the connect state after the poll loop already exited (it
-                // stops once selectedRoomAwaitingFirstAgent goes false) — pick
-                // it back up so "waiting…" isn't stuck without a live poll.
-                startSetupReadinessPolling()
-            }
+            guard payload["room_id"] as? String == selectedRoomID else { break }
+            // Join/leave bursts can be much faster than a Cloud list request.
+            // Funnel them through one request plus a dirty-bit rerun rather
+            // than retaining an unbounded task/request per event.
+            scheduleMemberRefresh(restartSetupReadinessAfterRefresh: true)
         case "presence_update":
-            updatePresence(from: payload)
+            recordPresenceActivity(from: payload)
+            if joinedRoomID == selectedRoomID, !updatePresence(from: payload) {
+                scheduleMemberRefresh()
+            }
         case "thinking":
             // Live thinking pulses arrive as this dedicated event, not
             // message_received, and are excluded from the visible message
             // feed — so track the working signal only; never bump room
             // activity for content the user can't see.
             if let message = try? decode(ChatMessage.self, payload) {
+                let receivedAt = Date()
+                recordLiveAgentActivity(message, receivedAt: receivedAt)
                 lastThinkingAt = RoomSidebarPresentation.updatedThinkingByAgent(
-                    lastThinkingAt, message: message, now: Date()
+                    lastThinkingAt, message: message, now: receivedAt
                 )
             }
         default:
@@ -1133,6 +1230,18 @@ final class ChatStore: ObservableObject {
     private func handleConnectionStatus(_ status: ConnectionStatus) {
         connectionStatus = status
         if !status.isConnected {
+            memberRefreshGeneration += 1
+            lastAppliedMemberRefreshGeneration = memberRefreshGeneration
+            memberRefreshCoordinatorGeneration += 1
+            memberRefreshTask?.cancel()
+            memberRefreshTask = nil
+            cancelMemberRefreshRetry()
+            memberRefreshPending = false
+            memberRefreshDelayedRetryAvailable = false
+            restartSetupReadinessAfterMemberRefresh = false
+            joinedRoomID = nil
+            memberCountIncludesCurrentAgentRoomIDs = []
+            roomMembers = []
             roomRefreshTask?.cancel()
             roomRefreshTask = nil
             messageSearchTask?.cancel()
@@ -1148,33 +1257,258 @@ final class ChatStore: ObservableObject {
             roomPreviewTask = nil
         }
         if case .failed = status {
-            joinedRoomID = nil
-            roomMembers = []
             scheduleReconnect()
         }
     }
 
     private func refreshMembers() async {
+        scheduleMemberRefresh()
+        let task = memberRefreshTask
+        await task?.value
+    }
+
+    private func scheduleMemberRefresh(
+        restartSetupReadinessAfterRefresh: Bool = false,
+        grantsDelayedRetry: Bool = true
+    ) {
+        guard connectionStatus.isConnected,
+              let roomID = selectedRoomID,
+              joinedRoomID == roomID else { return }
+        if grantsDelayedRetry {
+            memberRefreshDelayedRetryAvailable = true
+        }
+        memberRefreshPending = true
+        if restartSetupReadinessAfterRefresh {
+            restartSetupReadinessAfterMemberRefresh = true
+        }
+        // Once a failed refresh enters backoff, later join/presence events only
+        // mark its eventual snapshot dirty. They must not cancel the delay and
+        // turn an event storm into one immediate request per event.
+        guard memberRefreshRetryTask == nil else { return }
+        guard memberRefreshTask == nil else { return }
+
+        memberRefreshCoordinatorGeneration += 1
+        let coordinatorGeneration = memberRefreshCoordinatorGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await runMemberRefreshLoop(coordinatorGeneration: coordinatorGeneration)
+        }
+        memberRefreshTask = task
+    }
+
+    private func runMemberRefreshLoop(coordinatorGeneration: Int) async {
+        var shouldScheduleDelayedRetry = false
+        refreshLoop: while !Task.isCancelled,
+                           coordinatorGeneration == memberRefreshCoordinatorGeneration,
+                           connectionStatus.isConnected,
+                           selectedRoomID == joinedRoomID {
+            memberRefreshPending = false
+            switch await performMemberRefresh() {
+            case .applied:
+                if !memberRefreshPending { break refreshLoop }
+            case .failed:
+                // Never spin on an immediate transport failure. One delayed
+                // retry consumes every event coalesced into this request.
+                shouldScheduleDelayedRetry = memberRefreshDelayedRetryAvailable
+                memberRefreshPending = false
+                break refreshLoop
+            case .invalidated:
+                // A room switch can invalidate the old request while the new
+                // room has already joined and queued its own refresh behind
+                // this single-flight coordinator. Service that dirty request
+                // rather than losing it with the stale result.
+                if !Task.isCancelled,
+                   memberRefreshPending,
+                   coordinatorGeneration == memberRefreshCoordinatorGeneration,
+                   connectionStatus.isConnected,
+                   selectedRoomID == joinedRoomID {
+                    continue refreshLoop
+                }
+                memberRefreshPending = false
+                break refreshLoop
+            }
+        }
+
+        guard coordinatorGeneration == memberRefreshCoordinatorGeneration else { return }
+        let shouldRestartSetupReadiness = restartSetupReadinessAfterMemberRefresh
+        memberRefreshTask = nil
+        memberRefreshPending = false
+        memberRefreshDelayedRetryAvailable = false
+        if shouldScheduleDelayedRetry {
+            scheduleMemberRefreshRetry()
+            return
+        }
+        restartSetupReadinessAfterMemberRefresh = false
+        if shouldRestartSetupReadiness {
+            // The last member leaving can put the selected room back into the
+            // connect state after the existing poll loop already exited.
+            startSetupReadinessPolling()
+        }
+    }
+
+    private func scheduleMemberRefreshRetry() {
+        guard connectionStatus.isConnected,
+              let roomID = selectedRoomID,
+              joinedRoomID == roomID else {
+            restartSetupReadinessAfterMemberRefresh = false
+            return
+        }
         let expectedProfileGeneration = profileGeneration
-        guard connectionStatus.isConnected, let roomID = selectedRoomID else { return }
-        guard let members = try? await connection.listAgents(roomID: roomID),
+        let expectedRoomSelectionGeneration = roomSelectionGeneration
+        memberRefreshRetryGeneration += 1
+        let generation = memberRefreshRetryGeneration
+        let delay = memberRefreshRetryDelayNanoseconds
+        memberRefreshRetryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  let self,
+                  generation == memberRefreshRetryGeneration,
+                  expectedProfileGeneration == profileGeneration,
+                  expectedRoomSelectionGeneration == roomSelectionGeneration,
+                  connectionStatus.isConnected,
+                  selectedRoomID == roomID,
+                  joinedRoomID == roomID else { return }
+            memberRefreshRetryTask = nil
+            scheduleMemberRefresh(grantsDelayedRetry: false)
+        }
+    }
+
+    private func cancelMemberRefreshRetry() {
+        memberRefreshRetryGeneration += 1
+        memberRefreshRetryTask?.cancel()
+        memberRefreshRetryTask = nil
+    }
+
+    private func performMemberRefresh() async -> MemberRefreshOutcome {
+        guard !Task.isCancelled else { return .invalidated }
+        let expectedProfileGeneration = profileGeneration
+        let expectedRoomSelectionGeneration = roomSelectionGeneration
+        guard connectionStatus.isConnected,
+              let roomID = selectedRoomID,
+              joinedRoomID == roomID else { return .invalidated }
+        memberRefreshGeneration += 1
+        let generation = memberRefreshGeneration
+        let members: [AgentPresence]
+        do {
+            members = try await connection.listAgents(roomID: roomID)
+        } catch {
+            guard !Task.isCancelled,
+                  connectionStatus.isConnected,
+                  expectedProfileGeneration == profileGeneration,
+                  expectedRoomSelectionGeneration == roomSelectionGeneration,
+                  selectedRoomID == roomID,
+                  joinedRoomID == roomID else { return .invalidated }
+            return .failed
+        }
+        guard !Task.isCancelled,
+              connectionStatus.isConnected,
               expectedProfileGeneration == profileGeneration,
-              selectedRoomID == roomID else { return }
+              expectedRoomSelectionGeneration == roomSelectionGeneration,
+              generation >= lastAppliedMemberRefreshGeneration,
+              selectedRoomID == roomID,
+              joinedRoomID == roomID else { return .invalidated }
+        lastAppliedMemberRefreshGeneration = generation
         roomMembers = members.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
-        updateRoomMemberCount(roomID: roomID, count: members.count)
+        updateRoomMemberCount(
+            roomID: roomID,
+            count: members.count,
+            includesCurrentAgent: members.contains { $0.id == agentID }
+        )
         if hasCollaborator(in: members) { markSetupRoomReadyIfNeeded(roomID: roomID) }
+        return .applied
     }
 
-    private func updatePresence(from payload: [String: Any]) {
+    @discardableResult
+    private func updatePresence(from payload: [String: Any]) -> Bool {
         guard let agentID = payload["agent_id"] as? String,
-              let index = roomMembers.firstIndex(where: { $0.agentID == agentID }) else { return }
+              let index = roomMembers.firstIndex(where: { $0.agentID == agentID }) else { return false }
         roomMembers[index] = roomMembers[index].updating(
             status: payload["status"] as? String,
             detail: payload["status_detail"] as? String,
             progress: payload["progress"] as? Int
         )
+        return true
+    }
+
+    private func recordPresenceActivity(from payload: [String: Any]) {
+        guard let agentID = payload["agent_id"] as? String,
+              agentID != self.agentID,
+              let roomID = joinedRoomID else { return }
+        let status = (payload["status"] as? String)?.lowercased()
+        if status == "working" || status == "thinking" {
+            let now = Date()
+            lastThinkingAt[roomID, default: [:]][agentID] = now
+            recordRecentAgentActivity(agentID: agentID, roomID: roomID, at: now, now: now)
+        } else {
+            lastThinkingAt[roomID]?.removeValue(forKey: agentID)
+            if lastThinkingAt[roomID]?.isEmpty == true {
+                lastThinkingAt.removeValue(forKey: roomID)
+            }
+        }
+    }
+
+    private func recordHistoricalAgentActivity(in messages: [ChatMessage], now: Date) {
+        var updated = recentAgentActivityAt
+        pruneRecentAgentActivity(&updated, now: now)
+        for message in messages where message.agentID != agentID {
+            let timestamp = min(message.timestamp.cowchatDate ?? now, now)
+            guard now.timeIntervalSince(timestamp) < 600 else { continue }
+            let previous = updated[message.roomID]?[message.agentID] ?? .distantPast
+            if timestamp > previous {
+                updated[message.roomID, default: [:]][message.agentID] = timestamp
+            }
+        }
+        recentAgentActivityAt = updated
+    }
+
+    private func recordLiveAgentActivity(_ message: ChatMessage, receivedAt: Date) {
+        guard message.agentID != agentID else { return }
+        recordRecentAgentActivity(
+            agentID: message.agentID,
+            roomID: message.roomID,
+            at: receivedAt,
+            now: receivedAt
+        )
+    }
+
+    private func recordRecentAgentActivity(
+        agentID: String,
+        roomID: String,
+        at timestamp: Date,
+        now: Date
+    ) {
+        var updated = recentAgentActivityAt
+        pruneRecentAgentActivity(&updated, now: now)
+        let timestamp = min(timestamp, now)
+        guard now.timeIntervalSince(timestamp) < 600 else {
+            recentAgentActivityAt = updated
+            return
+        }
+        let previous = updated[roomID]?[agentID] ?? .distantPast
+        if timestamp > previous {
+            updated[roomID, default: [:]][agentID] = timestamp
+        }
+        recentAgentActivityAt = updated
+    }
+
+    private func pruneRecentAgentActivity(
+        _ activity: inout [String: [String: Date]],
+        now: Date
+    ) {
+        for (roomID, agents) in activity {
+            let recent = agents.filter { now.timeIntervalSince($0.value) < 600 }
+            if recent.isEmpty {
+                activity.removeValue(forKey: roomID)
+            } else {
+                activity[roomID] = recent
+            }
+        }
     }
 
     private func scheduleReconnect() {
@@ -1319,7 +1653,16 @@ final class ChatStore: ObservableObject {
         previewActivityByRoomID[message.roomID] = message.timestamp
     }
 
-    private func updateRoomMemberCount(roomID: String, count: Int) {
+    private func updateRoomMemberCount(
+        roomID: String,
+        count: Int,
+        includesCurrentAgent: Bool
+    ) {
+        if includesCurrentAgent {
+            memberCountIncludesCurrentAgentRoomIDs.insert(roomID)
+        } else {
+            memberCountIncludesCurrentAgentRoomIDs.remove(roomID)
+        }
         guard let index = rooms.firstIndex(where: { $0.roomID == roomID }),
               rooms[index].memberCount != count else { return }
         rooms[index] = rooms[index].updating(memberCount: count)
@@ -1327,6 +1670,8 @@ final class ChatStore: ObservableObject {
     }
 
     private func decrementRoomMemberCount(roomID: String) {
+        let includedCurrentAgent = memberCountIncludesCurrentAgentRoomIDs.remove(roomID) != nil
+        guard includedCurrentAgent else { return }
         guard let index = rooms.firstIndex(where: { $0.roomID == roomID }),
               let count = rooms[index].memberCount else { return }
         rooms[index] = rooms[index].updating(memberCount: max(0, count - 1))
@@ -1462,6 +1807,8 @@ final class ChatStore: ObservableObject {
         roomMessagePreviews.removeValue(forKey: roomID)
         previewActivityByRoomID.removeValue(forKey: roomID)
         lastThinkingAt.removeValue(forKey: roomID)
+        recentAgentActivityAt.removeValue(forKey: roomID)
+        memberCountIncludesCurrentAgentRoomIDs.remove(roomID)
         if roomReadyNotice?.id == roomID { roomReadyNotice = nil }
         if secondAgentHintRoom?.id == roomID { secondAgentHintRoom = nil }
         if roomBeingRenamed?.id == roomID { roomBeingRenamed = nil }
@@ -1505,6 +1852,9 @@ final class ChatStore: ObservableObject {
             encrypted: room.encrypted
         )
         rooms[index] = merged
+        if joinedRoomID == room.id, room.memberCount != nil {
+            memberCountIncludesCurrentAgentRoomIDs.insert(room.id)
+        }
         rooms.sort(by: roomSort)
         if roomReadyNotice?.id == room.id { roomReadyNotice = merged }
         if roomBeingRenamed?.id == room.id { roomBeingRenamed = merged }

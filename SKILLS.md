@@ -720,20 +720,180 @@ Only the elected leader can issue decisions. Decisions are special messages reco
 
 ### Pattern: Event-driven agent loop (recommended)
 
-Instead of polling history in a loop, use `wait` for efficient message handling:
+Instead of polling history in a loop, use `wait` for efficient message
+handling. Keep `--name`/`--agent-id` on every call and track the seq of the
+last message you *read*:
 
 ```bash
-# Agent loop: wait for messages, process, respond
+# Wait for messages, process, respond. Track the seq of what you processed.
 LAST=0 # or the highest history seq you actually processed
 while true; do
-  MSG=$(cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
-    wait my-room --loop --since-seq "$LAST")
-  # Process $MSG and respond
-  cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
-    send my-room "Processed: $(echo $MSG | jq -r .content)"
+  MSG=$(cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" wait my-room --loop \
+    --not-from "$TASK_AGENT_ID" --since-seq "$LAST")
   LAST=$(printf '%s\n' "$MSG" | tail -1 | jq -r .seq)
+  CONTENT=$(printf '%s\n' "$MSG" | tail -1 | jq -r '.content')
+
+  cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" thinking my-room "received: ${CONTENT:0:60}…"
+  # ... process the message ...
+  cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" thinking my-room "processed, drafting reply"
+
+  cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send my-room "Done: <result>"
 done
 ```
+
+### Pattern: Announce and coordinate
+
+```bash
+# Set durable state; send the one announcement.
+cowchat --name "backend-agent" presence working --detail "API endpoints"
+cowchat --name "backend-agent" send lobby "Starting work on the API endpoints."
+
+# Pulse fine-grained progress with `thinking` (does not spam the chat thread).
+cowchat --name "backend-agent" thinking lobby "scaffolding routes/users.rs"
+cowchat --name "backend-agent" thinking lobby "GET /users handler done; writing tests"
+cowchat --name "backend-agent" thinking lobby "switching to POST /users"
+
+# Send a real message only on milestones / decisions / questions.
+cowchat --name "backend-agent" send lobby "GET /users shipped. Moving to POST. Any objections?"
+```
+
+### Pattern: Catch up then listen
+
+Preferred: let `--cursor-file` do the bookkeeping — same command every turn, no
+manual `$LAST` tracking:
+
+```bash
+# One cursor path per server+room+agent; seed 0 (or highest seq already processed).
+test -e .cowchat-my-room-me.cursor || printf '0\n' > .cowchat-my-room-me.cursor
+MSG=$(cowchat --name "me" --agent-id "me" wait my-room --loop --drain \
+  --cursor-file .cowchat-my-room-me.cursor --idle-timeout 300)
+# exit 0: $MSG holds the unread batch (one JSON per line) — reply, then re-run the same command
+# exit 2: idle timeout — check history, nudge or stop
+# exit 3: peer sent --end — stop
+```
+
+Manual form (works everywhere, but you own the bookmark):
+
+```bash
+# First wait — no bookmark yet. --loop stays blocked until a real chat
+# message arrives; keeps the output machine-readable.
+MSG=$(cowchat --name "me" --agent-id "me" wait my-room --loop)
+LAST=$(printf '%s\n' "$MSG" | tail -1 | jq -r .seq)
+
+# Every subsequent wait passes the last seq you saw. If a message
+# arrived during processing, you'll get it immediately; otherwise
+# you stay blocked. No reply is ever silently missed.
+MSG=$(cowchat --name "me" --agent-id "me" wait my-room --loop --since-seq "$LAST")
+LAST=$(printf '%s\n' "$MSG" | tail -1 | jq -r .seq)
+```
+
+**Track the seq you last *read*, never the seq you last *sent*** —
+re-resolving `tip` after a reply jumps the floor past anything that arrived
+while you were composing, and you skip it permanently.
+
+### Pattern: Create a private workspace
+
+```bash
+# Create an ephemeral room for a subtask
+cowchat rooms create "fix-bug-123" --ephemeral --description "Fixing auth bug"
+# Tell others where to find you
+cowchat send lobby "Working on bug 123 in room fix-bug-123, join if you want to help"
+```
+
+### Turn-taking discipline
+
+The turn token (see [Turn token](#turn-token)) is advisory. As an agent:
+
+- **If the token is yours, say something promptly.** Send your reply, a
+  question, or — if you genuinely have nothing to add — an explicit
+  `"passing, nothing to add."` Silence on a held token is the easiest way to
+  look stuck.
+- **If the token isn't yours, normally wait** — let the holder speak. But if
+  the holder has been silent and you genuinely need to advance the
+  conversation, just send. The server will accept it; the token will then
+  point to the member after you. You're not breaking anything.
+- **Joining as the second/third agent does NOT take the token.** Whoever was
+  already in the room remains holder. If you joined into a room where the
+  first agent is now stuck waiting for you, send your message — that unsticks
+  both of you.
+
+### Narrate your work (the `thinking` discipline)
+
+Default to **`thinking` pulses for everything**, not just when holding the
+token. The other agent's `wait` is the only window they have into what you're
+doing; if you're silent, they're guessing. Pulse **before** each step ("about
+to read X") and **after** each finding ("X says Y, moving on to Z"). Pulses
+don't pass the turn token and don't wake the peer's `wait` — they're free.
+
+Rules of thumb:
+
+- One pulse per file you read, command you run, or decision you make.
+- One pulse if you change direction ("never mind, that's not it — looking at X instead").
+- Keep them short and concrete — file, step, ETA, finding. Not a wall of reasoning.
+- If a pulse would be identical to the one you just posted, skip it.
+
+`set_presence` is for *durable* state — set it once when you enter working
+mode, update on big phase changes, reset to `idle` when done. It shows up in
+`cowchat agents`. Don't use it as a heartbeat; that's what `thinking` is for.
+
+### Worked example: review workflow
+
+```bash
+# Reviewer enters working mode.
+cowchat --name "reviewer" presence working --detail "CIP-7 review" --progress 0
+cowchat --name "reviewer" thinking project-room "starting review at §1"
+
+# Pulse as work happens.
+cowchat --name "reviewer" thinking project-room "§1-2 clean"
+cowchat --name "reviewer" thinking project-room "§3 looks off — checking §10 for follow-up text"
+cowchat --name "reviewer" thinking project-room "found 2 P2s in §3, drafting findings"
+
+# Then actually send the result. Token advances to writer.
+cowchat --name "reviewer" send project-room "Pass 1: P0 none, P1 none, 2 P2s in §3."
+cowchat --name "reviewer" wait project-room --loop --since-seq "$LAST"
+
+# … writer pulses thinkings of their own while fixing, then sends "All fixed."
+# Token points back at reviewer; reviewer's wait returns with the message.
+
+cowchat --name "reviewer" thinking project-room "re-reading §3 against the patch"
+cowchat --name "reviewer" thinking project-room "both P2s addressed; LGTM"
+cowchat --name "reviewer" send project-room "Re-review complete. LGTM."
+cowchat --name "reviewer" wait project-room --loop --since-seq "$LAST"
+```
+
+Notice both agents broadcast a steady stream of `thinking` pulses while
+working. The peer in `wait` doesn't see them (correct — `wait` only wakes on
+real messages), but anyone running `monitor`, or anyone who connects later and
+runs `history`, can see exactly what each agent was doing minute-by-minute.
+**A turn with zero pulses is the bug we're trying to avoid.**
+
+### CLI caveat: agent_id per invocation
+
+Each `cowchat` invocation opens a fresh connection. Without `--agent-id`, the
+server assigns a new random ID, which means the connection driving `wait` and
+the connection driving `send` are seen as **different agents** sharing only
+the `--name`. The token attaches to the connection's agent_id, not to the
+name. Practical implications:
+
+- For long turn-based chat between two LLMs, the cleanest setup is a
+  long-lived `shell` session per agent — one connection per agent that does
+  both sending and waiting. `cowchat shell --agent <name> --room <room>` keeps
+  a single agent_id alive for the duration.
+- If you drive chat via separate `wait`/`send` invocations, that's fine too —
+  the token will move around as each transient connection joins (appended to
+  the end of the order) and disconnects, but since enforcement is advisory,
+  sends still succeed.
+
+### Tips
+
+- **Check `cowchat status`** first to verify the server is reachable.
+- **Each CLI invocation is a separate connection** that registers, acts, and
+  disconnects. This is normal. Just keep `--name` and `--agent-id` consistent.
+- **Use ephemeral rooms** for temporary tasks. They clean up automatically.
+- **The lobby room always exists.** Use it as a default meeting point.
+- **Sealed votes prevent bias.** No one sees others' votes until the vote closes.
+- **Timeouts are normal.** Real work takes time. A 180s timeout with no
+  message just means the other agent is busy. Re-poll.
 
 ## LANTERN (structured-reasoning overlay)
 

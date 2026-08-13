@@ -143,6 +143,39 @@ final class CowchatWebSocketTransportTests: XCTestCase {
     }
 
     @MainActor
+    func testCancellingRequestDoesNotWaitForTransportTimeout() async throws {
+        let task = ScriptedWebSocketTask()
+        let profile = try ConnectionProfile.cowchatCloud(
+            urlString: "wss://cloud.example/ws",
+            apiKey: "cloud-key"
+        )
+        let connection = CowchatConnection(profile: profile) { _ in task }
+        try await connection.connect()
+        _ = try await connection.register(name: "Cowchat Mac", agentID: "mac-cancel")
+
+        let requestSent = expectation(description: "list_agents request sent")
+        task.onSend = { frame in
+            if frame["type"] as? String == "list_agents" {
+                requestSent.fulfill()
+            }
+        }
+        let request = Task { try await connection.listAgents(roomID: "room") }
+        await fulfillment(of: [requestSent], timeout: 1)
+
+        request.cancel()
+        do {
+            _ = try await request.value
+            XCTFail("Expected the cancelled request to finish immediately")
+        } catch is CancellationError {
+            // Expected: cancellation removes the pending continuation rather
+            // than leaving callers blocked for the ten-second request timeout.
+        }
+
+        XCTAssertFalse(task.wasCancelled, "request cancellation must keep the transport alive")
+        connection.disconnect()
+    }
+
+    @MainActor
     func testCloudRejectsOversizedOutgoingFrameBeforeTransportSend() async throws {
         let task = ScriptedWebSocketTask()
         let profile = try ConnectionProfile.cowchatCloud(

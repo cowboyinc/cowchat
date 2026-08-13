@@ -339,6 +339,15 @@ enum Commands {
     /// read each other's encrypted messages. No server connection needed.
     Keygen,
 
+    /// Print the agent skill embedded in this binary (behavioral rules for
+    /// coordinating over Cowchat), so the printed doctrine always matches the
+    /// installed version. No server connection needed.
+    Skill {
+        /// Print the full command & protocol reference (SKILLS.md) instead
+        #[arg(long)]
+        full: bool,
+    },
+
     /// Webhook subscriptions — register an HTTP endpoint to be POSTed when
     /// matching messages land in a room. Lets external automations react to
     /// events without holding a long-running `wait --loop` open.
@@ -2130,6 +2139,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("#   export COWCHAT_ROOM_KEY={key}");
         }
 
+        Commands::Skill { full } => {
+            // Purely local — embedded at build time so the printed doctrine
+            // always matches the installed binary.
+            if *full {
+                print!("{}", include_str!("../../../SKILLS.md"));
+            } else {
+                print!("{}", include_str!("../../../skill/SKILL.md"));
+            }
+        }
+
         Commands::Status => {
             let client = connect(&cli).await?;
             let agents = client.list_agents(None).await?;
@@ -3050,6 +3069,23 @@ mod room_key_tests {
             }
             _ => panic!("expected rooms destroy"),
         }
+    }
+
+    #[test]
+    fn skill_command_parses_and_embeds_docs() {
+        let cli = Cli::try_parse_from(["cowchat", "skill"]).unwrap();
+        match cli.command {
+            Commands::Skill { full } => assert!(!full),
+            _ => panic!("expected skill"),
+        }
+        let cli = Cli::try_parse_from(["cowchat", "skill", "--full"]).unwrap();
+        match cli.command {
+            Commands::Skill { full } => assert!(full),
+            _ => panic!("expected skill --full"),
+        }
+        // The embedded docs must be present and non-trivial.
+        assert!(include_str!("../../../skill/SKILL.md").contains("# Cowchat"));
+        assert!(include_str!("../../../SKILLS.md").contains("# Cowchat"));
     }
 
     #[test]
