@@ -80,7 +80,7 @@ fn accessible_room(room_id: &str, api_key: &str, no_auth: bool, store: &Store) -
         .get_room(room_id)
         .ok()
         .flatten()
-        .filter(|room| can_access_room(room, api_key, no_auth))
+        .filter(|room| can_access_room(room, api_key, no_auth, store))
 }
 
 pub struct ServerConfig {
@@ -1753,7 +1753,13 @@ mod local_auth_tests {
             FrameType::RoomDestroyed,
             serde_json::json!({"room_id": "pending-room"}),
         );
-        crate::handler::broadcast_room_destroyed(&broker, &room, false, &destroyed);
+        crate::handler::broadcast_room_destroyed(
+            &broker,
+            &room,
+            &HashSet::new(),
+            false,
+            &destroyed,
+        );
 
         let would_report_restored = broker.is_agent_in_room("stable", "pending-room")
             && accessible_room("pending-room", "owner-key", false, &store).is_some();

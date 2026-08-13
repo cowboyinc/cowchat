@@ -12,6 +12,19 @@ pub fn generate_key() -> String {
     hex::encode(bytes)
 }
 
+/// Generate a room-invite token: recognizable prefix + the same entropy as an
+/// API key. The raw token is shown once; only its hash is persisted.
+pub fn generate_invite_token() -> String {
+    format!("cinv_{}", generate_key())
+}
+
+/// SHA-256 hex of an invite token — the only form the server stores.
+pub fn hash_invite_token(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(token.as_bytes());
+    hex::encode(digest.to_vec())
+}
+
 /// Encode bytes as hex string (simple implementation to avoid a dependency).
 mod hex {
     pub fn encode(bytes: Vec<u8>) -> String {

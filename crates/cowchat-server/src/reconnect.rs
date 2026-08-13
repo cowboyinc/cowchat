@@ -262,17 +262,20 @@ impl ReconnectManager {
 
     /// Buffer room metadata changes for disconnected agents that are allowed
     /// to discover the room. Public room updates go to every stash; private
-    /// updates remain confined to the owning API key.
+    /// updates remain confined to the owning API key plus any keys in
+    /// `granted_keys` (invite-issued room grants).
     pub fn buffer_visible_room_event(
         &self,
         visibility: &str,
         owner_key: Option<&str>,
+        granted_keys: &HashSet<String>,
         no_auth: bool,
         frame: &Frame,
     ) -> HashSet<String> {
         let mut buffered = HashSet::new();
         for mut entry in self.stashed.iter_mut() {
-            if can_access_room_parts(visibility, owner_key, &entry.api_key, no_auth)
+            if (can_access_room_parts(visibility, owner_key, &entry.api_key, no_auth)
+                || (!entry.api_key.is_empty() && granted_keys.contains(&entry.api_key)))
                 && frame_room_id(frame).is_none_or(|room_id| !self.room_is_destroyed(room_id))
                 && entry.missed_messages.len() < MAX_BUFFERED_MESSAGES
             {
@@ -429,7 +432,13 @@ mod tests {
             cowchat_core::FrameType::RoomUpdated,
             serde_json::json!({"room_id": "private-room", "name": "renamed-private"}),
         );
-        manager.buffer_visible_room_event("private", Some("owner-key"), false, &private_event);
+        manager.buffer_visible_room_event(
+            "private",
+            Some("owner-key"),
+            &HashSet::new(),
+            false,
+            &private_event,
+        );
 
         let owner = manager
             .reclaim("owner", "owner-key", false)
@@ -454,7 +463,13 @@ mod tests {
             cowchat_core::FrameType::RoomUpdated,
             serde_json::json!({"room_id": "public-room", "name": "renamed-public"}),
         );
-        manager.buffer_visible_room_event("public", Some("owner-key"), false, &public_event);
+        manager.buffer_visible_room_event(
+            "public",
+            Some("owner-key"),
+            &HashSet::new(),
+            false,
+            &public_event,
+        );
         for (agent_id, api_key) in [("owner", "owner-key"), ("outsider", "other-key")] {
             let stashed = manager.reclaim(agent_id, api_key, false).unwrap().unwrap();
             assert_eq!(stashed.missed_messages.len(), 1);
@@ -483,8 +498,13 @@ mod tests {
             cowchat_core::FrameType::RoomUpdated,
             serde_json::json!({"room_id": "room", "name": "during-handshake"}),
         );
-        let buffered =
-            manager.buffer_visible_room_event("private", Some("owner-key"), false, &event);
+        let buffered = manager.buffer_visible_room_event(
+            "private",
+            Some("owner-key"),
+            &HashSet::new(),
+            false,
+            &event,
+        );
         assert_eq!(buffered, HashSet::from(["stable".to_string()]));
 
         // A failed handshake drops the lease without consuming state.
@@ -544,8 +564,40 @@ mod tests {
             cowchat_core::FrameType::RoomUpdated,
             serde_json::json!({"room_id": "ownerless"}),
         );
-        let buffered = manager.buffer_visible_room_event("private", None, false, &event);
+        let buffered =
+            manager.buffer_visible_room_event("private", None, &HashSet::new(), false, &event);
         assert_eq!(buffered, HashSet::from(["keyless".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn granted_keys_receive_private_room_events_keyless_stashes_do_not() {
+        let manager = ReconnectManager::new();
+        for (agent_id, api_key) in [
+            ("granted", "granted-key"),
+            ("outsider", "other-key"),
+            ("keyless", ""),
+        ] {
+            manager.stash(
+                agent_id.into(),
+                agent_id.into(),
+                api_key.into(),
+                HashSet::new(),
+            );
+        }
+        let event = Frame::event(
+            cowchat_core::FrameType::RoomUpdated,
+            serde_json::json!({"room_id": "invited-room"}),
+        );
+        let granted = HashSet::from(["granted-key".to_string(), String::new()]);
+        let buffered = manager.buffer_visible_room_event(
+            "private",
+            Some("owner-key"),
+            &granted,
+            false,
+            &event,
+        );
+        // An empty entry in the granted set must never widen keyless access.
+        assert_eq!(buffered, HashSet::from(["granted".to_string()]));
     }
 
     #[tokio::test]

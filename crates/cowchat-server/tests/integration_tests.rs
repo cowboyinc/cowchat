@@ -3696,3 +3696,197 @@ async fn test_protocol_version_gate() {
         Some(2)
     );
 }
+
+// --- Room invites ---
+
+/// Like `start_test_server` but with the HTTP listener enabled (signup stays
+/// disabled — invites must work independently of `--enable-http-signup`).
+async fn start_test_server_with_http() -> (
+    tokio::task::JoinHandle<()>,
+    String,
+    String,
+    String,
+    tempfile::TempDir,
+) {
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let db_path = tmp_dir.path().join("test.db");
+    let key_path = tmp_dir.path().join("auth.key");
+    let socket_path = tmp_dir.path().join("test.sock");
+
+    let mut addrs = Vec::new();
+    for _ in 0..2 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        addrs.push(listener.local_addr().unwrap().to_string());
+        drop(listener);
+    }
+    let tcp_addr = addrs[0].clone();
+    let http_addr = addrs[1].clone();
+
+    let config = ServerConfig {
+        socket_path,
+        tcp_addr: Some(tcp_addr.clone()),
+        http_addr: Some(http_addr.clone()),
+        db_path,
+        auth_key_path: key_path,
+        no_auth: false,
+        allow_keyless_local: false,
+        allow_private_webhooks: true,
+        http_signup_enabled: false,
+        http_admin_secret: None,
+        http_allowed_origins: vec![],
+        trusted_proxy_ips: vec![],
+    };
+
+    let server = CowchatServer::new(config).unwrap();
+    let api_key = server.api_key().to_string();
+    let handle = tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+    sleep(Duration::from_millis(150)).await;
+
+    (handle, tcp_addr, http_addr, api_key, tmp_dir)
+}
+
+async fn redeem_invite_http(http_addr: &str, token: &str) -> (u16, serde_json::Value) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{http_addr}/api/invites/redeem"))
+        .json(&serde_json::json!({ "token": token }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or_default();
+    (status, body)
+}
+
+#[tokio::test]
+async fn test_single_use_invite_vends_key_and_private_room_access() {
+    let (_handle, addr, http_addr, owner_key, _tmp) = start_test_server_with_http().await;
+
+    let owner = connect_agent(&addr, &owner_key, "owner").await;
+    let room = owner.create_room("invite-lab", None, None).await.unwrap();
+    owner.join_room(&room.room_id).await.unwrap();
+    owner
+        .send_message(&room.room_id, "welcome aboard", None, vec![])
+        .await
+        .unwrap();
+
+    let invite = owner.create_invite(&room.room_id, true).await.unwrap();
+    assert!(invite.token.starts_with("cinv_"));
+    assert_eq!(invite.room_id, room.room_id);
+    assert_eq!(invite.room_name, "invite-lab");
+    assert!(invite.single_use);
+
+    // Open signup is off; the invite must redeem anyway.
+    let signup = reqwest::Client::new()
+        .post(format!("http://{http_addr}/api/keys"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(signup.status().as_u16(), 403);
+
+    let (status, body) = redeem_invite_http(&http_addr, &invite.token).await;
+    assert_eq!(status, 201);
+    assert_eq!(body["room_id"], room.room_id.as_str());
+    assert_eq!(body["room_name"], "invite-lab");
+    assert_eq!(body["tier"], "free");
+    let minted_key = body["api_key"].as_str().unwrap().to_string();
+    assert_ne!(minted_key, owner_key);
+
+    // Single-use invites self-destruct: the second redeem fails generically.
+    let (reused_status, _) = redeem_invite_http(&http_addr, &invite.token).await;
+    assert_eq!(reused_status, 404);
+
+    // The stranger can now see, join, speak in, and read the private room.
+    let stranger = connect_agent(&addr, &minted_key, "stranger").await;
+    let visible = stranger.list_rooms(None).await.unwrap();
+    assert!(
+        visible.iter().any(|r| r.room_id == room.room_id),
+        "granted private room must appear in the stranger's list_rooms"
+    );
+    stranger.join_room(&room.room_id).await.unwrap();
+    stranger
+        .send_message(&room.room_id, "howdy from outside", None, vec![])
+        .await
+        .unwrap();
+    let history = stranger.get_history(&room.room_id, 10, None).await.unwrap();
+    let contents: Vec<&str> = history.iter().map(|m| m.content.as_str()).collect();
+    assert!(contents.contains(&"welcome aboard"));
+    assert!(contents.contains(&"howdy from outside"));
+
+    // Creating an invite requires access: another private room stays closed…
+    let sealed = owner
+        .create_room("no-invites-here", None, None)
+        .await
+        .unwrap();
+    let denied = stranger.create_invite(&sealed.room_id, true).await;
+    assert!(
+        matches!(
+            denied,
+            Err(cowchat_client::ClientError::Server {
+                code: cowchat_core::ErrorCode::AccessDenied,
+                ..
+            })
+        ),
+        "stranger must not mint invites for rooms it cannot access"
+    );
+    // …while the granted room is accessible, so minting there is allowed.
+    stranger.create_invite(&room.room_id, true).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_open_invite_redeems_repeatedly_and_revocation_is_owner_scoped() {
+    let (_handle, addr, http_addr, owner_key, _tmp) = start_test_server_with_http().await;
+
+    let owner = connect_agent(&addr, &owner_key, "owner").await;
+    let room = owner.create_room("open-door", None, None).await.unwrap();
+    let invite = owner.create_invite(&room.room_id, false).await.unwrap();
+    assert!(!invite.single_use);
+
+    // Open invites redeem repeatedly, minting a distinct key each time.
+    let (first_status, first) = redeem_invite_http(&http_addr, &invite.token).await;
+    let (second_status, second) = redeem_invite_http(&http_addr, &invite.token).await;
+    assert_eq!((first_status, second_status), (201, 201));
+    let first_key = first["api_key"].as_str().unwrap().to_string();
+    let second_key = second["api_key"].as_str().unwrap().to_string();
+    assert_ne!(first_key, second_key);
+
+    // A granted stranger is neither the invite's creator nor the room owner,
+    // so it cannot revoke the invite.
+    let stranger = connect_agent(&addr, &first_key, "stranger").await;
+    let denied = stranger.revoke_invite(&invite.token).await;
+    assert!(matches!(
+        denied,
+        Err(cowchat_client::ClientError::Server {
+            code: cowchat_core::ErrorCode::AccessDenied,
+            ..
+        })
+    ));
+
+    // The owner revokes; further redemption fails with the generic 404.
+    owner.revoke_invite(&invite.token).await.unwrap();
+    let (revoked_status, _) = redeem_invite_http(&http_addr, &invite.token).await;
+    assert_eq!(revoked_status, 404);
+
+    // Revoking an unknown token reports InviteNotFound.
+    let missing = owner.revoke_invite("cinv_does_not_exist").await;
+    assert!(matches!(
+        missing,
+        Err(cowchat_client::ClientError::Server {
+            code: cowchat_core::ErrorCode::InviteNotFound,
+            ..
+        })
+    ));
+
+    // Keys minted before revocation keep their grants.
+    for key in [&first_key, &second_key] {
+        let holder = connect_agent(&addr, key, "holder").await;
+        let visible = holder.list_rooms(None).await.unwrap();
+        assert!(visible.iter().any(|r| r.room_id == room.room_id));
+        holder.join_room(&room.room_id).await.unwrap();
+    }
+}
