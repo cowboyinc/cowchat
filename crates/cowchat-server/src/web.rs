@@ -290,14 +290,18 @@ async fn create_api_key(
             Json(serde_json::json!({"error": "HTTP signup is disabled"})),
         );
     }
-    let supplied_admin = headers
-        .get(ADMIN_HEADER)
-        .and_then(|value| value.to_str().ok());
-    if state.admin_secret.as_deref().is_none() || supplied_admin != state.admin_secret.as_deref() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "admin secret required"})),
-        );
+    // With no admin secret configured, signup is open self-serve; the per-IP
+    // rate limit below is the only brake on key minting.
+    if let Some(admin_secret) = state.admin_secret.as_deref() {
+        let supplied_admin = headers
+            .get(ADMIN_HEADER)
+            .and_then(|value| value.to_str().ok());
+        if supplied_admin != Some(admin_secret) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "admin secret required"})),
+            );
+        }
     }
     let client_ip = signup_bucket(peer, &headers, &state.trusted_proxy_ips);
     if !state.rate_limiter.try_register_signup(&client_ip) {
@@ -789,7 +793,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signup_requires_explicit_mode_and_admin_secret() {
+    async fn signup_requires_explicit_mode_and_admin_secret_when_configured() {
         let peer = ConnectInfo("127.0.0.1:1234".parse().unwrap());
         let disabled = create_api_key(State(test_state()), peer, HeaderMap::new(), None)
             .await
@@ -812,6 +816,43 @@ mod tests {
             .await
             .into_response();
         assert_eq!(created.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn signup_without_admin_secret_is_open_and_rate_limited() {
+        let peer = ConnectInfo("127.0.0.1:1234".parse().unwrap());
+        let mut open = test_state();
+        open.signup_enabled = true;
+        open.admin_secret = None;
+
+        let created = create_api_key(State(open.clone()), peer, HeaderMap::new(), None)
+            .await
+            .into_response();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        // A stray admin header on an open server must not break signup.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HeaderName::from_static(ADMIN_HEADER),
+            HeaderValue::from_static("ignored"),
+        );
+        let with_header = create_api_key(State(open.clone()), peer, headers, None)
+            .await
+            .into_response();
+        assert_eq!(with_header.status(), StatusCode::CREATED);
+
+        // The per-IP mint throttle is the only brake in open mode.
+        let mut throttled_status = StatusCode::CREATED;
+        for _ in 0..64 {
+            let response = create_api_key(State(open.clone()), peer, HeaderMap::new(), None)
+                .await
+                .into_response();
+            throttled_status = response.status();
+            if throttled_status == StatusCode::TOO_MANY_REQUESTS {
+                break;
+            }
+        }
+        assert_eq!(throttled_status, StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

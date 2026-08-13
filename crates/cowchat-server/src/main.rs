@@ -54,12 +54,13 @@ enum Commands {
         #[arg(long)]
         http: Option<String>,
 
-        /// Allow POST /api/keys (also requires --http-admin-secret).
-        #[arg(long, requires = "http_admin_secret")]
+        /// Allow POST /api/keys. Open self-serve (per-IP rate-limited) unless
+        /// --http-admin-secret gates it.
+        #[arg(long)]
         enable_http_signup: bool,
 
-        /// Secret required in X-Cowchat-Admin for HTTP key creation
-        ///.
+        /// Secret required in X-Cowchat-Admin for HTTP key creation. Omit to
+        /// leave signup open when --enable-http-signup is set.
         #[arg(long)]
         http_admin_secret: Option<String>,
 
