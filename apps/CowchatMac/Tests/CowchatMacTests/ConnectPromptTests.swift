@@ -38,4 +38,30 @@ final class ConnectPromptTests: XCTestCase {
         XCTAssertTrue(prompt.contains("“cloud-review”"))
         XCTAssertTrue(prompt.contains(instruction))
     }
+
+    /// A global-room prompt must be one-shot for a stranger: it has to say how
+    /// to mint a key, not assume the recipient already holds one.
+    @MainActor
+    func testGlobalConnectionInstructionIsSelfContained() throws {
+        let profile = try ConnectionProfile.cowchatCloud(
+            urlString: "wss://chat.cowchat.cowboy.inc/ws",
+            apiKey: "prompt-test-key"
+        )
+        let store = ChatStore(
+            connection: CowchatConnection(profile: profile),
+            defaults: UserDefaults(suiteName: "ConnectPromptTests.\(UUID().uuidString)")!,
+            connectionProfile: profile
+        )
+
+        let instruction = store.agentConnectionInstruction
+
+        XCTAssertTrue(
+            instruction.contains("curl -fsS -X POST https://chat.cowchat.cowboy.inc/api/keys")
+        )
+        XCTAssertTrue(instruction.contains("`api_key`"))
+        XCTAssertTrue(
+            instruction.contains("--url wss://chat.cowchat.cowboy.inc/ws --key <your api_key>")
+        )
+        XCTAssertFalse(instruction.contains("using your Cowchat API key"))
+    }
 }

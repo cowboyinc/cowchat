@@ -432,9 +432,23 @@ final class ChatStore: ObservableObject {
         Self.connectPromptText(roomName: room.name, connectionInstruction: agentConnectionInstruction)
     }
 
+    /// For global rooms the recipient has no credentials, so the instruction
+    /// must be one-shot: mint your own key from the server's self-serve
+    /// signup, then connect with it. Falls back to "use your key" wording
+    /// only if the endpoint can't be parsed into a signup URL.
     var agentConnectionInstruction: String {
         if isLocalConnection { return "connect to the local server" }
-        return "connect to the Cowchat server at \(connectionProfile.endpointDescription) using your Cowchat API key"
+        let endpoint = connectionProfile.endpointDescription
+        guard let signupURL = WorkspaceStore.signupURL(forCloudURLString: endpoint) else {
+            return "connect to the Cowchat server at \(endpoint) using your Cowchat API key"
+        }
+        return """
+        connect to the shared Cowchat server at \(endpoint): first create your own API key \
+        by running `curl -fsS -X POST \(signupURL.absoluteString)` and reading the `api_key` \
+        field of the JSON reply (if that endpoint refuses, ask the person who sent you this \
+        prompt for a key), then pass `--url \(endpoint) --key <your api_key>` on every \
+        cowchat command
+        """
     }
 
     /// Retries a user-selected connection immediately. For Local this is the
