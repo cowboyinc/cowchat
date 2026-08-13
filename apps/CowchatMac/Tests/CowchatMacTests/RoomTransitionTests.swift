@@ -64,12 +64,14 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
             throw error
         }
     }
+    var registrationErrors: [Error] = []
     func register(name: String, agentID: String) async throws -> CowchatRegistration {
         registeredAgentIDs.append(agentID)
         if blocksNextRegistration {
             blocksNextRegistration = false
             await withCheckedContinuation { registrationContinuation = $0 }
         }
+        if !registrationErrors.isEmpty { throw registrationErrors.removeFirst() }
         if let registrationError { throw registrationError }
         return CowchatRegistration(
             agentID: registration.agentID.isEmpty ? agentID : registration.agentID,
@@ -2509,6 +2511,49 @@ final class RoomTransitionTests: XCTestCase {
         }
         XCTAssertTrue(reason.contains("reserved"))
         XCTAssertFalse(connection.operations.contains("create:Lobby"))
+    }
+
+    @MainActor
+    func testAgentIDBoundToStaleKeyRotatesAndRetriesOnce() async throws {
+        let suiteName = "RoomTransitionTests.rotate.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("cowchat-mac-stale", forKey: "CowchatMac.agentID")
+        defaults.set(true, forKey: ChatStore.didCreateDefaultRoomKey)
+        let connection = MockRoomConnection()
+        connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby")]
+        // The server rejects the persisted ID (bound to a rotated-away key);
+        // the retry must present a freshly minted ID and stick with it.
+        connection.registrationErrors = [
+            CowchatConnectionError.server(
+                message: "Agent ID belongs to a different API key",
+                code: "agent_id_taken"
+            )
+        ]
+        let store = ChatStore(connection: connection, defaults: defaults)
+
+        await store.connect()
+
+        XCTAssertTrue(store.connectionStatus.isConnected)
+        XCTAssertEqual(connection.registeredAgentIDs.count, 2)
+        XCTAssertEqual(connection.registeredAgentIDs.first, "cowchat-mac-stale")
+        let rotated = try XCTUnwrap(connection.registeredAgentIDs.last)
+        XCTAssertNotEqual(rotated, "cowchat-mac-stale")
+        XCTAssertEqual(defaults.string(forKey: "CowchatMac.agentID"), rotated)
+
+        // A second rejection in the same attempt is a real error, not a loop.
+        connection.registrationErrors = [
+            CowchatConnectionError.server(message: "taken", code: "agent_id_taken"),
+            CowchatConnectionError.server(message: "taken", code: "agent_id_taken"),
+        ]
+        store.connectionStatus = .disconnected
+        await store.connect()
+        if case .failed = store.connectionStatus {} else {
+            XCTFail("expected failure after repeated agent_id_taken, got \(store.connectionStatus)")
+        }
+        // Exactly one rotation per attempt: two more registers, no spin.
+        XCTAssertEqual(connection.registeredAgentIDs.count, 4)
     }
 
     @MainActor

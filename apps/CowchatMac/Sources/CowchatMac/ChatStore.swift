@@ -150,6 +150,25 @@ final class ChatStore: ObservableObject {
         return generated
     }
 
+    private func isAgentIDTaken(_ error: CowchatConnectionError) -> Bool {
+        if case .server(_, .some("agent_id_taken")) = error { return true }
+        return false
+    }
+
+    /// Abandons the persisted agent ID for this profile scope and mints a
+    /// replacement. Old messages stop reading as "mine", which is the price
+    /// of unbricking a connection whose ID is bound to a dead key.
+    private func rotateStableAgentID() -> String {
+        let key = connectionProfile.persistentIdentityScope
+            .map { "CowchatMac.agentID.\($0)" } ?? "CowchatMac.agentID"
+        defaults.removeObject(forKey: key)
+        stableAgentID = Self.resolveAgentID(
+            defaults: defaults,
+            scope: connectionProfile.persistentIdentityScope
+        )
+        return stableAgentID
+    }
+
     nonisolated static let didCreateDefaultRoomKey = "CowchatMac.didCreateDefaultRoom"
     nonisolated static let defaultRoomBackfillKey = "CowchatMac.defaultRoomBackfillAttempted"
 
@@ -302,10 +321,28 @@ final class ChatStore: ObservableObject {
             try await connectTransport(expectedProfileGeneration: expectedProfileGeneration)
             guard expectedProfileGeneration == profileGeneration,
                   connectionProfile == expectedProfile else { return }
-            let registration = try await connection.register(
-                name: agentName,
-                agentID: expectedAgentID
-            )
+            let registration: CowchatRegistration
+            do {
+                registration = try await connection.register(
+                    name: agentName,
+                    agentID: expectedAgentID
+                )
+            } catch let error as CowchatConnectionError
+                where isAgentIDTaken(error)
+            {
+                // The stored agent ID is bound to a stale API key on this
+                // server — typically ~/.cowchat/auth.key rotated out from
+                // under an old identity binding, which rejects every register
+                // forever. The ID is an app-internal handle, so mint a fresh
+                // one and retry once instead of bricking the connection.
+                guard expectedProfileGeneration == profileGeneration,
+                      connectionProfile == expectedProfile else { return }
+                let rotated = rotateStableAgentID()
+                registration = try await connection.register(
+                    name: agentName,
+                    agentID: rotated
+                )
+            }
             guard expectedProfileGeneration == profileGeneration,
                   connectionProfile == expectedProfile else { return }
             agentID = registration.agentID
