@@ -114,7 +114,7 @@ final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct CowchatMacApp: App {
     @NSApplicationDelegateAdaptor(CowchatAppDelegate.self) private var appDelegate
-    @StateObject private var store = ChatStore()
+    @StateObject private var workspace = WorkspaceStore()
     @StateObject private var updateChecker = UpdateChecker()
     @AppStorage(CowchatOnboarding.completedVersionKey) private var completedOnboardingVersion = 0
 
@@ -131,13 +131,14 @@ struct CowchatMacApp: App {
                     }
                 }
             }
-            .environmentObject(store)
+            .environmentObject(workspace)
+            .environmentObject(workspace.activeStore)
             .tint(SemanticColor.buttonPrimaryDefault)
             .task {
                 appDelegate.onTerminationRequested = {
-                    await store.shutdownOwnedLocalServerForAppTermination()
+                    await workspace.shutdownForAppTermination()
                 }
-                store.start()
+                workspace.start()
                 // Let the window settle first: an alert presented before the
                 // scene is ready is silently dropped.
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -186,7 +187,7 @@ struct CowchatMacApp: App {
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(after: .newItem) {
-                Button("New Room") { store.presentCreateRoom() }
+                Button("New Room") { workspace.activeStore.presentCreateRoom() }
                     .keyboardShortcut("n", modifiers: .command)
                     .disabled(completedOnboardingVersion < CowchatOnboarding.currentVersion)
             }

@@ -75,19 +75,19 @@ cd apps/CowchatMac
 open ~/Applications/Cowchat.app
 ```
 
-Use the connection selector at the bottom-left of the app to switch between:
+The app talks to up to two servers at once, and the sidebar shows both servers'
+rooms side by side:
 
-- **Local** — connects to `127.0.0.1:9229` without a key. If an existing server
-  is available, the app uses it and never assumes ownership of that process. If
-  the app starts its bundled server, it sends that owned child a graceful
-  shutdown signal when Cowchat quits. The SQLite database remains in
+- **Local** — always on. Connects to `127.0.0.1:9229` without a key. If an
+  existing server is available, the app uses it and never assumes ownership of
+  that process. If the app starts its bundled server, it sends that owned child
+  a graceful shutdown signal when Cowchat quits. The SQLite database remains in
   `~/.cowchat`.
-- **Cowchat Cloud** — connects to a configured `wss://` endpoint and registers
-  with its API key. A non-secret endpoint mirror is kept in app preferences for
-  display, while the endpoint and key are bound together in this Mac's
-  non-synchronizing, device-only Keychain. When leaving Local, the app stops only
-  a helper it launched itself; it never stops an independently started local
-  server.
+- **Global** — optional. Settings offers Cowboy's hosted server
+  (`wss://chat.cowchat.cowboy.inc/ws`) by default; paste an API key to join, or
+  point it at any other `wss://` endpoint. A non-secret endpoint mirror is kept
+  in app preferences for display, while the endpoint and key are bound together
+  in this Mac's non-synchronizing, device-only Keychain.
 
 The app supports plaintext rooms; encrypted rooms are visible but read-only
 for now. Local archive and pin state is kept separately for each connection.

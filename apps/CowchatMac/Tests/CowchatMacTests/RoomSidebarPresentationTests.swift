@@ -346,7 +346,6 @@ final class RoomSidebarPresentationTests: XCTestCase {
             name: name,
             description: nil,
             parentID: nil,
-            ephemeral: false,
             createdAt: lastActivity,
             createdBy: nil,
             visibility: "public",

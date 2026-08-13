@@ -113,7 +113,6 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         name: String,
         description: String?,
         parentID: String?,
-        ephemeral: Bool,
         isPublic: Bool
     ) async throws -> Room {
         operations.append("create:\(name)")
@@ -148,7 +147,6 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
             name: name,
             description: room.description,
             parentID: room.parentID,
-            ephemeral: room.ephemeral,
             createdAt: room.createdAt,
             createdBy: room.createdBy,
             visibility: room.visibility,
@@ -615,23 +613,19 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
-    func testReturningToLocalAndManualReconnectPermitOneExplicitHelperRetry() async throws {
+    func testManualReconnectsPermitOneExplicitHelperRetryEach() async throws {
         let connection = MockRoomConnection()
         let supervisor = MockLocalServerSupervisor()
-        let cloud = try ConnectionProfile.cowchatCloud(
-            urlString: "wss://cloud.example/ws",
-            apiKey: "retry-key"
-        )
         let defaults = UserDefaults(suiteName: "RoomTransitionTests.retry-helper.\(UUID().uuidString)")!
         let store = ChatStore(
             connection: connection,
             defaults: defaults,
-            connectionProfile: cloud,
+            connectionProfile: .local,
             localServerSupervisor: supervisor,
             localServerRetryDelaysNanoseconds: []
         )
 
-        store.useLocalConnection()
+        store.reconnect()
         XCTAssertEqual(supervisor.explicitRetryCount, 1)
         while !store.connectionStatus.isConnected { await Task.yield() }
 
@@ -762,7 +756,6 @@ final class RoomTransitionTests: XCTestCase {
             await store.createRoom(
                 name: "Stale",
                 description: "",
-                ephemeral: false,
                 isPublic: true
             )
         }
@@ -794,7 +787,6 @@ final class RoomTransitionTests: XCTestCase {
             await store.createRoom(
                 name: "Stale",
                 description: "",
-                ephemeral: false,
                 isPublic: true
             )
         }
@@ -1004,7 +996,6 @@ final class RoomTransitionTests: XCTestCase {
             let data = try JSONSerialization.data(withJSONObject: [
                 "room_id": id,
                 "name": id,
-                "ephemeral": false,
                 "created_at": "2026-07-11T12:00:00Z",
                 "visibility": "public",
                 "last_activity": activity,
@@ -1066,7 +1057,6 @@ final class RoomTransitionTests: XCTestCase {
         {
           "room_id":"room",
           "name":"room",
-          "ephemeral":false,
           "created_at":"2026-07-11T12:00:00Z",
           "visibility":"public"
         }
@@ -1670,7 +1660,6 @@ final class RoomTransitionTests: XCTestCase {
             let data = try JSONSerialization.data(withJSONObject: [
                 "room_id": id,
                 "name": id,
-                "ephemeral": false,
                 "created_at": "2026-07-11T12:00:00Z",
                 "visibility": "public",
             ])
@@ -1703,7 +1692,6 @@ final class RoomTransitionTests: XCTestCase {
         {
           "room_id":"room",
           "name":"room",
-          "ephemeral":false,
           "created_at":"2026-07-11T12:00:00Z",
           "visibility":"public",
           "last_activity":"2026-07-12T12:00:00Z"
@@ -1767,7 +1755,6 @@ final class RoomTransitionTests: XCTestCase {
         {
           "room_id":"room",
           "name":"room",
-          "ephemeral":false,
           "created_at":"2026-07-11T12:00:00Z",
           "visibility":"public",
           "last_activity":"2026-07-12T12:00:00Z"
@@ -1918,7 +1905,6 @@ final class RoomTransitionTests: XCTestCase {
             let json: [String: Any] = [
                 "room_id": id,
                 "name": id,
-                "ephemeral": false,
                 "created_at": "2026-07-11T12:00:00Z",
                 "visibility": "public",
             ]
@@ -2054,7 +2040,6 @@ final class RoomTransitionTests: XCTestCase {
         connection.onEvent?("room_updated", [
             "room_id": parent.id,
             "name": "Stale Parent",
-            "ephemeral": false,
             "created_at": "2026-08-04T12:00:00Z",
             "visibility": "public",
         ])
@@ -2089,7 +2074,6 @@ final class RoomTransitionTests: XCTestCase {
         connection.onEvent?("room_updated", [
             "room_id": "design",
             "name": "Design Systems",
-            "ephemeral": false,
             "created_at": "2026-08-04T12:00:00Z",
             "created_by": "creator-agent",
             "visibility": "public",
@@ -2222,7 +2206,6 @@ final class RoomTransitionTests: XCTestCase {
         let created = await store.createRoom(
             name: room.name,
             description: "",
-            ephemeral: false,
             isPublic: false
         )
         XCTAssertTrue(created)
@@ -2273,7 +2256,6 @@ final class RoomTransitionTests: XCTestCase {
         _ = await store.createRoom(
             name: room.name,
             description: "",
-            ephemeral: false,
             isPublic: false
         )
 
@@ -2293,7 +2275,7 @@ final class RoomTransitionTests: XCTestCase {
         connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby"), room]
         await store.connect()
         connection.roomToCreate = room
-        _ = await store.createRoom(name: "my-room", description: "", ephemeral: false, isPublic: true)
+        _ = await store.createRoom(name: "my-room", description: "", isPublic: true)
 
         // Collaborator appears while the room is selected → in-place flip.
         connection.agentsByRoom["r1"] = [AgentPresence(agentID: "other", name: "codex")]
@@ -2514,7 +2496,7 @@ final class RoomTransitionTests: XCTestCase {
         await store.connect()
 
         let created = await store.createRoom(
-            name: "Lobby", description: "", ephemeral: false, isPublic: true
+            name: "Lobby", description: "", isPublic: true
         )
         XCTAssertFalse(created)
         XCTAssertNotNil(store.errorMessage)
@@ -2525,13 +2507,11 @@ final class RoomTransitionTests: XCTestCase {
         id: String,
         name: String,
         createdBy: String? = nil,
-        ephemeral: Bool = false,
         memberCount: Int? = nil
     ) throws -> Room {
         var json: [String: Any] = [
             "room_id": id,
             "name": name,
-            "ephemeral": ephemeral,
             "created_at": "2026-08-04T12:00:00Z",
             "visibility": "public",
         ]
