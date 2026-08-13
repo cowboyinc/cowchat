@@ -12,7 +12,7 @@ fn truncate_for_log(s: &str, max: usize) -> String {
 }
 
 use crate::broker::Broker;
-use crate::connection::{can_access_room, matches_room_owner};
+use crate::connection::{can_access_room, can_access_room_parts, matches_room_owner};
 use crate::reconnect::ReconnectManager;
 
 fn normalize_room_name(req_id: Option<&str>, name: &str) -> Result<String, Frame> {
@@ -37,6 +37,7 @@ fn room_name_conflicts(
 fn broadcast_visible_room_event(
     broker: &Broker,
     reconnect_mgr: &ReconnectManager,
+    store: &Store,
     room: &Room,
     no_auth: bool,
     event: &Frame,
@@ -44,23 +45,41 @@ fn broadcast_visible_room_event(
     // Buffer first and return the exact claimed/stashed identities that won
     // that routing race. Live delivery then skips those IDs, so a reconnect
     // transition receives each metadata event through exactly one path.
+    let granted = store.granted_keys_for_room(&room.room_id);
     let buffered = reconnect_mgr.buffer_visible_room_event(
         &room.visibility,
         room.owner_key.as_deref(),
+        &granted,
         no_auth,
         event,
     );
     for entry in broker.agents.iter() {
-        if !buffered.contains(entry.key()) && can_access_room(room, &entry.value().api_key, no_auth)
+        if !buffered.contains(entry.key())
+            && can_access_room(room, &entry.value().api_key, no_auth, store)
         {
             broker.send_to_agent(entry.key(), event.clone());
         }
     }
 }
 
-pub(crate) fn broadcast_room_destroyed(broker: &Broker, room: &Room, no_auth: bool, event: &Frame) {
+/// `granted_keys` is a pre-destruction snapshot: the grants cache is purged
+/// with the room, so the live check alone would skip invited members.
+pub(crate) fn broadcast_room_destroyed(
+    broker: &Broker,
+    room: &Room,
+    granted_keys: &HashSet<String>,
+    no_auth: bool,
+    event: &Frame,
+) {
     for entry in broker.agents.iter() {
-        if can_access_room(room, &entry.value().api_key, no_auth) {
+        let api_key = entry.value().api_key.as_str();
+        if can_access_room_parts(
+            &room.visibility,
+            room.owner_key.as_deref(),
+            api_key,
+            no_auth,
+        ) || (!api_key.is_empty() && granted_keys.contains(api_key))
+        {
             broker.send_to_agent(entry.key(), event.clone());
         }
     }
@@ -120,8 +139,8 @@ fn reject_oversized(req_id: Option<&str>, content: &str, limits: &TierLimits) ->
 
 /// Authorize a room-scoped operation consistently. Public and system rooms are
 /// readable by every authenticated key; private rooms are visible only to the
-/// owning key. Membership requirements are enforced separately by operations
-/// that mutate room coordination state.
+/// owning key or a key holding an invite-issued grant. Membership requirements
+/// are enforced separately by operations that mutate room coordination state.
 fn authorize_room(
     req_id: Option<&str>,
     room_id: &str,
@@ -135,7 +154,7 @@ fn authorize_room(
             ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
         )
     })?;
-    if !can_access_room(&room, agent_api_key, no_auth) {
+    if !can_access_room(&room, agent_api_key, no_auth, store) {
         return Err(Frame::error(
             req_id,
             ErrorPayload::new(ErrorCode::AccessDenied, "This room is private"),
@@ -383,6 +402,14 @@ pub async fn handle_frame(
                 .await
         }
 
+        // Room invites
+        FrameType::CreateInvite => {
+            handle_create_invite(req_id, frame.payload, broker, store, agent_api_key, no_auth).await
+        }
+        FrameType::RevokeInvite => {
+            handle_revoke_invite(req_id, frame.payload, store, agent_api_key, no_auth).await
+        }
+
         // Tasks
         FrameType::AssignTask => {
             handle_assign_task(req_id, frame.payload, agent_id, broker, task_mgr).await
@@ -508,7 +535,7 @@ async fn handle_create_room(
             }
 
             let event = Frame::event(FrameType::RoomCreated, serde_json::to_value(&room).unwrap());
-            broadcast_visible_room_event(broker, reconnect_mgr, &room, no_auth, &event);
+            broadcast_visible_room_event(broker, reconnect_mgr, store, &room, no_auth, &event);
             Frame::ok(req_id, serde_json::to_value(&room).unwrap())
         }
         Err(crate::store::StoreError::RoomNameTaken(name)) => Frame::error(
@@ -667,7 +694,7 @@ async fn handle_rename_room(
         FrameType::RoomUpdated,
         serde_json::to_value(&updated).unwrap(),
     );
-    broadcast_visible_room_event(broker, reconnect_mgr, &updated, no_auth, &event);
+    broadcast_visible_room_event(broker, reconnect_mgr, store, &updated, no_auth, &event);
     log::info!(
         "Room {} renamed to {:?} by {}",
         updated.room_id,
@@ -768,6 +795,10 @@ async fn handle_destroy_room(
     // rename/create.
     let _room_guard = broker.lock_room_mutation();
 
+    // Snapshot invite grants before destruction purges them, so invited
+    // members still receive the RoomDestroyed event.
+    let granted_keys = store.granted_keys_for_room(&p.room_id);
+
     let destruction = broker
         .destroy_room_with(&p.room_id, || {
             store.destroy_room_authorized(&p.room_id, agent_id, agent_api_key, no_auth)
@@ -821,7 +852,7 @@ async fn handle_destroy_room(
         FrameType::RoomDestroyed,
         serde_json::json!({"room_id": room.room_id}),
     );
-    broadcast_room_destroyed(broker, &room, no_auth, &event);
+    broadcast_room_destroyed(broker, &room, &granted_keys, no_auth, &event);
 
     log::info!("Room {} explicitly destroyed by {}", room.room_id, agent_id);
     Frame::ok(req_id, serde_json::json!({"room_id": room.room_id}))
@@ -1191,7 +1222,7 @@ async fn handle_list_rooms(
 
     let mut rooms = match store.list_rooms(p.parent_id.as_deref()) {
         Ok(mut rooms) => {
-            rooms.retain(|room| can_access_room(room, agent_api_key, no_auth));
+            rooms.retain(|room| can_access_room(room, agent_api_key, no_auth, store));
             rooms
         }
         Err(e) => {
@@ -1291,7 +1322,7 @@ async fn handle_room_info(
 
     // Get sub-rooms
     let mut sub_rooms = store.list_rooms(Some(&p.room_id)).unwrap_or_default();
-    sub_rooms.retain(|child| can_access_room(child, agent_api_key, no_auth));
+    sub_rooms.retain(|child| can_access_room(child, agent_api_key, no_auth, store));
 
     Frame {
         id: Some(uuid::Uuid::new_v4().to_string()),
@@ -2459,6 +2490,127 @@ async fn handle_enable_subscription(
         req_id,
         serde_json::json!({"subscription_id": sub.subscription_id, "status": "active"}),
     )
+}
+
+// --- Room invites ---
+
+async fn handle_create_invite(
+    req_id: Option<&str>,
+    payload: serde_json::Value,
+    broker: &Arc<Broker>,
+    store: &Arc<Store>,
+    agent_api_key: &str,
+    no_auth: bool,
+) -> Frame {
+    let p: CreateInvitePayload = match serde_json::from_value(payload) {
+        Ok(p) => p,
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, e.to_string()),
+            )
+        }
+    };
+
+    let room = match authorize_room(req_id, &p.room_id, agent_api_key, no_auth, store) {
+        Ok(room) => room,
+        Err(error) => return error,
+    };
+
+    let token = crate::auth::generate_invite_token();
+    let token_hash = crate::auth::hash_invite_token(&token);
+    if let Err(e) = store.create_invite(&token_hash, &room.room_id, agent_api_key, p.single_use) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+        );
+    }
+
+    // Destruction may race authorization and the insert. The lifecycle
+    // tombstone is authoritative: remove the just-created invite rather than
+    // leaving a token that would vend keys for a dead room.
+    if broker.is_room_destroyed(&room.room_id) {
+        let _ = store.delete_room_artifacts(&room.room_id);
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::RoomNotFound, "Room not found"),
+        );
+    }
+
+    let info = InviteInfo {
+        token,
+        room_id: room.room_id,
+        room_name: room.name,
+        single_use: p.single_use,
+    };
+    Frame::ok(req_id, serde_json::to_value(&info).unwrap())
+}
+
+async fn handle_revoke_invite(
+    req_id: Option<&str>,
+    payload: serde_json::Value,
+    store: &Arc<Store>,
+    agent_api_key: &str,
+    no_auth: bool,
+) -> Frame {
+    let p: RevokeInvitePayload = match serde_json::from_value(payload) {
+        Ok(p) => p,
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, e.to_string()),
+            )
+        }
+    };
+
+    let token_hash = crate::auth::hash_invite_token(&p.token);
+    let invite = match store.get_invite(&token_hash) {
+        Ok(Some(invite)) => invite,
+        Ok(None) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InviteNotFound, "Invite not found"),
+            )
+        }
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+            )
+        }
+    };
+
+    // Revocation authority: the invite's creator key, or the room's owner key.
+    let is_creator = invite.created_by_key == agent_api_key;
+    let is_room_owner = store
+        .get_room(&invite.room_id)
+        .ok()
+        .flatten()
+        .is_some_and(|room| matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth));
+    if !no_auth && !is_creator && !is_room_owner {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(
+                ErrorCode::AccessDenied,
+                "Only the invite's creator or the room owner can revoke it",
+            ),
+        );
+    }
+
+    match store.revoke_invite(&token_hash) {
+        Ok(true) => Frame::ok(
+            req_id,
+            serde_json::json!({"revoked": true, "room_id": invite.room_id}),
+        ),
+        Ok(false) => Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InviteNotFound, "Invite not found"),
+        ),
+        Err(e) => Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
 }
 
 #[cfg(test)]

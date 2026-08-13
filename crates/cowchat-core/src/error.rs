@@ -43,6 +43,7 @@ pub enum ErrorCode {
     UnsupportedProtocol,
     AccessDenied,
     TaskNotFound,
+    InviteNotFound,
     /// Plaintext content was sent to an end-to-end encrypted room.
     PlaintextInEncryptedRoom,
 }

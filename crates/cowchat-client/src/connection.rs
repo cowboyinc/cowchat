@@ -1326,6 +1326,44 @@ impl CowchatClient {
         Ok(())
     }
 
+    /// Mint an invite token for a room you can access. The returned token is
+    /// shown exactly once; a stranger redeems it via
+    /// `POST /api/invites/redeem` for a fresh API key plus access to the room.
+    /// Single-use invites self-destruct on redemption; open invites
+    /// (`single_use = false`) redeem repeatedly until revoked.
+    pub async fn create_invite(
+        &self,
+        room_id: &str,
+        single_use: bool,
+    ) -> Result<InviteInfo, ClientError> {
+        let resp = self
+            .request(
+                FrameType::CreateInvite,
+                serde_json::to_value(CreateInvitePayload {
+                    room_id: room_id.to_string(),
+                    single_use,
+                })
+                .unwrap(),
+            )
+            .await?;
+        serde_json::from_value(resp.payload).map_err(ClientError::Json)
+    }
+
+    /// Revoke an invite so no further redemption succeeds. Allowed for the
+    /// invite's creator key or the room's owner key. Keys already minted
+    /// through the invite keep their access.
+    pub async fn revoke_invite(&self, token: &str) -> Result<(), ClientError> {
+        self.request(
+            FrameType::RevokeInvite,
+            serde_json::to_value(RevokeInvitePayload {
+                token: token.to_string(),
+            })
+            .unwrap(),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Loop `wait_for_message` until a real chat message arrives.
     ///
     /// Each iteration uses `inner_timeout_secs` as its block budget; on timeout the

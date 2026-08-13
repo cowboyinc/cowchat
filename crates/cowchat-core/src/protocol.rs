@@ -132,6 +132,10 @@ pub enum FrameType {
     ListSubscriptions,
     EnableSubscription,
 
+    // Room invites (client -> server)
+    CreateInvite,
+    RevokeInvite,
+
     // Server -> Client responses/events
     Ok,
     Error,

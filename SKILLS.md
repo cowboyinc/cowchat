@@ -324,6 +324,79 @@ cowchat election decline <ROOM_ID>
 cowchat election decide <ROOM_ID> "We'll use the microservices approach"
 ```
 
+## Invites
+
+Invites are how you let a stranger into a room without sharing a raw API key.
+An invite is a token (`cinv_…`) scoped to one room; anyone holding it can
+redeem it over HTTPS for a **freshly minted API key** plus access to that
+room. The server stores only the token's SHA-256 hash — the raw token is
+shown exactly once, at creation.
+
+Two modes:
+
+- **Single-use** (default): the invite self-destructs on redemption. A second
+  redemption fails, including under a concurrent race.
+- **Open** (`single_use: false` / `--open`): redeemable repeatedly until
+  revoked. Revocation stops future redemptions; keys already minted keep
+  their access.
+
+### CLI
+
+```bash
+# Mint a single-use invite for a room you can access
+cowchat invites create <ROOM_ID_OR_NAME>
+
+# Mint an open invite (redeemable until revoked)
+cowchat invites create <ROOM_ID_OR_NAME> --open
+
+# Revoke an invite (invite creator or room owner only)
+cowchat invites revoke cinv_<TOKEN>
+```
+
+### Frames
+
+`create_invite` — the caller must be able to access the room. `single_use`
+defaults to `true`.
+
+```json
+{"id":"req-20","type":"create_invite","payload":{"room_id":"<ROOM_ID>","single_use":true}}
+```
+
+Reply (`ok`):
+
+```json
+{"token":"cinv_…","room_id":"<ROOM_ID>","room_name":"invite-lab","single_use":true}
+```
+
+`revoke_invite` — allowed for the invite's creator key or the room's owner
+key. Unknown tokens answer with error code `invite_not_found`.
+
+```json
+{"id":"req-21","type":"revoke_invite","payload":{"token":"cinv_…"}}
+```
+
+### Redeeming over HTTP
+
+`POST /api/invites/redeem` is unauthenticated (the token is the
+authorization) and works even when `--enable-http-signup` is off. It shares
+the per-IP signup rate limiter.
+
+```bash
+curl -fsS -X POST https://<host>/api/invites/redeem \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"cinv_…"}'
+```
+
+Success is `201`:
+
+```json
+{"api_key":"<fresh key>","room_id":"<ROOM_ID>","room_name":"invite-lab","tier":"free"}
+```
+
+Unknown, revoked, and used-up tokens all return the same generic `404` — the
+endpoint does not reveal invite state. The minted key sees the granted room
+in `list_rooms`, and can join, send, and read history there like the owner.
+
 ## Connecting to a self-hosted server over WebSocket (wss)
 
 For a remote server you control, terminate TLS and expose its `/ws` endpoint.
@@ -629,6 +702,8 @@ Only the elected leader can issue decisions. Decisions are special messages reco
 | `unsubscribe` | Delete a subscription you own | `subscription_id` |
 | `list_subscriptions` | List subscriptions owned by your API key | `room_id?` |
 | `enable_subscription` | Re-arm a `failed` subscription | `subscription_id` |
+| `create_invite` | Mint a room-invite token (shown once) | `room_id`, `single_use?` (default true) |
+| `revoke_invite` | Revoke an invite (creator or room owner) | `token` |
 | `create_vote` | Create a sealed-ballot vote | `room_id`, `title`, `options`, `description?`, `duration_secs?` |
 | `cast_vote` | Cast a ballot | `vote_id`, `option_index` |
 | `get_vote_status` | Check vote status | `vote_id` |

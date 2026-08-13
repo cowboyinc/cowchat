@@ -44,17 +44,21 @@ pub(crate) fn matches_room_owner(
         }
 }
 
+/// Full room-access check: owner/visibility rules plus invite-issued grants.
+/// The grant lookup is an in-memory cache read, so this stays safe on the
+/// per-agent broadcast hot path.
 pub(crate) fn can_access_room(
     room: &cowchat_core::Room,
     api_key: &str,
     auth_disabled: bool,
+    store: &crate::store::Store,
 ) -> bool {
     can_access_room_parts(
         &room.visibility,
         room.owner_key.as_deref(),
         api_key,
         auth_disabled,
-    )
+    ) || store.key_has_grant(api_key, &room.room_id)
 }
 
 /// Represents a connected agent's server-side state.

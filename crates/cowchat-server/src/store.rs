@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use cowchat_core::{ChatMessage, Room};
+use dashmap::DashMap;
 use rusqlite::{params, Connection};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -8,6 +10,10 @@ use crate::connection::{matches_room_owner, LEGACY_UNOWNED_OWNER_KEY};
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// In-memory mirror of `room_grants` (api_key -> granted room_ids).
+    /// Consulted on the per-broadcast access hot path so grant checks never
+    /// touch SQLite. Hydrated at open, updated on redemption/room destroy.
+    grants: DashMap<String, HashSet<String>>,
 }
 
 pub(crate) const MAX_ROOM_NAME_CHARS: usize = 100;
@@ -30,6 +36,15 @@ pub(crate) fn normalize_room_name(name: &str) -> Result<String, String> {
         ));
     }
     Ok(normalized.to_string())
+}
+
+#[derive(Debug, Clone)]
+pub struct InviteMeta {
+    pub room_id: String,
+    pub created_by_key: String,
+    pub single_use: bool,
+    pub redeemed_count: i64,
+    pub revoked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +82,7 @@ impl Store {
         let conn = Connection::open(path)?;
         let store = Self {
             conn: Mutex::new(conn),
+            grants: DashMap::new(),
         };
         store.initialize()?;
         for candidate in [
@@ -86,6 +102,7 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         let store = Self {
             conn: Mutex::new(conn),
+            grants: DashMap::new(),
         };
         store.initialize()?;
         Ok(store)
@@ -231,6 +248,23 @@ impl Store {
                 UNIQUE(subscription_id, message_seq)
             );
             CREATE INDEX IF NOT EXISTS idx_deliveries_pending ON subscription_deliveries(next_attempt_at);
+
+            CREATE TABLE IF NOT EXISTS room_invites (
+                token_hash     TEXT PRIMARY KEY,
+                room_id        TEXT NOT NULL,
+                created_by_key TEXT NOT NULL,
+                single_use     INTEGER NOT NULL,
+                redeemed_count INTEGER NOT NULL DEFAULT 0,
+                revoked        INTEGER NOT NULL DEFAULT 0,
+                created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_room_invites_room ON room_invites(room_id);
+
+            CREATE TABLE IF NOT EXISTS room_grants (
+                api_key TEXT NOT NULL,
+                room_id TEXT NOT NULL,
+                PRIMARY KEY (api_key, room_id)
+            );
             ",
         )?;
 
@@ -320,6 +354,19 @@ impl Store {
                AND (SELECT COUNT(*) FROM vote_ballots b WHERE b.vote_id = votes.vote_id)
                    >= eligible_voters;",
         )?;
+
+        // Hydrate the in-memory grants cache from durable room_grants so the
+        // broadcast hot path never queries SQLite.
+        {
+            let mut stmt = conn.prepare("SELECT api_key, room_id FROM room_grants")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (api_key, room_id) = row?;
+                self.grants.entry(api_key).or_default().insert(room_id);
+            }
+        }
 
         Ok(())
     }
@@ -540,6 +587,8 @@ impl Store {
             return Err(DestroyRoomError::NotFound);
         }
         tx.commit()?;
+        drop(conn);
+        self.purge_room_grants_from_cache(room_id);
         Ok(room)
     }
 
@@ -551,6 +600,8 @@ impl Store {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         delete_room_artifacts_in_transaction(&tx, room_id)?;
         tx.commit()?;
+        drop(conn);
+        self.purge_room_grants_from_cache(room_id);
         Ok(())
     }
 
@@ -994,6 +1045,129 @@ impl Store {
         Ok(tier)
     }
 
+    // --- Room invite operations ---
+
+    /// Persist a new invite. Only the SHA-256 hex of the token is stored; the
+    /// raw token exists solely in the creation reply.
+    pub fn create_invite(
+        &self,
+        token_hash: &str,
+        room_id: &str,
+        created_by_key: &str,
+        single_use: bool,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO room_invites (token_hash, room_id, created_by_key, single_use)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![token_hash, room_id, created_by_key, single_use],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_invite(&self, token_hash: &str) -> Result<Option<InviteMeta>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT room_id, created_by_key, single_use, redeemed_count, revoked
+             FROM room_invites WHERE token_hash = ?1",
+            params![token_hash],
+            |row| {
+                Ok(InviteMeta {
+                    room_id: row.get(0)?,
+                    created_by_key: row.get(1)?,
+                    single_use: row.get::<_, i64>(2)? != 0,
+                    redeemed_count: row.get(3)?,
+                    revoked: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        );
+        match result {
+            Ok(meta) => Ok(Some(meta)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StoreError::Db(e)),
+        }
+    }
+
+    /// Atomically consume one redemption. The guarded UPDATE is the whole
+    /// race: of two concurrent redeems of a single-use invite exactly one
+    /// matches `revoked = 0` and wins; the loser sees zero rows affected.
+    /// Returns the invite's room_id on success, None for unknown/revoked/
+    /// used-up tokens (callers must not distinguish those cases).
+    pub fn redeem_invite(&self, token_hash: &str) -> Result<Option<String>, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let affected = tx.execute(
+            "UPDATE room_invites
+             SET redeemed_count = redeemed_count + 1,
+                 revoked = CASE WHEN single_use != 0 THEN 1 ELSE revoked END
+             WHERE token_hash = ?1 AND revoked = 0",
+            params![token_hash],
+        )?;
+        if affected == 0 {
+            return Ok(None);
+        }
+        let room_id: String = tx.query_row(
+            "SELECT room_id FROM room_invites WHERE token_hash = ?1",
+            params![token_hash],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(Some(room_id))
+    }
+
+    /// Mark an invite revoked so no further redemption succeeds. Idempotent;
+    /// returns false only when the token hash is unknown. Keys already minted
+    /// through the invite keep their grants.
+    pub fn revoke_invite(&self, token_hash: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "UPDATE room_invites SET revoked = 1 WHERE token_hash = ?1",
+            params![token_hash],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Record that `api_key` may access `room_id`, durably and in the cache.
+    pub fn add_room_grant(&self, api_key: &str, room_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO room_grants (api_key, room_id) VALUES (?1, ?2)",
+            params![api_key, room_id],
+        )?;
+        drop(conn);
+        self.grants
+            .entry(api_key.to_string())
+            .or_default()
+            .insert(room_id.to_string());
+        Ok(())
+    }
+
+    /// Cache-only grant check — safe on the per-broadcast hot path.
+    pub fn key_has_grant(&self, api_key: &str, room_id: &str) -> bool {
+        !api_key.is_empty()
+            && self
+                .grants
+                .get(api_key)
+                .is_some_and(|rooms| rooms.contains(room_id))
+    }
+
+    /// All API keys holding a grant for `room_id` (cache scan; used on the
+    /// rare room-metadata broadcast paths, not per message).
+    pub fn granted_keys_for_room(&self, room_id: &str) -> HashSet<String> {
+        self.grants
+            .iter()
+            .filter(|entry| entry.value().contains(room_id))
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    fn purge_room_grants_from_cache(&self, room_id: &str) {
+        self.grants.retain(|_, rooms| {
+            rooms.remove(room_id);
+            !rooms.is_empty()
+        });
+    }
+
     pub fn count_rooms_for_key(&self, api_key: &str) -> Result<usize, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
@@ -1004,7 +1178,8 @@ impl Store {
         Ok(count as usize)
     }
 
-    /// List rooms visible to the given API key: all public rooms + private rooms owned by the key.
+    /// List rooms visible to the given API key: all public rooms + private
+    /// rooms owned by the key + private rooms the key holds a grant for.
     pub fn list_rooms_for_key(
         &self,
         api_key: Option<&str>,
@@ -1017,7 +1192,8 @@ impl Store {
             (Some(pid), Some(key)) => {
                 let mut stmt = conn.prepare(
                     "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted
-                     FROM rooms WHERE parent_id = ?1 AND (visibility = 'public' OR owner_key = ?2) ORDER BY name",
+                     FROM rooms WHERE parent_id = ?1 AND (visibility = 'public' OR owner_key = ?2
+                         OR room_id IN (SELECT room_id FROM room_grants WHERE api_key = ?2)) ORDER BY name",
                 )?;
                 let rows = stmt.query_map(params![pid, key], map_room_row)?;
                 for row in rows {
@@ -1037,7 +1213,8 @@ impl Store {
             (None, Some(key)) => {
                 let mut stmt = conn.prepare(
                     "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted
-                     FROM rooms WHERE visibility = 'public' OR owner_key = ?1 ORDER BY name",
+                     FROM rooms WHERE visibility = 'public' OR owner_key = ?1
+                         OR room_id IN (SELECT room_id FROM room_grants WHERE api_key = ?1) ORDER BY name",
                 )?;
                 let rows = stmt.query_map(params![key], map_room_row)?;
                 for row in rows {
@@ -1519,6 +1696,14 @@ fn delete_room_artifacts_in_transaction(
     tx.execute("DELETE FROM messages WHERE room_id = ?1", params![room_id])?;
     tx.execute(
         "DELETE FROM room_sequences WHERE room_id = ?1",
+        params![room_id],
+    )?;
+    tx.execute(
+        "DELETE FROM room_invites WHERE room_id = ?1",
+        params![room_id],
+    )?;
+    tx.execute(
+        "DELETE FROM room_grants WHERE room_id = ?1",
         params![room_id],
     )?;
     Ok(())
@@ -2538,6 +2723,129 @@ mod tests {
         sequences.sort_unstable();
         assert_eq!(sequences, (1..=24).collect::<Vec<_>>());
         assert_eq!(store.room_tip("lobby").unwrap(), 24);
+    }
+
+    #[test]
+    fn test_single_use_invite_double_redeem_race_has_exactly_one_winner() {
+        let store = std::sync::Arc::new(Store::open_in_memory().unwrap());
+        store
+            .create_room("invited", "invited", None, None, Some("creator"))
+            .unwrap();
+        store
+            .create_invite("hash-single", "invited", "owner-key", true)
+            .unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let winners = (0..8)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.redeem_invite("hash-single").unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(winners, vec!["invited".to_string()]);
+
+        let invite = store.get_invite("hash-single").unwrap().unwrap();
+        assert!(invite.revoked);
+        assert_eq!(invite.redeemed_count, 1);
+    }
+
+    #[test]
+    fn test_open_invite_redeems_repeatedly_until_revoked() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room("open-room", "open-room", None, None, Some("creator"))
+            .unwrap();
+        store
+            .create_invite("hash-open", "open-room", "owner-key", false)
+            .unwrap();
+
+        assert_eq!(
+            store.redeem_invite("hash-open").unwrap().as_deref(),
+            Some("open-room")
+        );
+        assert_eq!(
+            store.redeem_invite("hash-open").unwrap().as_deref(),
+            Some("open-room")
+        );
+        assert!(store.revoke_invite("hash-open").unwrap());
+        assert_eq!(store.redeem_invite("hash-open").unwrap(), None);
+        assert_eq!(store.redeem_invite("unknown-hash").unwrap(), None);
+        assert!(!store.revoke_invite("unknown-hash").unwrap());
+        assert_eq!(
+            store
+                .get_invite("hash-open")
+                .unwrap()
+                .unwrap()
+                .redeemed_count,
+            2
+        );
+    }
+
+    #[test]
+    fn test_room_grants_are_durable_cached_and_destroyed_with_the_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grants.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .create_room_with_visibility(
+                    "granted-room",
+                    "Granted Room",
+                    None,
+                    None,
+                    Some("creator"),
+                    "private",
+                    Some("owner-key"),
+                    false,
+                )
+                .unwrap();
+            store
+                .create_invite("hash", "granted-room", "owner-key", false)
+                .unwrap();
+            store
+                .add_room_grant("stranger-key", "granted-room")
+                .unwrap();
+            assert!(store.key_has_grant("stranger-key", "granted-room"));
+            assert!(!store.key_has_grant("", "granted-room"));
+            assert!(!store.key_has_grant("stranger-key", "lobby"));
+        }
+
+        // Cache is rehydrated from room_grants on reopen.
+        let store = Store::open(&path).unwrap();
+        assert!(store.key_has_grant("stranger-key", "granted-room"));
+        assert_eq!(
+            store.granted_keys_for_room("granted-room"),
+            HashSet::from(["stranger-key".to_string()])
+        );
+        let visible = store
+            .list_rooms_for_key(Some("stranger-key"), None)
+            .unwrap();
+        assert!(visible.iter().any(|room| room.room_id == "granted-room"));
+
+        // Destroying the room deletes its invites and grants, durably and in cache.
+        store
+            .destroy_room_authorized("granted-room", "creator", "owner-key", false)
+            .unwrap();
+        assert!(!store.key_has_grant("stranger-key", "granted-room"));
+        assert!(store.get_invite("hash").unwrap().is_none());
+        let conn = store.conn.lock().unwrap();
+        for table in ["room_invites", "room_grants"] {
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE room_id = 'granted-room'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "{table} must be cleaned on destroy");
+        }
     }
 
     #[test]

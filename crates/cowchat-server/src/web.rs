@@ -80,6 +80,7 @@ pub fn router(state: AppState) -> Router {
     let router = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/keys", post(create_api_key))
+        .route("/api/invites/redeem", post(redeem_invite))
         .route("/api/status", get(api_status))
         .route("/api/rooms", get(api_list_rooms))
         .route("/api/agents", get(api_list_agents))
@@ -333,6 +334,90 @@ async fn create_api_key(
     )
 }
 
+/// Redeem a room-invite token for a freshly minted API key plus a grant to
+/// the invite's room. Unauthenticated by design — the token IS the
+/// authorization — and independent of `--enable-http-signup` (an invite is an
+/// explicit grant, not open signup), but throttled by the same per-IP signup
+/// rate limiter. Unknown, revoked, and used-up tokens all return the same
+/// generic 404 so the endpoint is not an invite-state oracle.
+async fn redeem_invite(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Option<Json<serde_json::Value>>,
+) -> impl IntoResponse {
+    let client_ip = signup_bucket(peer, &headers, &state.trusted_proxy_ips);
+    if !state.rate_limiter.try_register_signup(&client_ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "redemption rate limit exceeded for your IP; try again later"
+            })),
+        );
+    }
+
+    let invalid = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "invalid invite token"})),
+        )
+    };
+    let Some(token) = body
+        .as_ref()
+        .and_then(|b| b.get("token"))
+        .and_then(|v| v.as_str())
+        .filter(|t| !t.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "token is required"})),
+        );
+    };
+
+    let token_hash = crate::auth::hash_invite_token(token);
+    let room_id = match state.store.redeem_invite(&token_hash) {
+        Ok(Some(room_id)) => room_id,
+        Ok(None) => return invalid(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        }
+    };
+    // Room-destroy cleanup deletes invites, so this only misses on a narrow
+    // destroy race; fail with the same generic body.
+    let Some(room) = state.store.get_room(&room_id).ok().flatten() else {
+        return invalid();
+    };
+
+    let api_key = crate::auth::generate_key();
+    let label = format!("invite:{}", room.name);
+    if let Err(e) = state.store.create_api_key(&api_key, Some(&label)) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        );
+    }
+    // The grant must be durable before the key is handed out.
+    if let Err(e) = state.store.add_room_grant(&api_key, &room_id) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        );
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "api_key": api_key,
+            "room_id": room.room_id,
+            "room_name": room.name,
+            "tier": "free",
+        })),
+    )
+}
+
 fn signup_bucket(peer: SocketAddr, headers: &HeaderMap, trusted_proxies: &[IpAddr]) -> String {
     if trusted_proxies.contains(&peer.ip()) {
         if let Some(value) = headers
@@ -358,11 +443,16 @@ async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-async fn api_list_rooms(State(state): State<AppState>) -> impl IntoResponse {
-    // Public API: only show public rooms
+async fn api_list_rooms(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    // Without a key: only public rooms. With a valid key: also private rooms
+    // owned by, or invite-granted to, that key.
+    let key = headers
+        .get(API_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|key| *key == state.api_key || state.store.validate_api_key(key).unwrap_or(false));
     let rooms = state
         .store
-        .list_rooms_for_key(None, None)
+        .list_rooms_for_key(key, None)
         .unwrap_or_default();
 
     Json(serde_json::json!({"rooms": rooms}))
@@ -859,5 +949,122 @@ mod tests {
     async fn global_agent_rest_endpoint_requires_a_key() {
         let response = api_list_agents(State(test_state()), HeaderMap::new()).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn invite_redeem_is_independent_of_signup_and_generic_on_bad_tokens() {
+        let peer = ConnectInfo("127.0.0.1:4321".parse().unwrap());
+        // Signup stays disabled in test_state — an invite is an explicit
+        // grant, so redemption must work anyway.
+        let state = test_state();
+        assert!(!state.signup_enabled);
+
+        let room = state
+            .store
+            .create_room_with_visibility(
+                "invited-room",
+                "Invited Room",
+                None,
+                None,
+                Some("creator"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        let token = crate::auth::generate_invite_token();
+        state
+            .store
+            .create_invite(
+                &crate::auth::hash_invite_token(&token),
+                &room.room_id,
+                "owner-key",
+                true,
+            )
+            .unwrap();
+
+        // Unknown token: generic 404.
+        let unknown = redeem_invite(
+            State(state.clone()),
+            peer,
+            HeaderMap::new(),
+            Some(Json(serde_json::json!({"token": "cinv_wrong"}))),
+        )
+        .await
+        .into_response();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        let unknown_body = response_json(unknown).await;
+
+        // Valid token: 201 with a freshly minted key and a recorded grant.
+        let created = redeem_invite(
+            State(state.clone()),
+            peer,
+            HeaderMap::new(),
+            Some(Json(serde_json::json!({"token": token}))),
+        )
+        .await
+        .into_response();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body = response_json(created).await;
+        assert_eq!(body["room_id"], "invited-room");
+        assert_eq!(body["room_name"], "Invited Room");
+        assert_eq!(body["tier"], "free");
+        let minted = body["api_key"].as_str().unwrap().to_string();
+        assert!(state.store.validate_api_key(&minted).unwrap());
+        assert!(state.store.key_has_grant(&minted, "invited-room"));
+
+        // Second redemption of the single-use invite: the SAME generic 404 as
+        // an unknown token — no invite-state oracle.
+        let reused = redeem_invite(
+            State(state.clone()),
+            peer,
+            HeaderMap::new(),
+            Some(Json(serde_json::json!({"token": token}))),
+        )
+        .await
+        .into_response();
+        assert_eq!(reused.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response_json(reused).await, unknown_body);
+
+        // The minted key sees the private room through the keyed room listing.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HeaderName::from_static(API_KEY_HEADER),
+            HeaderValue::from_str(&minted).unwrap(),
+        );
+        let listed = response_json(
+            api_list_rooms(State(state.clone()), headers)
+                .await
+                .into_response(),
+        )
+        .await;
+        let names: Vec<&str> = listed["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|room| room["name"].as_str())
+            .collect();
+        assert!(names.contains(&"Invited Room"));
+        // Keyless listing still shows only public rooms.
+        let public_only = response_json(
+            api_list_rooms(State(state), HeaderMap::new())
+                .await
+                .into_response(),
+        )
+        .await;
+        let public_names: Vec<&str> = public_only["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|room| room["name"].as_str())
+            .collect();
+        assert!(!public_names.contains(&"Invited Room"));
     }
 }

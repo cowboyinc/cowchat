@@ -417,6 +417,40 @@ pub struct SubscribePayload {
     pub since_seq: Option<i64>,
 }
 
+// --- Room invites ---
+
+/// Mint an invite token for a room. The raw token is returned exactly once;
+/// the server persists only its SHA-256 hash. Anyone holding the token can
+/// redeem it over HTTP (`POST /api/invites/redeem`) for a fresh API key plus
+/// a grant to the room.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateInvitePayload {
+    pub room_id: String,
+    /// Single-use invites self-destruct on redemption; open invites
+    /// (`single_use = false`) redeem repeatedly until revoked. Default: true.
+    #[serde(default = "default_single_use")]
+    pub single_use: bool,
+}
+
+fn default_single_use() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokeInvitePayload {
+    pub token: String,
+}
+
+/// Returned by `create_invite`. `token` is shown only here — it cannot be
+/// recovered later.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InviteInfo {
+    pub token: String,
+    pub room_id: String,
+    pub room_name: String,
+    pub single_use: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnsubscribePayload {
     pub subscription_id: String,

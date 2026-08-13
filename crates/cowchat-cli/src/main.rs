@@ -356,6 +356,13 @@ enum Commands {
         action: SubAction,
     },
 
+    /// Room invites — mint a token a stranger redeems over HTTPS for a fresh
+    /// API key plus access to one room. Replaces sharing a raw API key.
+    Invites {
+        #[command(subcommand)]
+        action: InviteAction,
+    },
+
     /// Export a room's history as markdown (or json/text).
     Export {
         /// Room ID or exact name
@@ -697,6 +704,25 @@ enum SubAction {
     Enable { subscription_id: String },
 }
 
+#[derive(Subcommand)]
+enum InviteAction {
+    /// Mint an invite token for a room. Printed once — it cannot be recovered.
+    Create {
+        /// Room ID or exact name
+        room: String,
+        /// Make the invite open: redeemable repeatedly until revoked.
+        /// Default is single-use (self-destructs on first redemption).
+        #[arg(long)]
+        open: bool,
+    },
+    /// Revoke an invite so no further redemption succeeds (creator or room
+    /// owner only). Keys already minted through it keep their access.
+    Revoke {
+        /// The raw invite token (cinv_…)
+        token: String,
+    },
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ExportFormat {
     /// Markdown — chat-style rendering with timestamps + agent labels.
@@ -837,6 +863,28 @@ async fn resolve_room_id(
         [single] => Ok(single.room_id.clone()),
         [] => Err(format!("Room '{room}' not found (expected ID or exact name)").into()),
         _ => Err(format!("Room name '{room}' is ambiguous; use the room ID").into()),
+    }
+}
+
+/// HTTP base for the invite-redeem hint. The CLI only knows the server's HTTP
+/// origin when `--url` (a ws/wss endpoint) was used; otherwise print a
+/// path-only placeholder the operator fills in.
+fn invite_http_base(ws_url: Option<&str>) -> String {
+    match ws_url {
+        Some(url) => {
+            let base = if let Some(rest) = url.strip_prefix("wss://") {
+                format!("https://{rest}")
+            } else if let Some(rest) = url.strip_prefix("ws://") {
+                format!("http://{rest}")
+            } else {
+                url.to_string()
+            };
+            base.trim_end_matches('/')
+                .trim_end_matches("/ws")
+                .trim_end_matches('/')
+                .to_string()
+        }
+        None => "https://<host>".to_string(),
     }
 }
 
@@ -2258,6 +2306,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        Commands::Invites { action } => {
+            let client = connect(&cli).await?;
+            match action {
+                InviteAction::Create { room, open } => {
+                    let room_id = resolve_room_id(&client, room).await?;
+                    let invite = client.create_invite(&room_id, !*open).await?;
+                    println!("Invite token: {}", invite.token);
+                    println!("  Room: {} ({})", invite.room_name, invite.room_id);
+                    println!(
+                        "  Mode: {}",
+                        if invite.single_use {
+                            "single-use (self-destructs on redemption)"
+                        } else {
+                            "open (redeemable until revoked)"
+                        }
+                    );
+                    println!("  Shown once — the server stores only a hash.");
+                    println!();
+                    println!("Redeem it for an API key + room access:");
+                    println!(
+                        "  curl -fsS -X POST {}/api/invites/redeem -H 'Content-Type: application/json' -d '{{\"token\":\"{}\"}}'",
+                        invite_http_base(cli.url.as_deref()),
+                        invite.token
+                    );
+                }
+                InviteAction::Revoke { token } => {
+                    client.revoke_invite(token).await?;
+                    println!("Invite revoked. Keys already minted through it keep their access.");
+                }
+            }
+        }
+
         Commands::Vote { action } => {
             let client = connect(&cli).await?;
             match action {
@@ -3006,7 +3086,7 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
 
 #[cfg(test)]
 mod room_key_tests {
-    use super::{resolve_room_key, Cli, Commands, RoomAction};
+    use super::{invite_http_base, resolve_room_key, Cli, Commands, InviteAction, RoomAction};
     use clap::Parser;
 
     #[test]
@@ -3049,6 +3129,45 @@ mod room_key_tests {
             }
             _ => panic!("expected rooms destroy"),
         }
+    }
+
+    #[test]
+    fn invites_commands_parse_and_derive_the_redeem_base() {
+        let cli = Cli::try_parse_from(["cowchat", "invites", "create", "my-room"]).unwrap();
+        match cli.command {
+            Commands::Invites {
+                action: InviteAction::Create { room, open },
+            } => {
+                assert_eq!(room, "my-room");
+                assert!(!open);
+            }
+            _ => panic!("expected invites create"),
+        }
+        let cli =
+            Cli::try_parse_from(["cowchat", "invites", "create", "my-room", "--open"]).unwrap();
+        match cli.command {
+            Commands::Invites {
+                action: InviteAction::Create { open, .. },
+            } => assert!(open),
+            _ => panic!("expected invites create --open"),
+        }
+        let cli = Cli::try_parse_from(["cowchat", "invites", "revoke", "cinv_abc"]).unwrap();
+        match cli.command {
+            Commands::Invites {
+                action: InviteAction::Revoke { token },
+            } => assert_eq!(token, "cinv_abc"),
+            _ => panic!("expected invites revoke"),
+        }
+
+        assert_eq!(
+            invite_http_base(Some("wss://chat.example.com/ws")),
+            "https://chat.example.com"
+        );
+        assert_eq!(
+            invite_http_base(Some("ws://127.0.0.1:8080/ws")),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(invite_http_base(None), "https://<host>");
     }
 
     #[test]
