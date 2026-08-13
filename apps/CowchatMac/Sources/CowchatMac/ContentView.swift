@@ -26,6 +26,7 @@ private enum AppAppearance: String, CaseIterable, Identifiable {
 }
 
 struct ContentView: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var store: ChatStore
     let onShowOnboarding: () -> Void
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
@@ -122,7 +123,11 @@ struct ContentView: View {
             isPresented: $store.isCreateRoomPresented,
             onDismiss: { store.createRoomParentID = nil }
         ) {
-            CreateRoomView()
+            CreateRoomView(
+                local: workspace.local,
+                globalOrLocal: workspace.global ?? workspace.local,
+                hasGlobal: workspace.global != nil
+            )
                 .environmentObject(store)
         }
         .sheet(item: $store.roomBeingRenamed) { room in
@@ -169,54 +174,45 @@ private struct SidebarView: View {
     @Binding var isSettingsPresented: Bool
     @State private var isArchiveExpanded = false
     @FocusState private var isSearchFocused: Bool
-    @State private var isLobbyHovering = false
     /// Once per process: the launch-focus clear must not repeat on sidebar re-mounts.
     private static var didClearLaunchFocus = false
 
-    private var lobbyRoom: Room? {
-        workspace.local.rooms.first {
-            $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame
-        }
-    }
-
+    // Subviews observe their ChatStore directly (@ObservedObject) so a change
+    // in one store re-renders only the views that read it. The workspace
+    // deliberately does NOT republish store changes — forwarding them turned
+    // every message tick into a whole-window invalidation, which starved the
+    // run loop during AppKit menu/hover tracking (2026-08-13 archive hang,
+    // same loop signature as the 2026-08-06 freeze).
     var body: some View {
         VStack(spacing: 0) {
-            if let lobby = lobbyRoom {
-                lobbyNavRow(lobby)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 10)
-            }
+            LobbyNavRow(local: workspace.local)
 
             searchField
                 .padding(.horizontal, 12)
                 .padding(.bottom, 14)
 
-            TimelineView(.periodic(from: .now, by: anyAgentsThinking ? 10 : 60)) { timeline in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        if visibleRoomsEmpty {
-                            if isSearchActive {
-                                emptyRoomsState
-                            }
-                        } else {
-                            roomsSection(for: .local, at: timeline.date)
-                            roomsSection(for: .global, at: timeline.date)
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 12)
-                }
-                .scrollIndicators(.hidden)
-            }
+            SidebarRoomLists(
+                local: workspace.local,
+                globalOrLocal: workspace.global ?? workspace.local,
+                hasGlobal: workspace.global != nil
+            )
 
             // Archive stays pinned above the footer instead of trailing the
             // room list (which floats it mid-sidebar when the list is short).
-            TimelineView(.periodic(from: .now, by: 60)) { timeline in
-                archiveSection(at: timeline.date)
-                    .padding(.horizontal, 8)
-            }
+            ArchiveSection(
+                local: workspace.local,
+                globalOrLocal: workspace.global ?? workspace.local,
+                hasGlobal: workspace.global != nil,
+                isExpanded: $isArchiveExpanded
+            )
+            .padding(.horizontal, 8)
 
-            sidebarFooter
+            SidebarFooter(
+                local: workspace.local,
+                globalOrLocal: workspace.global ?? workspace.local,
+                hasGlobal: workspace.global != nil,
+                isSettingsPresented: $isSettingsPresented
+            )
         }
         .padding(.top, 14)
         .onAppear {
@@ -232,173 +228,6 @@ private struct SidebarView: View {
                     NSApp.keyWindow?.makeFirstResponder(nil)
                 }
             }
-        }
-    }
-
-    private func baseRooms(in store: ChatStore, server: WorkspaceStore.Server) -> [Room] {
-        // The local Lobby lives in its own nav row, so the idle table excludes
-        // it — but an active search must still surface Lobby name/message
-        // hits. The global server has no nav row; its lobby stays listed.
-        let searching = !workspace.searchText
-            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let source = searching || server == .global
-            ? store.unarchivedRooms
-            : store.unarchivedRooms.filter {
-                $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
-            }
-        return RoomSidebarPresentation.filteredRooms(
-            from: source,
-            query: workspace.searchText,
-            matchingMessageRoomIDs: store.messageSearchRoomIDs
-        )
-    }
-
-    private var anyAgentsThinking: Bool {
-        !workspace.local.lastThinkingAt.isEmpty
-            || !(workspace.global?.lastThinkingAt.isEmpty ?? true)
-    }
-
-    private var visibleRoomsEmpty: Bool {
-        WorkspaceStore.Server.allCases.allSatisfy { server in
-            guard let store = workspace.store(for: server) else { return true }
-            return baseRooms(in: store, server: server).isEmpty
-        }
-    }
-
-    /// Item D (quiet empty state): the sidebar only shows an explicit empty
-    /// message while a search is actually in flight or has text typed. A
-    /// genuinely empty room list (no search) renders nothing above Archive.
-    private var isSearchActive: Bool {
-        workspace.local.isSearchingMessages
-            || (workspace.global?.isSearchingMessages ?? false)
-            || !workspace.searchText.isEmpty
-    }
-
-    @ViewBuilder
-    private func roomsSection(for server: WorkspaceStore.Server, at now: Date) -> some View {
-        if let store = workspace.store(for: server) {
-            let rooms = baseRooms(in: store, server: server)
-            if workspace.isGlobalEnabled {
-                // Always shown while two servers exist, even over an empty
-                // list — a connecting/failed global server announces itself
-                // here, not only in the footer.
-                sectionHeader(for: server, store: store)
-            }
-            if !rooms.isEmpty {
-                VStack(spacing: 0) {
-                    ForEach(RoomSidebarPresentation.sortedByRecency(rooms)) { room in
-                        roomRowButton(room: room, store: store, server: server, now: now)
-                    }
-                }
-                .padding(.bottom, 10)
-            }
-        }
-    }
-
-    /// Section labels only exist once there are two servers to tell apart —
-    /// with global rooms off the sidebar reads exactly as before.
-    private func sectionHeader(for server: WorkspaceStore.Server, store: ChatStore) -> some View {
-        HStack(spacing: 6) {
-            Text(server.label)
-                .gallopText(.caption, color: SemanticColor.textTertiary)
-            if !store.connectionStatus.isConnected {
-                Text(store.connectionStatus.label)
-                    .gallopText(.dataLabel, color: SemanticColor.textTertiary)
-                    .help(
-                        store.connectionStatus.failureMessage
-                            ?? store.connectionStatus.label
-                    )
-            }
-            Spacer()
-        }
-        .padding(.leading, 16)
-        .padding(.trailing, 10)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
-    }
-
-    private func roomRowButton(
-        room: Room,
-        store: ChatStore,
-        server: WorkspaceStore.Server,
-        now: Date
-    ) -> some View {
-        Button {
-            Task { await workspace.select(room: room, on: server) }
-        } label: {
-            RoomRow(
-                room: room,
-                messagePreview: store.roomMessagePreviews[room.id],
-                isSelected: workspace.isSelected(room, on: server),
-                isUnread: store.isUnread(room),
-                isWorking: store.isWorking(room, at: now),
-                now: now
-            )
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .contextMenu { roomContextMenu(for: room, store: store) }
-        .macAccessibleAction(
-            label: "Open \(room.name)",
-            value: roomAccessibilityValue(for: room, store: store, server: server, now: now)
-        ) {
-            Task { await workspace.select(room: room, on: server) }
-        }
-    }
-
-    private func archivedRooms(
-        in store: ChatStore
-    ) -> [Room] {
-        RoomSidebarPresentation.filteredRooms(
-            from: store.archivedRooms,
-            query: workspace.searchText,
-            matchingMessageRoomIDs: store.messageSearchRoomIDs
-        )
-    }
-
-    private func archivedRoomEntries() -> [(server: WorkspaceStore.Server, room: Room)] {
-        WorkspaceStore.Server.allCases.flatMap { server in
-            guard let store = workspace.store(for: server) else {
-                return [(server: WorkspaceStore.Server, room: Room)]()
-            }
-            return archivedRooms(in: store).map { (server: server, room: $0) }
-        }
-    }
-
-    /// Dash-style nav destination: Lobby is Home, above the conversations
-    /// table, not a row inside it (Patrick, 2026-08-06).
-    private func lobbyNavRow(_ lobby: Room) -> some View {
-        let isSelected = workspace.isSelected(lobby, on: .local)
-        return Button {
-            Task { await workspace.select(room: lobby, on: .local) }
-        } label: {
-            HStack(spacing: 10) {
-                GallopIconView(icon: .sunrise, fallbackSystemName: "sunrise", size: 18)
-                    .foregroundStyle(
-                        isSelected
-                            ? SemanticColor.surfaceGlassOnIconDefault
-                            : SemanticColor.iconSecondary
-                    )
-                Text("Lobby")
-                    .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 38)
-            .background(
-                SidebarRowBackground(
-                    state: .init(isSelected: isSelected, isHovering: isLobbyHovering)
-                )
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { isLobbyHovering = $0 }
-        .macAccessibleAction(
-            label: "Open Lobby",
-            value: isSelected ? "selected" : nil
-        ) {
-            Task { await workspace.select(room: lobby, on: .local) }
         }
     }
 
@@ -433,105 +262,229 @@ private struct SidebarView: View {
         }
     }
 
-    private func archiveSection(at now: Date) -> some View {
-        let entries = archivedRoomEntries()
-        return VStack(alignment: .leading, spacing: 4) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) { isArchiveExpanded.toggle() }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "archivebox")
-                        .font(.system(size: 13, weight: .medium))
-                        .offset(y: 1)  // optical center against the label ink
-                    Text("Archive")
-                        .gallopText(.bodySStrong)
-                    Spacer()
-                    if !entries.isEmpty {
-                        Text("\(entries.count)")
-                            .gallopText(.caption)
-                    }
-                    Image(systemName: isArchiveVisible ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-                .foregroundStyle(SemanticColor.textTertiary)
-                // Leading 16 matches RoomRow's avatar inset so the archive
-                // glyph joins the same left column as the rows above it.
-                .padding(.leading, 16)
-                .padding(.trailing, 10)
-                .frame(height: 36)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .macAccessibleAction(
-                label: "Archive, \(entries.count) rooms",
-                value: isArchiveVisible ? "expanded" : "collapsed"
-            ) {
-                withAnimation(.easeInOut(duration: 0.18)) { isArchiveExpanded.toggle() }
-            }
+}
 
-            if isArchiveVisible {
-                if entries.isEmpty {
-                    Text("No rooms archived")
-                        .gallopText(.caption, color: SemanticColor.textTertiary)
-                        .padding(.leading, 16)
-                        .padding(.trailing, 10)
-                        .padding(.bottom, 8)
-                } else {
-                    // Bounded: the archive sits OUTSIDE the room-list scroll
-                    // view, so an unbounded expansion would crush the room
-                    // list and push the footer offscreen at min window height.
-                    // Rows are a fixed 54pt; cap the reveal at ~4.5 rows.
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(entries, id: \.room.id) { entry in
-                                if let store = workspace.store(for: entry.server) {
-                                    Button {
-                                        Task {
-                                            await workspace.select(
-                                                room: entry.room,
-                                                on: entry.server
-                                            )
-                                        }
-                                    } label: {
-                                        RoomRow(
-                                            room: entry.room,
-                                            messagePreview: store.roomMessagePreviews[entry.room.id],
-                                            isSelected: workspace.isSelected(entry.room, on: entry.server),
-                                            isUnread: store.isUnread(entry.room),
-                                            isWorking: store.isWorking(entry.room, at: now),
-                                            now: now
-                                        )
-                                            .contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                    .contextMenu {
-                                        Button("Unarchive") { store.unarchive(entry.room) }
-                                    }
-                                    .macAccessibleAction(
-                                        label: "Open \(entry.room.name)",
-                                        value: roomAccessibilityValue(
-                                            for: entry.room,
-                                            store: store,
-                                            server: entry.server,
-                                            now: now
-                                        )
-                                    ) {
-                                        Task {
-                                            await workspace.select(
-                                                room: entry.room,
-                                                on: entry.server
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
+/// Dash-style nav destination: Lobby is Home, above the conversations
+/// table, not a row inside it (Patrick, 2026-08-06).
+private struct LobbyNavRow: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @ObservedObject var local: ChatStore
+    @State private var isHovering = false
+
+    private var lobby: Room? {
+        local.rooms.first { $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame }
+    }
+
+    var body: some View {
+        if let lobby {
+            row(lobby)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+        }
+    }
+
+    private func row(_ lobby: Room) -> some View {
+        let isSelected = workspace.isSelected(lobby, on: .local)
+        return Button {
+            Task { await workspace.select(room: lobby, on: .local) }
+        } label: {
+            HStack(spacing: 10) {
+                GallopIconView(icon: .sunrise, fallbackSystemName: "sunrise", size: 18)
+                    .foregroundStyle(
+                        isSelected
+                            ? SemanticColor.surfaceGlassOnIconDefault
+                            : SemanticColor.iconSecondary
+                    )
+                Text("Lobby")
+                    .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 38)
+            .background(
+                SidebarRowBackground(
+                    state: .init(isSelected: isSelected, isHovering: isHovering)
+                )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .macAccessibleAction(
+            label: "Open Lobby",
+            value: isSelected ? "selected" : nil
+        ) {
+            Task { await workspace.select(room: lobby, on: .local) }
+        }
+    }
+}
+
+/// One selectable room row, shared by the room lists and the archive.
+private struct SidebarRoomRowButton: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @ObservedObject var store: ChatStore
+    let room: Room
+    let server: WorkspaceStore.Server
+    let now: Date
+    var isArchived = false
+
+    var body: some View {
+        Button {
+            Task { await workspace.select(room: room, on: server) }
+        } label: {
+            RoomRow(
+                room: room,
+                messagePreview: store.roomMessagePreviews[room.id],
+                isSelected: workspace.isSelected(room, on: server),
+                isUnread: store.isUnread(room),
+                isWorking: store.isWorking(room, at: now),
+                now: now
+            )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            if isArchived {
+                Button("Unarchive") { store.unarchive(room) }
+            } else {
+                Button("Rename") { store.presentRename(room) }
+                    .disabled(!store.canRename(room))
+                if room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame {
+                    Button("Archive") {
+                        Task { await store.archive(room) }
                     }
-                    .scrollIndicators(.hidden)
-                    .frame(height: min(CGFloat(entries.count) * 54, 244))
                 }
             }
         }
+        .macAccessibleAction(label: "Open \(room.name)", value: accessibilityValue) {
+            Task { await workspace.select(room: room, on: server) }
+        }
+    }
+
+    /// Value announced by the AccessibleActionOverlay for a room row (see
+    /// macAccessibleAction) — RoomRow's own accessibility subtree is hidden,
+    /// so unread/selected state must be composed here to be announced at all.
+    private var accessibilityValue: String? {
+        let parts = [
+            store.isWorking(room, at: now) ? "Agents working" : nil,
+            store.isUnread(room) ? "Unread" : nil,
+            workspace.isSelected(room, on: server) ? "selected" : nil,
+        ].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+}
+
+/// The scrolling room table: a Local section and, with global rooms on, a
+/// Global section. `globalOrLocal` duplicates `local` when global is off —
+/// @ObservedObject cannot hold an Optional, and observing local twice is free.
+private struct SidebarRoomLists: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @ObservedObject var local: ChatStore
+    @ObservedObject var globalOrLocal: ChatStore
+    let hasGlobal: Bool
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: anyAgentsThinking ? 10 : 60)) { timeline in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if visibleRoomsEmpty {
+                        if isSearchActive {
+                            emptyRoomsState
+                        }
+                    } else {
+                        section(for: .local, store: local, at: timeline.date)
+                        if hasGlobal {
+                            section(for: .global, store: globalOrLocal, at: timeline.date)
+                        }
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 12)
+            }
+            .scrollIndicators(.hidden)
+        }
+    }
+
+    private func baseRooms(in store: ChatStore, server: WorkspaceStore.Server) -> [Room] {
+        // The local Lobby lives in its own nav row, so the idle table excludes
+        // it — but an active search must still surface Lobby name/message
+        // hits. The global server has no nav row; its lobby stays listed.
+        let searching = !workspace.searchText
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let source = searching || server == .global
+            ? store.unarchivedRooms
+            : store.unarchivedRooms.filter {
+                $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
+            }
+        return RoomSidebarPresentation.filteredRooms(
+            from: source,
+            query: workspace.searchText,
+            matchingMessageRoomIDs: store.messageSearchRoomIDs
+        )
+    }
+
+    private var anyAgentsThinking: Bool {
+        !local.lastThinkingAt.isEmpty
+            || (hasGlobal && !globalOrLocal.lastThinkingAt.isEmpty)
+    }
+
+    private var visibleRoomsEmpty: Bool {
+        baseRooms(in: local, server: .local).isEmpty
+            && (!hasGlobal || baseRooms(in: globalOrLocal, server: .global).isEmpty)
+    }
+
+    /// Item D (quiet empty state): the sidebar only shows an explicit empty
+    /// message while a search is actually in flight or has text typed. A
+    /// genuinely empty room list (no search) renders nothing above Archive.
+    private var isSearchActive: Bool {
+        isSearchingMessages || !workspace.searchText.isEmpty
+    }
+
+    private var isSearchingMessages: Bool {
+        local.isSearchingMessages || (hasGlobal && globalOrLocal.isSearchingMessages)
+    }
+
+    @ViewBuilder
+    private func section(
+        for server: WorkspaceStore.Server,
+        store: ChatStore,
+        at now: Date
+    ) -> some View {
+        let rooms = baseRooms(in: store, server: server)
+        if hasGlobal {
+            // Always shown while two servers exist, even over an empty
+            // list — a connecting/failed global server announces itself
+            // here, not only in the footer.
+            sectionHeader(for: server, store: store)
+        }
+        if !rooms.isEmpty {
+            VStack(spacing: 0) {
+                ForEach(RoomSidebarPresentation.sortedByRecency(rooms)) { room in
+                    SidebarRoomRowButton(store: store, room: room, server: server, now: now)
+                }
+            }
+            .padding(.bottom, 10)
+        }
+    }
+
+    private func sectionHeader(for server: WorkspaceStore.Server, store: ChatStore) -> some View {
+        HStack(spacing: 6) {
+            Text(server.label)
+                .gallopText(.caption, color: SemanticColor.textTertiary)
+            if !store.connectionStatus.isConnected {
+                Text(store.connectionStatus.label)
+                    .gallopText(.dataLabel, color: SemanticColor.textTertiary)
+                    .help(
+                        store.connectionStatus.failureMessage
+                            ?? store.connectionStatus.label
+                    )
+            }
+            Spacer()
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 10)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
     }
 
     /// Only ever shown while `isSearchActive`, so the branch below always has
@@ -546,7 +499,7 @@ private struct SidebarView: View {
                 GallopIconView(icon: .search, fallbackSystemName: "magnifyingglass", size: 20)
                     .foregroundStyle(SemanticColor.iconTertiary)
             }
-            Text(emptyRoomsTitle)
+            Text(isSearchingMessages ? "Searching messages…" : "No rooms or messages found")
                 .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
             if !workspace.searchText.isEmpty {
                 Text("Try another room, message, or agent name.")
@@ -558,29 +511,127 @@ private struct SidebarView: View {
         .padding(.horizontal, 18)
         .padding(.top, 44)
     }
+}
 
-    private var isSearchingMessages: Bool {
-        workspace.local.isSearchingMessages
-            || (workspace.global?.isSearchingMessages ?? false)
+private struct ArchiveSection: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @ObservedObject var local: ChatStore
+    @ObservedObject var globalOrLocal: ChatStore
+    let hasGlobal: Bool
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { timeline in
+            content(at: timeline.date)
+        }
     }
 
-    private var emptyRoomsTitle: String {
-        isSearchingMessages ? "Searching messages…" : "No rooms or messages found"
+    private var isVisible: Bool {
+        isExpanded || !workspace.searchText.isEmpty
     }
 
-    private var isArchiveVisible: Bool {
-        isArchiveExpanded || !workspace.searchText.isEmpty
+    private func archivedRooms(in store: ChatStore) -> [Room] {
+        RoomSidebarPresentation.filteredRooms(
+            from: store.archivedRooms,
+            query: workspace.searchText,
+            matchingMessageRoomIDs: store.messageSearchRoomIDs
+        )
     }
 
-    private var sidebarFooter: some View {
+    private var entries: [(server: WorkspaceStore.Server, store: ChatStore, room: Room)] {
+        var all = archivedRooms(in: local).map { (server: WorkspaceStore.Server.local, store: local, room: $0) }
+        if hasGlobal {
+            all += archivedRooms(in: globalOrLocal).map { (server: .global, store: globalOrLocal, room: $0) }
+        }
+        return all
+    }
+
+    private func content(at now: Date) -> some View {
+        let entries = entries
+        return VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "archivebox")
+                        .font(.system(size: 13, weight: .medium))
+                        .offset(y: 1)  // optical center against the label ink
+                    Text("Archive")
+                        .gallopText(.bodySStrong)
+                    Spacer()
+                    if !entries.isEmpty {
+                        Text("\(entries.count)")
+                            .gallopText(.caption)
+                    }
+                    Image(systemName: isVisible ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(SemanticColor.textTertiary)
+                // Leading 16 matches RoomRow's avatar inset so the archive
+                // glyph joins the same left column as the rows above it.
+                .padding(.leading, 16)
+                .padding(.trailing, 10)
+                .frame(height: 36)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .macAccessibleAction(
+                label: "Archive, \(entries.count) rooms",
+                value: isVisible ? "expanded" : "collapsed"
+            ) {
+                withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
+            }
+
+            if isVisible {
+                if entries.isEmpty {
+                    Text("No rooms archived")
+                        .gallopText(.caption, color: SemanticColor.textTertiary)
+                        .padding(.leading, 16)
+                        .padding(.trailing, 10)
+                        .padding(.bottom, 8)
+                } else {
+                    // Bounded: the archive sits OUTSIDE the room-list scroll
+                    // view, so an unbounded expansion would crush the room
+                    // list and push the footer offscreen at min window height.
+                    // Rows are a fixed 54pt; cap the reveal at ~4.5 rows.
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(entries, id: \.room.id) { entry in
+                                SidebarRoomRowButton(
+                                    store: entry.store,
+                                    room: entry.room,
+                                    server: entry.server,
+                                    now: now,
+                                    isArchived: true
+                                )
+                            }
+                        }
+                    }
+                    .scrollIndicators(.hidden)
+                    .frame(height: min(CGFloat(entries.count) * 54, 244))
+                }
+            }
+        }
+    }
+}
+
+private struct SidebarFooter: View {
+    @ObservedObject var local: ChatStore
+    @ObservedObject var globalOrLocal: ChatStore
+    let hasGlobal: Bool
+    @Binding var isSettingsPresented: Bool
+
+    var body: some View {
         HStack(spacing: 8) {
             Button {
                 isSettingsPresented = true
             } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    serverStatusRow(for: .local)
-                    if workspace.isGlobalEnabled {
-                        serverStatusRow(for: .global)
+                // A Grid keeps the status column aligned — "Local" and
+                // "Global" set different label widths.
+                Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 3) {
+                    statusRow(label: "Local", store: local)
+                    if hasGlobal {
+                        statusRow(label: "Global", store: globalOrLocal)
                     }
                 }
                 .contentShape(Rectangle())
@@ -608,33 +659,28 @@ private struct SidebarView: View {
         .frame(height: 58)
     }
 
-    @ViewBuilder
-    private func serverStatusRow(for server: WorkspaceStore.Server) -> some View {
-        if let store = workspace.store(for: server) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(statusColor(for: store.connectionStatus))
-                    .frame(width: 7, height: 7)
-                Text(server.label)
-                    .gallopText(.caption, color: SemanticColor.textSecondary)
-                Text(store.connectionStatus.label)
-                    .gallopText(.dataLabel, color: SemanticColor.textTertiary)
-                    .help(store.connectionStatus.failureMessage ?? store.connectionStatus.label)
-            }
+    private func statusRow(label: String, store: ChatStore) -> some View {
+        GridRow {
+            Circle()
+                .fill(statusColor(for: store.connectionStatus))
+                .frame(width: 7, height: 7)
+            Text(label)
+                .gallopText(.caption, color: SemanticColor.textSecondary)
+            Text(store.connectionStatus.label)
+                .gallopText(.dataLabel, color: SemanticColor.textTertiary)
+                .help(store.connectionStatus.failureMessage ?? store.connectionStatus.label)
         }
     }
 
     private var anyServerDisconnected: Bool {
-        WorkspaceStore.Server.allCases.contains { server in
-            guard let store = workspace.store(for: server) else { return false }
-            return !store.connectionStatus.isConnected
-        }
+        !local.connectionStatus.isConnected
+            || (hasGlobal && !globalOrLocal.connectionStatus.isConnected)
     }
 
     private func reconnectDisconnectedServers() {
-        for server in WorkspaceStore.Server.allCases {
-            guard let store = workspace.store(for: server),
-                  !store.connectionStatus.isConnected else { continue }
+        var stores = [local]
+        if hasGlobal { stores.append(globalOrLocal) }
+        for store in stores where !store.connectionStatus.isConnected {
             store.reconnect()
         }
     }
@@ -645,34 +691,6 @@ private struct SidebarView: View {
         case .connecting: return SemanticColor.warning
         case .disconnected, .failed: return SemanticColor.textError
         }
-    }
-
-    @ViewBuilder
-    private func roomContextMenu(for room: Room, store: ChatStore) -> some View {
-        Button("Rename") { store.presentRename(room) }
-            .disabled(!store.canRename(room))
-        if room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame {
-            Button("Archive") {
-                Task { await store.archive(room) }
-            }
-        }
-    }
-
-    /// Value announced by the AccessibleActionOverlay for a room row (see
-    /// macAccessibleAction) — RoomRow's own accessibility subtree is hidden,
-    /// so unread/selected state must be composed here to be announced at all.
-    private func roomAccessibilityValue(
-        for room: Room,
-        store: ChatStore,
-        server: WorkspaceStore.Server,
-        now: Date
-    ) -> String? {
-        let parts = [
-            store.isWorking(room, at: now) ? "Agents working" : nil,
-            store.isUnread(room) ? "Unread" : nil,
-            workspace.isSelected(room, on: server) ? "selected" : nil,
-        ].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 }
 
@@ -2214,7 +2232,7 @@ private struct SettingsView: View {
                     Text("Local server")
                         .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                     Spacer()
-                    serverStatusBadge(for: workspace.local)
+                    ServerStatusBadge(store: workspace.local)
                 }
                 Text("Always on. Cowchat starts its bundled server when needed, and your room database stays on this Mac.")
                     .gallopText(.bodyM, color: SemanticColor.textTertiary)
@@ -2233,7 +2251,7 @@ private struct SettingsView: View {
                         .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                     Spacer()
                     if let global = workspace.global {
-                        serverStatusBadge(for: global)
+                        ServerStatusBadge(store: global)
                     }
                 }
                 Text("Cowboy runs a shared Cowchat server for everyone. Connect and its rooms appear in the sidebar alongside your local rooms — a key is created for you automatically, or paste your own.")
@@ -2257,25 +2275,10 @@ private struct SettingsView: View {
                     .overlay {
                         Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
                     }
-                if let failureMessage = globalFailureMessage {
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(SemanticColor.warning)
-                        Text(failureMessage)
-                            .gallopText(.bodyS, color: SemanticColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(12)
-                    .background(
-                        SemanticColor.surfaceGlassOnDefault,
-                        in: RoundedRectangle(cornerRadius: 12)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(SemanticColor.borderDefault, lineWidth: 1)
-                    }
-                }
+                GlobalServerNotice(
+                    store: workspace.global ?? workspace.local,
+                    hasGlobal: workspace.global != nil
+                )
                 HStack(spacing: 10) {
                     Spacer()
                     if workspace.isGlobalEnabled {
@@ -2318,28 +2321,6 @@ private struct SettingsView: View {
         }
     }
 
-    private func serverStatusBadge(for store: ChatStore) -> some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(statusColor(for: store.connectionStatus))
-                .frame(width: 7, height: 7)
-            Text(store.connectionStatus.label)
-                .gallopText(.caption, color: SemanticColor.textTertiary)
-        }
-    }
-
-    private func statusColor(for status: ConnectionStatus) -> Color {
-        switch status {
-        case .connected: return SemanticColor.success
-        case .connecting: return SemanticColor.warning
-        case .disconnected, .failed: return SemanticColor.textError
-        }
-    }
-
-    private var globalFailureMessage: String? {
-        workspace.globalSetupError
-            ?? workspace.global?.connectionStatus.failureMessage
-    }
 
     private var themeSettings: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -2645,16 +2626,92 @@ private struct RenameRoomView: View {
     }
 }
 
+private struct ServerStatusBadge: View {
+    @ObservedObject var store: ChatStore
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 7, height: 7)
+            Text(store.connectionStatus.label)
+                .gallopText(.caption, color: SemanticColor.textTertiary)
+        }
+    }
+
+    private var statusColor: Color {
+        switch store.connectionStatus {
+        case .connected: return SemanticColor.success
+        case .connecting: return SemanticColor.warning
+        case .disconnected, .failed: return SemanticColor.textError
+        }
+    }
+}
+
+/// Inline warning in the Global settings card: setup problems from the
+/// workspace, or the global store's own connection failure.
+private struct GlobalServerNotice: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @ObservedObject var store: ChatStore
+    let hasGlobal: Bool
+
+    var body: some View {
+        if let message = noticeMessage {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(SemanticColor.warning)
+                Text(message)
+                    .gallopText(.bodyS, color: SemanticColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .background(
+                SemanticColor.surfaceGlassOnDefault,
+                in: RoundedRectangle(cornerRadius: 12)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(SemanticColor.borderDefault, lineWidth: 1)
+            }
+        }
+    }
+
+    private var noticeMessage: String? {
+        workspace.globalSetupError
+            ?? (hasGlobal ? store.connectionStatus.failureMessage : nil)
+    }
+}
+
 private struct CreateRoomView: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var store: ChatStore
+    @ObservedObject var local: ChatStore
+    @ObservedObject var globalOrLocal: ChatStore
+    let hasGlobal: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var description = ""
     @State private var isCreating = false
+    @State private var chosenServer: WorkspaceStore.Server?
 
     private var parentRoom: Room? {
         guard let parentID = store.createRoomParentID else { return nil }
         return store.rooms.first { $0.id == parentID }
+    }
+
+    /// Nested rooms stay on their parent's server; top-level rooms default to
+    /// whichever server owns the current selection.
+    private var targetServer: WorkspaceStore.Server {
+        if parentRoom != nil { return workspace.activeServer }
+        return chosenServer ?? workspace.activeServer
+    }
+
+    private var targetStore: ChatStore {
+        switch targetServer {
+        case .local: return local
+        case .global: return hasGlobal ? globalOrLocal : local
+        }
     }
 
     var body: some View {
@@ -2667,7 +2724,7 @@ private struct CreateRoomView: View {
                         parentRoom.map {
                             "Create a separate conversation inside \($0.name). Membership and history stay independent."
                         }
-                            ?? (store.isLocalConnection
+                            ?? (targetServer == .local
                                 ? "Create a conversation on this Mac's local Cowchat server."
                                 : "Create a conversation on the global Cowchat server.")
                     )
@@ -2683,6 +2740,15 @@ private struct CreateRoomView: View {
             }
 
             VStack(spacing: 12) {
+                if hasGlobal, parentRoom == nil {
+                    Picker("Server", selection: serverSelection) {
+                        ForEach(WorkspaceStore.Server.allCases) { server in
+                            Text(server.label).tag(server)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
                 styledField("Room name", text: $name)
                 if !name.isEmpty, let nameValidationMessage {
                     Text(nameValidationMessage)
@@ -2746,10 +2812,17 @@ private struct CreateRoomView: View {
             }
     }
 
+    private var serverSelection: Binding<WorkspaceStore.Server> {
+        Binding(
+            get: { targetServer },
+            set: { chosenServer = $0 }
+        )
+    }
+
     private var canCreate: Bool {
         nameValidationMessage == nil
             && !isCreating
-            && store.connectionStatus.isConnected
+            && targetStore.connectionStatus.isConnected
     }
 
     private var nameValidationMessage: String? {
@@ -2766,19 +2839,31 @@ private struct CreateRoomView: View {
 
     private var createButtonTitle: String {
         if isCreating { return "Creating…" }
-        return store.connectionStatus.isConnected ? "Create Room" : "Connecting…"
+        return targetStore.connectionStatus.isConnected ? "Create Room" : "Connecting…"
     }
 
     private func createRoom() {
         guard canCreate else { return }
         isCreating = true
+        let server = targetServer
+        let target = targetStore
+        let presenting = store
         Task {
-            _ = await store.createRoom(
+            let created = await target.createRoom(
                 name: name,
                 description: description,
                 isPublic: true
             )
             isCreating = false
+            if created {
+                // The room was created and selected on `server`; make that
+                // server active so the chat pane shows it, and close the
+                // sheet on whichever store presented it.
+                workspace.activate(server: server)
+                presenting.isCreateRoomPresented = false
+                presenting.createRoomParentID = nil
+                dismiss()
+            }
         }
     }
 

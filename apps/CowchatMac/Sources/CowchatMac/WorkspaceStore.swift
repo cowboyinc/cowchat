@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 
 enum GlobalSignupError: LocalizedError, Equatable {
@@ -57,7 +56,6 @@ final class WorkspaceStore: ObservableObject {
     private let preferences: ConnectionProfilePreferences
     private let defaults: UserDefaults
     private let requestAPIKey: (URL) async throws -> String
-    private var storeChangeSubscriptions: Set<AnyCancellable> = []
 
     var activeStore: ChatStore {
         switch activeServer {
@@ -80,7 +78,6 @@ final class WorkspaceStore: ObservableObject {
         self.defaults = defaults
         self.global = global
         self.requestAPIKey = requestAPIKey
-        rebindStoreChangeForwarding()
     }
 
     convenience init() {
@@ -125,6 +122,13 @@ final class WorkspaceStore: ObservableObject {
 
     func isSelected(_ room: Room, on server: Server) -> Bool {
         activeServer == server && store(for: server)?.selectedRoomID == room.id
+    }
+
+    /// Makes a server's selection the one the chat pane shows (e.g. after
+    /// creating a room on the non-active server).
+    func activate(server: Server) {
+        guard store(for: server) != nil else { return }
+        activeServer = server
     }
 
     func select(room: Room, on server: Server) async {
@@ -232,7 +236,6 @@ final class WorkspaceStore: ObservableObject {
         if activeServer == .global { activeServer = .local }
         global?.shutdownForRemoval()
         global = nil
-        rebindStoreChangeForwarding()
     }
 
     private func attachGlobalStore(profile: ConnectionProfile, configurationError: Error?) {
@@ -244,7 +247,6 @@ final class WorkspaceStore: ObservableObject {
             connectionConfigurationError: configurationError
         )
         global = store
-        rebindStoreChangeForwarding()
         store.start()
     }
 
@@ -277,17 +279,4 @@ final class WorkspaceStore: ObservableObject {
         preferences.loadSavedCloudURL() ?? ConnectionProfile.defaultGlobalURLString
     }
 
-    /// Views observe the workspace alone; child-store changes republish here so
-    /// sections rendering both servers' rooms stay current.
-    private func rebindStoreChangeForwarding() {
-        storeChangeSubscriptions.removeAll()
-        forwardChanges(from: local)
-        if let global { forwardChanges(from: global) }
-    }
-
-    private func forwardChanges(from store: ChatStore) {
-        store.objectWillChange
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &storeChangeSubscriptions)
-    }
 }
