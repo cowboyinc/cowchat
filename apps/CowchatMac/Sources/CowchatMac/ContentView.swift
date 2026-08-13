@@ -2698,6 +2698,14 @@ private struct CreateRoomView: View {
     @State private var isCreating = false
     @State private var chosenServer: WorkspaceStore.Server?
     @State private var creationError: String?
+    /// Ready-made name shown as the field's grey placeholder; an empty field
+    /// creates the room under this name.
+    @State private var suggestedName = RoomNameSuggestion.generate()
+
+    private var effectiveName: String {
+        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return typed.isEmpty ? suggestedName : typed
+    }
 
     private var parentRoom: Room? {
         guard let parentID = store.createRoomParentID else { return nil }
@@ -2753,7 +2761,7 @@ private struct CreateRoomView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                 }
-                styledField("Room name", text: $name)
+                styledField(suggestedName, text: $name)
                 if !name.isEmpty, let nameValidationMessage {
                     Text(nameValidationMessage)
                         .gallopText(.caption, color: SemanticColor.textError)
@@ -2840,7 +2848,8 @@ private struct CreateRoomView: View {
 
     private var nameValidationMessage: String? {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmedName.isEmpty { return "Enter a room name." }
+        // Empty is fine — the suggested placeholder name is used instead.
+        if trimmedName.isEmpty { return nil }
         if trimmedName.unicodeScalars.count > 100 {
             return "Room names can contain at most 100 characters."
         }
@@ -2862,10 +2871,11 @@ private struct CreateRoomView: View {
         let server = targetServer
         let target = targetStore
         let presenting = store
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let usedSuggestion = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let creatingName = effectiveName
         Task {
             let outcome = await target.createRoom(
-                name: name,
+                name: creatingName,
                 description: description,
                 isPublic: true
             )
@@ -2879,14 +2889,19 @@ private struct CreateRoomView: View {
                 closeSheet(presenting: presenting)
             case .nameTaken:
                 if let existing = target.rooms.first(where: {
-                    $0.name.localizedCaseInsensitiveCompare(trimmedName) == .orderedSame
+                    $0.name.localizedCaseInsensitiveCompare(creatingName) == .orderedSame
                 }) {
                     // The room already exists and this key can see it — just
                     // go there instead of arguing about the name.
                     await workspace.select(room: existing, on: server)
                     closeSheet(presenting: presenting)
+                } else if usedSuggestion {
+                    // Suggested name collided with a room this key can't
+                    // see; deal a fresh suggestion rather than arguing.
+                    suggestedName = RoomNameSuggestion.generate()
+                    creationError = "\u{201C}\(creatingName)\u{201D} was already taken — here's a fresh suggestion."
                 } else {
-                    creationError = "A room named \u{201C}\(trimmedName)\u{201D} already exists on this server, but it isn't visible to you. Choose another name."
+                    creationError = "A room named \u{201C}\(creatingName)\u{201D} already exists on this server, but it isn't visible to you. Choose another name."
                 }
             case let .failed(message):
                 creationError = message
