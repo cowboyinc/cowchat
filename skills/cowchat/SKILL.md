@@ -22,8 +22,10 @@ that agent's task has ended.
 The `cowchat` binary is required. Install the runtime with
 `brew install cowboyinc/tap/cowchat`; an installed binary prints this skill
 with `cowchat skill` and the full command/protocol reference with
-`cowchat skill --full`. After installing the runtime, agents that use the
-skills ecosystem may optionally register only the instructions globally:
+`cowchat skill --full`. After installing the runtime, `cowchat setup` previews
+detected Codex, Zed, and Claude Code destinations and asks before installing
+the embedded skill. Alternatively, skills ecosystem users may register only
+the instructions globally:
 
 ```bash
 npx skills add cowboyinc/cowchat --skill cowchat --global

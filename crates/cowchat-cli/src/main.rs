@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 mod lantern;
+mod setup;
+
+use setup::SetupTarget;
 
 /// `metadata.kind` marking the last message of a conversation. `send --end` sets
 /// it; `wait` exits 3 on receiving one so a reply-then-wait loop terminates.
@@ -387,6 +390,25 @@ enum Commands {
         /// Print the full command & protocol reference (SKILLS.md) instead
         #[arg(long)]
         full: bool,
+    },
+
+    /// Preview or install the embedded Cowchat skill for supported agents
+    Setup {
+        /// Agent host to configure; repeat to select more than one
+        #[arg(long, value_enum)]
+        target: Vec<SetupTarget>,
+
+        /// Show the exact filesystem plan without writing anything
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+
+        /// Apply the previewed plan without prompting
+        #[arg(long)]
+        yes: bool,
+
+        /// Remove only files still matching Cowchat's ownership record
+        #[arg(long)]
+        remove: bool,
     },
 
     /// Webhook subscriptions — register an HTTP endpoint to be POSTed when
@@ -2204,6 +2226,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        Commands::Setup {
+            target,
+            dry_run,
+            yes,
+            remove,
+        } => {
+            // Purely local and explicit: preview first, then write only after
+            // confirmation (or --yes). No server or network connection.
+            setup::run(target, *dry_run, *yes, *remove)?;
+        }
+
         Commands::Status => {
             let client = connect(&cli).await?;
             let agents = client.list_agents(None).await?;
@@ -3109,7 +3142,7 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
 mod room_key_tests {
     use super::{
         invite_http_base, render_room_list, resolve_room_key, Cli, Commands, InviteAction,
-        RoomAction,
+        RoomAction, SetupTarget,
     };
     use chrono::Utc;
     use clap::Parser;
@@ -3284,6 +3317,63 @@ mod room_key_tests {
         // The embedded docs must be present and non-trivial.
         assert!(include_str!("../../../skills/cowchat/SKILL.md").contains("# Cowchat"));
         assert!(include_str!("../../../SKILLS.md").contains("# Cowchat"));
+    }
+
+    #[test]
+    fn setup_command_parses_targets_and_rejects_incompatible_flags() {
+        let cli = Cli::try_parse_from(["cowchat", "setup"]).unwrap();
+        match cli.command {
+            Commands::Setup {
+                target,
+                dry_run,
+                yes,
+                remove,
+            } => {
+                assert!(target.is_empty());
+                assert!(!dry_run);
+                assert!(!yes);
+                assert!(!remove);
+            }
+            _ => panic!("expected default setup"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "cowchat",
+            "setup",
+            "--target",
+            "codex",
+            "--target",
+            "claude-code",
+            "--dry-run",
+            "--remove",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Setup {
+                target,
+                dry_run,
+                yes,
+                remove,
+            } => {
+                assert_eq!(target, vec![SetupTarget::Codex, SetupTarget::ClaudeCode]);
+                assert!(dry_run);
+                assert!(!yes);
+                assert!(remove);
+            }
+            _ => panic!("expected setup"),
+        }
+
+        assert!(Cli::try_parse_from(["cowchat", "setup", "--dry-run", "--yes"]).is_err());
+        assert!(Cli::try_parse_from(["cowchat", "setup", "--target", "unsupported"]).is_err());
+
+        let cli = Cli::try_parse_from(["cowchat", "setup", "--yes", "--remove"]).unwrap();
+        match cli.command {
+            Commands::Setup { yes, remove, .. } => {
+                assert!(yes);
+                assert!(remove);
+            }
+            _ => panic!("expected confirmed removal"),
+        }
     }
 
     #[test]

@@ -24,15 +24,36 @@ coordinate. Cowchat provides:
 
 ```bash
 brew install cowboyinc/tap/cowchat
+cowchat setup
 ```
 
 This installs the `cowchat` CLI and the `cowchat-server` daemon. To build from
-source instead, run `cargo build --workspace`.
+source instead, run `cargo build --workspace`. Homebrew does not modify agent
+configuration: `cowchat setup` shows every detected destination and asks before
+installing the embedded skill.
+
+Codex and Zed use the shared Agent Skills path
+`~/.agents/skills/cowchat/SKILL.md`; Claude Code uses
+`~/.claude/skills/cowchat/SKILL.md`. Preview or automate explicit targets with:
+
+```bash
+cowchat setup --dry-run
+cowchat setup --target codex --target zed --target claude-code --yes
+cowchat setup                    # safe to re-run after an upgrade
+cowchat setup --remove           # previews, confirms, then removes owned files
+```
+
+Re-running setup is idempotent. Cowchat updates a file only when its hash still
+matches the last Cowchat-owned version; an edited or unmanaged file is reported
+and preserved. `cowchat setup --remove` applies the same check and removes no
+parent directories. Because Codex and Zed share one standard path, removing
+either explicit target removes that shared Cowchat skill when it is still
+Cowchat-owned.
 
 The runtime embeds its agent instructions: `cowchat skill` prints the concise
 behavioral skill and `cowchat skill --full` prints the complete protocol
-reference. If your agent uses the skills ecosystem, optionally register the
-instructions globally after installing the runtime:
+reference. As a portable alternative to `cowchat setup`, skills ecosystem users
+can register the instructions globally:
 
 ```bash
 npx skills add cowboyinc/cowchat --skill cowchat --global
