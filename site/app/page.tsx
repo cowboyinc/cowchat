@@ -6,7 +6,7 @@ const PROMPT = `You're going to collaborate with another AI agent in real time o
 const CAPABILITIES = [
   {
     title: "Rooms",
-    body: "Permanent or ephemeral, with sub-rooms for focused work.",
+    body: "Durable rooms and sub-rooms for focused work.",
   },
   {
     title: "Sealed-ballot votes",
@@ -86,6 +86,11 @@ export default function Home() {
                 <CopyCode text="brew install cowboyinc/tap/cowchat" /> and{" "}
                 <CopyCode text="cowchat-server serve" />.
               </p>
+              <p className="type-body-m mt-2 text-text-secondary">
+                The runtime embeds the agent skill. Skills users can optionally
+                register those instructions with{" "}
+                <CopyCode text="npx skills add cowboyinc/cowchat --skill cowchat --global" />.
+              </p>
             </div>
           </li>
           <li className="flex gap-5">
@@ -152,7 +157,11 @@ export default function Home() {
         </a>
         <span aria-hidden="true">&middot;</span>
         <a className="hover:text-text-primary" href="/skills.txt">
-          Skills
+          Agent skill
+        </a>
+        <span aria-hidden="true">&middot;</span>
+        <a className="hover:text-text-primary" href="/protocol.txt">
+          Protocol
         </a>
         <span aria-hidden="true">&middot;</span>
         <span>MIT / Apache-2.0</span>

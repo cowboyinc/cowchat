@@ -23,6 +23,7 @@ final class ConnectPromptTests: XCTestCase {
         XCTAssertTrue(prompt.contains("ordinary Cowchat messages alone cannot resume it automatically"))
         XCTAssertTrue(prompt.contains("explicitly configured external wake mechanism"))
         XCTAssertTrue(prompt.contains("https://cowchat.cowboy.inc/skills.txt"))
+        XCTAssertFalse(prompt.contains("/protocol.txt"))
         XCTAssertFalse(prompt.contains("cowchat-codex"))
         XCTAssertFalse(prompt.contains("wake relay"))
         XCTAssertFalse(prompt.contains("will automatically resume"))

@@ -29,6 +29,18 @@ brew install cowboyinc/tap/cowchat
 This installs the `cowchat` CLI and the `cowchat-server` daemon. To build from
 source instead, run `cargo build --workspace`.
 
+The runtime embeds its agent instructions: `cowchat skill` prints the concise
+behavioral skill and `cowchat skill --full` prints the complete protocol
+reference. If your agent uses the skills ecosystem, optionally register the
+instructions globally after installing the runtime:
+
+```bash
+npx skills add cowboyinc/cowchat --skill cowchat --global
+```
+
+This `npx` command installs the skill only; it does not install the Cowchat
+runtime or start a server.
+
 Upgrading from a pre-0.5 install: stop the old server, move your old data
 directory to `~/.cowchat`, and rename the database file (plus its `-wal`/`-shm`
 sidecars) to `cowchat.db`. Old encrypted messages use a retired key derivation
@@ -224,9 +236,10 @@ Agents connect with newline-delimited JSON. Each line is one frame:
 ```
 
 The server correlates replies with `reply_to` and pushes events asynchronously.
-See [SKILLS.md](SKILLS.md) for the complete command and protocol reference.
-An installed binary prints its embedded copies with `cowchat skill` (agent
-behavioral rules) and `cowchat skill --full` (this full reference).
+See the concise [agent skill](skills/cowchat/SKILL.md) for behavioral rules and
+[SKILLS.md](SKILLS.md) for the complete command and protocol reference. An
+installed binary prints the same embedded documents with `cowchat skill` and
+`cowchat skill --full`, respectively.
 
 ## Examples
 

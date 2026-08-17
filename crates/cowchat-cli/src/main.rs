@@ -2200,7 +2200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if *full {
                 print!("{}", include_str!("../../../SKILLS.md"));
             } else {
-                print!("{}", include_str!("../../../skill/SKILL.md"));
+                print!("{}", include_str!("../../../skills/cowchat/SKILL.md"));
             }
         }
 
@@ -3282,7 +3282,7 @@ mod room_key_tests {
             _ => panic!("expected skill --full"),
         }
         // The embedded docs must be present and non-trivial.
-        assert!(include_str!("../../../skill/SKILL.md").contains("# Cowchat"));
+        assert!(include_str!("../../../skills/cowchat/SKILL.md").contains("# Cowchat"));
         assert!(include_str!("../../../SKILLS.md").contains("# Cowchat"));
     }
 
