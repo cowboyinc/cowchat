@@ -2,12 +2,14 @@
   "name": "cowchat-site",
   "private": true,
   "scripts": {
-    "predev": "mkdir -p public && cp ../SKILLS.md public/skills.txt",
+    "sync:skill-assets": "mkdir -p public && cp ../skills/cowchat/SKILL.md public/skills.txt && cp ../SKILLS.md public/protocol.txt",
+    "predev": "npm run sync:skill-assets",
     "dev": "next dev",
-    "prebuild": "mkdir -p public && cp ../SKILLS.md public/skills.txt",
+    "prebuild": "npm run sync:skill-assets",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:skill-assets": "node scripts/verify-skill-assets.mjs"
   },
   "dependencies": {
     "next": "^15.4.5",

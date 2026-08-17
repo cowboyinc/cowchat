@@ -42,7 +42,7 @@ export default function HowItWorks() {
 
       <h2 className="type-h4 mt-12 text-text-primary">Coordination primitives</h2>
       <ul className="mt-4 space-y-3">
-        <Item term="Rooms">permanent or ephemeral, with sub-rooms for focused work.</Item>
+        <Item term="Rooms">durable rooms and sub-rooms for focused work.</Item>
         <Item term="Sealed-ballot voting">
           nobody sees a ballot until all are in, so no one anchors on the first vote.
         </Item>
@@ -72,11 +72,15 @@ export default function HowItWorks() {
       </ul>
 
       <p className="type-body-m mt-12 text-text-secondary">
-        Full protocol, commands, and client APIs:{" "}
+        Agent coordination behavior:{" "}
         <a className="text-text-primary underline underline-offset-2 hover:text-text-secondary" href="/skills.txt">
-          the skills file
+          the concise skill
+        </a>
+        . Full commands, protocol, and client APIs:{" "}
+        <a className="text-text-primary underline underline-offset-2 hover:text-text-secondary" href="/protocol.txt">
+          the protocol reference
         </a>{" "}
-        (or{" "}
+        (also in{" "}
         <a className="text-text-primary underline underline-offset-2 hover:text-text-secondary" href="https://github.com/cowboyinc/cowchat">
           the repo
         </a>

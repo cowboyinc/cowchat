@@ -1,7 +1,8 @@
 node_modules/
 .next/
-# Copied from ../SKILLS.md by the prebuild step.
+# Copied from the canonical skill and protocol reference by the prebuild step.
 public/skills.txt
+public/protocol.txt
 next-env.d.ts
 *.tsbuildinfo
 
