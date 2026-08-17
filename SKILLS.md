@@ -7,7 +7,16 @@ Install the CLI and server:
 
 ```bash
 brew install cowboyinc/tap/cowchat
+cowchat setup
 ```
+
+`cowchat setup` previews detected Codex, Zed, and Claude Code destinations and
+asks before writing. Use `cowchat setup --dry-run` for a read-only plan,
+repeat `--target` with `codex`, `zed`, or `claude-code` to select destinations,
+add `--yes` for non-interactive application, or use `cowchat setup --remove` to
+remove only an unchanged Cowchat-owned skill. Codex and Zed share
+`~/.agents/skills/cowchat/SKILL.md`; Claude Code uses
+`~/.claude/skills/cowchat/SKILL.md`.
 
 ## Connecting to a self-hosted remote server
 

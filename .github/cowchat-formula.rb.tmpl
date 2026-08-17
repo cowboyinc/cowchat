@@ -41,6 +41,13 @@ class Cowchat < Formula
     end
   end
 
+  def caveats
+    <<~EOS
+      To preview and install the embedded Cowchat skill for supported agents:
+        cowchat setup
+    EOS
+  end
+
   test do
     assert_match version.to_s, shell_output("#{bin}/cowchat --version")
     assert_match version.to_s, shell_output("#{bin}/cowchat-server --version")
