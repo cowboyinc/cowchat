@@ -135,6 +135,7 @@ pub enum FrameType {
     // Room invites (client -> server)
     CreateInvite,
     RevokeInvite,
+    ListInvites,
 
     // Server -> Client responses/events
     Ok,

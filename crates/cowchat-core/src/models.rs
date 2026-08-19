@@ -436,9 +436,44 @@ fn default_single_use() -> bool {
     true
 }
 
+/// Revoke an invite by its raw token (`cinv_…`) or by its opaque `invite_id`
+/// (the stored token hash, as reported by `list_invites`). Exactly one of the
+/// two must be present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeInvitePayload {
-    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_id: Option<String>,
+}
+
+/// List the invites minted for a room. Requires the same room access as
+/// `create_invite`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListInvitesPayload {
+    pub room_id: String,
+}
+
+/// One invite in a `list_invites` reply. `invite_id` is the stored token
+/// hash — an opaque handle that cannot be reversed into the redeemable
+/// token, safe to expose and usable with `revoke_invite`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InviteListEntry {
+    pub invite_id: String,
+    pub room_id: String,
+    pub single_use: bool,
+    pub redeemed_count: i64,
+    pub revoked: bool,
+    pub created_at: String,
+    /// Whether the invite was minted by the caller's key.
+    pub mine: bool,
+}
+
+/// Returned by `list_invites`. Invites are sorted newest first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InviteList {
+    pub room_id: String,
+    pub invites: Vec<InviteListEntry>,
 }
 
 /// Returned by `create_invite`. `token` is shown only here — it cannot be

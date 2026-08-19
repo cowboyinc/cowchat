@@ -40,11 +40,13 @@ pub(crate) fn normalize_room_name(name: &str) -> Result<String, String> {
 
 #[derive(Debug, Clone)]
 pub struct InviteMeta {
+    pub token_hash: String,
     pub room_id: String,
     pub created_by_key: String,
     pub single_use: bool,
     pub redeemed_count: i64,
     pub revoked: bool,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1068,24 +1070,45 @@ impl Store {
     pub fn get_invite(&self, token_hash: &str) -> Result<Option<InviteMeta>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let result = conn.query_row(
-            "SELECT room_id, created_by_key, single_use, redeemed_count, revoked
+            "SELECT token_hash, room_id, created_by_key, single_use, redeemed_count, revoked,
+                    created_at
              FROM room_invites WHERE token_hash = ?1",
             params![token_hash],
-            |row| {
-                Ok(InviteMeta {
-                    room_id: row.get(0)?,
-                    created_by_key: row.get(1)?,
-                    single_use: row.get::<_, i64>(2)? != 0,
-                    redeemed_count: row.get(3)?,
-                    revoked: row.get::<_, i64>(4)? != 0,
-                })
-            },
+            Self::invite_meta_from_row,
         );
         match result {
             Ok(meta) => Ok(Some(meta)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(StoreError::Db(e)),
         }
+    }
+
+    fn invite_meta_from_row(row: &rusqlite::Row<'_>) -> Result<InviteMeta, rusqlite::Error> {
+        Ok(InviteMeta {
+            token_hash: row.get(0)?,
+            room_id: row.get(1)?,
+            created_by_key: row.get(2)?,
+            single_use: row.get::<_, i64>(3)? != 0,
+            redeemed_count: row.get(4)?,
+            revoked: row.get::<_, i64>(5)? != 0,
+            created_at: row.get(6)?,
+        })
+    }
+
+    /// All invites minted for `room_id`, newest first. Redeemed single-use
+    /// invites remain (marked revoked); rows only disappear with the room.
+    pub fn list_room_invites(&self, room_id: &str) -> Result<Vec<InviteMeta>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT token_hash, room_id, created_by_key, single_use, redeemed_count, revoked,
+                    created_at
+             FROM room_invites WHERE room_id = ?1
+             ORDER BY created_at DESC, rowid DESC",
+        )?;
+        let invites = stmt
+            .query_map(params![room_id], Self::invite_meta_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(invites)
     }
 
     /// Atomically consume one redemption. The guarded UPDATE is the whole

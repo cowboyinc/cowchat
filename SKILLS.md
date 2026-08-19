@@ -349,8 +349,13 @@ cowchat invites create <ROOM_ID_OR_NAME>
 # Mint an open invite (redeemable until revoked)
 cowchat invites create <ROOM_ID_OR_NAME> --open
 
-# Revoke an invite (invite creator or room owner only)
+# List a room's invites (metadata only — tokens cannot be recovered)
+cowchat invites list <ROOM_ID_OR_NAME>
+
+# Revoke an invite (invite creator or room owner only).
+# cinv_… values are raw tokens; 64-hex values are invite ids from `list`.
 cowchat invites revoke cinv_<TOKEN>
+cowchat invites revoke <INVITE_ID>
 ```
 
 ### Frames
@@ -368,11 +373,32 @@ Reply (`ok`):
 {"token":"cinv_…","room_id":"<ROOM_ID>","room_name":"invite-lab","single_use":true}
 ```
 
+`list_invites` — the caller must be able to access the room (same gate as
+`create_invite`). Returns metadata only, newest first; the redeemable tokens
+cannot be recovered. `invite_id` is the invite's stored SHA-256 token hash —
+an opaque handle, safe to expose. `mine` is whether the caller's key minted
+the invite. A redeemed single-use invite shows `redeemed_count: 1` and
+`revoked: true`.
+
+```json
+{"id":"req-22","type":"list_invites","payload":{"room_id":"<ROOM_ID>"}}
+```
+
+Reply (`ok`):
+
+```json
+{"room_id":"<ROOM_ID>","invites":[{"invite_id":"<64-hex>","room_id":"<ROOM_ID>","single_use":true,"redeemed_count":0,"revoked":false,"created_at":"2026-08-19T17:03:21.114Z","mine":true}]}
+```
+
 `revoke_invite` — allowed for the invite's creator key or the room's owner
-key. Unknown tokens answer with error code `invite_not_found`.
+key. Address the invite by its raw `token` **or** by the `invite_id` from
+`list_invites` — exactly one of the two (anything else is
+`invalid_payload`). Unknown tokens and ids answer with error code
+`invite_not_found`.
 
 ```json
 {"id":"req-21","type":"revoke_invite","payload":{"token":"cinv_…"}}
+{"id":"req-21","type":"revoke_invite","payload":{"invite_id":"<64-hex>"}}
 ```
 
 ### Redeeming over HTTP

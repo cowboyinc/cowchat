@@ -409,6 +409,9 @@ pub async fn handle_frame(
         FrameType::RevokeInvite => {
             handle_revoke_invite(req_id, frame.payload, store, agent_api_key, no_auth).await
         }
+        FrameType::ListInvites => {
+            handle_list_invites(req_id, frame.payload, store, agent_api_key, no_auth).await
+        }
 
         // Tasks
         FrameType::AssignTask => {
@@ -2563,7 +2566,21 @@ async fn handle_revoke_invite(
         }
     };
 
-    let token_hash = crate::auth::hash_invite_token(&p.token);
+    // Exactly one addressing form: the raw token (hashed here) or the
+    // invite_id, which IS the stored hash.
+    let token_hash = match (p.token, p.invite_id) {
+        (Some(token), None) => crate::auth::hash_invite_token(&token),
+        (None, Some(invite_id)) => invite_id,
+        _ => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::InvalidPayload,
+                    "Provide exactly one of `token` or `invite_id`",
+                ),
+            )
+        }
+    };
     let invite = match store.get_invite(&token_hash) {
         Ok(Some(invite)) => invite,
         Ok(None) => {
@@ -2611,6 +2628,58 @@ async fn handle_revoke_invite(
             ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
         ),
     }
+}
+
+async fn handle_list_invites(
+    req_id: Option<&str>,
+    payload: serde_json::Value,
+    store: &Arc<Store>,
+    agent_api_key: &str,
+    no_auth: bool,
+) -> Frame {
+    let p: ListInvitesPayload = match serde_json::from_value(payload) {
+        Ok(p) => p,
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, e.to_string()),
+            )
+        }
+    };
+
+    let room = match authorize_room(req_id, &p.room_id, agent_api_key, no_auth, store) {
+        Ok(room) => room,
+        Err(error) => return error,
+    };
+
+    let invites = match store.list_room_invites(&room.room_id) {
+        Ok(invites) => invites,
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+            )
+        }
+    };
+
+    let invites = invites
+        .into_iter()
+        .map(|meta| InviteListEntry {
+            invite_id: meta.token_hash,
+            room_id: meta.room_id,
+            single_use: meta.single_use,
+            redeemed_count: meta.redeemed_count,
+            revoked: meta.revoked,
+            created_at: meta.created_at,
+            mine: meta.created_by_key == agent_api_key,
+        })
+        .collect();
+
+    let list = InviteList {
+        room_id: room.room_id,
+        invites,
+    };
+    Frame::ok(req_id, serde_json::to_value(&list).unwrap())
 }
 
 #[cfg(test)]
@@ -2787,5 +2856,140 @@ mod room_lifecycle_tests {
             store.rename_room_authorized("persistent", "creator", "owner-key", false, "Stale"),
             Err(RenameRoomError::NotFound)
         ));
+    }
+}
+
+#[cfg(test)]
+mod invite_tests {
+    use super::*;
+
+    fn store_with_private_room(room_id: &str, owner_key: &str) -> Arc<Store> {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        store
+            .create_room_with_visibility(
+                room_id,
+                room_id,
+                None,
+                None,
+                Some("creator"),
+                "private",
+                Some(owner_key),
+                false,
+            )
+            .unwrap();
+        store
+    }
+
+    fn error_code(frame: &Frame) -> ErrorCode {
+        assert_eq!(frame.frame_type, FrameType::Error);
+        serde_json::from_value::<ErrorPayload>(frame.payload.clone())
+            .unwrap()
+            .code
+    }
+
+    #[tokio::test]
+    async fn list_invites_requires_room_access() {
+        let store = store_with_private_room("sealed", "owner-key");
+        let denied = handle_list_invites(
+            Some("req"),
+            serde_json::json!({"room_id": "sealed"}),
+            &store,
+            "intruder-key",
+            false,
+        )
+        .await;
+        assert_eq!(error_code(&denied), ErrorCode::AccessDenied);
+
+        let allowed = handle_list_invites(
+            Some("req"),
+            serde_json::json!({"room_id": "sealed"}),
+            &store,
+            "owner-key",
+            false,
+        )
+        .await;
+        assert_eq!(allowed.frame_type, FrameType::Ok);
+    }
+
+    #[tokio::test]
+    async fn list_invites_reports_mine_and_newest_first() {
+        let store = store_with_private_room("lab", "key-a");
+        store.create_invite("hash-1", "lab", "key-a", true).unwrap();
+        store
+            .create_invite("hash-2", "lab", "key-b", false)
+            .unwrap();
+        store.create_invite("hash-3", "lab", "key-a", true).unwrap();
+
+        let reply = handle_list_invites(
+            Some("req"),
+            serde_json::json!({"room_id": "lab"}),
+            &store,
+            "key-a",
+            false,
+        )
+        .await;
+        assert_eq!(reply.frame_type, FrameType::Ok);
+        let list: InviteList = serde_json::from_value(reply.payload).unwrap();
+        assert_eq!(list.room_id, "lab");
+        let ids: Vec<&str> = list.invites.iter().map(|i| i.invite_id.as_str()).collect();
+        assert_eq!(ids, vec!["hash-3", "hash-2", "hash-1"]);
+        let mine: Vec<bool> = list.invites.iter().map(|i| i.mine).collect();
+        assert_eq!(mine, vec![true, false, true]);
+        assert!(list.invites.iter().all(|i| !i.created_at.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn revoke_by_id_enforces_authority_and_reports_unknown_ids() {
+        let store = store_with_private_room("gate", "owner-key");
+        store
+            .create_invite("hash-x", "gate", "creator-key", false)
+            .unwrap();
+
+        // Neither the creator nor the room owner: denied.
+        let denied = handle_revoke_invite(
+            Some("req"),
+            serde_json::json!({"invite_id": "hash-x"}),
+            &store,
+            "rando-key",
+            false,
+        )
+        .await;
+        assert_eq!(error_code(&denied), ErrorCode::AccessDenied);
+
+        // The invite's creator revokes by id.
+        let revoked = handle_revoke_invite(
+            Some("req"),
+            serde_json::json!({"invite_id": "hash-x"}),
+            &store,
+            "creator-key",
+            false,
+        )
+        .await;
+        assert_eq!(revoked.frame_type, FrameType::Ok);
+        assert!(store.get_invite("hash-x").unwrap().unwrap().revoked);
+
+        // Unknown ids answer InviteNotFound.
+        let missing = handle_revoke_invite(
+            Some("req"),
+            serde_json::json!({"invite_id": "no-such-hash"}),
+            &store,
+            "owner-key",
+            false,
+        )
+        .await;
+        assert_eq!(error_code(&missing), ErrorCode::InviteNotFound);
+    }
+
+    #[tokio::test]
+    async fn revoke_requires_exactly_one_of_token_or_invite_id() {
+        let store = store_with_private_room("either", "owner-key");
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"token": "cinv_x", "invite_id": "hash-x"}),
+        ] {
+            let reply =
+                handle_revoke_invite(Some("req"), payload, &store, "owner-key", false).await;
+            assert_eq!(error_code(&reply), ErrorCode::InvalidPayload);
+        }
     }
 }

@@ -1353,15 +1353,48 @@ impl CowchatClient {
     /// invite's creator key or the room's owner key. Keys already minted
     /// through the invite keep their access.
     pub async fn revoke_invite(&self, token: &str) -> Result<(), ClientError> {
+        self.revoke_invite_payload(RevokeInvitePayload {
+            token: Some(token.to_string()),
+            invite_id: None,
+        })
+        .await
+    }
+
+    /// Like [`revoke_invite`](Self::revoke_invite), addressing the invite by
+    /// its opaque `invite_id` (the stored token hash, as reported by
+    /// [`list_invites`](Self::list_invites)) instead of the raw token.
+    pub async fn revoke_invite_by_id(&self, invite_id: &str) -> Result<(), ClientError> {
+        self.revoke_invite_payload(RevokeInvitePayload {
+            token: None,
+            invite_id: Some(invite_id.to_string()),
+        })
+        .await
+    }
+
+    async fn revoke_invite_payload(&self, payload: RevokeInvitePayload) -> Result<(), ClientError> {
         self.request(
             FrameType::RevokeInvite,
-            serde_json::to_value(RevokeInvitePayload {
-                token: token.to_string(),
-            })
-            .unwrap(),
+            serde_json::to_value(payload).unwrap(),
         )
         .await?;
         Ok(())
+    }
+
+    /// List the invites minted for a room you can access, newest first.
+    /// Entries carry metadata only — the redeemable tokens cannot be
+    /// recovered. Each entry's `invite_id` works with
+    /// [`revoke_invite_by_id`](Self::revoke_invite_by_id).
+    pub async fn list_invites(&self, room_id: &str) -> Result<InviteList, ClientError> {
+        let resp = self
+            .request(
+                FrameType::ListInvites,
+                serde_json::to_value(ListInvitesPayload {
+                    room_id: room_id.to_string(),
+                })
+                .unwrap(),
+            )
+            .await?;
+        serde_json::from_value(resp.payload).map_err(ClientError::Json)
     }
 
     /// Loop `wait_for_message` until a real chat message arrives.

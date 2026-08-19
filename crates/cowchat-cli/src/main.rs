@@ -715,12 +715,32 @@ enum InviteAction {
         #[arg(long)]
         open: bool,
     },
+    /// List a room's invites (metadata only — tokens cannot be recovered).
+    List {
+        /// Room ID or exact name
+        room: String,
+    },
     /// Revoke an invite so no further redemption succeeds (creator or room
     /// owner only). Keys already minted through it keep their access.
     Revoke {
-        /// The raw invite token (cinv_…)
-        token: String,
+        /// The raw invite token (cinv_…) or the 64-hex invite id from
+        /// `invites list`
+        token_or_id: String,
     },
+}
+
+/// Classify a `invites revoke` argument: `cinv_…` values are raw tokens,
+/// 64-hex values are invite ids (stored token hashes).
+fn invite_revoke_is_id(value: &str) -> Result<bool, String> {
+    if value.starts_with("cinv_") {
+        Ok(false)
+    } else if value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(true)
+    } else {
+        Err(format!(
+            "'{value}' is neither an invite token (cinv_…) nor a 64-hex invite id"
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -2331,8 +2351,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         invite.token
                     );
                 }
-                InviteAction::Revoke { token } => {
-                    client.revoke_invite(token).await?;
+                InviteAction::List { room } => {
+                    let room_id = resolve_room_id(&client, room).await?;
+                    let list = client.list_invites(&room_id).await?;
+                    if list.invites.is_empty() {
+                        println!("No invites.");
+                    } else {
+                        println!(
+                            "{:<18} {:<12} {:<12} {:<9} {:<26} MINE",
+                            "ID", "MODE", "REDEMPTIONS", "REVOKED", "CREATED"
+                        );
+                        println!("{}", "-".repeat(84));
+                        for invite in &list.invites {
+                            println!(
+                                "{:<18} {:<12} {:<12} {:<9} {:<26} {}",
+                                &invite.invite_id[..invite.invite_id.len().min(16)],
+                                if invite.single_use {
+                                    "single-use"
+                                } else {
+                                    "open"
+                                },
+                                invite.redeemed_count,
+                                if invite.revoked { "yes" } else { "no" },
+                                invite.created_at,
+                                if invite.mine { "yes" } else { "no" },
+                            );
+                        }
+                        println!();
+                        println!(
+                            "Revoke with: cowchat invites revoke <full 64-hex id or cinv_… token>"
+                        );
+                    }
+                }
+                InviteAction::Revoke { token_or_id } => {
+                    if invite_revoke_is_id(token_or_id)? {
+                        client.revoke_invite_by_id(token_or_id).await?;
+                    } else {
+                        client.revoke_invite(token_or_id).await?;
+                    }
                     println!("Invite revoked. Keys already minted through it keep their access.");
                 }
             }
@@ -3151,11 +3207,18 @@ mod room_key_tests {
             } => assert!(open),
             _ => panic!("expected invites create --open"),
         }
+        let cli = Cli::try_parse_from(["cowchat", "invites", "list", "my-room"]).unwrap();
+        match cli.command {
+            Commands::Invites {
+                action: InviteAction::List { room },
+            } => assert_eq!(room, "my-room"),
+            _ => panic!("expected invites list"),
+        }
         let cli = Cli::try_parse_from(["cowchat", "invites", "revoke", "cinv_abc"]).unwrap();
         match cli.command {
             Commands::Invites {
-                action: InviteAction::Revoke { token },
-            } => assert_eq!(token, "cinv_abc"),
+                action: InviteAction::Revoke { token_or_id },
+            } => assert_eq!(token_or_id, "cinv_abc"),
             _ => panic!("expected invites revoke"),
         }
 
@@ -3168,6 +3231,25 @@ mod room_key_tests {
             "http://127.0.0.1:8080"
         );
         assert_eq!(invite_http_base(None), "https://<host>");
+    }
+
+    #[test]
+    fn invite_revoke_detects_tokens_versus_ids() {
+        use super::invite_revoke_is_id;
+        // cinv_ prefix wins, whatever follows.
+        assert_eq!(invite_revoke_is_id("cinv_abc123"), Ok(false));
+        assert_eq!(
+            invite_revoke_is_id(&format!("cinv_{}", "a".repeat(64))),
+            Ok(false)
+        );
+        // Exactly 64 hex chars is an invite id.
+        assert_eq!(invite_revoke_is_id(&"0123456789abcdef".repeat(4)), Ok(true));
+        assert_eq!(invite_revoke_is_id(&"ABCDEF0123456789".repeat(4)), Ok(true));
+        // Everything else is rejected up front.
+        assert!(invite_revoke_is_id(&"f".repeat(63)).is_err());
+        assert!(invite_revoke_is_id(&"f".repeat(65)).is_err());
+        assert!(invite_revoke_is_id(&format!("{}g", "f".repeat(63))).is_err());
+        assert!(invite_revoke_is_id("not-an-invite").is_err());
     }
 
     #[test]

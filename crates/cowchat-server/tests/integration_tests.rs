@@ -3890,3 +3890,98 @@ async fn test_open_invite_redeems_repeatedly_and_revocation_is_owner_scoped() {
         holder.join_room(&room.room_id).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn test_list_invites_reports_metadata_and_revoke_by_id() {
+    let (_handle, addr, http_addr, owner_key, _tmp) = start_test_server_with_http().await;
+
+    let owner = connect_agent(&addr, &owner_key, "owner").await;
+    let room = owner.create_room("invite-desk", None, None).await.unwrap();
+
+    // Listing requires room access: a stranger with its own key sees nothing.
+    let single = owner.create_invite(&room.room_id, true).await.unwrap();
+    let open = owner.create_invite(&room.room_id, false).await.unwrap();
+
+    let list = owner.list_invites(&room.room_id).await.unwrap();
+    assert_eq!(list.room_id, room.room_id);
+    assert_eq!(list.invites.len(), 2);
+    // Newest first: the open invite was minted second.
+    let open_entry = &list.invites[0];
+    let single_entry = &list.invites[1];
+    assert!(!open_entry.single_use);
+    assert!(single_entry.single_use);
+    for entry in &list.invites {
+        // The invite_id is the SHA-256 hex of the token — opaque, never cinv_.
+        assert_eq!(entry.invite_id.len(), 64);
+        assert!(entry.invite_id.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(entry.room_id, room.room_id);
+        assert_eq!(entry.redeemed_count, 0);
+        assert!(!entry.revoked);
+        assert!(!entry.created_at.is_empty());
+        assert!(entry.mine, "owner minted both invites");
+    }
+    assert!(
+        !list
+            .invites
+            .iter()
+            .any(|i| i.invite_id == single.token || i.invite_id == open.token),
+        "listing must never expose redeemable tokens"
+    );
+
+    // A stranger holding a granted key sees the metadata with mine = false.
+    let (status, body) = redeem_invite_http(&http_addr, &single.token).await;
+    assert_eq!(status, 201);
+    let minted_key = body["api_key"].as_str().unwrap().to_string();
+    let stranger = connect_agent(&addr, &minted_key, "stranger").await;
+    let strangers_view = stranger.list_invites(&room.room_id).await.unwrap();
+    assert_eq!(strangers_view.invites.len(), 2);
+    assert!(
+        strangers_view.invites.iter().all(|i| !i.mine),
+        "the stranger minted none of these invites"
+    );
+    // The single-use invite is now consumed: redeemed once, revoked.
+    let consumed = strangers_view
+        .invites
+        .iter()
+        .find(|i| i.single_use)
+        .unwrap();
+    assert_eq!(consumed.redeemed_count, 1);
+    assert!(consumed.revoked);
+
+    // A key without access to the room cannot list at all.
+    let sealed = owner.create_room("sealed-desk", None, None).await.unwrap();
+    let denied = stranger.list_invites(&sealed.room_id).await;
+    assert!(matches!(
+        denied,
+        Err(cowchat_client::ClientError::Server {
+            code: cowchat_core::ErrorCode::AccessDenied,
+            ..
+        })
+    ));
+
+    // The owner revokes the open invite by its listed id; the list reflects it
+    // and redemption stops.
+    let open_id = list
+        .invites
+        .iter()
+        .find(|i| !i.single_use)
+        .unwrap()
+        .invite_id
+        .clone();
+    owner.revoke_invite_by_id(&open_id).await.unwrap();
+    let after = owner.list_invites(&room.room_id).await.unwrap();
+    let open_after = after.invites.iter().find(|i| !i.single_use).unwrap();
+    assert!(open_after.revoked);
+    let (revoked_status, _) = redeem_invite_http(&http_addr, &open.token).await;
+    assert_eq!(revoked_status, 404);
+
+    // Revoking an unknown id reports InviteNotFound.
+    let missing = owner.revoke_invite_by_id(&"0".repeat(64)).await;
+    assert!(matches!(
+        missing,
+        Err(cowchat_client::ClientError::Server {
+            code: cowchat_core::ErrorCode::InviteNotFound,
+            ..
+        })
+    ));
+}
