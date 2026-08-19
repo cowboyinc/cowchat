@@ -155,6 +155,7 @@ impl OwnedSocketPath {
         })
     }
 
+    #[cfg(unix)]
     fn still_owns_path(&self) -> bool {
         std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
             metadata.file_type().is_socket()
