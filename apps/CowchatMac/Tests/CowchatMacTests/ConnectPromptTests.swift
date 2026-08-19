@@ -90,10 +90,37 @@ final class ConnectPromptTests: XCTestCase {
         XCTAssertTrue(store.connectPrompt(for: room).contains("cinv_first"))
 
         // Copying consumes and re-mints.
-        let copied = store.copyableConnectPrompt(for: room)
+        let copied = await store.copyableConnectPrompt(for: room)
         XCTAssertTrue(copied.contains("cinv_first"))
         while store.promptInviteTokens[room.id] == nil { await Task.yield() }
         XCTAssertEqual(store.promptInviteTokens[room.id], "cinv_second")
+    }
+
+    /// Copying with nothing cached (rapid double-copy, or a room whose
+    /// connect screen never appeared) awaits a mint inline — every copy is
+    /// its own invitation, never a silent fallback.
+    @MainActor
+    func testCopyWithEmptyCacheAwaitsAFreshMint() async throws {
+        let connection = PromptInviteStubConnection()
+        connection.invites = ["cinv_a", "cinv_b", "cinv_c", "cinv_d"]
+        let store = try makeGlobalStore(connection: connection)
+        store.connectionStatus = .connected
+        let room = makeRoom(id: "room-2", name: "ops")
+
+        // No ensurePromptInvite ran; the copy must still carry an invite.
+        let first = await store.copyableConnectPrompt(for: room)
+        XCTAssertTrue(first.contains("cinv_a"), "first copy should mint inline")
+
+        // Two rapid copies produce two distinct invites.
+        while store.promptInviteTokens[room.id] == nil { await Task.yield() }
+        let second = await store.copyableConnectPrompt(for: room)
+        let third = await store.copyableConnectPrompt(for: room)
+        let tokens = [first, second, third].compactMap { prompt in
+            ["cinv_a", "cinv_b", "cinv_c", "cinv_d"].first { prompt.contains($0) }
+        }
+        XCTAssertEqual(tokens.count, 3)
+        XCTAssertEqual(Set(tokens).count, 3, "each copy must carry a distinct invite")
+        XCTAssertFalse(third.contains("/api/keys"), "no self-serve fallback while minting works")
     }
 
     @MainActor

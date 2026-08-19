@@ -8,9 +8,9 @@ struct RoomConnectStateView: View {
     let prompt: String
     let variant: RoomPaneState.ConnectVariant
     /// Fetches the prompt to place on the pasteboard. Copying consumes the
-    /// room's single-use invite, so the copied text may differ from the
-    /// displayed preview's token.
-    var makeCopyPrompt: (() -> String)?
+    /// room's single-use invite (minting inline when none is cached), so the
+    /// copied text may differ from the displayed preview's token.
+    var makeCopyPrompt: (() async -> String)?
 
     @State private var hasCopiedPrompt = false
     @State private var showsSlowJoinHint = false
@@ -115,10 +115,18 @@ struct RoomConnectStateView: View {
     }
 
     private func copyPrompt() {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(makeCopyPrompt?() ?? prompt, forType: .string)
         hasCopiedPrompt = true
+        Task {
+            let text: String
+            if let makeCopyPrompt {
+                text = await makeCopyPrompt()
+            } else {
+                text = prompt
+            }
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+        }
     }
 }
 

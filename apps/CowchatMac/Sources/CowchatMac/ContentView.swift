@@ -1084,7 +1084,7 @@ private struct ChatRoomView: View {
                                 roomName: room.name,
                                 prompt: store.connectPrompt(for: room),
                                 variant: variant,
-                                makeCopyPrompt: { store.copyableConnectPrompt(for: room) }
+                                makeCopyPrompt: { await store.copyableConnectPrompt(for: room) }
                             )
                             .onAppear { store.ensurePromptInvite(for: room) }
                         } else if state == .quiet {
@@ -1192,10 +1192,14 @@ private struct ChatRoomView: View {
     }
 
     private func copyConnectPrompt() {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        // Consumes the room's cached single-use invite and mints the next.
-        pasteboard.setString(store.copyableConnectPrompt(for: room), forType: .string)
+        Task {
+            // Every copy carries its own single-use invite; the mint is
+            // awaited when no cached one is ready.
+            let prompt = await store.copyableConnectPrompt(for: room)
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(prompt, forType: .string)
+        }
     }
 
     private func presenceSummary(at now: Date) -> String {

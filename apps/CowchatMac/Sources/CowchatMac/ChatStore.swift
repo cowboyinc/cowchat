@@ -476,11 +476,19 @@ final class ChatStore: ObservableObject {
         connectPrompt(for: room, inviteToken: promptInviteTokens[room.id])
     }
 
-    /// Prompt for the copy action: consumes the cached single-use invite so
-    /// the next copy hands out a fresh one, and starts minting the
-    /// replacement immediately.
-    func copyableConnectPrompt(for room: Room) -> String {
-        let token = promptInviteTokens.removeValue(forKey: room.id)
+    /// Prompt for the copy action. Every copy carries its own single-use
+    /// invite: the cached one when it's ready, otherwise a mint awaited
+    /// inline — so copying N times yields N distinct invitations. Only a
+    /// failed mint falls back to self-serve wording.
+    func copyableConnectPrompt(for room: Room) async -> String {
+        if let token = promptInviteTokens.removeValue(forKey: room.id) {
+            ensurePromptInvite(for: room)
+            return connectPrompt(for: room, inviteToken: token)
+        }
+        guard connectionProfile.kind == .cowchatCloud, connectionStatus.isConnected else {
+            return connectPrompt(for: room, inviteToken: nil)
+        }
+        let token = try? await connection.createInvite(roomID: room.roomID, singleUse: true)
         ensurePromptInvite(for: room)
         return connectPrompt(for: room, inviteToken: token)
     }
