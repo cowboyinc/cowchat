@@ -109,6 +109,31 @@ struct Room: Codable, Identifiable, Hashable {
     }
 }
 
+/// Invite metadata from `list_invites`. The redeemable token is hash-at-rest
+/// server-side, so listings carry only this opaque handle — fresh tokens are
+/// shown once at mint time and never again.
+struct RoomInvite: Codable, Identifiable, Equatable {
+    let inviteID: String
+    let roomID: String
+    let singleUse: Bool
+    let redeemedCount: Int
+    let revoked: Bool
+    let createdAt: String
+    let mine: Bool
+
+    var id: String { inviteID }
+
+    enum CodingKeys: String, CodingKey {
+        case inviteID = "invite_id"
+        case roomID = "room_id"
+        case singleUse = "single_use"
+        case redeemedCount = "redeemed_count"
+        case revoked
+        case createdAt = "created_at"
+        case mine
+    }
+}
+
 struct MessageMetadata: Codable, Equatable {
     let type: String?
 

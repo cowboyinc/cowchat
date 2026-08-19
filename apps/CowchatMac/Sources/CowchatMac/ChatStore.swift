@@ -493,6 +493,27 @@ final class ChatStore: ObservableObject {
         return connectPrompt(for: room, inviteToken: token)
     }
 
+    // MARK: Invite management (Invites… sheet)
+
+    func invites(for room: Room) async throws -> [RoomInvite] {
+        try await connection.listInvites(roomID: room.roomID)
+    }
+
+    /// Mints an invite and returns its token — shown once, never recoverable
+    /// from the server afterwards.
+    func mintInvite(for room: Room, singleUse: Bool) async throws -> String {
+        try await connection.createInvite(roomID: room.roomID, singleUse: singleUse)
+    }
+
+    func revokeInvite(id: String) async throws {
+        try await connection.revokeInvite(inviteID: id)
+    }
+
+    /// Full paste-able prompt around an explicitly minted token.
+    func connectPrompt(for room: Room, embedding token: String) -> String {
+        connectPrompt(for: room, inviteToken: token)
+    }
+
     private func connectPrompt(for room: Room, inviteToken: String?) -> String {
         Self.connectPromptText(
             roomName: room.name,

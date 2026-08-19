@@ -130,6 +130,46 @@ struct RoomConnectStateView: View {
     }
 }
 
+/// Floating pill over a live feed where nobody else is present: one tap
+/// copies a connect prompt carrying a fresh single-use invite.
+struct InviteCollaboratorNudge: View {
+    let makePrompt: () async -> String
+    @State private var copied = false
+
+    var body: some View {
+        Button(action: copyInvite) {
+            HStack(spacing: 8) {
+                Image(systemName: copied ? "checkmark" : "person.badge.plus")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(copied ? "Invite copied — paste it into any agent" : "Invite a collaborator")
+                    .gallopText(.bodySStrong, color: SemanticColor.buttonPrimaryTextDefault)
+            }
+            .foregroundStyle(SemanticColor.buttonPrimaryTextDefault)
+            .padding(.horizontal, 16)
+            .frame(height: 36)
+            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+            .shadow(color: Color.black.opacity(0.18), radius: 6, x: 0, y: 2)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .animation(.easeInOut(duration: 0.15), value: copied)
+        .macAccessibleAction(label: "Invite a collaborator", action: copyInvite)
+    }
+
+    private func copyInvite() {
+        guard !copied else { return }
+        copied = true
+        Task {
+            let prompt = await makePrompt()
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(prompt, forType: .string)
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            copied = false
+        }
+    }
+}
+
 /// Subtle opacity pulse for the waiting dot; no motion for static variants.
 private struct PulsingDot: ViewModifier {
     let active: Bool

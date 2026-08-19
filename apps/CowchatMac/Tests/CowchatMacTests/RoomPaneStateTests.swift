@@ -104,4 +104,14 @@ final class RoomPaneStateTests: XCTestCase {
         )
     }
 
+    func testInviteNudgeOnlyFloatsOverALonelyLiveFeed() {
+        XCTAssertTrue(RoomPaneState.showsInviteNudge(state: .chat, hasOtherMembers: false))
+        XCTAssertFalse(RoomPaneState.showsInviteNudge(state: .chat, hasOtherMembers: true))
+        // Connect and quiet states carry their own invite CTAs.
+        XCTAssertFalse(
+            RoomPaneState.showsInviteNudge(state: .connectPrompt(.connected), hasOtherMembers: false)
+        )
+        XCTAssertFalse(RoomPaneState.showsInviteNudge(state: .quiet, hasOtherMembers: true))
+        XCTAssertFalse(RoomPaneState.showsInviteNudge(state: .loading, hasOtherMembers: false))
+    }
 }

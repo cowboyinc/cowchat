@@ -25,6 +25,8 @@ private final class StubConnection: CowchatConnectionProtocol {
     func createInvite(roomID: String, singleUse: Bool) async throws -> String {
         throw CancellationError()
     }
+    func listInvites(roomID: String) async throws -> [RoomInvite] { [] }
+    func revokeInvite(inviteID: String) async throws {}
     func join(roomID: String) async throws {}
     func leave(roomID: String) async throws {}
     func history(roomID: String, limit: Int, before: String?) async throws -> [ChatMessage] { [] }

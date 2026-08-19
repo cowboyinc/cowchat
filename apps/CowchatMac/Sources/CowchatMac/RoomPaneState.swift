@@ -30,4 +30,11 @@ enum RoomPaneState: Equatable {
         if hasOtherMembers { return .quiet }
         return .connectPrompt(.connected)
     }
+
+    /// The floating "Invite a collaborator" nudge: live chat, but nobody
+    /// else here. The connect and quiet states carry their own invite CTAs,
+    /// so the nudge only floats over an active feed.
+    static func showsInviteNudge(state: RoomPaneState, hasOtherMembers: Bool) -> Bool {
+        state == .chat && !hasOtherMembers
+    }
 }

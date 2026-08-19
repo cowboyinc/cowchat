@@ -126,10 +126,20 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         return roomToCreate
     }
     var invitesToVend: [String] = []
+    var listedInvites: [RoomInvite] = []
+    var revokedInviteIDs: [String] = []
     func createInvite(roomID: String, singleUse: Bool) async throws -> String {
         operations.append("invite:\(roomID):\(singleUse ? "single" : "open")")
         guard !invitesToVend.isEmpty else { throw CancellationError() }
         return invitesToVend.removeFirst()
+    }
+    func listInvites(roomID: String) async throws -> [RoomInvite] {
+        operations.append("invites-list:\(roomID)")
+        return listedInvites
+    }
+    func revokeInvite(inviteID: String) async throws {
+        operations.append("invite-revoke:\(inviteID)")
+        revokedInviteIDs.append(inviteID)
     }
     func destroy(roomID: String) async throws {
         operations.append("destroy:\(roomID)")

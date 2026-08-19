@@ -197,6 +197,8 @@ private final class PromptInviteStubConnection: CowchatConnectionProtocol {
         guard !invites.isEmpty else { throw CancellationError() }
         return invites.removeFirst()
     }
+    func listInvites(roomID: String) async throws -> [RoomInvite] { [] }
+    func revokeInvite(inviteID: String) async throws {}
     func join(roomID: String) async throws {}
     func leave(roomID: String) async throws {}
     func history(roomID: String, limit: Int, before: String?) async throws -> [ChatMessage] { [] }

@@ -1036,6 +1036,7 @@ private struct ChatRoomView: View {
     @State private var isFieldHovering = false
     @State private var isDestroyConfirmationPresented = false
     @State private var isDestroyingRoom = false
+    @State private var isInvitesPresented = false
     @State private var isMessageListNearBottom = true
     @State private var newMessageCount = 0
     @State private var hasCopiedQuietRoomPrompt = false
@@ -1053,15 +1054,19 @@ private struct ChatRoomView: View {
             connectionStatus: store.connectionStatus,
             isLoadingMessages: store.isLoadingMessages,
             hasMessages: !store.messages.isEmpty,
-            hasOtherMembers: ChatPresencePresentation.hasCollaboratorSignal(
-                members: store.roomMembers,
-                currentAgentID: store.agentID,
-                fallbackMemberCount: room.memberCount,
-                fallbackMemberCountIncludesCurrentAgent:
-                    store.fallbackMemberCountIncludesCurrentAgent(in: room.id),
-                recentActivityByAgent: store.recentAgentActivityAt[room.id],
-                now: now
-            )
+            hasOtherMembers: hasCollaborators(at: now)
+        )
+    }
+
+    private func hasCollaborators(at now: Date) -> Bool {
+        ChatPresencePresentation.hasCollaboratorSignal(
+            members: store.roomMembers,
+            currentAgentID: store.agentID,
+            fallbackMemberCount: room.memberCount,
+            fallbackMemberCountIncludesCurrentAgent:
+                store.fallbackMemberCountIncludesCurrentAgent(in: room.id),
+            recentActivityByAgent: store.recentAgentActivityAt[room.id],
+            now: now
         )
     }
 
@@ -1091,12 +1096,26 @@ private struct ChatRoomView: View {
                             quietRoom
                                 .allowsHitTesting(true)
                         }
+                        if RoomPaneState.showsInviteNudge(
+                            state: state,
+                            hasOtherMembers: hasCollaborators(at: timeline.date)
+                        ) {
+                            InviteCollaboratorNudge {
+                                await store.copyableConnectPrompt(for: room)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            .padding(.top, 12)
+                        }
                     }
                 }
                 composer
             }
         }
         .background(SemanticColor.surface500)
+        .sheet(isPresented: $isInvitesPresented) {
+            RoomInvitesView(room: room)
+                .environmentObject(store)
+        }
         .alert("Destroy \(room.name)?", isPresented: $isDestroyConfirmationPresented) {
             Button("Cancel", role: .cancel) {}
             Button("Destroy Room", role: .destructive) {
@@ -1118,6 +1137,9 @@ private struct ChatRoomView: View {
                 Spacer()
                 Menu {
                     Button("Copy connect prompt") { copyConnectPrompt() }
+                    if !store.isLocalConnection {
+                        Button("Invites…") { isInvitesPresented = true }
+                    }
                     Divider()
                     // Rename and destroy are creator-only, so for other
                     // agents' rooms they are hidden rather than left as

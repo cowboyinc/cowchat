@@ -192,4 +192,25 @@ final class ProtocolModelsTests: XCTestCase {
         XCTAssertEqual(code, "room_name_taken")
         XCTAssertEqual(error.errorDescription, "Room name 'General' already taken")
     }
+    func testRoomInviteDecodesListPayloadShape() throws {
+        let data = Data("""
+        {
+          "invite_id":"a3f1c2d4e5f60718293a4b5c6d7e8f901234567890abcdef1234567890abcdef",
+          "room_id":"room-9",
+          "single_use":false,
+          "redeemed_count":3,
+          "revoked":false,
+          "created_at":"2026-08-13T18:00:00Z",
+          "mine":true
+        }
+        """.utf8)
+
+        let invite = try JSONDecoder().decode(RoomInvite.self, from: data)
+        XCTAssertEqual(invite.id.prefix(8), "a3f1c2d4")
+        XCTAssertEqual(invite.roomID, "room-9")
+        XCTAssertFalse(invite.singleUse)
+        XCTAssertEqual(invite.redeemedCount, 3)
+        XCTAssertFalse(invite.revoked)
+        XCTAssertTrue(invite.mine)
+    }
 }
