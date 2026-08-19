@@ -613,9 +613,16 @@ impl CowchatServer {
             }
         });
 
+        #[cfg(unix)]
+        let uds_wait = async {
+            let _ = uds_task.await;
+        };
+        #[cfg(not(unix))]
+        let uds_wait = std::future::pending::<()>();
+
         // Wait for shutdown signal
         tokio::select! {
-            _ = uds_task => {},
+            _ = uds_wait => {},
             _ = async { if let Some(t) = tcp_task { t.await.ok(); } else { std::future::pending::<()>().await } } => {},
             _ = async { if let Some(t) = http_task { t.await.ok(); } else { std::future::pending::<()>().await } } => {},
             signal = shutdown_signal() => {
