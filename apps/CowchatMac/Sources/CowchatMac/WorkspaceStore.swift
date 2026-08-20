@@ -86,11 +86,25 @@ final class WorkspaceStore: ObservableObject {
             defaults: defaults,
             credentialStore: KeychainCowchatCredentialStore()
         )
+        #if DEBUG
+        // Dev builds run as a bare `swift build` binary with no
+        // Contents/Helpers, so allow the fixed Homebrew install locations as
+        // helper fallbacks. Deliberately empty in release: the shipped app
+        // only ever spawns the helper it was signed with.
+        let devFallbackServerPaths = [
+            "/opt/homebrew/bin/cowchat-server",
+            "/usr/local/bin/cowchat-server",
+        ]
+        #else
+        let devFallbackServerPaths: [String] = []
+        #endif
         let local = ChatStore(
             connection: CowchatConnection(profile: .local),
             defaults: defaults,
             connectionProfile: .local,
-            localServerSupervisor: LocalServerSupervisor()
+            localServerSupervisor: LocalServerSupervisor(
+                devFallbackServerPaths: devFallbackServerPaths
+            )
         )
         var global: ChatStore?
         if preferences.isGlobalEnabled() {

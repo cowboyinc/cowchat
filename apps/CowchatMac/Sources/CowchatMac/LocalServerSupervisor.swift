@@ -327,6 +327,12 @@ final class LocalServerSupervisor: LocalServerSupervising {
 
     private let bundleURL: URL
     private let fileManager: FileManager
+    /// Absolute paths tried only when the bundled helper is absent — dev
+    /// builds run as a bare `swift build` binary with no Contents/Helpers.
+    /// Always empty in release builds (see the WorkspaceStore call site):
+    /// the shipped app must only ever spawn the helper it was signed with,
+    /// and this is a fixed allowlist, never a $PATH search.
+    private let devFallbackServerPaths: [String]
     private let startupGraceNanoseconds: UInt64
     private let maxStandardErrorBytes: Int
     private let interruptShutdownGraceNanoseconds: UInt64
@@ -342,6 +348,7 @@ final class LocalServerSupervisor: LocalServerSupervising {
     init(
         bundleURL: URL = Bundle.main.bundleURL,
         fileManager: FileManager = .default,
+        devFallbackServerPaths: [String] = [],
         startupGraceNanoseconds: UInt64 = 250_000_000,
         maxStandardErrorBytes: Int = 2_048,
         interruptShutdownGraceNanoseconds: UInt64 = 1_000_000_000,
@@ -351,6 +358,7 @@ final class LocalServerSupervisor: LocalServerSupervising {
     ) {
         self.bundleURL = bundleURL
         self.fileManager = fileManager
+        self.devFallbackServerPaths = devFallbackServerPaths
         self.startupGraceNanoseconds = startupGraceNanoseconds
         self.maxStandardErrorBytes = max(0, maxStandardErrorBytes)
         self.interruptShutdownGraceNanoseconds = interruptShutdownGraceNanoseconds
@@ -401,7 +409,7 @@ final class LocalServerSupervisor: LocalServerSupervising {
         }
         if let retainedLaunchFailure { throw retainedLaunchFailure }
 
-        let executableURL = Self.serverExecutableURL(in: bundleURL)
+        let executableURL = resolvedServerExecutableURL()
         guard fileManager.fileExists(atPath: executableURL.path) else {
             let failure = LocalServerSupervisorError.missingBundledServer(executableURL)
             retainedLaunchFailure = failure
@@ -612,5 +620,18 @@ final class LocalServerSupervisor: LocalServerSupervising {
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("Helpers", isDirectory: true)
             .appendingPathComponent("cowchat-server", isDirectory: false)
+    }
+
+    /// The bundled helper always wins; the dev fallback list is consulted
+    /// only when it does not exist at all. A missing-everything state still
+    /// resolves to the bundled path so the error names the canonical
+    /// location.
+    func resolvedServerExecutableURL() -> URL {
+        let bundled = Self.serverExecutableURL(in: bundleURL)
+        guard !fileManager.fileExists(atPath: bundled.path) else { return bundled }
+        for path in devFallbackServerPaths where fileManager.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return bundled
     }
 }

@@ -22,6 +22,48 @@ final class LocalServerSupervisorTests: XCTestCase {
     }
 
     @MainActor
+    func testDevFallbackResolvesOnlyWhenBundledHelperIsAbsent() throws {
+        let missingBundle = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fallback = temporaryFileURL(named: "fallback-server")
+        try "#!/bin/sh\nexit 0\n".write(to: fallback, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: fallback.path
+        )
+
+        // Bundled helper absent → executable fallback wins.
+        let fallbackSupervisor = LocalServerSupervisor(
+            bundleURL: missingBundle,
+            devFallbackServerPaths: [fallback.path]
+        )
+        XCTAssertEqual(fallbackSupervisor.resolvedServerExecutableURL().path, fallback.path)
+
+        // Non-executable fallback is skipped; resolution names the canonical
+        // bundled path so the missing-helper error stays accurate.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o644], ofItemAtPath: fallback.path
+        )
+        XCTAssertEqual(
+            fallbackSupervisor.resolvedServerExecutableURL().path,
+            LocalServerSupervisor.serverExecutableURL(in: missingBundle).path
+        )
+
+        // A present bundled helper always wins over any fallback.
+        let bundle = try makeBundleFixture(script: "exit 0")
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: fallback.path
+        )
+        let bundledSupervisor = LocalServerSupervisor(
+            bundleURL: bundle,
+            devFallbackServerPaths: [fallback.path]
+        )
+        XCTAssertEqual(
+            bundledSupervisor.resolvedServerExecutableURL().path,
+            LocalServerSupervisor.serverExecutableURL(in: bundle).path
+        )
+    }
+
+    @MainActor
     func testMissingBundledServerFailsWithoutClaimingOwnership() async {
         let missingBundle = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
