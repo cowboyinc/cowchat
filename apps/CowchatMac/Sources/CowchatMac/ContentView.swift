@@ -1240,9 +1240,19 @@ private struct ChatRoomView: View {
     private var messageList: some View {
         TimelineView(.periodic(from: .now, by: 60)) { timeline in
             ScrollViewReader { proxy in
+                GeometryReader { viewport in
                 ZStack(alignment: .bottom) {
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 22) {
+                        // A plain VStack on purpose. LazyVStack's prefetch
+                        // cache never converges when variable-height rows are
+                        // appended while the view is scrolled up: each pass
+                        // shifts the height estimates, signalPrefetch requests
+                        // another update, and the main thread livelocks at
+                        // 100% CPU re-laying-out the feed (ANRs of 2026-08-06
+                        // and 2026-08-19, both sample-confirmed in
+                        // LazyLayoutViewCache.signalPrefetch). History is
+                        // bounded, so eager layout converges in one pass.
+                        VStack(alignment: .leading, spacing: 22) {
 
                         ForEach(store.messages) { message in
                             MessageFeedRow(
@@ -1263,18 +1273,37 @@ private struct ChatRoomView: View {
                                 .id("thinking-indicator")
                             }
 
+                            // Non-lazy containers fire onAppear on insertion,
+                            // not on scroll — near-bottom detection reads the
+                            // marker's position in the scroll viewport
+                            // instead. The states it drives only affect the
+                            // pill OVERLAY, never the feed's own layout, so
+                            // the preference loop settles in one pass.
                             Color.clear
                                 .frame(height: 1)
                                 .id("message-list-bottom")
-                                .onAppear {
-                                    isMessageListNearBottom = true
-                                    newMessageCount = 0
-                                }
-                                .onDisappear { isMessageListNearBottom = false }
+                                .background(
+                                    GeometryReader { marker in
+                                        Color.clear.preference(
+                                            key: FeedBottomOffsetKey.self,
+                                            value: marker.frame(in: .named("cowchatFeed")).minY
+                                        )
+                                    }
+                                )
                         }
                         .padding(.horizontal, 20)
                         .padding(.top, 18)
                         .padding(.bottom, isComposerExpanded ? 86 : 72)
+                    }
+                    .coordinateSpace(name: "cowchatFeed")
+                    .onPreferenceChange(FeedBottomOffsetKey.self) { markerY in
+                        let nearBottom = markerY <= viewport.size.height + 60
+                        if nearBottom {
+                            if !isMessageListNearBottom { isMessageListNearBottom = true }
+                            if newMessageCount != 0 { newMessageCount = 0 }
+                        } else if isMessageListNearBottom {
+                            isMessageListNearBottom = false
+                        }
                     }
                     .scrollIndicators(.hidden)
                     .opacity(hasPositionedInitialScroll ? 1 : 0)
@@ -1330,6 +1359,7 @@ private struct ChatRoomView: View {
                     } else if !store.isLoadingMessages {
                         hasPositionedInitialScroll = true
                     }
+                }
                 }
             }
         }
@@ -1473,6 +1503,15 @@ private struct ChatRoomView: View {
         store.connectionStatus.isConnected
             && !room.encrypted
             && !store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+/// Distance of the feed's bottom marker from the top of the scroll viewport;
+/// smaller than the viewport height means the user is at (or near) the bottom.
+private struct FeedBottomOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = .infinity
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = min(value, nextValue())
     }
 }
 
