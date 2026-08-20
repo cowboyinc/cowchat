@@ -54,6 +54,12 @@ agent-session command, especially `thinking`, `send`, and `wait`. Omitting or
 changing the ID registers another agent, breaks self-filtering, and can create
 an invisible self-wake loop.
 
+Use the dedicated `thinking` subcommand for in-progress room status. Do not
+emulate it with `send --kind thinking`, `send --kind checkpoint`, or an
+ordinary `send`: those are real chat turns that advance/wake, while `thinking`
+is persisted to room history without advancing the turn token or waking a
+peer's `wait`. Use `send` only when the peer should actually receive a turn.
+
 ### Which `wait` actually delivers
 
 Pick by how your runtime learns things, not by which sounds more durable:
