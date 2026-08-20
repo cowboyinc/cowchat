@@ -170,32 +170,35 @@ struct InviteCollaboratorNudge: View {
     }
 }
 
-/// Pinned "what are they doing" line above the composer. Text only —
-/// callers own placement, and hit-testing stays off so the feed scrolls
-/// underneath it.
-struct ThinkingStatusBar: View {
-    let text: String
+/// In-feed "what is this agent doing" pill, rendered under that agent's
+/// latest message. Wraps freely — pulse text is prose, not a status code.
+/// Lives inside the eager feed VStack on purpose: with lazy layout gone,
+/// pills changing the feed's height converges in a single pass.
+struct ThinkingPulsePill: View {
+    let pulse: AgentThinkingPulse
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             Circle()
                 .fill(SemanticColor.buttonPrimaryDefault)
                 .frame(width: 7, height: 7)
                 .modifier(PulsingDot(active: true))
-            Text(text)
+                .padding(.top, 5)
+            Text(ThinkingPulsePresentation.label(for: pulse))
                 .gallopText(.bodyS, color: SemanticColor.textSecondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 14)
-        .frame(height: 30)
-        .background(SemanticColor.surface600, in: Capsule())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(
+            SemanticColor.surface600,
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
         .overlay {
-            Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(SemanticColor.borderDefault, lineWidth: 1)
         }
-        .shadow(color: Color.black.opacity(0.08), radius: 4, x: 0, y: 1)
-        .frame(maxWidth: 640)
-        .padding(.horizontal, 20)
+        .frame(maxWidth: 640, alignment: .leading)
     }
 }
 

@@ -1106,20 +1106,6 @@ private struct ChatRoomView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                             .padding(.top, 12)
                         }
-                        // Rich thinking line: an OVERLAY on purpose — its
-                        // state never touches the feed's layout (see the
-                        // LazyVStack livelock note in messageList), and the
-                        // dot animates on its own layer.
-                        if state == .chat, let status = thinkingStatusLine(at: timeline.date) {
-                            ThinkingStatusBar(text: status)
-                                .frame(
-                                    maxWidth: .infinity,
-                                    maxHeight: .infinity,
-                                    alignment: .bottom
-                                )
-                                .padding(.bottom, isComposerExpanded ? 96 : 82)
-                                .allowsHitTesting(false)
-                        }
                     }
                 }
                 composer
@@ -1268,13 +1254,34 @@ private struct ChatRoomView: View {
                         // bounded, so eager layout converges in one pass.
                         VStack(alignment: .leading, spacing: 22) {
 
+                        let pulseAnchors = ThinkingPulsePresentation.anchors(
+                            messages: store.messages,
+                            pulses: store.thinkingPulses[room.id, default: [:]],
+                            currentAgentID: store.agentID,
+                            now: timeline.date
+                        )
+
                         ForEach(store.messages) { message in
-                            MessageFeedRow(
-                                message: message,
-                                isMine: message.agentID == store.agentID,
-                                now: timeline.date
-                            )
+                            VStack(alignment: .leading, spacing: 10) {
+                                MessageFeedRow(
+                                    message: message,
+                                    isMine: message.agentID == store.agentID,
+                                    now: timeline.date
+                                )
+                                ForEach(
+                                    pulseAnchors.byMessageID[message.id] ?? [],
+                                    id: \.agentID
+                                ) { pulse in
+                                    ThinkingPulsePill(pulse: pulse)
+                                }
+                            }
                             .id(message.id)
+                        }
+
+                        // Pulsing agents who haven't spoken yet pill at the
+                        // end of the feed rather than vanishing.
+                        ForEach(pulseAnchors.unanchored, id: \.agentID) { pulse in
+                            ThinkingPulsePill(pulse: pulse)
                         }
 
                             // Non-lazy containers fire onAppear on insertion,
@@ -1406,24 +1413,6 @@ private struct ChatRoomView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// One line, richest available: latest pulse text ("claude-b: checking
-    /// file X"), progress when reported, other thinkers as a count; plain
-    /// "X is thinking…" when no pulse carried text. Same 120s freshness
-    /// window as the sidebar's working spinner.
-    private func thinkingStatusLine(at now: Date) -> String? {
-        let fresh = store.thinkingPulses[room.id, default: [:]].values
-            .filter { $0.agentID != store.agentID && now.timeIntervalSince($0.at) < 120 }
-            .sorted { $0.at > $1.at }
-        guard !fresh.isEmpty else { return nil }
-        if let rich = fresh.first(where: { $0.text != nil }), let text = rich.text {
-            var line = "\(rich.agentName): \(text)"
-            if let progress = rich.progress { line += " · \(progress)%" }
-            if fresh.count > 1 { line += " · +\(fresh.count - 1) more thinking" }
-            return line
-        }
-        if fresh.count == 1 { return "\(fresh[0].agentName) is thinking…" }
-        return "\(fresh.count) agents are thinking…"
-    }
 
     @ViewBuilder
     private var composer: some View {
