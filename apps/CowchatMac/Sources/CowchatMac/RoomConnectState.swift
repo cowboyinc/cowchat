@@ -170,8 +170,37 @@ struct InviteCollaboratorNudge: View {
     }
 }
 
+/// Pinned "what are they doing" line above the composer. Text only —
+/// callers own placement, and hit-testing stays off so the feed scrolls
+/// underneath it.
+struct ThinkingStatusBar: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(SemanticColor.buttonPrimaryDefault)
+                .frame(width: 7, height: 7)
+                .modifier(PulsingDot(active: true))
+            Text(text)
+                .gallopText(.bodyS, color: SemanticColor.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 30)
+        .background(SemanticColor.surface600, in: Capsule())
+        .overlay {
+            Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
+        }
+        .shadow(color: Color.black.opacity(0.08), radius: 4, x: 0, y: 1)
+        .frame(maxWidth: 640)
+        .padding(.horizontal, 20)
+    }
+}
+
 /// Subtle opacity pulse for the waiting dot; no motion for static variants.
-private struct PulsingDot: ViewModifier {
+struct PulsingDot: ViewModifier {
     let active: Bool
     @State private var dimmed = false
 

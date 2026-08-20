@@ -109,6 +109,16 @@ struct Room: Codable, Identifiable, Hashable {
     }
 }
 
+/// One agent's most recent "thinking out loud" signal in a room — text from
+/// the dedicated `thinking` event, or presence status detail/progress.
+struct AgentThinkingPulse: Equatable {
+    let agentID: String
+    let agentName: String
+    let text: String?
+    let progress: Int?
+    let at: Date
+}
+
 /// Invite metadata from `list_invites`. The redeemable token is hash-at-rest
 /// server-side, so listings carry only this opaque handle — fresh tokens are
 /// shown once at mint time and never again.

@@ -33,6 +33,11 @@ final class ChatStore: ObservableObject {
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
     @Published private(set) var lastThinkingAt: [String: [String: Date]] = [:]
+    /// Latest rich thinking pulse per room → agent: the free-text `thinking`
+    /// event content, or presence `status_detail`/`progress`. Freshness is
+    /// judged against `at` with the same window as `lastThinkingAt`, which
+    /// stays the boolean working-signal source of truth.
+    @Published private(set) var thinkingPulses: [String: [String: AgentThinkingPulse]] = [:]
     @Published private(set) var recentAgentActivityAt: [String: [String: Date]] = [:]
     @Published var roomReadyNotice: Room?
     @Published var secondAgentHintRoom: Room?
@@ -769,6 +774,7 @@ final class ChatStore: ObservableObject {
         isSearchingMessages = false
         roomMessagePreviews = [:]
         lastThinkingAt = [:]
+        thinkingPulses = [:]
         recentAgentActivityAt = [:]
         roomReadyNotice = nil
         secondAgentHintRoom = nil
@@ -1256,6 +1262,14 @@ final class ChatStore: ObservableObject {
                 lastThinkingAt = RoomSidebarPresentation.updatedThinkingByAgent(
                     lastThinkingAt, message: message, now: receivedAt
                 )
+                if !message.isThinking {
+                    // A real message ends this agent's pulse; another agent's
+                    // pulse in the same room stays live.
+                    thinkingPulses[message.roomID]?.removeValue(forKey: message.agentID)
+                    if thinkingPulses[message.roomID]?.isEmpty == true {
+                        thinkingPulses.removeValue(forKey: message.roomID)
+                    }
+                }
                 if message.isThinking {
                     updateRoomActivity(from: message)
                     break
@@ -1323,6 +1337,14 @@ final class ChatStore: ObservableObject {
                 recordLiveAgentActivity(message, receivedAt: receivedAt)
                 lastThinkingAt = RoomSidebarPresentation.updatedThinkingByAgent(
                     lastThinkingAt, message: message, now: receivedAt
+                )
+                let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                thinkingPulses[message.roomID, default: [:]][message.agentID] = AgentThinkingPulse(
+                    agentID: message.agentID,
+                    agentName: message.agentName,
+                    text: trimmed.isEmpty ? nil : trimmed,
+                    progress: nil,
+                    at: receivedAt
                 )
             }
         default:
@@ -1548,10 +1570,30 @@ final class ChatStore: ObservableObject {
             let now = Date()
             lastThinkingAt[roomID, default: [:]][agentID] = now
             recordRecentAgentActivity(agentID: agentID, roomID: roomID, at: now, now: now)
+            // Presence refreshes the pulse; a nil detail must not erase text
+            // from a richer `thinking` event that arrived moments ago.
+            let existing = thinkingPulses[roomID]?[agentID]
+            let detail = (payload["status_detail"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = (payload["name"] as? String)
+                ?? existing?.agentName
+                ?? roomMembers.first(where: { $0.agentID == agentID })?.name
+                ?? agentID
+            thinkingPulses[roomID, default: [:]][agentID] = AgentThinkingPulse(
+                agentID: agentID,
+                agentName: name,
+                text: (detail?.isEmpty == false ? detail : nil) ?? existing?.text,
+                progress: (payload["progress"] as? Int) ?? existing?.progress,
+                at: now
+            )
         } else {
             lastThinkingAt[roomID]?.removeValue(forKey: agentID)
             if lastThinkingAt[roomID]?.isEmpty == true {
                 lastThinkingAt.removeValue(forKey: roomID)
+            }
+            thinkingPulses[roomID]?.removeValue(forKey: agentID)
+            if thinkingPulses[roomID]?.isEmpty == true {
+                thinkingPulses.removeValue(forKey: roomID)
             }
         }
     }
@@ -1910,6 +1952,7 @@ final class ChatStore: ObservableObject {
         roomMessagePreviews.removeValue(forKey: roomID)
         previewActivityByRoomID.removeValue(forKey: roomID)
         lastThinkingAt.removeValue(forKey: roomID)
+        thinkingPulses.removeValue(forKey: roomID)
         recentAgentActivityAt.removeValue(forKey: roomID)
         memberCountIncludesCurrentAgentRoomIDs.remove(roomID)
         if roomReadyNotice?.id == roomID { roomReadyNotice = nil }

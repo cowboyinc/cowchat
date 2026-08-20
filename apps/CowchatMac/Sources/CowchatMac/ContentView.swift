@@ -1106,6 +1106,20 @@ private struct ChatRoomView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                             .padding(.top, 12)
                         }
+                        // Rich thinking line: an OVERLAY on purpose — its
+                        // state never touches the feed's layout (see the
+                        // LazyVStack livelock note in messageList), and the
+                        // dot animates on its own layer.
+                        if state == .chat, let status = thinkingStatusLine(at: timeline.date) {
+                            ThinkingStatusBar(text: status)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    maxHeight: .infinity,
+                                    alignment: .bottom
+                                )
+                                .padding(.bottom, isComposerExpanded ? 96 : 82)
+                                .allowsHitTesting(false)
+                        }
                     }
                 }
                 composer
@@ -1263,16 +1277,6 @@ private struct ChatRoomView: View {
                             .id(message.id)
                         }
 
-                            if let thinkingText {
-                                HStack(spacing: 8) {
-                                    GallopIconView(icon: .thinking, fallbackSystemName: "arrow.triangle.2.circlepath", size: 16)
-                                        .foregroundStyle(SemanticColor.buttonPrimaryDefault)
-                                    Text(thinkingText)
-                                        .gallopText(.bodyL, color: SemanticColor.textTertiary)
-                                }
-                                .id("thinking-indicator")
-                            }
-
                             // Non-lazy containers fire onAppear on insertion,
                             // not on scroll — near-bottom detection reads the
                             // marker's position in the scroll viewport
@@ -1402,12 +1406,23 @@ private struct ChatRoomView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var thinkingText: String? {
-        let names = store.roomMembers.filter {
-            ($0.status ?? "").localizedCaseInsensitiveContains("thinking")
-        }.map(\.name)
-        guard !names.isEmpty else { return nil }
-        return names.count == 1 ? "\(names[0]) is thinking…" : "\(names.joined(separator: ", ")) are thinking…"
+    /// One line, richest available: latest pulse text ("claude-b: checking
+    /// file X"), progress when reported, other thinkers as a count; plain
+    /// "X is thinking…" when no pulse carried text. Same 120s freshness
+    /// window as the sidebar's working spinner.
+    private func thinkingStatusLine(at now: Date) -> String? {
+        let fresh = store.thinkingPulses[room.id, default: [:]].values
+            .filter { $0.agentID != store.agentID && now.timeIntervalSince($0.at) < 120 }
+            .sorted { $0.at > $1.at }
+        guard !fresh.isEmpty else { return nil }
+        if let rich = fresh.first(where: { $0.text != nil }), let text = rich.text {
+            var line = "\(rich.agentName): \(text)"
+            if let progress = rich.progress { line += " · \(progress)%" }
+            if fresh.count > 1 { line += " · +\(fresh.count - 1) more thinking" }
+            return line
+        }
+        if fresh.count == 1 { return "\(fresh[0].agentName) is thinking…" }
+        return "\(fresh.count) agents are thinking…"
     }
 
     @ViewBuilder
