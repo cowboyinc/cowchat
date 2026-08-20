@@ -15,6 +15,10 @@ final class ConnectPromptTests: XCTestCase {
         XCTAssertTrue(prompt.contains("unique to this server, room, and agent"))
         XCTAssertTrue(prompt.contains("highest message sequence you actually processed"))
         XCTAssertTrue(prompt.contains("use `0` if there is no history"))
+        XCTAssertTrue(
+            prompt.contains(#"run `thinking design-review "<one line on what you're doing>"`"#)
+        )
+        XCTAssertTrue(prompt.contains("refresh it roughly every minute"))
         XCTAssertTrue(prompt.contains("returning `wait --loop --drain --cursor-file <that-file>`"))
         XCTAssertTrue(prompt.contains("never recompute the floor from the room tip"))
         XCTAssertTrue(prompt.contains("Do not use `wait --follow`"))
