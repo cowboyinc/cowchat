@@ -3843,6 +3843,78 @@ async fn test_single_use_invite_vends_key_and_private_room_access() {
 }
 
 #[tokio::test]
+async fn test_authenticated_redeem_grants_the_callers_existing_key() {
+    let (_handle, addr, http_addr, owner_key, _tmp) = start_test_server_with_http().await;
+
+    let owner = connect_agent(&addr, &owner_key, "owner").await;
+
+    // A stranger first gets a key the usual way: HTTP-redeeming an invite to
+    // a throwaway room mints one.
+    let porch = owner.create_room("front-porch", None, None).await.unwrap();
+    let porch_invite = owner.create_invite(&porch.room_id, true).await.unwrap();
+    let (status, body) = redeem_invite_http(&http_addr, &porch_invite.token).await;
+    assert_eq!(status, 201);
+    let stranger_key = body["api_key"].as_str().unwrap().to_string();
+
+    // A private room the stranger's key cannot see yet.
+    let den = owner.create_room("private-den", None, None).await.unwrap();
+    owner.join_room(&den.room_id).await.unwrap();
+    owner
+        .send_message(&den.room_id, "members only", None, vec![])
+        .await
+        .unwrap();
+    let invite = owner.create_invite(&den.room_id, true).await.unwrap();
+
+    let stranger = connect_agent(&addr, &stranger_key, "stranger").await;
+    let visible = stranger.list_rooms(None).await.unwrap();
+    assert!(
+        !visible.iter().any(|r| r.room_id == den.room_id),
+        "private room must be invisible before redemption"
+    );
+
+    // The authenticated frame grants the stranger's EXISTING key — no new
+    // key is minted.
+    let redeemed = stranger.redeem_invite(&invite.token).await.unwrap();
+    assert_eq!(redeemed.room_id, den.room_id);
+    assert_eq!(redeemed.room_name, "private-den");
+
+    let visible = stranger.list_rooms(None).await.unwrap();
+    assert!(visible.iter().any(|r| r.room_id == den.room_id));
+    stranger.join_room(&den.room_id).await.unwrap();
+    stranger
+        .send_message(&den.room_id, "howdy, same key as before", None, vec![])
+        .await
+        .unwrap();
+    let history = stranger.get_history(&den.room_id, 10, None).await.unwrap();
+    assert!(history.iter().any(|m| m.content == "members only"));
+
+    // The single-use invite is consumed: the HTTP path now answers the
+    // generic 404.
+    let (reused_status, _) = redeem_invite_http(&http_addr, &invite.token).await;
+    assert_eq!(reused_status, 404);
+
+    // No-burn: redeeming an invite for a room the key ALREADY accesses
+    // returns the room without consuming the invite…
+    let second = owner.create_invite(&den.room_id, true).await.unwrap();
+    let noop = stranger.redeem_invite(&second.token).await.unwrap();
+    assert_eq!(noop.room_id, den.room_id);
+    // …so the same token still redeems for someone who gains access.
+    let (fresh_status, fresh_body) = redeem_invite_http(&http_addr, &second.token).await;
+    assert_eq!(fresh_status, 201);
+    assert_ne!(fresh_body["api_key"].as_str().unwrap(), stranger_key);
+
+    // Unknown tokens over the frame answer the generic invite_not_found.
+    let missing = stranger.redeem_invite("cinv_no_such_token").await;
+    assert!(matches!(
+        missing,
+        Err(cowchat_client::ClientError::Server {
+            code: cowchat_core::ErrorCode::InviteNotFound,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn test_open_invite_redeems_repeatedly_and_revocation_is_owner_scoped() {
     let (_handle, addr, http_addr, owner_key, _tmp) = start_test_server_with_http().await;
 

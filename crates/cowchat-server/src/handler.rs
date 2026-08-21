@@ -412,6 +412,9 @@ pub async fn handle_frame(
         FrameType::ListInvites => {
             handle_list_invites(req_id, frame.payload, store, agent_api_key, no_auth).await
         }
+        FrameType::RedeemInvite => {
+            handle_redeem_invite(req_id, frame.payload, store, agent_api_key, no_auth).await
+        }
 
         // Tasks
         FrameType::AssignTask => {
@@ -2682,6 +2685,108 @@ async fn handle_list_invites(
     Frame::ok(req_id, serde_json::to_value(&list).unwrap())
 }
 
+/// Authenticated redemption: consumes the invite exactly like the HTTP form
+/// (`POST /api/invites/redeem`), but grants the CALLER's existing key instead
+/// of minting a fresh one. Unknown, revoked, and used-up tokens all answer
+/// the same generic `invite_not_found` — no invite-state oracle.
+///
+/// No-burn rule: if the caller's key can already access the room (public,
+/// owned, or already granted), the reply still carries the room but the
+/// invite is NOT consumed — a single-use invite never burns on a key that
+/// gains nothing. The check is best-effort (it precedes the atomic consume),
+/// so a grant landing concurrently may still burn the invite.
+async fn handle_redeem_invite(
+    req_id: Option<&str>,
+    payload: serde_json::Value,
+    store: &Arc<Store>,
+    agent_api_key: &str,
+    no_auth: bool,
+) -> Frame {
+    let p: RedeemInvitePayload = match serde_json::from_value(payload) {
+        Ok(p) => p,
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, e.to_string()),
+            )
+        }
+    };
+
+    // Grants never attach to the empty key, so a keyless-local connection has
+    // no key an invite could be redeemed onto.
+    if agent_api_key.is_empty() {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(
+                ErrorCode::Unauthorized,
+                "Redeeming an invite requires an API key; keyless connections cannot hold room grants",
+            ),
+        );
+    }
+
+    let invalid = || {
+        Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InviteNotFound, "Invite not found"),
+        )
+    };
+    let redeemed = |room: &Room| {
+        Frame::ok(
+            req_id,
+            serde_json::to_value(RedeemedInvite {
+                room_id: room.room_id.clone(),
+                room_name: room.name.clone(),
+            })
+            .unwrap(),
+        )
+    };
+
+    let token_hash = crate::auth::hash_invite_token(&p.token);
+
+    // No-burn: a live invite for a room the caller already accesses is a
+    // friendly no-op. Unknown/revoked invites fall through so every failure
+    // shares the one generic error below.
+    match store.get_invite(&token_hash) {
+        Ok(Some(invite)) if !invite.revoked => {
+            if let Some(room) = store.get_room(&invite.room_id).ok().flatten() {
+                if can_access_room(&room, agent_api_key, no_auth, store) {
+                    return redeemed(&room);
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+            )
+        }
+    }
+
+    let room_id = match store.redeem_invite(&token_hash) {
+        Ok(Some(room_id)) => room_id,
+        Ok(None) => return invalid(),
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+            )
+        }
+    };
+    // Room-destroy cleanup deletes invites, so this only misses on a narrow
+    // destroy race; answer with the same generic error (mirrors the HTTP path).
+    let Some(room) = store.get_room(&room_id).ok().flatten() else {
+        return invalid();
+    };
+    if let Err(e) = store.add_room_grant(agent_api_key, &room_id) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+        );
+    }
+    redeemed(&room)
+}
+
 #[cfg(test)]
 mod room_lifecycle_tests {
     use super::*;
@@ -2991,5 +3096,185 @@ mod invite_tests {
                 handle_revoke_invite(Some("req"), payload, &store, "owner-key", false).await;
             assert_eq!(error_code(&reply), ErrorCode::InvalidPayload);
         }
+    }
+
+    fn minted_invite(store: &Store, room_id: &str, single_use: bool) -> String {
+        let token = crate::auth::generate_invite_token();
+        store
+            .create_invite(
+                &crate::auth::hash_invite_token(&token),
+                room_id,
+                "owner-key",
+                single_use,
+            )
+            .unwrap();
+        token
+    }
+
+    #[tokio::test]
+    async fn redeem_frame_grants_the_callers_key_and_room_becomes_visible() {
+        let store = store_with_private_room("vault", "owner-key");
+        let token = minted_invite(&store, "vault", true);
+
+        let reply = handle_redeem_invite(
+            Some("req"),
+            serde_json::json!({"token": token}),
+            &store,
+            "stranger-key",
+            false,
+        )
+        .await;
+        assert_eq!(reply.frame_type, FrameType::Ok);
+        assert_eq!(reply.payload["room_id"], "vault");
+        assert_eq!(reply.payload["room_name"], "vault");
+        assert!(store.key_has_grant("stranger-key", "vault"));
+        let visible = store
+            .list_rooms_for_key(Some("stranger-key"), None)
+            .unwrap();
+        assert!(visible.iter().any(|room| room.room_id == "vault"));
+    }
+
+    #[tokio::test]
+    async fn redeem_frame_single_use_race_has_exactly_one_winner() {
+        let store = store_with_private_room("once", "owner-key");
+        let token = minted_invite(&store, "once", true);
+
+        let mut handles = Vec::new();
+        for key in ["racer-a", "racer-b", "racer-c", "racer-d"] {
+            let store = Arc::clone(&store);
+            let token = token.clone();
+            handles.push(tokio::spawn(async move {
+                let reply = handle_redeem_invite(
+                    Some("req"),
+                    serde_json::json!({"token": token}),
+                    &store,
+                    key,
+                    false,
+                )
+                .await;
+                (key, reply)
+            }));
+        }
+        let mut winners = Vec::new();
+        for handle in handles {
+            let (key, reply) = handle.await.unwrap();
+            if reply.frame_type == FrameType::Ok {
+                winners.push(key);
+            } else {
+                assert_eq!(error_code(&reply), ErrorCode::InviteNotFound);
+            }
+        }
+        assert_eq!(winners.len(), 1, "exactly one racer must win");
+        assert!(store.key_has_grant(winners[0], "once"));
+        let hash = crate::auth::hash_invite_token(&token);
+        let invite = store.get_invite(&hash).unwrap().unwrap();
+        assert!(invite.revoked);
+        assert_eq!(invite.redeemed_count, 1);
+    }
+
+    #[tokio::test]
+    async fn redeem_frame_answers_generically_for_unknown_and_revoked() {
+        let store = store_with_private_room("sealed", "owner-key");
+        let token = minted_invite(&store, "sealed", true);
+        store
+            .revoke_invite(&crate::auth::hash_invite_token(&token))
+            .unwrap();
+
+        let revoked = handle_redeem_invite(
+            Some("req"),
+            serde_json::json!({"token": token}),
+            &store,
+            "stranger-key",
+            false,
+        )
+        .await;
+        let unknown = handle_redeem_invite(
+            Some("req"),
+            serde_json::json!({"token": "cinv_no_such_token"}),
+            &store,
+            "stranger-key",
+            false,
+        )
+        .await;
+        // Revoked and unknown are indistinguishable — no invite-state oracle.
+        for reply in [&revoked, &unknown] {
+            assert_eq!(error_code(reply), ErrorCode::InviteNotFound);
+        }
+        assert_eq!(revoked.payload, unknown.payload);
+        assert!(!store.key_has_grant("stranger-key", "sealed"));
+    }
+
+    #[tokio::test]
+    async fn redeem_frame_rejects_keyless_connections_without_consuming() {
+        let store = store_with_private_room("gated", "owner-key");
+        let token = minted_invite(&store, "gated", true);
+
+        let reply = handle_redeem_invite(
+            Some("req"),
+            serde_json::json!({"token": token}),
+            &store,
+            "",
+            false,
+        )
+        .await;
+        assert_eq!(error_code(&reply), ErrorCode::Unauthorized);
+        let invite = store
+            .get_invite(&crate::auth::hash_invite_token(&token))
+            .unwrap()
+            .unwrap();
+        assert!(!invite.revoked);
+        assert_eq!(invite.redeemed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn redeem_frame_does_not_burn_invites_for_already_accessible_rooms() {
+        let store = store_with_private_room("mine", "owner-key");
+        let token = minted_invite(&store, "mine", true);
+        let hash = crate::auth::hash_invite_token(&token);
+
+        // The owner already accesses the room: friendly no-op, invite intact,
+        // and no spurious grant row for the owner.
+        let owner_reply = handle_redeem_invite(
+            Some("req"),
+            serde_json::json!({"token": token}),
+            &store,
+            "owner-key",
+            false,
+        )
+        .await;
+        assert_eq!(owner_reply.frame_type, FrameType::Ok);
+        assert_eq!(owner_reply.payload["room_id"], "mine");
+        assert!(!store.key_has_grant("owner-key", "mine"));
+
+        // A key already holding a grant: same no-op.
+        store.add_room_grant("granted-key", "mine").unwrap();
+        let granted_reply = handle_redeem_invite(
+            Some("req"),
+            serde_json::json!({"token": token}),
+            &store,
+            "granted-key",
+            false,
+        )
+        .await;
+        assert_eq!(granted_reply.frame_type, FrameType::Ok);
+
+        let invite = store.get_invite(&hash).unwrap().unwrap();
+        assert!(!invite.revoked);
+        assert_eq!(invite.redeemed_count, 0);
+
+        // The invite is still redeemable by a key that actually gains access.
+        let stranger_reply = handle_redeem_invite(
+            Some("req"),
+            serde_json::json!({"token": token}),
+            &store,
+            "stranger-key",
+            false,
+        )
+        .await;
+        assert_eq!(stranger_reply.frame_type, FrameType::Ok);
+        assert!(store.key_has_grant("stranger-key", "mine"));
+        let invite = store.get_invite(&hash).unwrap().unwrap();
+        assert!(invite.revoked);
+        assert_eq!(invite.redeemed_count, 1);
     }
 }
