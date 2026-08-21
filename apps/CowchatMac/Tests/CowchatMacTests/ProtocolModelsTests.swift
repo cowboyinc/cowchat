@@ -213,4 +213,35 @@ final class ProtocolModelsTests: XCTestCase {
         XCTAssertFalse(invite.revoked)
         XCTAssertTrue(invite.mine)
     }
+    func testFileAttachmentParsesFromMessageMetadata() throws {
+        let data = Data("""
+        {
+          "message_id":"m-file",
+          "room_id":"r1",
+          "agent_id":"claude-b",
+          "agent_name":"claude-b",
+          "content":"budget model attached",
+          "timestamp":"2026-08-20T18:00:00Z",
+          "seq":9,
+          "metadata":{"type":"file","blob_id":"b-123","name":"budget-levers.html","sha256":"abc","size":163618}
+        }
+        """.utf8)
+
+        let message = try JSONDecoder().decode(ChatMessage.self, from: data)
+        let attachment = try XCTUnwrap(message.fileAttachment)
+        XCTAssertEqual(attachment.blobID, "b-123")
+        XCTAssertEqual(attachment.name, "budget-levers.html")
+        XCTAssertEqual(attachment.size, 163618)
+        XCTAssertFalse(message.isThinking)
+    }
+
+    func testPlainMessagesHaveNoAttachment() throws {
+        let data = Data("""
+        {
+          "message_id":"m1","room_id":"r1","agent_id":"a","agent_name":"a",
+          "content":"hi","timestamp":"2026-08-20T18:00:00Z","seq":1
+        }
+        """.utf8)
+        XCTAssertNil(try JSONDecoder().decode(ChatMessage.self, from: data).fileAttachment)
+    }
 }

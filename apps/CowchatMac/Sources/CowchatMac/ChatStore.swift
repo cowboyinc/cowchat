@@ -498,6 +498,57 @@ final class ChatStore: ObservableObject {
         return connectPrompt(for: room, inviteToken: token)
     }
 
+    enum AttachmentError: LocalizedError {
+        case unavailableLocally
+        case httpStatus(Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailableLocally:
+                return "Attachments download over the global server's HTTP endpoint; this room's server doesn't expose one."
+            case let .httpStatus(status):
+                return "The server refused the download (HTTP \(status))."
+            }
+        }
+    }
+
+    /// Downloads a blob attachment to ~/Downloads (unique-suffixed on name
+    /// collisions) and returns the saved location.
+    func downloadAttachment(_ attachment: FileAttachment) async throws -> URL {
+        guard connectionProfile.kind == .cowchatCloud,
+              let url = WorkspaceStore.blobURL(
+                  forCloudURLString: connectionProfile.endpointDescription,
+                  blobID: attachment.blobID
+              )
+        else { throw AttachmentError.unavailableLocally }
+        var request = URLRequest(url: url)
+        request.setValue(connectionProfile.apiKey, forHTTPHeaderField: "x-cowchat-key")
+        request.timeoutInterval = 60
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else { throw AttachmentError.httpStatus(status) }
+
+        let safeName = attachment.name
+            .components(separatedBy: "/").last?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "attachment"
+        let downloads = FileManager.default.urls(
+            for: .downloadsDirectory, in: .userDomainMask
+        )[0]
+        var destination = downloads.appendingPathComponent(
+            safeName.isEmpty ? "attachment" : safeName
+        )
+        let base = destination.deletingPathExtension().lastPathComponent
+        let ext = destination.pathExtension
+        var counter = 1
+        while FileManager.default.fileExists(atPath: destination.path) {
+            let candidate = ext.isEmpty ? "\(base)-\(counter)" : "\(base)-\(counter).\(ext)"
+            destination = downloads.appendingPathComponent(candidate)
+            counter += 1
+        }
+        try data.write(to: destination)
+        return destination
+    }
+
     // MARK: Invite management (Invites… sheet)
 
     func invites(for room: Room) async throws -> [RoomInvite] {

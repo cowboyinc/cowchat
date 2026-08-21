@@ -196,6 +196,14 @@ final class WorkspaceStore: ObservableObject {
         apiURL(forCloudURLString: urlString, path: "/api/invites/redeem")
     }
 
+    /// `wss://host[:port]/…` → `https://host[:port]/api/blobs/<id>`.
+    nonisolated static func blobURL(forCloudURLString urlString: String, blobID: String) -> URL? {
+        guard blobID.range(of: "^[A-Za-z0-9-]+$", options: .regularExpression) != nil else {
+            return nil
+        }
+        return apiURL(forCloudURLString: urlString, path: "/api/blobs/\(blobID)")
+    }
+
     private nonisolated static func apiURL(
         forCloudURLString urlString: String,
         path: String

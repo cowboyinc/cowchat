@@ -1224,6 +1224,17 @@ private struct ChatRoomView: View {
         }
     }
 
+    private func saveAttachment(_ attachment: FileAttachment) {
+        Task {
+            do {
+                let saved = try await store.downloadAttachment(attachment)
+                NSWorkspace.shared.activateFileViewerSelecting([saved])
+            } catch {
+                store.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func presenceSummary(at now: Date) -> String {
         ChatPresencePresentation.summary(
             members: store.roomMembers,
@@ -1266,7 +1277,8 @@ private struct ChatRoomView: View {
                                 MessageFeedRow(
                                     message: message,
                                     isMine: message.agentID == store.agentID,
-                                    now: timeline.date
+                                    now: timeline.date,
+                                    onSaveAttachment: { saveAttachment($0) }
                                 )
                                 ForEach(
                                     pulseAnchors.byMessageID[message.id] ?? [],
@@ -1523,6 +1535,7 @@ private struct MessageFeedRow: View {
     let message: ChatMessage
     let isMine: Bool
     let now: Date
+    var onSaveAttachment: ((FileAttachment) -> Void)?
     @State private var isHovering = false
 
     var body: some View {
@@ -1531,6 +1544,7 @@ private struct MessageFeedRow: View {
                 Spacer(minLength: 120)
                 VStack(alignment: .leading, spacing: 7) {
                     ExpandableMessageText(content: message.content, textColor: SemanticColor.textPrimary)
+                    attachmentChip
                     Text(relativeTimestamp)
                         .gallopText(.caption, color: SemanticColor.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -1574,6 +1588,7 @@ private struct MessageFeedRow: View {
                     }
                     .modifier(OpenInAppAccessibility(label: openInLabel, value: relativeTimestamp, action: openInApp))
                     ExpandableMessageText(content: message.content)
+                    attachmentChip
                 }
                 .frame(maxWidth: 760, alignment: .leading)
                 Spacer(minLength: 24)
@@ -1582,6 +1597,52 @@ private struct MessageFeedRow: View {
             .contentShape(Rectangle())
             .onHover { isHovering = $0 }
             .animation(.easeOut(duration: 0.12), value: isHovering)
+        }
+    }
+
+    @ViewBuilder
+    private var attachmentChip: some View {
+        if let attachment = message.fileAttachment {
+            Button {
+                onSaveAttachment?(attachment)
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "doc.fill")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(SemanticColor.iconSecondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(attachment.name)
+                            .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if let size = attachment.size {
+                            Text(ByteCountFormatter.string(
+                                fromByteCount: Int64(size), countStyle: .file
+                            ))
+                                .gallopText(.caption, color: SemanticColor.textTertiary)
+                        }
+                    }
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(SemanticColor.iconTertiary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    SemanticColor.surface600,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: 340, alignment: .leading)
+            .macAccessibleAction(label: "Save \(attachment.name)") {
+                onSaveAttachment?(attachment)
+            }
         }
     }
 

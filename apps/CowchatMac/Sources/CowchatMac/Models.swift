@@ -146,10 +146,36 @@ struct RoomInvite: Codable, Identifiable, Equatable {
 
 struct MessageMetadata: Codable, Equatable {
     let type: String?
+    let blobID: String?
+    let name: String?
+    let sha256: String?
+    let size: Int?
 
-    init(type: String? = nil) {
-        self.type = type
+    enum CodingKeys: String, CodingKey {
+        case type, name, sha256, size
+        case blobID = "blob_id"
     }
+
+    init(
+        type: String? = nil,
+        blobID: String? = nil,
+        name: String? = nil,
+        sha256: String? = nil,
+        size: Int? = nil
+    ) {
+        self.type = type
+        self.blobID = blobID
+        self.name = name
+        self.sha256 = sha256
+        self.size = size
+    }
+}
+
+/// A blob attachment referenced by a message (`metadata.type == "file"`).
+struct FileAttachment: Equatable {
+    let blobID: String
+    let name: String
+    let size: Int?
 }
 
 struct ChatMessage: Codable, Identifiable, Equatable {
@@ -196,6 +222,16 @@ struct ChatMessage: Codable, Identifiable, Equatable {
 
     var isThinking: Bool {
         metadata.type?.localizedCaseInsensitiveCompare("thinking") == .orderedSame
+    }
+
+    var fileAttachment: FileAttachment? {
+        guard metadata.type?.localizedCaseInsensitiveCompare("file") == .orderedSame,
+              let blobID = metadata.blobID, !blobID.isEmpty else { return nil }
+        return FileAttachment(
+            blobID: blobID,
+            name: metadata.name?.isEmpty == false ? metadata.name! : "attachment",
+            size: metadata.size
+        )
     }
 }
 
