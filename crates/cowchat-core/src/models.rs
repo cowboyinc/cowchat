@@ -420,9 +420,10 @@ pub struct SubscribePayload {
 // --- Room invites ---
 
 /// Mint an invite token for a room. The raw token is returned exactly once;
-/// the server persists only its SHA-256 hash. Anyone holding the token can
-/// redeem it over HTTP (`POST /api/invites/redeem`) for a fresh API key plus
-/// a grant to the room.
+/// the server persists only its SHA-256 hash. A holder with no API key
+/// redeems it over HTTP (`POST /api/invites/redeem`) for a fresh key plus a
+/// grant to the room; a holder that already has a key redeems it with the
+/// authenticated `redeem_invite` frame, which grants that key instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateInvitePayload {
     pub room_id: String,
@@ -484,6 +485,25 @@ pub struct InviteInfo {
     pub room_id: String,
     pub room_name: String,
     pub single_use: bool,
+}
+
+/// Redeem an invite token over an authenticated connection. Unlike the HTTP
+/// redemption (which mints a fresh API key for a stranger with none), this
+/// grants the invite's room to the CALLER's existing key. If that key can
+/// already access the room, the reply still carries the room but the invite
+/// is not consumed — a single-use invite never burns on a key that gains
+/// nothing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedeemInvitePayload {
+    pub token: String,
+}
+
+/// Returned by `redeem_invite`. The room now appears in the caller's
+/// `list_rooms`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedeemedInvite {
+    pub room_id: String,
+    pub room_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

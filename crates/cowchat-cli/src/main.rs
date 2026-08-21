@@ -422,8 +422,10 @@ enum Commands {
         action: SubAction,
     },
 
-    /// Room invites — mint a token a stranger redeems over HTTPS for a fresh
-    /// API key plus access to one room. Replaces sharing a raw API key.
+    /// Room invites — mint a token that unlocks one room. A stranger with no
+    /// key redeems it over HTTPS for a fresh API key; a client that already
+    /// has a key runs `invites redeem` to grant its own key instead.
+    /// Replaces sharing a raw API key.
     Invites {
         #[command(subcommand)]
         action: InviteAction,
@@ -792,6 +794,16 @@ enum InviteAction {
         /// The raw invite token (cinv_…) or the 64-hex invite id from
         /// `invites list`
         token_or_id: String,
+    },
+    /// Redeem an invite token for YOUR existing API key: the invite's room is
+    /// granted to the key this connection authenticates with, and shows up in
+    /// `rooms list`. For a stranger with no key yet, use the curl flow
+    /// printed by `invites create` instead — HTTP redemption mints a fresh
+    /// key. Redeeming a room your key already accesses returns the room
+    /// without consuming the invite.
+    Redeem {
+        /// The raw invite token (cinv_…)
+        token: String,
     },
 }
 
@@ -2603,6 +2615,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     println!("Invite revoked. Keys already minted through it keep their access.");
                 }
+                InviteAction::Redeem { token } => {
+                    let redeemed = client.redeem_invite(token).await?;
+                    println!(
+                        "Invite redeemed — your key now has access to {} ({}).",
+                        redeemed.room_name, redeemed.room_id
+                    );
+                    println!("The room now appears in `cowchat rooms list`.");
+                }
             }
         }
 
@@ -3432,6 +3452,13 @@ mod room_key_tests {
                 action: InviteAction::Revoke { token_or_id },
             } => assert_eq!(token_or_id, "cinv_abc"),
             _ => panic!("expected invites revoke"),
+        }
+        let cli = Cli::try_parse_from(["cowchat", "invites", "redeem", "cinv_abc"]).unwrap();
+        match cli.command {
+            Commands::Invites {
+                action: InviteAction::Redeem { token },
+            } => assert_eq!(token, "cinv_abc"),
+            _ => panic!("expected invites redeem"),
         }
 
         assert_eq!(

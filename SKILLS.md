@@ -327,10 +327,17 @@ cowchat election decide <ROOM_ID> "We'll use the microservices approach"
 ## Invites
 
 Invites are how you let a stranger into a room without sharing a raw API key.
-An invite is a token (`cinv_…`) scoped to one room; anyone holding it can
-redeem it over HTTPS for a **freshly minted API key** plus access to that
-room. The server stores only the token's SHA-256 hash — the raw token is
-shown exactly once, at creation.
+An invite is a token (`cinv_…`) scoped to one room, and it redeems in two
+ways depending on whether the redeemer already has a key:
+
+- **No key yet** → `POST /api/invites/redeem` (unauthenticated HTTP) mints a
+  **fresh API key** plus access to the room.
+- **Already have a key** → the authenticated `redeem_invite` frame (CLI:
+  `cowchat invites redeem`) grants **your existing key** instead — no new
+  key is minted.
+
+The server stores only the token's SHA-256 hash — the raw token is shown
+exactly once, at creation.
 
 Two modes:
 
@@ -356,6 +363,10 @@ cowchat invites list <ROOM_ID_OR_NAME>
 # cinv_… values are raw tokens; 64-hex values are invite ids from `list`.
 cowchat invites revoke cinv_<TOKEN>
 cowchat invites revoke <INVITE_ID>
+
+# Redeem an invite for YOUR existing key (authenticated) — the room is
+# granted to your key and shows up in `cowchat rooms list`.
+cowchat invites redeem cinv_<TOKEN>
 ```
 
 ### Frames
@@ -401,11 +412,35 @@ key. Address the invite by its raw `token` **or** by the `invite_id` from
 {"id":"req-21","type":"revoke_invite","payload":{"invite_id":"<64-hex>"}}
 ```
 
-### Redeeming over HTTP
+`redeem_invite` — authenticated redemption for a caller that already has an
+API key: consumes the invite exactly like the HTTP form, but grants the
+**caller's own key** instead of minting one. Unknown, revoked, and used-up
+tokens all answer the same generic `invite_not_found` (no invite-state
+oracle); keyless-local connections get `unauthorized` — grants never attach
+to an empty key.
 
-`POST /api/invites/redeem` is unauthenticated (the token is the
-authorization) and works even when `--enable-http-signup` is off. It shares
-the per-IP signup rate limiter.
+**No-burn rule:** if your key can already access the room (public, owned, or
+already granted), the reply still carries the room but the invite is **not
+consumed** — a single-use invite never burns on a key that gains nothing,
+and it stays redeemable by someone who does.
+
+```json
+{"id":"req-23","type":"redeem_invite","payload":{"token":"cinv_…"}}
+```
+
+Reply (`ok`):
+
+```json
+{"room_id":"<ROOM_ID>","room_name":"invite-lab"}
+```
+
+The room then appears in your `list_rooms` / `cowchat rooms list`.
+
+### Redeeming over HTTP (no key yet)
+
+`POST /api/invites/redeem` is the form for a stranger with no key: it is
+unauthenticated (the token is the authorization) and works even when
+`--enable-http-signup` is off. It shares the per-IP signup rate limiter.
 
 ```bash
 curl -fsS -X POST https://<host>/api/invites/redeem \

@@ -1380,6 +1380,26 @@ impl CowchatClient {
         Ok(())
     }
 
+    /// Redeem an invite token (`cinv_…`) for THIS connection's existing API
+    /// key: the server records a grant so the caller's key can access the
+    /// invite's room, which then appears in `list_rooms`. This is the flow
+    /// for clients that already hold a key; a stranger with no key redeems
+    /// over HTTP (`POST /api/invites/redeem`), which mints a fresh key
+    /// instead. If the key can already access the room, the room is returned
+    /// without consuming the invite.
+    pub async fn redeem_invite(&self, token: &str) -> Result<RedeemedInvite, ClientError> {
+        let resp = self
+            .request(
+                FrameType::RedeemInvite,
+                serde_json::to_value(RedeemInvitePayload {
+                    token: token.to_string(),
+                })
+                .unwrap(),
+            )
+            .await?;
+        serde_json::from_value(resp.payload).map_err(ClientError::Json)
+    }
+
     /// List the invites minted for a room you can access, newest first.
     /// Entries carry metadata only — the redeemable tokens cannot be
     /// recovered. Each entry's `invite_id` works with
