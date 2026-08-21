@@ -3,7 +3,7 @@ use cowchat_core::{ChatMessage, Room};
 use dashmap::DashMap;
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::connection::{matches_room_owner, LEGACY_UNOWNED_OWNER_KEY};
@@ -14,6 +14,9 @@ pub struct Store {
     /// Consulted on the per-broadcast access hot path so grant checks never
     /// touch SQLite. Hydrated at open, updated on redemption/room destroy.
     grants: DashMap<String, HashSet<String>>,
+    /// Directory holding blob attachment bytes, one file per `blob_id`,
+    /// sibling to the SQLite file. Created lazily on first upload.
+    blob_dir: PathBuf,
 }
 
 pub(crate) const MAX_ROOM_NAME_CHARS: usize = 100;
@@ -50,6 +53,16 @@ pub struct InviteMeta {
 }
 
 #[derive(Debug, Clone)]
+pub struct BlobMeta {
+    pub blob_id: String,
+    pub room_id: String,
+    pub name: String,
+    pub sha256: String,
+    pub size: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct VoteMeta {
     pub vote_id: String,
     pub room_id: String,
@@ -82,9 +95,14 @@ impl Store {
         crate::auth::harden_file_permissions(path)
             .map_err(|_| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
         let conn = Connection::open(path)?;
+        let blob_dir = path
+            .parent()
+            .map(|parent| parent.join("blobs"))
+            .unwrap_or_else(|| PathBuf::from("blobs"));
         let store = Self {
             conn: Mutex::new(conn),
             grants: DashMap::new(),
+            blob_dir,
         };
         store.initialize()?;
         for candidate in [
@@ -102,9 +120,13 @@ impl Store {
 
     pub fn open_in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
+        // A unique per-store temp dir keeps parallel in-memory tests isolated;
+        // it's only materialized if a blob is actually written.
+        let blob_dir = std::env::temp_dir().join(format!("cowchat-blobs-{}", uuid::Uuid::new_v4()));
         let store = Self {
             conn: Mutex::new(conn),
             grants: DashMap::new(),
+            blob_dir,
         };
         store.initialize()?;
         Ok(store)
@@ -267,6 +289,16 @@ impl Store {
                 room_id TEXT NOT NULL,
                 PRIMARY KEY (api_key, room_id)
             );
+
+            CREATE TABLE IF NOT EXISTS blobs (
+                blob_id    TEXT PRIMARY KEY,
+                room_id    TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                sha256     TEXT NOT NULL,
+                size       INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_blobs_room ON blobs(room_id);
             ",
         )?;
 
@@ -583,6 +615,7 @@ impl Store {
         // schemas predate room foreign keys on votes/subscriptions, so relying
         // only on ON DELETE CASCADE would leave credentialed webhooks or active
         // coordination state behind after an upgrade.
+        let blob_ids = room_blob_ids_in_transaction(&tx, room_id)?;
         detach_children_and_delete_room_artifacts(&tx, room_id)?;
         let affected = tx.execute("DELETE FROM rooms WHERE room_id = ?1", params![room_id])?;
         if affected != 1 {
@@ -591,6 +624,7 @@ impl Store {
         tx.commit()?;
         drop(conn);
         self.purge_room_grants_from_cache(room_id);
+        self.remove_blob_files(&blob_ids);
         Ok(room)
     }
 
@@ -600,10 +634,12 @@ impl Store {
     pub fn delete_room_artifacts(&self, room_id: &str) -> Result<(), StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let blob_ids = room_blob_ids_in_transaction(&tx, room_id)?;
         delete_room_artifacts_in_transaction(&tx, room_id)?;
         tx.commit()?;
         drop(conn);
         self.purge_room_grants_from_cache(room_id);
+        self.remove_blob_files(&blob_ids);
         Ok(())
     }
 
@@ -1259,6 +1295,155 @@ impl Store {
         Ok(rooms)
     }
 
+    // --- Blob attachment operations ---
+
+    /// Directory holding blob bytes (one file per blob_id). May not exist yet.
+    pub fn blob_dir(&self) -> &Path {
+        &self.blob_dir
+    }
+
+    pub fn blob_file_path(&self, blob_id: &str) -> PathBuf {
+        self.blob_dir.join(blob_id)
+    }
+
+    /// Persist an uploaded blob: bytes on disk under a fresh UUID, metadata
+    /// row in SQLite. The recorded sha256 is computed from the bytes actually
+    /// received. On a failed row insert the file is removed again.
+    pub fn add_blob(
+        &self,
+        room_id: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<BlobMeta, StoreError> {
+        let blob_id = uuid::Uuid::new_v4().to_string();
+        let sha256 = crate::auth::sha256_hex(bytes);
+        std::fs::create_dir_all(&self.blob_dir)?;
+        let path = self.blob_file_path(&blob_id);
+        std::fs::write(&path, bytes)?;
+
+        let inserted = {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO blobs (blob_id, room_id, name, sha256, size) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![blob_id, room_id, name, sha256, bytes.len() as i64],
+            )
+            .and_then(|_| {
+                conn.query_row(
+                    "SELECT created_at FROM blobs WHERE blob_id = ?1",
+                    params![blob_id],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+        };
+        match inserted {
+            Ok(created_at) => Ok(BlobMeta {
+                blob_id,
+                room_id: room_id.to_string(),
+                name: name.to_string(),
+                sha256,
+                size: bytes.len() as i64,
+                created_at,
+            }),
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                Err(StoreError::Db(e))
+            }
+        }
+    }
+
+    pub fn get_blob(&self, blob_id: &str) -> Result<Option<BlobMeta>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT blob_id, room_id, name, sha256, size, created_at FROM blobs WHERE blob_id = ?1",
+            params![blob_id],
+            |row| {
+                Ok(BlobMeta {
+                    blob_id: row.get(0)?,
+                    room_id: row.get(1)?,
+                    name: row.get(2)?,
+                    sha256: row.get(3)?,
+                    size: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        );
+        match result {
+            Ok(meta) => Ok(Some(meta)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StoreError::Db(e)),
+        }
+    }
+
+    /// Retention sweep for blob attachments. Deletes rows AND disk files for:
+    /// - blobs whose room has been idle longer than `idle_seconds` (idle = the
+    ///   room's newest message timestamp; a blob uploaded after that message
+    ///   still gets the full window from its own `created_at`),
+    /// - blobs whose room no longer exists (an upload that raced a destroy),
+    /// - orphaned files (file on disk, no row) older than `orphan_grace` —
+    ///   the grace keeps the sweep from eating a file written by an upload
+    ///   whose row insert hasn't committed yet.
+    ///
+    /// Returns the number of blobs/files removed.
+    pub fn sweep_blobs(
+        &self,
+        idle_seconds: u64,
+        orphan_grace: std::time::Duration,
+    ) -> Result<usize, StoreError> {
+        let expired: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let modifier = format!("-{idle_seconds} seconds");
+            let mut stmt = conn.prepare(
+                "SELECT blob_id FROM blobs b
+                 WHERE b.room_id NOT IN (SELECT room_id FROM rooms)
+                    OR MAX(
+                         COALESCE(
+                             (SELECT MAX(m.created_at) FROM messages m WHERE m.room_id = b.room_id),
+                             b.created_at
+                         ),
+                         b.created_at
+                       ) < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+            )?;
+            let ids = stmt
+                .query_map(params![modifier], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for blob_id in &ids {
+                conn.execute("DELETE FROM blobs WHERE blob_id = ?1", params![blob_id])?;
+            }
+            ids
+        };
+        let mut removed = expired.len();
+        self.remove_blob_files(&expired);
+
+        // Orphaned files: on disk but no row. Only touch files old enough that
+        // no in-flight upload can still be between its write and row insert.
+        if let Ok(entries) = std::fs::read_dir(&self.blob_dir) {
+            for entry in entries.flatten() {
+                let Some(file_name) = entry.file_name().to_str().map(String::from) else {
+                    continue;
+                };
+                if self.get_blob(&file_name)?.is_some() {
+                    continue;
+                }
+                let old_enough = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age >= orphan_grace);
+                if old_enough && std::fs::remove_file(entry.path()).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    fn remove_blob_files(&self, blob_ids: &[String]) {
+        for blob_id in blob_ids {
+            let _ = std::fs::remove_file(self.blob_file_path(blob_id));
+        }
+    }
+
     // --- Vote operations (continued) ---
 
     pub fn get_vote_meta(&self, vote_id: &str) -> Result<Option<VoteMeta>, StoreError> {
@@ -1729,7 +1914,21 @@ fn delete_room_artifacts_in_transaction(
         "DELETE FROM room_grants WHERE room_id = ?1",
         params![room_id],
     )?;
+    tx.execute("DELETE FROM blobs WHERE room_id = ?1", params![room_id])?;
     Ok(())
+}
+
+/// Blob ids for a room, read under the destroy transaction so the row delete
+/// and the later disk-file removal cover the same set.
+fn room_blob_ids_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    room_id: &str,
+) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt = tx.prepare("SELECT blob_id FROM blobs WHERE room_id = ?1")?;
+    let ids = stmt
+        .query_map(params![room_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
 }
 
 fn detach_children_and_delete_room_artifacts(
@@ -1929,6 +2128,9 @@ pub enum StoreError {
 
     #[error("invalid room name: {0}")]
     InvalidRoomName(String),
+
+    #[error("blob storage I/O error: {0}")]
+    Io(#[from] std::io::Error),
 
     #[error("vote not found")]
     VoteNotFound,
@@ -2869,6 +3071,151 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0, "{table} must be cleaned on destroy");
         }
+    }
+
+    #[test]
+    fn add_blob_persists_bytes_and_metadata() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room("blob-room", "blob-room", None, None, Some("a"))
+            .unwrap();
+        let blob = store.add_blob("blob-room", "hello.txt", b"hello").unwrap();
+        assert_eq!(blob.room_id, "blob-room");
+        assert_eq!(blob.name, "hello.txt");
+        assert_eq!(blob.size, 5);
+        assert_eq!(
+            blob.sha256,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        assert!(!blob.created_at.is_empty());
+
+        let fetched = store.get_blob(&blob.blob_id).unwrap().unwrap();
+        assert_eq!(fetched.sha256, blob.sha256);
+        assert_eq!(
+            std::fs::read(store.blob_file_path(&blob.blob_id)).unwrap(),
+            b"hello"
+        );
+        assert!(store.get_blob("missing").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(store.blob_dir());
+    }
+
+    #[test]
+    fn blob_sweep_expires_idle_rooms_and_orphan_rows_but_keeps_active_ones() {
+        let store = Store::open_in_memory().unwrap();
+        for room in ["active", "idle", "quiet"] {
+            store
+                .create_room(room, room, None, None, Some("a"))
+                .unwrap();
+        }
+        for room in ["active", "idle"] {
+            store
+                .insert_message(
+                    &format!("m-{room}"),
+                    room,
+                    "a",
+                    "A",
+                    "hi",
+                    None,
+                    &serde_json::json!({}),
+                )
+                .unwrap();
+        }
+
+        let kept = store.add_blob("active", "kept.bin", b"kept").unwrap();
+        let dropped = store.add_blob("idle", "dropped.bin", b"dropped").unwrap();
+        let fresh_quiet = store.add_blob("quiet", "fresh.bin", b"fresh").unwrap();
+        let stale_quiet = store.add_blob("quiet", "stale.bin", b"stale").unwrap();
+        // Simulates an upload that raced a room destroy: row without a room.
+        let ghost = store
+            .add_blob("no-such-room", "ghost.bin", b"ghost")
+            .unwrap();
+
+        // Backdate the idle room's activity and the affected blobs; "quiet"
+        // has no messages at all, so its blobs age by their own created_at.
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE messages SET created_at = '2000-01-01T00:00:00.000Z' WHERE room_id = 'idle'",
+                [],
+            )
+            .unwrap();
+            for blob_id in [&dropped.blob_id, &stale_quiet.blob_id] {
+                conn.execute(
+                    "UPDATE blobs SET created_at = '2000-01-01T00:00:00.000Z' WHERE blob_id = ?1",
+                    params![blob_id],
+                )
+                .unwrap();
+            }
+        }
+
+        let removed = store
+            .sweep_blobs(3600, std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert_eq!(removed, 3, "idle, stale-quiet, and ghost blobs expire");
+
+        for survivor in [&kept, &fresh_quiet] {
+            assert!(store.get_blob(&survivor.blob_id).unwrap().is_some());
+            assert!(store.blob_file_path(&survivor.blob_id).exists());
+        }
+        for gone in [&dropped, &stale_quiet, &ghost] {
+            assert!(store.get_blob(&gone.blob_id).unwrap().is_none());
+            assert!(!store.blob_file_path(&gone.blob_id).exists());
+        }
+        let _ = std::fs::remove_dir_all(store.blob_dir());
+    }
+
+    #[test]
+    fn blob_sweep_removes_orphan_files_only_after_the_grace_window() {
+        let store = Store::open_in_memory().unwrap();
+        std::fs::create_dir_all(store.blob_dir()).unwrap();
+        let stray = store.blob_file_path("stray-file");
+        std::fs::write(&stray, b"stray").unwrap();
+
+        // A just-written orphan is protected — it may be an in-flight upload.
+        store
+            .sweep_blobs(3600, std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert!(stray.exists(), "fresh orphan must survive the grace window");
+
+        let removed = store.sweep_blobs(3600, std::time::Duration::ZERO).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!stray.exists());
+        let _ = std::fs::remove_dir_all(store.blob_dir());
+    }
+
+    #[test]
+    fn destroy_room_removes_blob_rows_and_files() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room_with_visibility(
+                "doomed-blobs",
+                "doomed-blobs",
+                None,
+                None,
+                Some("creator"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        let blob = store.add_blob("doomed-blobs", "doc.txt", b"doc").unwrap();
+        assert!(store.blob_file_path(&blob.blob_id).exists());
+
+        store
+            .destroy_room_authorized("doomed-blobs", "creator", "owner-key", false)
+            .unwrap();
+        assert!(store.get_blob(&blob.blob_id).unwrap().is_none());
+        assert!(!store.blob_file_path(&blob.blob_id).exists());
+
+        // The race-path artifact cleanup covers blobs too.
+        store
+            .create_room("raced", "raced", None, None, Some("creator"))
+            .unwrap();
+        let raced = store.add_blob("raced", "raced.txt", b"raced").unwrap();
+        store.delete_room_artifacts("raced").unwrap();
+        assert!(store.get_blob(&raced.blob_id).unwrap().is_none());
+        assert!(!store.blob_file_path(&raced.blob_id).exists());
+        let _ = std::fs::remove_dir_all(store.blob_dir());
     }
 
     #[test]

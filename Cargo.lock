@@ -350,8 +350,10 @@ dependencies = [
  "directories",
  "env_logger",
  "log",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]

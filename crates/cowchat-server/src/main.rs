@@ -258,6 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 http_admin_secret,
                 http_allowed_origins: http_origins,
                 trusted_proxy_ips,
+                blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
             };
 
             let server = CowchatServer::new(config)?;

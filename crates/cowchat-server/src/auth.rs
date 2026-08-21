@@ -20,9 +20,13 @@ pub fn generate_invite_token() -> String {
 
 /// SHA-256 hex of an invite token — the only form the server stores.
 pub fn hash_invite_token(token: &str) -> String {
+    sha256_hex(token.as_bytes())
+}
+
+/// SHA-256 hex of arbitrary bytes (blob attachment integrity records).
+pub fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(token.as_bytes());
-    hex::encode(digest.to_vec())
+    hex::encode(Sha256::digest(bytes).to_vec())
 }
 
 /// Encode bytes as hex string (simple implementation to avoid a dependency).
