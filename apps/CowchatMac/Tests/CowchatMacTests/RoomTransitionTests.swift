@@ -141,6 +141,12 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         operations.append("invite-revoke:\(inviteID)")
         revokedInviteIDs.append(inviteID)
     }
+    var redeemedRoomID: String?
+    func redeemInvite(token: String) async throws -> String {
+        operations.append("invite-redeem:\(token)")
+        guard let redeemedRoomID else { throw CancellationError() }
+        return redeemedRoomID
+    }
     func destroy(roomID: String) async throws {
         operations.append("destroy:\(roomID)")
         destroyedRoomIDs.append(roomID)
@@ -2642,6 +2648,38 @@ final class RoomTransitionTests: XCTestCase {
         XCTAssertNotNil(store.thinkingPulses["r1"]?["codex-a"])
         // Empty content stays a texted-less pulse, not an empty string.
         XCTAssertNil(store.thinkingPulses["r1"]?["codex-a"]?.text)
+    }
+
+    /// Redeeming an invite must grant, refresh, and hand back the room so
+    /// the caller can select it; the room list is refreshed with no
+    /// fallback-selection side effect.
+    @MainActor
+    func testRedeemInviteRefreshesRoomsAndReturnsTheGrantedRoom() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        let granted = try decodeRoom(id: "granted-room", name: "private-plans")
+        connection.redeemedRoomID = granted.id
+        connection.listedRooms = [granted]
+
+        let room = try await store.redeemInvite(token: "  cinv_tok  ")
+
+        XCTAssertEqual(room?.id, granted.id)
+        XCTAssertEqual(store.rooms.map(\.id), [granted.id])
+        XCTAssertTrue(connection.operations.contains("invite-redeem:cinv_tok"))
+        XCTAssertNil(store.selectedRoom, "redeem must not auto-select; the caller decides")
+    }
+
+    @MainActor
+    func testRedeemInviteFailureSurfacesTheError() async {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        connection.redeemedRoomID = nil
+
+        do {
+            _ = try await store.redeemInvite(token: "cinv_bad")
+            XCTFail("expected redeem to throw")
+        } catch {}
+        XCTAssertTrue(store.rooms.isEmpty)
     }
 
     private func decodeRoom(

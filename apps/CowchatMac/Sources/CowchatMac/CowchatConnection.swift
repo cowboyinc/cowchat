@@ -72,6 +72,9 @@ protocol CowchatConnectionProtocol: AnyObject {
     func createInvite(roomID: String, singleUse: Bool) async throws -> String
     func listInvites(roomID: String) async throws -> [RoomInvite]
     func revokeInvite(inviteID: String) async throws
+    /// Authenticated redemption: grants THIS connection's key access to the
+    /// invite's room (no new key minted). Returns the granted room's id.
+    func redeemInvite(token: String) async throws -> String
     func join(roomID: String) async throws
     func leave(roomID: String) async throws
     func history(
@@ -258,6 +261,14 @@ final class CowchatConnection: CowchatConnectionProtocol {
 
     func revokeInvite(inviteID: String) async throws {
         _ = try await request(type: "revoke_invite", payload: ["invite_id": inviteID])
+    }
+
+    func redeemInvite(token: String) async throws -> String {
+        let response = try await request(type: "redeem_invite", payload: ["token": token])
+        guard let roomID = response["room_id"] as? String, !roomID.isEmpty else {
+            throw CowchatConnectionError.invalidResponse
+        }
+        return roomID
     }
 
     func rename(roomID: String, name: String) async throws -> Room {

@@ -2275,6 +2275,9 @@ private struct SettingsView: View {
     @State private var cloudURL = ""
     @State private var cloudAPIKey = ""
     @State private var isConnectingGlobal = false
+    @State private var inviteToken = ""
+    @State private var isRedeemingInvite = false
+    @State private var inviteRedeemError: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -2412,6 +2415,41 @@ private struct SettingsView: View {
                     store: workspace.global ?? workspace.local,
                     hasGlobal: workspace.global != nil
                 )
+                if workspace.isGlobalEnabled {
+                    HStack(spacing: 10) {
+                        TextField("Have an invite? Paste its cinv_… token", text: $inviteToken)
+                            .textFieldStyle(.plain)
+                            .gallopText(.bodyM, color: SemanticColor.textPrimary)
+                            .padding(.horizontal, 13)
+                            .frame(height: 36)
+                            .background(SemanticColor.textfieldDefault, in: Capsule())
+                            .overlay {
+                                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
+                            }
+                        Button(isRedeemingInvite ? "Redeeming…" : "Redeem") { redeemInvite() }
+                            .buttonStyle(.plain)
+                            .gallopText(.bodySStrong, color: SemanticColor.buttonSecondaryTextDefault)
+                            .padding(.horizontal, 14)
+                            .frame(height: 36)
+                            .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
+                            .overlay {
+                                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
+                            }
+                            .disabled(!canRedeemInvite)
+                            .opacity(canRedeemInvite ? 1 : 0.45)
+                            .fixedSize()
+                            .macAccessibleAction(
+                                label: "Redeem invite",
+                                isEnabled: canRedeemInvite,
+                                action: redeemInvite
+                            )
+                    }
+                    if let inviteRedeemError {
+                        Text(inviteRedeemError)
+                            .gallopText(.caption, color: SemanticColor.textError)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 HStack(spacing: 10) {
                     Spacer()
                     if workspace.isGlobalEnabled {
@@ -2615,6 +2653,31 @@ private struct SettingsView: View {
                 loadCloudConfiguration()
             }
             isConnectingGlobal = false
+        }
+    }
+
+    private var canRedeemInvite: Bool {
+        !isRedeemingInvite
+            && !inviteToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && workspace.global?.connectionStatus.isConnected == true
+    }
+
+    private func redeemInvite() {
+        guard canRedeemInvite, let global = workspace.global else { return }
+        isRedeemingInvite = true
+        inviteRedeemError = nil
+        Task {
+            do {
+                let room = try await global.redeemInvite(token: inviteToken)
+                inviteToken = ""
+                if let room {
+                    await workspace.select(room: room, on: .global)
+                    isPresented = false
+                }
+            } catch {
+                inviteRedeemError = error.localizedDescription
+            }
+            isRedeemingInvite = false
         }
     }
 

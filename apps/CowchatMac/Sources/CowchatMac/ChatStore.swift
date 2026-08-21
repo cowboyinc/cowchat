@@ -565,6 +565,16 @@ final class ChatStore: ObservableObject {
         try await connection.revokeInvite(inviteID: id)
     }
 
+    /// Redeems an invite for THIS store's key and returns the granted room
+    /// once it lands in the refreshed room list.
+    func redeemInvite(token: String) async throws -> Room? {
+        let roomID = try await connection.redeemInvite(
+            token: token.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        try? await refreshRooms(selectFallbackForMissingSelection: false)
+        return rooms.first { $0.id == roomID }
+    }
+
     /// Full paste-able prompt around an explicitly minted token.
     func connectPrompt(for room: Room, embedding token: String) -> String {
         connectPrompt(for: room, inviteToken: token)
