@@ -7,8 +7,12 @@ use std::time::{Duration, Instant};
 const SIGNUP_MAX_PER_WINDOW: u32 = 10;
 const SIGNUP_WINDOW: Duration = Duration::from_secs(3600);
 
-/// Per-IP key-creation counter within a sliding reset window.
-struct SignupWindow {
+/// Max blob uploads a single API key may perform per [`UPLOAD_WINDOW`].
+pub(crate) const UPLOAD_MAX_PER_WINDOW: u32 = 60;
+const UPLOAD_WINDOW: Duration = Duration::from_secs(3600);
+
+/// Per-bucket event counter within a sliding reset window.
+struct CountWindow {
     count: u32,
     window_start: Instant,
 }
@@ -81,7 +85,32 @@ impl TierLimits {
 pub struct RateLimiter {
     usage: DashMap<String, KeyUsage>,
     /// Per-IP API-key creation throttle (gates open signup against key-spam).
-    signups: DashMap<String, SignupWindow>,
+    signups: DashMap<String, CountWindow>,
+    /// Per-key blob-upload throttle.
+    uploads: DashMap<String, CountWindow>,
+}
+
+fn try_register_window(
+    windows: &DashMap<String, CountWindow>,
+    bucket: &str,
+    max: u32,
+    window: Duration,
+) -> bool {
+    let mut w = windows
+        .entry(bucket.to_string())
+        .or_insert_with(|| CountWindow {
+            count: 0,
+            window_start: Instant::now(),
+        });
+    if w.window_start.elapsed() > window {
+        w.count = 0;
+        w.window_start = Instant::now();
+    }
+    if w.count >= max {
+        return false;
+    }
+    w.count += 1;
+    true
 }
 
 impl RateLimiter {
@@ -89,28 +118,19 @@ impl RateLimiter {
         Self {
             usage: DashMap::new(),
             signups: DashMap::new(),
+            uploads: DashMap::new(),
         }
     }
 
     /// Record a key-creation attempt from `ip` and return whether it's allowed.
     /// Counts against a per-IP window; denies once the window cap is hit.
     pub fn try_register_signup(&self, ip: &str) -> bool {
-        let mut w = self
-            .signups
-            .entry(ip.to_string())
-            .or_insert_with(|| SignupWindow {
-                count: 0,
-                window_start: Instant::now(),
-            });
-        if w.window_start.elapsed() > SIGNUP_WINDOW {
-            w.count = 0;
-            w.window_start = Instant::now();
-        }
-        if w.count >= SIGNUP_MAX_PER_WINDOW {
-            return false;
-        }
-        w.count += 1;
-        true
+        try_register_window(&self.signups, ip, SIGNUP_MAX_PER_WINDOW, SIGNUP_WINDOW)
+    }
+
+    /// Record a blob upload for `api_key` and return whether it's allowed.
+    pub fn try_register_upload(&self, api_key: &str) -> bool {
+        try_register_window(&self.uploads, api_key, UPLOAD_MAX_PER_WINDOW, UPLOAD_WINDOW)
     }
 
     fn get_or_create(&self, api_key: &str) -> dashmap::mapref::one::Ref<'_, String, KeyUsage> {
@@ -191,6 +211,18 @@ mod tests {
         assert!(!rl.try_register_signup("1.2.3.4"));
         // A different IP has its own budget.
         assert!(rl.try_register_signup("5.6.7.8"));
+    }
+
+    #[test]
+    fn upload_throttle_caps_per_key() {
+        let rl = RateLimiter::new();
+        for _ in 0..UPLOAD_MAX_PER_WINDOW {
+            assert!(rl.try_register_upload("key-a"));
+        }
+        // Over the cap for this key.
+        assert!(!rl.try_register_upload("key-a"));
+        // A different key has its own budget.
+        assert!(rl.try_register_upload("key-b"));
     }
 
     #[test]

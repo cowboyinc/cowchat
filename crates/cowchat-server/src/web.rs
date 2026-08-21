@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Path, State,
+        ConnectInfo, DefaultBodyLimit, Path, Query, State,
     },
     http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     response::IntoResponse,
@@ -24,7 +24,13 @@ use crate::voting::VoteManager;
 
 const ADMIN_HEADER: &str = "x-cowchat-admin";
 const API_KEY_HEADER: &str = "x-cowchat-key";
+const SHA256_HEADER: &str = "x-cowchat-sha256";
 const WEBSOCKET_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Hard cap on a single blob attachment.
+pub(crate) const MAX_BLOB_BYTES: usize = 25 * 1024 * 1024;
+/// Max Unicode scalar values kept from an uploaded blob's `name`.
+const MAX_BLOB_NAME_CHARS: usize = 128;
 
 /// Hyper may cancel an upgraded handler while its spawned bridge tasks are
 /// still live. Dropping this guard closes both halves of the pipe and wakes the
@@ -85,6 +91,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/rooms", get(api_list_rooms))
         .route("/api/agents", get(api_list_agents))
         .route("/api/rooms/{room_id}/history", get(api_room_history))
+        .route(
+            "/api/rooms/{room_id}/blobs",
+            // Let bodies just over the cap through the framework limit so the
+            // handler can answer the documented JSON 413.
+            post(upload_blob).layer(DefaultBodyLimit::max(MAX_BLOB_BYTES + 1024)),
+        )
+        .route("/api/blobs/{blob_id}", get(download_blob))
         .fallback(static_handler)
         .with_state(state);
     let origins = allowed_origins
@@ -517,6 +530,158 @@ async fn api_room_history(
         )
             .into_response(),
     }
+}
+
+// --- Blob attachments ---
+
+/// The API key presented in `x-cowchat-key`, if it's valid on this server.
+fn authenticated_key(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let key = headers.get(API_KEY_HEADER)?.to_str().ok()?;
+    if key.is_empty() {
+        return None;
+    }
+    (key == state.api_key || state.store.validate_api_key(key).unwrap_or(false))
+        .then(|| key.to_string())
+}
+
+/// Reduce an uploaded filename to a safe basename: last path component only,
+/// control characters and quotes stripped, trimmed, capped at
+/// [`MAX_BLOB_NAME_CHARS`]. None = nothing usable left.
+fn sanitize_blob_name(raw: &str) -> Option<String> {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(MAX_BLOB_NAME_CHARS).collect())
+}
+
+fn json_error(status: StatusCode, message: &str) -> axum::response::Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+/// Generic 404 for both "room/blob doesn't exist" and "you can't access it" —
+/// same no-oracle stance as invite redemption.
+fn blob_not_found() -> axum::response::Response {
+    json_error(StatusCode::NOT_FOUND, "blob not found")
+}
+
+fn room_not_found() -> axum::response::Response {
+    json_error(StatusCode::NOT_FOUND, "room not found")
+}
+
+#[derive(serde::Deserialize)]
+struct UploadBlobParams {
+    name: Option<String>,
+}
+
+async fn upload_blob(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    Query(params): Query<UploadBlobParams>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let Some(key) = authenticated_key(&state, &headers) else {
+        return json_error(StatusCode::UNAUTHORIZED, "invalid API key");
+    };
+    // Absent rooms and inaccessible private rooms answer identically.
+    let accessible = state
+        .store
+        .get_room(&room_id)
+        .ok()
+        .flatten()
+        .is_some_and(|room| {
+            crate::connection::can_access_room(&room, &key, state.no_auth, &state.store)
+        });
+    if !accessible {
+        return room_not_found();
+    }
+    let Some(name) = params.name.as_deref().and_then(sanitize_blob_name) else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "a non-empty ?name=<filename> query parameter is required",
+        );
+    };
+    if body.len() > MAX_BLOB_BYTES {
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "blob exceeds the 25 MiB attachment limit",
+        );
+    }
+    if !state.rate_limiter.try_register_upload(&key) {
+        return json_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "upload rate limit exceeded for this API key; try again later",
+        );
+    }
+
+    match state.store.add_blob(&room_id, &name, &body) {
+        Ok(blob) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "blob_id": blob.blob_id,
+                "room_id": blob.room_id,
+                "name": blob.name,
+                "sha256": blob.sha256,
+                "size": blob.size,
+            })),
+        )
+            .into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+async fn download_blob(
+    State(state): State<AppState>,
+    Path(blob_id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let Some(key) = authenticated_key(&state, &headers) else {
+        return json_error(StatusCode::UNAUTHORIZED, "invalid API key");
+    };
+    let Ok(Some(blob)) = state.store.get_blob(&blob_id) else {
+        return blob_not_found();
+    };
+    // Access is judged against the blob's room; unknown ids, destroyed rooms,
+    // and inaccessible rooms all answer identically.
+    let accessible = state
+        .store
+        .get_room(&blob.room_id)
+        .ok()
+        .flatten()
+        .is_some_and(|room| {
+            crate::connection::can_access_room(&room, &key, state.no_auth, &state.store)
+        });
+    if !accessible {
+        return blob_not_found();
+    }
+    let Ok(bytes) = tokio::fs::read(state.store.blob_file_path(&blob.blob_id)).await else {
+        log::warn!("blob {} has a row but no readable file", blob.blob_id);
+        return blob_not_found();
+    };
+
+    let disposition = HeaderValue::from_str(&format!("attachment; filename=\"{}\"", blob.name))
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment"));
+    let sha_header =
+        HeaderValue::from_str(&blob.sha256).expect("sha256 hex is always a valid header value");
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            ),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::HeaderName::from_static(SHA256_HEADER), sha_header),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 // --- Static file serving ---
@@ -956,6 +1121,312 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Private room owned by `owner-key`, with `granted-key` invited in and
+    /// `other-key` valid but ungranted.
+    fn seed_blob_room(state: &AppState) {
+        for key in ["owner-key", "granted-key", "other-key"] {
+            state.store.create_api_key(key, None).unwrap();
+        }
+        state
+            .store
+            .create_room_with_visibility(
+                "files-room",
+                "files-room",
+                None,
+                None,
+                Some("creator"),
+                "private",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        state
+            .store
+            .add_room_grant("granted-key", "files-room")
+            .unwrap();
+    }
+
+    fn blob_url(addr: &SocketAddr, blob_id: &str) -> String {
+        format!("http://{addr}/api/blobs/{blob_id}")
+    }
+
+    fn upload_url(addr: &SocketAddr, room: &str) -> String {
+        format!("http://{addr}/api/rooms/{room}/blobs")
+    }
+
+    async fn upload(
+        addr: &SocketAddr,
+        room: &str,
+        key: &str,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> reqwest::Response {
+        reqwest::Client::new()
+            .post(upload_url(addr, room))
+            .query(&[("name", name)])
+            .header(API_KEY_HEADER, key)
+            .body(bytes)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn blob_upload_download_roundtrip_for_owner_and_granted_keys() {
+        let state = test_state();
+        seed_blob_room(&state);
+        let observed = state.clone();
+        let (server, addr) = start_test_web_server(state).await;
+
+        let content = b"attachment payload bytes".to_vec();
+        let created = upload(
+            &addr,
+            "files-room",
+            "owner-key",
+            "notes.txt",
+            content.clone(),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body: serde_json::Value =
+            serde_json::from_slice(&created.bytes().await.unwrap()).unwrap();
+        assert_eq!(body["room_id"], "files-room");
+        assert_eq!(body["name"], "notes.txt");
+        assert_eq!(body["size"], content.len());
+        assert_eq!(body["sha256"], crate::auth::sha256_hex(&content));
+        let blob_id = body["blob_id"].as_str().unwrap().to_string();
+        assert!(observed.store.blob_file_path(&blob_id).exists());
+
+        for key in ["owner-key", "granted-key"] {
+            let fetched = reqwest::Client::new()
+                .get(blob_url(&addr, &blob_id))
+                .header(API_KEY_HEADER, key)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(fetched.status(), StatusCode::OK, "key {key} must download");
+            assert_eq!(
+                fetched
+                    .headers()
+                    .get(header::CONTENT_DISPOSITION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("attachment; filename=\"notes.txt\"")
+            );
+            assert_eq!(
+                fetched
+                    .headers()
+                    .get(SHA256_HEADER)
+                    .and_then(|value| value.to_str().ok()),
+                Some(crate::auth::sha256_hex(&content).as_str())
+            );
+            assert_eq!(
+                fetched.content_length(),
+                Some(content.len() as u64),
+                "download must carry content-length"
+            );
+            assert_eq!(fetched.bytes().await.unwrap().to_vec(), content);
+        }
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn blob_endpoints_reject_missing_or_invalid_keys() {
+        let state = test_state();
+        seed_blob_room(&state);
+        let (server, addr) = start_test_web_server(state).await;
+        let http = reqwest::Client::new();
+
+        let keyless_upload = http
+            .post(upload_url(&addr, "files-room"))
+            .query(&[("name", "a.txt")])
+            .body(b"x".to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(keyless_upload.status(), StatusCode::UNAUTHORIZED);
+        let bad_key_upload = upload(&addr, "files-room", "not-a-key", "a.txt", b"x".to_vec()).await;
+        assert_eq!(bad_key_upload.status(), StatusCode::UNAUTHORIZED);
+
+        let keyless_download = http.get(blob_url(&addr, "whatever")).send().await.unwrap();
+        assert_eq!(keyless_download.status(), StatusCode::UNAUTHORIZED);
+        let bad_key_download = http
+            .get(blob_url(&addr, "whatever"))
+            .header(API_KEY_HEADER, "not-a-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_key_download.status(), StatusCode::UNAUTHORIZED);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn blob_access_denial_is_indistinguishable_from_absence() {
+        let state = test_state();
+        seed_blob_room(&state);
+        let (server, addr) = start_test_web_server(state).await;
+        let http = reqwest::Client::new();
+
+        let created = upload(
+            &addr,
+            "files-room",
+            "owner-key",
+            "secret.txt",
+            b"s".to_vec(),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body: serde_json::Value =
+            serde_json::from_slice(&created.bytes().await.unwrap()).unwrap();
+        let blob_id = body["blob_id"].as_str().unwrap().to_string();
+
+        // Upload: a private room you can't access answers exactly like a room
+        // that doesn't exist.
+        let denied = upload(&addr, "files-room", "other-key", "a.txt", b"x".to_vec()).await;
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        let denied_body = denied.bytes().await.unwrap();
+        let absent = upload(&addr, "no-such-room", "other-key", "a.txt", b"x".to_vec()).await;
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+        assert_eq!(absent.bytes().await.unwrap(), denied_body);
+
+        // Download: an inaccessible blob answers exactly like an unknown id.
+        let denied = http
+            .get(blob_url(&addr, &blob_id))
+            .header(API_KEY_HEADER, "other-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        let denied_body = denied.bytes().await.unwrap();
+        let unknown = http
+            .get(blob_url(&addr, "00000000-0000-0000-0000-000000000000"))
+            .header(API_KEY_HEADER, "other-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        assert_eq!(unknown.bytes().await.unwrap(), denied_body);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn blob_upload_over_the_cap_is_rejected_with_413() {
+        let state = test_state();
+        seed_blob_room(&state);
+        let observed = state.clone();
+        let (server, addr) = start_test_web_server(state).await;
+
+        let oversized = vec![0u8; MAX_BLOB_BYTES + 1];
+        let rejected = upload(&addr, "files-room", "owner-key", "huge.bin", oversized).await;
+        assert_eq!(rejected.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body: serde_json::Value =
+            serde_json::from_slice(&rejected.bytes().await.unwrap()).unwrap();
+        assert!(body["error"].as_str().unwrap().contains("25 MiB"));
+        // Nothing may be persisted for a rejected upload.
+        let dir_empty = std::fs::read_dir(observed.store.blob_dir())
+            .map(|entries| entries.count() == 0)
+            .unwrap_or(true);
+        assert!(dir_empty, "rejected upload must not leave a file behind");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn blob_upload_sanitizes_names() {
+        let state = test_state();
+        seed_blob_room(&state);
+        let (server, addr) = start_test_web_server(state).await;
+
+        for (raw, stored) in [
+            ("../../etc/passwd", "passwd"),
+            ("a\\b\\evil.txt", "evil.txt"),
+            ("with\nnewline.txt", "withnewline.txt"),
+            ("  padded.txt  ", "padded.txt"),
+        ] {
+            let created = upload(&addr, "files-room", "owner-key", raw, b"x".to_vec()).await;
+            assert_eq!(created.status(), StatusCode::CREATED, "name {raw:?}");
+            let body: serde_json::Value =
+                serde_json::from_slice(&created.bytes().await.unwrap()).unwrap();
+            assert_eq!(body["name"], stored, "name {raw:?}");
+        }
+
+        // Over-long names are capped, not rejected.
+        let long_name = "n".repeat(300);
+        let created = upload(&addr, "files-room", "owner-key", &long_name, b"x".to_vec()).await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body: serde_json::Value =
+            serde_json::from_slice(&created.bytes().await.unwrap()).unwrap();
+        assert_eq!(body["name"].as_str().unwrap().chars().count(), 128);
+
+        // Nothing usable left, or no name at all: 400.
+        for unusable in ["", "///", "   "] {
+            let rejected = upload(&addr, "files-room", "owner-key", unusable, b"x".to_vec()).await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "name {unusable:?}"
+            );
+        }
+        let nameless = reqwest::Client::new()
+            .post(upload_url(&addr, "files-room"))
+            .header(API_KEY_HEADER, "owner-key")
+            .body(b"x".to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(nameless.status(), StatusCode::BAD_REQUEST);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn blob_uploads_are_rate_limited_per_key() {
+        let state = test_state();
+        seed_blob_room(&state);
+        let (server, addr) = start_test_web_server(state).await;
+
+        for i in 0..crate::rate_limit::UPLOAD_MAX_PER_WINDOW {
+            let created = upload(&addr, "files-room", "owner-key", "tiny.bin", b"x".to_vec()).await;
+            assert_eq!(created.status(), StatusCode::CREATED, "upload #{i}");
+        }
+        let throttled = upload(&addr, "files-room", "owner-key", "tiny.bin", b"x".to_vec()).await;
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+        // A different key has its own budget.
+        let other = upload(
+            &addr,
+            "files-room",
+            "granted-key",
+            "tiny.bin",
+            b"x".to_vec(),
+        )
+        .await;
+        assert_eq!(other.status(), StatusCode::CREATED);
+
+        server.abort();
+    }
+
+    #[test]
+    fn blob_name_sanitizer_covers_edge_cases() {
+        assert_eq!(
+            sanitize_blob_name("plain.txt").as_deref(),
+            Some("plain.txt")
+        );
+        assert_eq!(
+            sanitize_blob_name("../../etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert_eq!(
+            sanitize_blob_name("quo\"te.txt").as_deref(),
+            Some("quote.txt"),
+            "quotes must be stripped so Content-Disposition can't be broken"
+        );
+        assert_eq!(sanitize_blob_name(""), None);
+        assert_eq!(sanitize_blob_name("/"), None);
+        assert_eq!(sanitize_blob_name("\u{7}\u{8}"), None);
     }
 
     #[tokio::test]

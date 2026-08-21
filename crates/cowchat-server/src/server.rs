@@ -34,6 +34,13 @@ pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const REGISTER_TIMEOUT_SECS: u64 = 10;
 /// How often the background task purges messages past their tier's retention.
 const PURGE_INTERVAL: Duration = Duration::from_secs(3600);
+/// How often the background task sweeps expired blob attachments.
+const BLOB_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// How old an orphaned blob file (on disk, no row) must be before the sweep
+/// removes it — protects an in-flight upload between file write and row insert.
+const BLOB_ORPHAN_GRACE: Duration = Duration::from_secs(15 * 60);
+/// Default blob retention: delete once the owning room has been idle 72h.
+pub const DEFAULT_BLOB_IDLE_EXPIRY_SECS: u64 = 72 * 3600;
 
 fn tcp_connection_allows_keyless(allow_keyless_local: bool, peer_ip: std::net::IpAddr) -> bool {
     allow_keyless_local && peer_ip.is_loopback()
@@ -99,6 +106,8 @@ pub struct ServerConfig {
     pub http_admin_secret: Option<String>,
     pub http_allowed_origins: Vec<String>,
     pub trusted_proxy_ips: Vec<std::net::IpAddr>,
+    /// Blob attachments are deleted once their room has been idle this long.
+    pub blob_idle_expiry_seconds: u64,
 }
 
 pub struct CowchatServer {
@@ -582,6 +591,24 @@ impl CowchatServer {
                 // wide stall we don't want on an interval.
                 if total > 0 {
                     log::info!("retention purge: deleted {total} expired message(s)");
+                }
+            }
+        });
+
+        // Background blob sweep: delete attachments whose room has gone idle
+        // past the configured window (rows + disk files), plus rows for
+        // destroyed rooms and orphaned files. Runs once on start, then every
+        // BLOB_SWEEP_INTERVAL.
+        let blob_store = self.store.clone();
+        let blob_idle_expiry_seconds = self.config.blob_idle_expiry_seconds;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(BLOB_SWEEP_INTERVAL);
+            loop {
+                tick.tick().await;
+                match blob_store.sweep_blobs(blob_idle_expiry_seconds, BLOB_ORPHAN_GRACE) {
+                    Ok(n) if n > 0 => log::info!("blob sweep: removed {n} expired blob(s)"),
+                    Ok(_) => {}
+                    Err(e) => log::warn!("blob sweep failed: {e}"),
                 }
             }
         });
@@ -1408,6 +1435,7 @@ mod startup_tests {
             http_admin_secret: None,
             http_allowed_origins: vec![],
             trusted_proxy_ips: vec![],
+            blob_idle_expiry_seconds: DEFAULT_BLOB_IDLE_EXPIRY_SECS,
         }
     }
 

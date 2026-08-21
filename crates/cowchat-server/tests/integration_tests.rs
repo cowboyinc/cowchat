@@ -46,6 +46,7 @@ async fn start_test_server_with_keyless_local(
         http_admin_secret: None,
         http_allowed_origins: vec![],
         trusted_proxy_ips: vec![],
+        blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
     };
 
     let server = CowchatServer::new(config).unwrap();
@@ -1007,6 +1008,7 @@ async fn test_open_vote_and_ballots_survive_server_restart() {
         http_admin_secret: None,
         http_allowed_origins: vec![],
         trusted_proxy_ips: vec![],
+        blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
     })
     .unwrap();
     let restarted_handle = tokio::spawn(async move {
@@ -2937,6 +2939,7 @@ async fn test_agent_id_ownership_survives_server_restart() {
         http_admin_secret: None,
         http_allowed_origins: vec![],
         trusted_proxy_ips: vec![],
+        blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
     })
     .unwrap();
     let restarted_handle = tokio::spawn(async move {
@@ -3735,6 +3738,7 @@ async fn start_test_server_with_http() -> (
         http_admin_secret: None,
         http_allowed_origins: vec![],
         trusted_proxy_ips: vec![],
+        blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
     };
 
     let server = CowchatServer::new(config).unwrap();

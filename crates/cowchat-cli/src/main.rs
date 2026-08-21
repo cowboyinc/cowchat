@@ -99,6 +99,47 @@ fn render_export(
     out
 }
 
+fn human_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Render the `[file] <name> (<size>) <blob_id>` tag for a file-attachment
+/// message (metadata `{"type":"file",...}`), or None for ordinary messages.
+fn file_message_tag(msg: &ChatMessage) -> Option<String> {
+    if msg.metadata.get("type").and_then(|v| v.as_str()) != Some("file") {
+        return None;
+    }
+    let name = msg
+        .metadata
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let size = msg
+        .metadata
+        .get("size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let blob_id = msg
+        .metadata
+        .get("blob_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let mut tag = format!("[file] {} ({}) {}", name, human_size(size), blob_id);
+    // The note rides in `content`; the filename-as-content default is noise.
+    if !msg.content.is_empty() && msg.content != name {
+        tag.push_str(&format!(" — {}", msg.content));
+    }
+    Some(tag)
+}
+
 fn format_message(msg: &ChatMessage) -> String {
     let ts = msg.timestamp.format("%H:%M:%S");
     let is_system = msg.metadata.get("type").and_then(|v| v.as_str()) == Some("system");
@@ -107,6 +148,8 @@ fn format_message(msg: &ChatMessage) -> String {
             "[{}] #{} * {} {} *",
             ts, msg.seq, msg.agent_name, msg.content
         )
+    } else if let Some(tag) = file_message_tag(msg) {
+        format!("[{}] #{} {}: {}", ts, msg.seq, msg.agent_name, tag)
     } else {
         format!("[{}] #{} {}: {}", ts, msg.seq, msg.agent_name, msg.content)
     }
@@ -312,6 +355,29 @@ enum Commands {
         /// Use one path unique to the server, room, and logical agent.
         #[arg(long)]
         cursor_file: Option<PathBuf>,
+    },
+
+    /// Upload a file to a room's blob store, then post a file message
+    /// referencing it. Replaces pasting file bodies into chat. Needs the HTTP
+    /// surface (`--url wss://host/ws`); blobs expire after 72h of room idleness.
+    SendFile {
+        /// Room ID or name
+        room: String,
+        /// Path of the file to upload (max 25 MiB)
+        path: PathBuf,
+        /// Message text to accompany the file (defaults to the filename)
+        #[arg(long)]
+        note: Option<String>,
+    },
+
+    /// Download a blob attachment by id, verifying its sha256 against the
+    /// server-reported digest. Needs the HTTP surface (`--url wss://host/ws`).
+    Fetch {
+        /// Blob id from a file message's metadata
+        blob_id: String,
+        /// Output path (defaults to the attachment's filename in the cwd)
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 
     /// Monitor events in real-time
@@ -798,6 +864,7 @@ fn command_represents_agent_session(command: &Commands) -> bool {
     matches!(
         command,
         Commands::Send { .. }
+            | Commands::SendFile { .. }
             | Commands::Thinking { .. }
             | Commands::Wait { .. }
             | Commands::Shell { .. }
@@ -906,6 +973,37 @@ fn invite_http_base(ws_url: Option<&str>) -> String {
         }
         None => "https://<host>".to_string(),
     }
+}
+
+/// HTTPS base for blob attachment calls, derived from the `--url` WebSocket
+/// endpoint (wss://host/ws → https://host). Socket/TCP connections have no
+/// HTTP surface, so attachments require `--url`.
+fn attachment_http_base(ws_url: Option<&str>) -> Result<String, String> {
+    match ws_url {
+        Some(url) => Ok(invite_http_base(Some(url))),
+        None => Err(
+            "attachments need the server's HTTP surface; connect with --url wss://<host>/ws \
+             (local socket/TCP connections don't expose one)"
+                .to_string(),
+        ),
+    }
+}
+
+/// The `filename="…"` value from a Content-Disposition header, reduced to a
+/// safe basename.
+fn content_disposition_filename(header: &str) -> Option<String> {
+    let rest = header.split("filename=\"").nth(1)?;
+    let name = rest.split('"').next()?;
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
+    (!base.is_empty()).then(|| base.to_string())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 fn write_cursor_atomic(path: &std::path::Path, seq: i64) -> std::io::Result<()> {
@@ -2158,6 +2256,120 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        Commands::SendFile { room, path, note } => {
+            let base = attachment_http_base(cli.url.as_deref())?;
+            let bytes =
+                std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| format!("{} has no usable file name", path.display()))?;
+            let key = load_key(&cli.key);
+
+            let client = connect(&cli).await?;
+            let room_id = resolve_room_id(&client, room).await?;
+            client.join_room(&room_id).await?;
+
+            let local_sha256 = sha256_hex(&bytes);
+            let response = reqwest::Client::new()
+                .post(format!("{base}/api/rooms/{room_id}/blobs"))
+                .query(&[("name", file_name)])
+                .header("x-cowchat-key", &key)
+                .body(bytes)
+                .send()
+                .await?;
+            let status = response.status();
+            let body = response.bytes().await?;
+            if status != reqwest::StatusCode::CREATED {
+                return Err(format!(
+                    "upload failed ({status}): {}",
+                    String::from_utf8_lossy(&body)
+                )
+                .into());
+            }
+            let blob: serde_json::Value = serde_json::from_slice(&body)?;
+            let server_sha256 = blob["sha256"].as_str().unwrap_or_default();
+            if server_sha256 != local_sha256 {
+                return Err(format!(
+                    "upload corrupted: server sha256 {server_sha256} != local {local_sha256}"
+                )
+                .into());
+            }
+
+            let metadata = serde_json::json!({
+                "type": "file",
+                "blob_id": blob["blob_id"],
+                "name": blob["name"],
+                "sha256": blob["sha256"],
+                "size": blob["size"],
+            });
+            let content = note.clone().unwrap_or_else(|| file_name.to_string());
+            let msg = client
+                .send_message_with_metadata(&room_id, &content, None, vec![], metadata)
+                .await?;
+            println!("{}", format_message(&msg));
+        }
+
+        Commands::Fetch { blob_id, out } => {
+            let base = attachment_http_base(cli.url.as_deref())?;
+            let key = load_key(&cli.key);
+            let response = reqwest::Client::new()
+                .get(format!("{base}/api/blobs/{blob_id}"))
+                .header("x-cowchat-key", &key)
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.bytes().await.unwrap_or_default();
+                return Err(format!(
+                    "fetch failed ({status}): {}",
+                    String::from_utf8_lossy(&body)
+                )
+                .into());
+            }
+            let expected_sha256 = response
+                .headers()
+                .get("x-cowchat-sha256")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let attachment_name = response
+                .headers()
+                .get(reqwest::header::CONTENT_DISPOSITION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(content_disposition_filename);
+            let bytes = response.bytes().await?;
+
+            let actual_sha256 = sha256_hex(&bytes);
+            let verified = match &expected_sha256 {
+                Some(expected) if *expected != actual_sha256 => {
+                    return Err(format!(
+                        "sha256 mismatch: server reported {expected}, downloaded bytes hash to {actual_sha256}"
+                    )
+                    .into());
+                }
+                Some(_) => true,
+                None => false,
+            };
+
+            let out_path = out
+                .clone()
+                .or_else(|| attachment_name.map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from(blob_id));
+            std::fs::write(&out_path, &bytes)
+                .map_err(|e| format!("cannot write {}: {e}", out_path.display()))?;
+            println!(
+                "wrote {} ({}) sha256={}{}",
+                out_path.display(),
+                human_size(bytes.len() as u64),
+                actual_sha256,
+                if verified {
+                    " (verified)"
+                } else {
+                    " (unverified: server sent no digest)"
+                }
+            );
+        }
+
         Commands::Monitor { room, json } => {
             let client = connect(&cli).await?;
             let room_secret = resolve_room_secret(&cli);
@@ -3267,6 +3479,119 @@ mod room_key_tests {
         // The embedded docs must be present and non-trivial.
         assert!(include_str!("../../../skill/SKILL.md").contains("# Cowchat"));
         assert!(include_str!("../../../SKILLS.md").contains("# Cowchat"));
+    }
+
+    #[test]
+    fn send_file_and_fetch_parse() {
+        use std::path::PathBuf;
+        let cli = Cli::try_parse_from([
+            "cowchat",
+            "send-file",
+            "my-room",
+            "/tmp/report.pdf",
+            "--note",
+            "final report",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::SendFile { room, path, note } => {
+                assert_eq!(room, "my-room");
+                assert_eq!(path, PathBuf::from("/tmp/report.pdf"));
+                assert_eq!(note.as_deref(), Some("final report"));
+            }
+            _ => panic!("expected send-file"),
+        }
+        let cli =
+            Cli::try_parse_from(["cowchat", "fetch", "blob-123", "--out", "out.bin"]).unwrap();
+        match cli.command {
+            Commands::Fetch { blob_id, out } => {
+                assert_eq!(blob_id, "blob-123");
+                assert_eq!(out, Some(PathBuf::from("out.bin")));
+            }
+            _ => panic!("expected fetch"),
+        }
+        let cli = Cli::try_parse_from(["cowchat", "fetch", "blob-123"]).unwrap();
+        match cli.command {
+            Commands::Fetch { out, .. } => assert!(out.is_none()),
+            _ => panic!("expected fetch"),
+        }
+    }
+
+    #[test]
+    fn attachment_base_derives_https_from_ws_url_and_requires_one() {
+        use super::attachment_http_base;
+        assert_eq!(
+            attachment_http_base(Some("wss://chat.example.com/ws")).unwrap(),
+            "https://chat.example.com"
+        );
+        assert_eq!(
+            attachment_http_base(Some("ws://127.0.0.1:8080/ws")).unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        let err = attachment_http_base(None).unwrap_err();
+        assert!(err.contains("--url"), "error should point at --url: {err}");
+    }
+
+    #[test]
+    fn fetch_parses_content_disposition_filenames_safely() {
+        use super::content_disposition_filename;
+        assert_eq!(
+            content_disposition_filename("attachment; filename=\"report.pdf\"").as_deref(),
+            Some("report.pdf")
+        );
+        assert_eq!(
+            content_disposition_filename("attachment; filename=\"../../etc/passwd\"").as_deref(),
+            Some("passwd"),
+            "path components must be stripped"
+        );
+        assert_eq!(content_disposition_filename("attachment"), None);
+        assert_eq!(
+            content_disposition_filename("attachment; filename=\"\""),
+            None
+        );
+    }
+
+    #[test]
+    fn file_messages_render_as_file_tags() {
+        use super::{file_message_tag, format_message, human_size};
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(2048), "2.0 KiB");
+        assert_eq!(human_size(26 * 1024 * 1024), "26.0 MiB");
+
+        let msg = cowchat_core::ChatMessage {
+            message_id: "m1".into(),
+            room_id: "r1".into(),
+            agent_id: "a1".into(),
+            agent_name: "claude".into(),
+            content: "here's the plan".into(),
+            reply_to_message: None,
+            metadata: serde_json::json!({
+                "type": "file",
+                "blob_id": "blob-1",
+                "name": "plan.md",
+                "sha256": "abc",
+                "size": 2048,
+            }),
+            timestamp: chrono::Utc::now(),
+            seq: 7,
+        };
+        let tag = file_message_tag(&msg).unwrap();
+        assert_eq!(tag, "[file] plan.md (2.0 KiB) blob-1 — here's the plan");
+        assert!(format_message(&msg).contains("[file] plan.md (2.0 KiB) blob-1"));
+
+        // Default content (the filename) isn't repeated as a note.
+        let mut default_note = msg.clone();
+        default_note.content = "plan.md".into();
+        assert_eq!(
+            file_message_tag(&default_note).unwrap(),
+            "[file] plan.md (2.0 KiB) blob-1"
+        );
+
+        // Ordinary messages are untouched.
+        let mut plain = msg.clone();
+        plain.metadata = serde_json::json!({});
+        assert!(file_message_tag(&plain).is_none());
+        assert!(format_message(&plain).ends_with("claude: here's the plan"));
     }
 
     #[test]
