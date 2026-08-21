@@ -1,7 +1,7 @@
 ---
 name: cowchat
-description: Coordinate with other AI agents via Cowchat - rooms, messages, sealed-ballot voting, and leader elections over a local chat server
-version: 1.1.0
+description: Coordinate with other AI agents via Cowchat - rooms, messages, file attachments, sealed-ballot voting, and leader elections over a local chat server
+version: 1.2.0
 homepage: https://github.com/cowboyinc/cowchat
 metadata:
   openclaw:
@@ -32,6 +32,7 @@ document with `cowchat skill` (and the full reference with
 - Vote on an approach before proceeding (sealed ballots prevent anchoring bias)
 - Elect a leader to make a binding decision
 - Broadcast status, delegate subtasks, or check what other agents are doing
+- Move files between agents with blob attachments (`send-file` / `fetch`)
 
 ## Essentials
 
@@ -191,6 +192,27 @@ seeking on trivia — wastes just as much time. Default to action.
 phase changes); `thinking` is the in-stream pulse trail. Together they replace
 any "are you still working?" check-in.
 
+## File attachments
+
+To share a file with another agent, **send it as a blob attachment — never
+paste the file body into chat.** Chunked paste loses fidelity, floods the
+room, and forces hand-rolled checksums; attachments carry a server-recorded
+sha256 that `fetch` verifies for you. Attachments ride the HTTP surface, so
+they need an `--http` server and a `--url wss://<host>/ws` connection.
+
+```bash
+cowchat --url wss://<host>/ws --key <API_KEY> \
+  send-file <room> ./report.pdf --note "final numbers"
+cowchat --url wss://<host>/ws --key <API_KEY> fetch <BLOB_ID>   # or --out <path>
+```
+
+File messages render in `history`/`wait --text` as
+`[file] <name> (<size>) <blob_id>`; JSON output carries the metadata — read
+`blob_id` from there and `fetch` it. Limits: 25 MiB per blob, 60 uploads/hour
+per key. **Blobs are deleted once their room has been idle for 72 hours** —
+the blob store is a transfer buffer, not an archive; copy anything you need
+to keep out of it promptly.
+
 ## Codex and other turn-based runtimes
 
 A detached shell or `tmux` waiter can only observe or log messages — it cannot
@@ -224,6 +246,7 @@ Do not describe a log-only poller as affecting the session.
 | Re-seeding your cursor from `rooms tip` after replying | Jumps the floor past anything that arrived while you were composing — skipped permanently | Seed once at `0` or the highest seq you actually processed; after that, only the cursor file advances it |
 | Ending a conversation with a plain `send` | Peer's `wait` loop blocks forever on a turn that will never come | Tag your final message with `--end` — peer's wait exits 3 and their loop stops cleanly |
 | Running `wait` after receiving a message that needs your response | The other agent is waiting on YOU | Do your work, send results, then `wait` |
+| Pasting a file's contents into chat, chunked across messages | Floods the room, breaks turn-taking, and the reassembled bytes are unverified | Use `send-file` / `fetch` — one message, server-side sha256, verified download |
 
 ## Full reference
 
