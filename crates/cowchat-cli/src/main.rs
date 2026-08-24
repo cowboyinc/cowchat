@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use cowchat_client::{ClientError, CowchatClient};
-use cowchat_core::{ChatMessage, ErrorCode, FrameType};
+use cowchat_core::{ChatMessage, ErrorCode, FrameType, Room};
 use std::io::Write;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -153,6 +153,47 @@ fn format_message(msg: &ChatMessage) -> String {
     } else {
         format!("[{}] #{} {}: {}", ts, msg.seq, msg.agent_name, msg.content)
     }
+}
+
+#[derive(serde::Serialize)]
+struct RoomListOutput<'a> {
+    rooms: &'a [Room],
+}
+
+fn render_room_list(rooms: &[Room], json: bool) -> Result<String, serde_json::Error> {
+    if json {
+        let output = RoomListOutput { rooms };
+        return serde_json::to_string(&output).map(|line| format!("{line}\n"));
+    }
+
+    if rooms.is_empty() {
+        return Ok("No rooms found.\n".to_string());
+    }
+
+    let mut lines = vec![
+        format!(
+            "{:<38} {:<20} {:<8} {:<20} DESCRIPTION",
+            "ID", "NAME", "MEMBERS", "LAST ACTIVITY"
+        ),
+        "-".repeat(120),
+    ];
+    lines.extend(rooms.iter().map(|room| {
+        let desc = room.description.as_deref().unwrap_or("");
+        let members = room
+            .member_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let activity = room
+            .last_activity
+            .map(|time| time.format("%H:%M:%S").to_string())
+            .unwrap_or_else(|| "-".to_string());
+        format!(
+            "{:<38} {:<20} {:<8} {:<20} {}",
+            room.room_id, room.name, members, activity, desc
+        )
+    }));
+
+    Ok(format!("{}\n", lines.join("\n")))
 }
 
 #[derive(Parser)]
@@ -620,6 +661,9 @@ enum RoomAction {
         /// Filter by parent room ID
         #[arg(long)]
         parent: Option<String>,
+        /// Print the server room objects as JSON for agents and scripts
+        #[arg(long)]
+        json: bool,
     },
     /// Create a new room
     Create {
@@ -1598,32 +1642,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Rooms { action } => {
             let client = connect(&cli).await?;
             match action {
-                RoomAction::List { parent } => {
+                RoomAction::List { parent, json } => {
                     let rooms = client.list_rooms(parent.as_deref()).await?;
-                    if rooms.is_empty() {
-                        println!("No rooms found.");
-                    } else {
-                        println!(
-                            "{:<38} {:<20} {:<8} {:<20} DESCRIPTION",
-                            "ID", "NAME", "MEMBERS", "LAST ACTIVITY"
-                        );
-                        println!("{}", "-".repeat(120));
-                        for room in rooms {
-                            let desc = room.description.as_deref().unwrap_or("");
-                            let members = room
-                                .member_count
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| "-".to_string());
-                            let activity = room
-                                .last_activity
-                                .map(|t| t.format("%H:%M:%S").to_string())
-                                .unwrap_or_else(|| "-".to_string());
-                            println!(
-                                "{:<38} {:<20} {:<8} {:<20} {}",
-                                room.room_id, room.name, members, activity, desc
-                            );
-                        }
-                    }
+                    print!("{}", render_room_list(&rooms, *json)?);
                 }
                 RoomAction::Create {
                     name,
@@ -3374,8 +3395,29 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
 
 #[cfg(test)]
 mod room_key_tests {
-    use super::{invite_http_base, resolve_room_key, Cli, Commands, InviteAction, RoomAction};
+    use super::{
+        invite_http_base, render_room_list, resolve_room_key, Cli, Commands, InviteAction,
+        RoomAction,
+    };
+    use chrono::Utc;
     use clap::Parser;
+    use cowchat_core::Room;
+
+    fn described_room() -> Room {
+        Room {
+            room_id: "room-1".to_string(),
+            name: "review".to_string(),
+            description: Some("Review PR 42".to_string()),
+            parent_id: None,
+            created_at: Utc::now(),
+            created_by: Some("agent-1".to_string()),
+            visibility: "public".to_string(),
+            owner_key: Some("must-not-leak".to_string()),
+            last_activity: None,
+            member_count: Some(2),
+            encrypted: false,
+        }
+    }
 
     #[test]
     fn room_key_resolution_precedence() {
@@ -3394,6 +3436,63 @@ mod room_key_tests {
         );
 
         std::env::remove_var("COWCHAT_ROOM_KEY");
+    }
+
+    #[test]
+    fn room_list_json_flags_parse_with_and_without_parent() {
+        let cli = Cli::try_parse_from(["cowchat", "rooms", "list", "--json"]).unwrap();
+        match cli.command {
+            Commands::Rooms {
+                action: RoomAction::List { parent, json },
+            } => {
+                assert_eq!(parent, None);
+                assert!(json);
+            }
+            _ => panic!("expected rooms list --json"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "cowchat",
+            "rooms",
+            "list",
+            "--parent",
+            "parent-room",
+            "--json",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Rooms {
+                action: RoomAction::List { parent, json },
+            } => {
+                assert_eq!(parent.as_deref(), Some("parent-room"));
+                assert!(json);
+            }
+            _ => panic!("expected rooms list --parent ... --json"),
+        }
+    }
+
+    #[test]
+    fn room_list_json_preserves_descriptions_and_empty_arrays() {
+        let output = render_room_list(&[described_room()], true).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["rooms"][0]["description"], "Review PR 42");
+        assert_eq!(parsed["rooms"][0]["member_count"], 2);
+        assert!(parsed["rooms"][0].get("owner_key").is_none());
+
+        let empty = render_room_list(&[], true).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&empty).unwrap(),
+            serde_json::json!({"rooms": []})
+        );
+    }
+
+    #[test]
+    fn room_list_human_output_keeps_headings_and_description() {
+        let output = render_room_list(&[described_room()], false).unwrap();
+        assert!(output.contains("ID"));
+        assert!(output.contains("LAST ACTIVITY"));
+        assert!(output.contains("DESCRIPTION"));
+        assert!(output.contains("Review PR 42"));
     }
 
     #[test]
