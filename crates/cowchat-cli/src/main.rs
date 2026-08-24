@@ -932,7 +932,17 @@ async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>>
     } else if let Some(addr) = &cli.tcp {
         CowchatClient::connect_tcp(addr, &key, &cli.name, agent_id, vec![]).await?
     } else {
-        CowchatClient::connect_uds(&cli.socket, &key, &cli.name, agent_id, vec![]).await?
+        #[cfg(unix)]
+        {
+            CowchatClient::connect_uds(&cli.socket, &key, &cli.name, agent_id, vec![]).await?
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(
+                "Unix socket connections are not supported on this platform; pass --tcp or --url"
+                    .into(),
+            );
+        }
     };
     if let Some(secret) = resolve_room_secret(cli) {
         client.set_room_secret(&secret);
