@@ -1452,7 +1452,7 @@ where
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod startup_tests {
     use super::*;
 
