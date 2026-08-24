@@ -4,14 +4,18 @@ use fs2::FileExt;
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::auth;
@@ -114,6 +118,7 @@ pub struct CowchatServer {
     config: ServerConfig,
     _instance_lock: File,
     listeners: Mutex<Option<PreparedListeners>>,
+    #[cfg(unix)]
     _socket_guard: OwnedSocketPath,
     broker: Arc<Broker>,
     store: Arc<Store>,
@@ -126,6 +131,7 @@ pub struct CowchatServer {
 }
 
 struct PreparedListeners {
+    #[cfg(unix)]
     uds: StdUnixListener,
     tcp: Option<std::net::TcpListener>,
     http: Option<std::net::TcpListener>,
@@ -133,12 +139,14 @@ struct PreparedListeners {
 
 /// Removes only the exact socket inode created by this server. If another
 /// process replaces the path, dropping this server must not unlink it.
+#[cfg(unix)]
 struct OwnedSocketPath {
     path: PathBuf,
     device: u64,
     inode: u64,
 }
 
+#[cfg(unix)]
 impl OwnedSocketPath {
     fn new(path: PathBuf) -> io::Result<Self> {
         let metadata = std::fs::symlink_metadata(&path)?;
@@ -165,6 +173,7 @@ impl OwnedSocketPath {
     }
 }
 
+#[cfg(unix)]
 impl Drop for OwnedSocketPath {
     fn drop(&mut self) {
         if self.still_owns_path() {
@@ -210,6 +219,7 @@ fn instance_lock_path(db_path: &Path) -> io::Result<PathBuf> {
     Ok(db_path.with_file_name(lock_name))
 }
 
+#[cfg(unix)]
 fn reject_hard_linked_database(db_path: &Path) -> io::Result<()> {
     let metadata = match std::fs::metadata(db_path) {
         Ok(metadata) => metadata,
@@ -229,10 +239,18 @@ fn reject_hard_linked_database(db_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn reject_hard_linked_database(db_path: &Path) -> io::Result<()> {
+    let _ = db_path;
+    Ok(())
+}
+
 fn acquire_instance_lock(db_path: &Path) -> io::Result<File> {
     let lock_path = instance_lock_path(db_path)?;
     let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).mode(0o600);
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    options.mode(0o600);
     let lock = options.open(&lock_path)?;
     lock.try_lock_exclusive().map_err(|error| {
         io::Error::new(
@@ -251,6 +269,7 @@ fn acquire_instance_lock(db_path: &Path) -> io::Result<File> {
     Ok(lock)
 }
 
+#[cfg(unix)]
 fn same_socket_inode(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     left.file_type().is_socket()
         && right.file_type().is_socket()
@@ -258,6 +277,7 @@ fn same_socket_inode(left: &std::fs::Metadata, right: &std::fs::Metadata) -> boo
         && left.ino() == right.ino()
 }
 
+#[cfg(unix)]
 fn bind_unix_listener(path: &Path) -> io::Result<(StdUnixListener, OwnedSocketPath)> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -350,6 +370,7 @@ impl CowchatServer {
         // Reserve every configured endpoint before opening the database. This
         // keeps bind failures side-effect-free with respect to migrations,
         // authentication material, and background workers.
+        #[cfg(unix)]
         let (uds_listener, socket_guard) = bind_unix_listener(&config.socket_path)?;
         let tcp_listener = config
             .tcp_addr
@@ -383,10 +404,12 @@ impl CowchatServer {
             config,
             _instance_lock: instance_lock,
             listeners: Mutex::new(Some(PreparedListeners {
+                #[cfg(unix)]
                 uds: uds_listener,
                 tcp: tcp_listener,
                 http: http_listener,
             })),
+            #[cfg(unix)]
             _socket_guard: socket_guard,
             broker,
             store,
@@ -409,6 +432,7 @@ impl CowchatServer {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::AlreadyExists, "server is already running")
             })?;
+        #[cfg(unix)]
         let uds_listener = UnixListener::from_std(prepared.uds)?;
         let tcp_listener = prepared.tcp.map(TcpListener::from_std).transpose()?;
         let http_listener = prepared.http.map(TcpListener::from_std).transpose()?;
@@ -418,58 +442,61 @@ impl CowchatServer {
         // with the server.
         let _webhook_worker = self.webhook_mgr.start();
 
-        log::info!("Listening on UDS: {:?}", self.config.socket_path);
+        #[cfg(unix)]
+        let uds_task = {
+            log::info!("Listening on UDS: {:?}", self.config.socket_path);
 
-        // Spawn UDS accept loop as a task
-        let uds_broker = self.broker.clone();
-        let uds_store = self.store.clone();
-        let uds_vote_mgr = self.vote_mgr.clone();
-        let uds_api_key = self.api_key.clone();
-        let uds_no_auth = self.config.no_auth;
-        let uds_allow_keyless = self.config.allow_keyless_local;
-        let uds_rate_limiter = self.rate_limiter.clone();
-        let uds_reconnect_mgr = self.reconnect_mgr.clone();
-        let uds_task_mgr = self.task_mgr.clone();
-        let uds_webhook_mgr = self.webhook_mgr.clone();
-        let uds_task = tokio::spawn(async move {
-            loop {
-                match uds_listener.accept().await {
-                    Ok((stream, _addr)) => {
-                        let (read_half, write_half) = tokio::io::split(stream);
-                        let broker = uds_broker.clone();
-                        let store = uds_store.clone();
-                        let vote_mgr = uds_vote_mgr.clone();
-                        let api_key = uds_api_key.clone();
-                        let rate_limiter = uds_rate_limiter.clone();
-                        let reconnect_mgr = uds_reconnect_mgr.clone();
-                        let task_mgr = uds_task_mgr.clone();
-                        let webhook_mgr = uds_webhook_mgr.clone();
-                        tokio::spawn(async move {
-                            let _ = connection_loop(
-                                read_half,
-                                write_half,
-                                broker,
-                                store,
-                                vote_mgr,
-                                api_key,
-                                uds_no_auth,
-                                uds_allow_keyless,
-                                rate_limiter,
-                                reconnect_mgr,
-                                task_mgr,
-                                webhook_mgr,
-                                None,
-                            )
-                            .await;
-                        });
-                    }
-                    Err(e) => {
-                        log::error!("UDS accept error: {}", e);
-                        break;
+            // Spawn UDS accept loop as a task
+            let uds_broker = self.broker.clone();
+            let uds_store = self.store.clone();
+            let uds_vote_mgr = self.vote_mgr.clone();
+            let uds_api_key = self.api_key.clone();
+            let uds_no_auth = self.config.no_auth;
+            let uds_allow_keyless = self.config.allow_keyless_local;
+            let uds_rate_limiter = self.rate_limiter.clone();
+            let uds_reconnect_mgr = self.reconnect_mgr.clone();
+            let uds_task_mgr = self.task_mgr.clone();
+            let uds_webhook_mgr = self.webhook_mgr.clone();
+            tokio::spawn(async move {
+                loop {
+                    match uds_listener.accept().await {
+                        Ok((stream, _addr)) => {
+                            let (read_half, write_half) = tokio::io::split(stream);
+                            let broker = uds_broker.clone();
+                            let store = uds_store.clone();
+                            let vote_mgr = uds_vote_mgr.clone();
+                            let api_key = uds_api_key.clone();
+                            let rate_limiter = uds_rate_limiter.clone();
+                            let reconnect_mgr = uds_reconnect_mgr.clone();
+                            let task_mgr = uds_task_mgr.clone();
+                            let webhook_mgr = uds_webhook_mgr.clone();
+                            tokio::spawn(async move {
+                                let _ = connection_loop(
+                                    read_half,
+                                    write_half,
+                                    broker,
+                                    store,
+                                    vote_mgr,
+                                    api_key,
+                                    uds_no_auth,
+                                    uds_allow_keyless,
+                                    rate_limiter,
+                                    reconnect_mgr,
+                                    task_mgr,
+                                    webhook_mgr,
+                                    None,
+                                )
+                                .await;
+                            });
+                        }
+                        Err(e) => {
+                            log::error!("UDS accept error: {}", e);
+                            break;
+                        }
                     }
                 }
-            }
-        });
+            })
+        };
 
         // Spawn TCP accept loop if configured
         let tcp_task = if let Some(tcp_listener) = tcp_listener {
