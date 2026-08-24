@@ -1,0 +1,27 @@
+[workflow]
+name = "software-delivery"
+version = 1
+
+[channels.dispatch]
+description = "Claim work, report blockers, and publish completion."
+room = "dispatch"
+events = ["work.claimed", "work.blocked", "work.completed"]
+use_when = ["Starting shared work", "Ownership or status materially changes"]
+
+[channels.review]
+description = "Request and resolve implementation review."
+room = "review"
+events = ["review.requested", "review.finding", "review.resolved"]
+use_when = ["A change is ready to inspect", "A finding needs resolution"]
+
+[channels.decisions]
+description = "Record decisions that affect other agents or future work."
+room = "decisions"
+events = ["decision.proposed", "decision.recorded"]
+use_when = ["A choice changes shared direction", "A decision needs a durable record"]
+
+[channels.handoffs]
+description = "Transfer bounded, evidence-backed context when ownership changes."
+room = "handoffs"
+events = ["handoff.ready", "handoff.accepted"]
+use_when = ["Stopping or transferring active work", "A replacement agent needs context"]

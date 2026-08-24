@@ -70,4 +70,21 @@ final class MessageRenderingTests: XCTestCase {
         XCTAssertEqual(plannedSources, [String(content.prefix(MessagePreview.characterLimit))])
         XCTAssertFalse(plannedSources.contains(content))
     }
+
+    @MainActor
+    func testHandoffCardRendersTheStructuredFields() throws {
+        let card = HandoffMessageCard(
+            handoff: HandoffContext(
+                version: 1,
+                summary: "Auth change complete",
+                next: "Review expiry tests",
+                risks: ["Coverage is incomplete"],
+                refs: ["git:abc123"]
+            )
+        )
+        .frame(width: 520, alignment: .leading)
+
+        let image = try XCTUnwrap(ImageRenderer(content: card).cgImage)
+        XCTAssertGreaterThan(image.height, 100)
+    }
 }

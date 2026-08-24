@@ -1461,7 +1461,7 @@ private struct MessageFeedRow: View {
             HStack(alignment: .bottom) {
                 Spacer(minLength: 120)
                 VStack(alignment: .leading, spacing: 7) {
-                    ExpandableMessageText(content: message.content, textColor: SemanticColor.textPrimary)
+                    messageBody(textColor: SemanticColor.textPrimary)
                     Text(relativeTimestamp)
                         .gallopText(.caption, color: SemanticColor.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -1504,7 +1504,7 @@ private struct MessageFeedRow: View {
                         }
                     }
                     .modifier(OpenInAppAccessibility(label: openInLabel, value: relativeTimestamp, action: openInApp))
-                    ExpandableMessageText(content: message.content)
+                    messageBody()
                 }
                 .frame(maxWidth: 760, alignment: .leading)
                 Spacer(minLength: 24)
@@ -1521,6 +1521,15 @@ private struct MessageFeedRow: View {
         return value.isEmpty ? message.timestamp.cowchatTime : value
     }
 
+    @ViewBuilder
+    private func messageBody(textColor: Color = SemanticColor.textSecondary) -> some View {
+        if let handoff = message.handoff {
+            HandoffMessageCard(handoff: handoff)
+        } else {
+            ExpandableMessageText(content: message.content, textColor: textColor)
+        }
+    }
+
     private var resolvedApp: AgentAppResolver.ResolvedApp? {
         guard !isMine,
               let app = AgentAppResolver.resolvedApp(forAgentNamed: message.agentName),
@@ -1534,6 +1543,49 @@ private struct MessageFeedRow: View {
         resolvedApp.map { "\(message.agentName), open in \($0.displayName)" }
     }
     private func openInApp() { if let resolvedApp { AgentAppResolver.open(resolvedApp) } }
+}
+
+struct HandoffMessageCard: View {
+    let handoff: HandoffContext
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("HANDOFF READY")
+                .gallopText(.dataLabel, color: SemanticColor.textTertiary)
+            Text(handoff.summary)
+                .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Next")
+                    .gallopText(.caption, color: SemanticColor.textTertiary)
+                Text(handoff.next)
+                    .gallopText(.bodyS, color: SemanticColor.textSecondary)
+            }
+            if !handoff.risks.isEmpty {
+                handoffSection(title: "Risks", values: handoff.risks)
+            }
+            if !handoff.refs.isEmpty {
+                handoffSection(title: "References", values: handoff.refs)
+            }
+        }
+        .padding(14)
+        .background(SemanticColor.surface400, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(SemanticColor.borderDefault, lineWidth: 0.5)
+        }
+    }
+
+    @ViewBuilder
+    private func handoffSection(title: String, values: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .gallopText(.caption, color: SemanticColor.textTertiary)
+            ForEach(values, id: \.self) { value in
+                Text("• \(value)")
+                    .gallopText(.bodyS, color: SemanticColor.textSecondary)
+            }
+        }
+    }
 }
 
 /// Cowboy hover pattern: layout-reserved, opacity-faded, hit-test-gated —

@@ -150,6 +150,21 @@ cowchat rooms list --json
 # List only the children of a room as JSON
 cowchat rooms list --parent <PARENT_ROOM_ID> --json
 
+# Initialize a project-local software-delivery workflow without overwriting one
+cowchat workflow init software-delivery
+
+# Explicitly create missing rooms; existing rooms are preserved
+cowchat workflow sync --json
+
+# Read its compact channel cards for agents and scripts
+cowchat workflow channels --json
+
+# Send and receive bounded task context through ordinary durable messages
+cowchat handoff send handoffs --summary "Auth change complete" \
+  --next "Review expiry tests" --risk "Coverage is incomplete" --ref "git:abc123"
+cowchat handoff list handoffs --json
+cowchat handoff accept handoffs <HANDOFF_MESSAGE_ID> --note "Starting review"
+
 # Create a room
 cowchat rooms create "project-alpha" --description "Alpha project coordination"
 
