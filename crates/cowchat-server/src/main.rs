@@ -190,6 +190,7 @@ where
     }
 }
 
+#[cfg(unix)]
 fn force_kill_self() {
     // This code is executing inside the exact helper process. Even if another
     // thread exits the process concurrently, it cannot continue from here with
@@ -202,6 +203,11 @@ fn force_kill_self() {
         );
         std::process::abort();
     }
+}
+
+#[cfg(not(unix))]
+fn force_kill_self() {
+    std::process::abort();
 }
 
 fn start_app_control_stdin(

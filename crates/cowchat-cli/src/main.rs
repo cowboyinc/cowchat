@@ -932,7 +932,17 @@ async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>>
     } else if let Some(addr) = &cli.tcp {
         CowchatClient::connect_tcp(addr, &key, &cli.name, agent_id, vec![]).await?
     } else {
-        CowchatClient::connect_uds(&cli.socket, &key, &cli.name, agent_id, vec![]).await?
+        #[cfg(unix)]
+        {
+            CowchatClient::connect_uds(&cli.socket, &key, &cli.name, agent_id, vec![]).await?
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(
+                "Unix socket connections are not supported on this platform; pass --tcp or --url"
+                    .into(),
+            );
+        }
     };
     if let Some(secret) = resolve_room_secret(cli) {
         client.set_room_secret(&secret);
@@ -1541,8 +1551,28 @@ async fn run_shell(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let handle = std::thread::Builder::new()
+        .name("cowchat-main".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime
+                .block_on(async_main())
+                .map_err(|error| error.to_string())
+        })?;
+
+    match handle.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.into()),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let cli = Cli::parse();

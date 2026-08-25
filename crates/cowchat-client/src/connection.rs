@@ -1,9 +1,12 @@
 use cowchat_core::*;
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -301,6 +304,7 @@ pub struct CowchatClient {
 
 impl CowchatClient {
     /// Connect via Unix domain socket and register.
+    #[cfg(unix)]
     pub async fn connect_uds(
         socket_path: &Path,
         key: &str,
