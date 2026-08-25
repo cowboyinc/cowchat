@@ -160,9 +160,10 @@ cowchat workflow sync --json
 cowchat workflow channels --json
 
 # Send and receive bounded task context through ordinary durable messages
-cowchat handoff send handoffs --summary "Auth change complete" \
+cowchat handoff send handoffs --task "AUTH-118" --revision "r1" \
+  --summary "Auth change complete" \
   --next "Review expiry tests" --risk "Coverage is incomplete" --ref "git:abc123"
-cowchat handoff list handoffs --json
+cowchat handoff list handoffs --pending --json
 cowchat handoff accept handoffs <HANDOFF_MESSAGE_ID> --note "Starting review"
 
 # Create a room

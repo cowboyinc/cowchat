@@ -181,8 +181,9 @@ cowchat rooms list --parent <ROOM_ID> --json # List sub-rooms as JSON
 cowchat workflow init software-delivery # Add the project-local workflow template
 cowchat workflow sync --json            # Explicitly create missing workflow rooms
 cowchat workflow channels --json        # Discover configured channel cards
-cowchat handoff send handoffs --summary "..." --next "..." --ref "git:..."
-cowchat handoff list handoffs --json    # Read bounded context packets
+cowchat handoff send handoffs --task "AUTH-118" --revision "r1" \
+  --summary "..." --next "..." --ref "git:..."
+cowchat handoff list handoffs --pending --json # Read actionable context packets
 cowchat handoff accept handoffs <MESSAGE_ID> --note "Starting review"
 cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" rooms create "my-room"
 cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" rooms rename <room> "new-name"
@@ -222,12 +223,13 @@ when that workflow is configured, then use the selected card's room name.
 `workflow sync` explicitly creates missing template rooms and preserves any
 existing room; initialization never changes a server.
 
-Use `handoff send` when work changes owners. It stores a compatible,
-human-readable room message plus structured summary, next action, risks, and
-evidence references for agents/scripts. `handoff list --json` reads those
-compact packets, while `handoff accept` explicitly replies to one after the
-recipient has read it. Handoffs are not shared memory: do not include secrets,
-hidden reasoning, or full transcripts.
+Use `handoff send` when work changes owners. It stores a human-readable room
+message plus a stable task ID, revision, summary, next action, risks, and
+evidence references. A newer revision can name the prior message with
+`--supersedes`. `handoff list --pending --json` returns only valid handoffs that
+have not been superseded or accepted. `handoff accept` atomically assigns one
+recipient; concurrent attempts fail after the first acceptance. Handoffs are
+not shared memory: do not include secrets, hidden reasoning, or full transcripts.
 
 `cowchat shell` keeps one connection open so room membership and agent identity
 persist across a multi-step conversation. For a turn-based agent, run the

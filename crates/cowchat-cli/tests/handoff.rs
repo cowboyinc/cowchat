@@ -68,8 +68,7 @@ async fn handoff_send_list_and_accept_preserve_structured_context() {
             None,
             vec![],
             serde_json::json!({
-                "kind": "handoff.ready",
-                "handoff": {"version": 1, "summary": "missing next"}
+                "kind": "checkpoint"
             }),
         )
         .await
@@ -94,6 +93,10 @@ async fn handoff_send_list_and_accept_preserve_structured_context() {
             "handoff",
             "send",
             "handoffs",
+            "--task",
+            "AUTH-118",
+            "--revision",
+            "r1",
             "--summary",
             "Auth change is complete",
             "--next",
@@ -122,9 +125,142 @@ async fn handoff_send_list_and_accept_preserve_structured_context() {
         .find(|handoff| handoff["kind"] == "handoff.ready")
         .unwrap();
     let handoff_id = ready["message_id"].as_str().unwrap().to_string();
+    assert_eq!(ready["state"], "pending");
+    assert_eq!(ready["handoff"]["task_id"], "AUTH-118");
+    assert_eq!(ready["handoff"]["revision"], "r1");
     assert_eq!(ready["handoff"]["summary"], "Auth change is complete");
     assert_eq!(ready["handoff"]["next"], "Review expiry-path coverage");
     assert_eq!(ready["handoff"]["refs"][0], "git:abc123");
+
+    let cross_task_supersession = run(
+        &socket,
+        &key,
+        &[
+            "handoff",
+            "send",
+            "handoffs",
+            "--task",
+            "OTHER-9",
+            "--revision",
+            "r2",
+            "--supersedes",
+            &handoff_id,
+            "--summary",
+            "Wrong task",
+            "--next",
+            "Do not publish",
+        ],
+    )
+    .await;
+    assert!(!cross_task_supersession.status.success());
+    assert!(String::from_utf8_lossy(&cross_task_supersession.stderr)
+        .contains("superseded handoff belongs to task AUTH-118, not OTHER-9"));
+
+    let raw_cross_task_supersession = creator
+        .send_message_with_metadata(
+            &room.room_id,
+            "invalid cross-task replacement",
+            None,
+            vec![],
+            serde_json::json!({
+                "kind": "handoff.ready",
+                "handoff": {
+                    "version": 2,
+                    "task_id": "OTHER-9",
+                    "revision": "r2",
+                    "supersedes": handoff_id,
+                    "summary": "Wrong task",
+                    "next": "Do not publish",
+                    "risks": [],
+                    "refs": []
+                }
+            }),
+        )
+        .await;
+    assert!(raw_cross_task_supersession.is_err());
+
+    let forged_acceptance = creator
+        .send_message_with_metadata(
+            &room.room_id,
+            "forged acceptance",
+            Some(&handoff_id),
+            vec![],
+            serde_json::json!({
+                "kind": "handoff.accepted",
+                "handoff": {
+                    "version": 2,
+                    "accepted_handoff_id": handoff_id,
+                    "note": "bypass"
+                }
+            }),
+        )
+        .await;
+    assert!(forged_acceptance.is_err());
+
+    let replacement = run(
+        &socket,
+        &key,
+        &[
+            "--name",
+            "builder",
+            "--agent-id",
+            "builder-task",
+            "handoff",
+            "send",
+            "handoffs",
+            "--task",
+            "AUTH-118",
+            "--revision",
+            "r2",
+            "--supersedes",
+            &handoff_id,
+            "--summary",
+            "Auth change is ready for review",
+            "--next",
+            "Review expiry-path coverage",
+            "--ref",
+            "git:def456",
+        ],
+    )
+    .await;
+    assert!(
+        replacement.status.success(),
+        "replacement send failed: {}",
+        String::from_utf8_lossy(&replacement.stderr)
+    );
+
+    let pending = run(
+        &socket,
+        &key,
+        &["handoff", "list", "handoffs", "--pending", "--json"],
+    )
+    .await;
+    assert!(pending.status.success());
+    let pending: serde_json::Value = serde_json::from_slice(&pending.stdout).unwrap();
+    let pending = pending["handoffs"].as_array().unwrap();
+    assert_eq!(pending.len(), 1);
+    let replacement_id = pending[0]["message_id"].as_str().unwrap().to_string();
+    assert_eq!(pending[0]["handoff"]["revision"], "r2");
+    assert_eq!(pending[0]["handoff"]["supersedes"], handoff_id);
+
+    let superseded_acceptance = run(
+        &socket,
+        &key,
+        &[
+            "--name",
+            "reviewer",
+            "--agent-id",
+            "task-reviewer",
+            "handoff",
+            "accept",
+            "handoffs",
+            &handoff_id,
+        ],
+    )
+    .await;
+    assert!(!superseded_acceptance.status.success());
+    assert!(String::from_utf8_lossy(&superseded_acceptance.stderr)
+        .contains("handoff is no longer pending"));
 
     let accepted = run(
         &socket,
@@ -137,7 +273,7 @@ async fn handoff_send_list_and_accept_preserve_structured_context() {
             "handoff",
             "accept",
             "handoffs",
-            &handoff_id,
+            &replacement_id,
             "--note",
             "Starting review now",
         ],
@@ -149,6 +285,24 @@ async fn handoff_send_list_and_accept_preserve_structured_context() {
         String::from_utf8_lossy(&accepted.stderr)
     );
 
+    let duplicate = run(
+        &socket,
+        &key,
+        &[
+            "--name",
+            "second-reviewer",
+            "--agent-id",
+            "second-reviewer-task",
+            "handoff",
+            "accept",
+            "handoffs",
+            &replacement_id,
+        ],
+    )
+    .await;
+    assert!(!duplicate.status.success());
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("handoff is no longer pending"));
+
     let listed = run(&socket, &key, &["handoff", "list", "handoffs", "--json"]).await;
     assert!(listed.status.success());
     let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
@@ -158,7 +312,111 @@ async fn handoff_send_list_and_accept_preserve_structured_context() {
         .iter()
         .find(|handoff| handoff["kind"] == "handoff.accepted")
         .unwrap();
-    assert_eq!(accepted["reply_to_message"], handoff_id);
-    assert_eq!(accepted["handoff"]["accepted_handoff_id"], handoff_id);
+    assert_eq!(accepted["reply_to_message"], replacement_id);
+    assert_eq!(accepted["handoff"]["accepted_handoff_id"], replacement_id);
     assert_eq!(accepted["handoff"]["note"], "Starting review now");
+
+    let ready = listed["handoffs"].as_array().unwrap();
+    let original = ready
+        .iter()
+        .find(|handoff| handoff["message_id"] == handoff_id)
+        .unwrap();
+    assert_eq!(original["state"], "superseded");
+    let replacement = ready
+        .iter()
+        .find(|handoff| handoff["message_id"] == replacement_id)
+        .unwrap();
+    assert_eq!(replacement["state"], "accepted");
+}
+
+#[tokio::test]
+async fn concurrent_acceptance_has_exactly_one_owner() {
+    let (_server, socket, key, _server_data) = start_test_server().await;
+    let creator = CowchatClient::connect_uds(
+        &socket,
+        &key,
+        "handoff-creator",
+        Some("handoff-creator"),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let room = creator
+        .create_room("handoffs", Some("Task handoffs"), None)
+        .await
+        .unwrap();
+    creator.join_room(&room.room_id).await.unwrap();
+
+    let created = run(
+        &socket,
+        &key,
+        &[
+            "--name",
+            "builder",
+            "--agent-id",
+            "builder-task",
+            "handoff",
+            "send",
+            "handoffs",
+            "--task",
+            "AUTH-118",
+            "--revision",
+            "r1",
+            "--summary",
+            "Ready",
+            "--next",
+            "Review",
+        ],
+    )
+    .await;
+    assert!(created.status.success());
+    let pending = run(
+        &socket,
+        &key,
+        &["handoff", "list", "handoffs", "--pending", "--json"],
+    )
+    .await;
+    let pending: serde_json::Value = serde_json::from_slice(&pending.stdout).unwrap();
+    let handoff_id = pending["handoffs"][0]["message_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let first_args = [
+        "--name",
+        "reviewer-a",
+        "--agent-id",
+        "reviewer-a-task",
+        "handoff",
+        "accept",
+        "handoffs",
+        handoff_id.as_str(),
+    ];
+    let second_args = [
+        "--name",
+        "reviewer-b",
+        "--agent-id",
+        "reviewer-b-task",
+        "handoff",
+        "accept",
+        "handoffs",
+        handoff_id.as_str(),
+    ];
+    let (first, second) = tokio::join!(
+        run(&socket, &key, &first_args),
+        run(&socket, &key, &second_args)
+    );
+    assert_eq!(
+        usize::from(first.status.success()) + usize::from(second.status.success()),
+        1
+    );
+
+    let pending = run(
+        &socket,
+        &key,
+        &["handoff", "list", "handoffs", "--pending", "--json"],
+    )
+    .await;
+    let pending: serde_json::Value = serde_json::from_slice(&pending.stdout).unwrap();
+    assert!(pending["handoffs"].as_array().unwrap().is_empty());
 }

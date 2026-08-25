@@ -1,29 +1,10 @@
 use cowchat_client::CowchatClient;
-use cowchat_core::ChatMessage;
-use serde::{Deserialize, Serialize};
-
-pub(crate) const HANDOFF_READY_KIND: &str = "handoff.ready";
-pub(crate) const HANDOFF_ACCEPTED_KIND: &str = "handoff.accepted";
-const HANDOFF_VERSION: u8 = 1;
-const MAX_TEXT_LENGTH: usize = 2_000;
-const MAX_ITEMS: usize = 10;
-const MAX_ITEM_LENGTH: usize = 500;
-
-#[derive(Debug, Deserialize, Serialize)]
-struct HandoffPacket {
-    version: u8,
-    summary: String,
-    next: String,
-    risks: Vec<String>,
-    refs: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HandoffAcceptancePacket {
-    version: u8,
-    accepted_handoff_id: String,
-    note: Option<String>,
-}
+use cowchat_core::{
+    ChatMessage, HandoffAcceptancePacket, HandoffPacket, HANDOFF_ACCEPTED_KIND, HANDOFF_READY_KIND,
+    HANDOFF_SCHEMA_VERSION,
+};
+use serde::Serialize;
+use std::collections::HashSet;
 
 #[derive(Debug, Serialize)]
 struct HandoffListOutput {
@@ -40,23 +21,44 @@ struct HandoffListItem {
     reply_to_message: Option<String>,
     kind: String,
     handoff: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+}
+
+pub(crate) struct HandoffDraft<'a> {
+    pub task_id: &'a str,
+    pub revision: &'a str,
+    pub supersedes: Option<&'a str>,
+    pub summary: &'a str,
+    pub next: &'a str,
+    pub risks: &'a [String],
+    pub refs: &'a [String],
 }
 
 pub(crate) async fn send(
     client: &CowchatClient,
     room_id: &str,
-    summary: &str,
-    next: &str,
-    risks: &[String],
-    refs: &[String],
+    draft: HandoffDraft<'_>,
 ) -> Result<ChatMessage, Box<dyn std::error::Error>> {
     let packet = HandoffPacket {
-        version: HANDOFF_VERSION,
-        summary: bounded_required("summary", summary)?,
-        next: bounded_required("next", next)?,
-        risks: bounded_items("risk", risks)?,
-        refs: bounded_items("ref", refs)?,
+        version: HANDOFF_SCHEMA_VERSION,
+        task_id: draft.task_id.trim().to_string(),
+        revision: draft.revision.trim().to_string(),
+        supersedes: draft.supersedes.map(str::trim).map(str::to_string),
+        summary: draft.summary.trim().to_string(),
+        next: draft.next.trim().to_string(),
+        risks: draft
+            .risks
+            .iter()
+            .map(|risk| risk.trim().to_string())
+            .collect(),
+        refs: draft
+            .refs
+            .iter()
+            .map(|reference| reference.trim().to_string())
+            .collect(),
     };
+    packet.validate()?;
     let content = render_ready(&packet);
     Ok(client
         .send_message_with_metadata(
@@ -74,11 +76,48 @@ pub(crate) async fn list(
     room_id: &str,
     limit: u32,
     json: bool,
+    pending: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let messages = client.get_history(room_id, limit, None).await?;
-    let output = HandoffListOutput {
-        handoffs: messages.iter().filter_map(parse_list_item).collect(),
-    };
+    let mut handoffs: Vec<_> = messages.iter().filter_map(parse_list_item).collect();
+    let accepted: HashSet<_> = handoffs
+        .iter()
+        .filter(|item| item.kind == HANDOFF_ACCEPTED_KIND)
+        .filter_map(|item| {
+            serde_json::from_value::<HandoffAcceptancePacket>(item.handoff.clone())
+                .ok()
+                .map(|packet| packet.accepted_handoff_id)
+        })
+        .collect();
+    let superseded: HashSet<_> = handoffs
+        .iter()
+        .filter(|item| item.kind == HANDOFF_READY_KIND)
+        .filter_map(|item| {
+            serde_json::from_value::<HandoffPacket>(item.handoff.clone())
+                .ok()
+                .and_then(|packet| packet.supersedes)
+        })
+        .collect();
+    for item in &mut handoffs {
+        if item.kind == HANDOFF_READY_KIND {
+            item.state = Some(
+                if accepted.contains(&item.message_id) {
+                    "accepted"
+                } else if superseded.contains(&item.message_id) {
+                    "superseded"
+                } else {
+                    "pending"
+                }
+                .to_string(),
+            );
+        }
+    }
+    if pending {
+        handoffs.retain(|item| {
+            item.kind == HANDOFF_READY_KIND && item.state.as_deref() == Some("pending")
+        });
+    }
+    let output = HandoffListOutput { handoffs };
     if json {
         return Ok(format!("{}\n", serde_json::to_string(&output)?));
     }
@@ -90,11 +129,24 @@ pub(crate) async fn list(
     let mut lines = Vec::with_capacity(output.handoffs.len());
     for item in output.handoffs {
         let detail = serde_json::from_value::<HandoffPacket>(item.handoff.clone())
-            .map(|packet| format!("{} → {}", packet.summary, packet.next))
+            .map(|packet| {
+                format!(
+                    "{}@{} {} → {}",
+                    packet.task_id, packet.revision, packet.summary, packet.next
+                )
+            })
             .unwrap_or_else(|_| "accepted".to_string());
         lines.push(format!(
-            "#{} {} {}: {} ({})",
-            item.seq, item.kind, item.agent_name, detail, item.message_id
+            "#{} {}{} {}: {} ({})",
+            item.seq,
+            item.kind,
+            item.state
+                .as_deref()
+                .map(|state| format!(" [{state}]"))
+                .unwrap_or_default(),
+            item.agent_name,
+            detail,
+            item.message_id
         ));
     }
     Ok(format!("{}\n", lines.join("\n")))
@@ -106,41 +158,15 @@ pub(crate) async fn accept(
     handoff_message_id: &str,
     note: Option<&str>,
 ) -> Result<ChatMessage, Box<dyn std::error::Error>> {
-    let messages = client.get_history(room_id, 500, None).await?;
-    let handoff = messages
-        .iter()
-        .find(|message| message.message_id == handoff_message_id)
-        .ok_or_else(|| {
-            format!("handoff {handoff_message_id} was not found in the latest 500 messages")
-        })?;
-    if !is_valid_ready_handoff(handoff) {
-        return Err(
-            format!("message {handoff_message_id} is not a valid handoff.ready event").into(),
-        );
-    }
-
-    let note = note
-        .map(|value| bounded_required("note", value))
-        .transpose()?;
-    let content = match note.as_deref() {
-        Some(note) => format!("Handoff accepted: {handoff_message_id}\n\nNote: {note}"),
-        None => format!("Handoff accepted: {handoff_message_id}"),
+    let note = note.map(str::trim);
+    let acceptance = HandoffAcceptancePacket {
+        version: HANDOFF_SCHEMA_VERSION,
+        accepted_handoff_id: handoff_message_id.trim().to_string(),
+        note: note.map(str::to_string),
     };
+    acceptance.validate()?;
     Ok(client
-        .send_message_with_metadata(
-            room_id,
-            &content,
-            Some(handoff_message_id),
-            vec![],
-            serde_json::json!({
-                "kind": HANDOFF_ACCEPTED_KIND,
-                "handoff": {
-                    "version": HANDOFF_VERSION,
-                    "accepted_handoff_id": handoff_message_id,
-                    "note": note,
-                }
-            }),
-        )
+        .accept_handoff(room_id, handoff_message_id, note)
         .await?)
 }
 
@@ -171,87 +197,37 @@ fn parse_list_item(message: &ChatMessage) -> Option<HandoffListItem> {
         reply_to_message: message.reply_to_message.clone(),
         kind: kind.to_string(),
         handoff,
+        state: None,
     })
-}
-
-fn is_valid_ready_handoff(message: &ChatMessage) -> bool {
-    message
-        .metadata
-        .get("kind")
-        .and_then(|value| value.as_str())
-        == Some(HANDOFF_READY_KIND)
-        && message
-            .metadata
-            .get("handoff")
-            .is_some_and(is_valid_ready_packet)
 }
 
 fn is_valid_ready_packet(value: &serde_json::Value) -> bool {
     serde_json::from_value::<HandoffPacket>(value.clone())
         .ok()
-        .is_some_and(|packet| {
-            packet.version == HANDOFF_VERSION
-                && bounded_required("summary", &packet.summary).is_ok()
-                && bounded_required("next", &packet.next).is_ok()
-                && bounded_items("risk", &packet.risks).is_ok()
-                && bounded_items("ref", &packet.refs).is_ok()
-        })
+        .is_some_and(|packet| packet.validate().is_ok())
 }
 
 fn is_valid_acceptance_packet(message: &ChatMessage, value: &serde_json::Value) -> bool {
     serde_json::from_value::<HandoffAcceptancePacket>(value.clone())
         .ok()
         .is_some_and(|packet| {
-            packet.version == HANDOFF_VERSION
-                && !packet.accepted_handoff_id.trim().is_empty()
+            packet.validate().is_ok()
                 && message.reply_to_message.as_deref() == Some(&packet.accepted_handoff_id)
-                && packet
-                    .note
-                    .as_deref()
-                    .map(|note| bounded_required("note", note).is_ok())
-                    .unwrap_or(true)
         })
-}
-
-fn bounded_required(name: &str, value: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err(format!("--{name} must not be empty").into());
-    }
-    if value.chars().count() > MAX_TEXT_LENGTH {
-        return Err(format!("--{name} must be at most {MAX_TEXT_LENGTH} characters").into());
-    }
-    Ok(value.to_string())
-}
-
-fn bounded_items(name: &str, values: &[String]) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    if values.len() > MAX_ITEMS {
-        return Err(format!("at most {MAX_ITEMS} --{name} values are allowed").into());
-    }
-    values
-        .iter()
-        .map(|value| {
-            let value = value.trim();
-            if value.is_empty() {
-                return Err(format!("--{name} must not be empty").into());
-            }
-            if value.chars().count() > MAX_ITEM_LENGTH {
-                return Err(
-                    format!("--{name} must be at most {MAX_ITEM_LENGTH} characters").into(),
-                );
-            }
-            Ok(value.to_string())
-        })
-        .collect()
 }
 
 fn render_ready(packet: &HandoffPacket) -> String {
     let mut lines = vec![
         "Handoff ready".to_string(),
         String::new(),
+        format!("Task: {}", packet.task_id),
+        format!("Revision: {}", packet.revision),
         format!("Summary: {}", packet.summary),
         format!("Next: {}", packet.next),
     ];
+    if let Some(supersedes) = packet.supersedes.as_deref() {
+        lines.push(format!("Supersedes: {supersedes}"));
+    }
     if !packet.risks.is_empty() {
         lines.push(String::new());
         lines.push("Risks:".to_string());
@@ -267,36 +243,48 @@ fn render_ready(packet: &HandoffPacket) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        bounded_items, bounded_required, is_valid_ready_packet, render_ready, HandoffPacket,
-    };
+    use super::{is_valid_ready_packet, render_ready, HandoffPacket, HANDOFF_SCHEMA_VERSION};
 
-    #[test]
-    fn handoff_body_is_readable_without_metadata() {
-        let body = render_ready(&HandoffPacket {
-            version: 1,
+    fn packet() -> HandoffPacket {
+        HandoffPacket {
+            version: HANDOFF_SCHEMA_VERSION,
+            task_id: "AUTH-118".to_string(),
+            revision: "r2".to_string(),
+            supersedes: Some("prior-message".to_string()),
             summary: "Auth change complete".to_string(),
             next: "Review expiry tests".to_string(),
             risks: vec!["Expiry coverage is incomplete".to_string()],
             refs: vec!["git:abc123".to_string()],
-        });
+        }
+    }
+
+    #[test]
+    fn handoff_body_is_readable_without_metadata() {
+        let body = render_ready(&packet());
+        assert!(body.contains("Task: AUTH-118"));
+        assert!(body.contains("Revision: r2"));
+        assert!(body.contains("Supersedes: prior-message"));
         assert!(body.contains("Summary: Auth change complete"));
         assert!(body.contains("Next: Review expiry tests"));
         assert!(body.contains("- git:abc123"));
     }
 
     #[test]
-    fn handoff_fields_are_bounded_and_trimmed() {
-        assert_eq!(bounded_required("summary", "  useful  ").unwrap(), "useful");
-        assert!(bounded_required("summary", "   ").is_err());
-        assert!(bounded_items("ref", &[" ".to_string()]).is_err());
-        assert!(bounded_items("ref", &vec!["x".to_string(); 11]).is_err());
+    fn handoff_fields_are_bounded() {
+        let mut invalid = packet();
+        invalid.task_id = " ".to_string();
+        assert!(invalid.validate().is_err());
+        let mut invalid = packet();
+        invalid.refs = vec!["x".to_string(); 11];
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
     fn only_a_complete_bounded_packet_is_a_structured_handoff() {
         let valid = serde_json::json!({
-            "version": 1,
+            "version": 2,
+            "task_id": "AUTH-118",
+            "revision": "r2",
             "summary": "Ready for review",
             "next": "Review the change",
             "risks": [],
@@ -305,7 +293,8 @@ mod tests {
         assert!(is_valid_ready_packet(&valid));
 
         let malformed = serde_json::json!({
-            "version": 1,
+            "version": 2,
+            "task_id": "AUTH-118",
             "summary": "Missing required fields"
         });
         assert!(!is_valid_ready_packet(&malformed));

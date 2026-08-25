@@ -719,6 +719,15 @@ enum HandoffAction {
     Send {
         /// Room ID or exact name
         room: String,
+        /// Stable task or work-item identifier
+        #[arg(long)]
+        task: String,
+        /// Producer-defined revision identifier
+        #[arg(long)]
+        revision: String,
+        /// Prior handoff message ID replaced by this revision
+        #[arg(long)]
+        supersedes: Option<String>,
         /// What is true at the handoff boundary
         #[arg(long)]
         summary: String,
@@ -742,6 +751,9 @@ enum HandoffAction {
         /// Print stable structured output for agents and scripts
         #[arg(long)]
         json: bool,
+        /// Return only valid, unaccepted, non-superseded handoffs
+        #[arg(long)]
+        pending: bool,
     },
     /// Acknowledge a specific handoff after reading it
     Accept {
@@ -2339,6 +2351,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Handoff { action } => match action {
             HandoffAction::Send {
                 room,
+                task,
+                revision,
+                supersedes,
                 summary,
                 next,
                 risk,
@@ -2347,14 +2362,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let client = connect(&cli).await?;
                 let room_id = resolve_room_id(&client, room).await?;
                 client.join_room(&room_id).await?;
-                let message =
-                    handoff::send(&client, &room_id, summary, next, risk, reference).await?;
+                let message = handoff::send(
+                    &client,
+                    &room_id,
+                    handoff::HandoffDraft {
+                        task_id: task,
+                        revision,
+                        supersedes: supersedes.as_deref(),
+                        summary,
+                        next,
+                        risks: risk,
+                        refs: reference,
+                    },
+                )
+                .await?;
                 println!("{}", format_message(&message));
             }
-            HandoffAction::List { room, limit, json } => {
+            HandoffAction::List {
+                room,
+                limit,
+                json,
+                pending,
+            } => {
                 let client = connect(&cli).await?;
                 let room_id = resolve_room_id(&client, room).await?;
-                print!("{}", handoff::list(&client, &room_id, *limit, *json).await?);
+                print!(
+                    "{}",
+                    handoff::list(&client, &room_id, *limit, *json, *pending).await?
+                );
             }
             HandoffAction::Accept {
                 room,

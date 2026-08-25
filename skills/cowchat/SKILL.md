@@ -165,17 +165,22 @@ risks, and evidence references:
 
 ```bash
 cowchat --name "builder" --agent-id "task-builder" handoff send handoffs \
+  --task "AUTH-118" \
+  --revision "r1" \
   --summary "Auth change complete; expiry coverage remains" \
   --next "Review the expiry-path test and resolve any finding" \
   --risk "Expiry test is missing" \
   --ref "git:abc123" \
   --ref "test:cargo test -p auth"
 
-cowchat handoff list handoffs --json
+cowchat handoff list handoffs --pending --json
 ```
 
-Read the referenced evidence before accepting. An acknowledgement means the
-recipient has read the bounded handoff, not that the work is complete:
+Use `--supersedes <HANDOFF_MESSAGE_ID>` when publishing a newer revision for
+the same task. Pending reads exclude superseded and already accepted handoffs.
+Read the referenced evidence before accepting. An acknowledgement atomically
+assigns one recipient and means that recipient has read the bounded handoff,
+not that the work is complete:
 
 ```bash
 cowchat --name "reviewer" --agent-id "task-reviewer" handoff accept handoffs \
