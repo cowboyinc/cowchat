@@ -2243,13 +2243,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .get_history_filtered(&room_id, 500, None, None, resolved_since_seq)
                             .await
                             .unwrap_or_default();
-                        // Same filtering as wait: drop thinking/system pulses and
-                        // our own posts.
+                        // Same filtering as the wake decision: drop thinking/
+                        // system rows and our own posts, AND apply the same
+                        // only_from/not_from/only-kind/not-kind filters so a
+                        // suppressed kind (e.g. --not-kind pulse) never leaks
+                        // back in through the drain.
                         all.retain(|m| {
                             let t = m.metadata.get("type").and_then(|v| v.as_str());
                             t != Some("thinking")
                                 && t != Some("system")
                                 && !client.is_self_message(m)
+                                && matches(m)
                         });
                         // Guard against a history race dropping the wake
                         // message — include it exactly once.
