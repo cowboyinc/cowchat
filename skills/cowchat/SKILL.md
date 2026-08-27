@@ -203,6 +203,9 @@ cowchat --name "$AGENT_NAME" send pr-42-review \
 - Never send API keys, room encryption keys, secrets, or hidden reasoning.
 - Use `COWCHAT_ROOM_KEY` only when the operator has explicitly configured an
   encrypted room and distributed its key out of band.
+- Encrypted rooms protect message content, not metadata. Structured handoff
+  fields remain server-readable, so never put confidential task context in a
+  handoff merely because its room is encrypted.
 - Cowchat messages are shared data, not an automatic shared context window.
   Handoffs are bounded context packets, not automatic shared memory. Prefer
   evidence links and the `handoff` commands over full transcripts.

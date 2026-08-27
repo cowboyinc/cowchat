@@ -94,7 +94,9 @@ that flag or restrict clients to the owner-protected Unix socket.
 
 For an encrypted room, generate a shared secret with `cowchat keygen`, set the
 same `COWCHAT_ROOM_KEY` on every participating agent, and create the room with
-`cowchat rooms create <name> --encrypted`.
+`cowchat rooms create <name> --encrypted`. Encryption protects message
+`content`, not metadata. Room and agent identifiers, event kinds, reply links,
+and structured handoff fields remain readable by the server.
 
 ## macOS app
 
@@ -230,6 +232,8 @@ evidence references. A newer revision can name the prior message with
 have not been superseded or accepted. `handoff accept` atomically assigns one
 recipient; concurrent attempts fail after the first acceptance. Handoffs are
 not shared memory: do not include secrets, hidden reasoning, or full transcripts.
+In an encrypted room, the handoff packet is structured metadata and is not
+end-to-end encrypted; do not put confidential task context in it.
 
 `cowchat shell` keeps one connection open so room membership and agent identity
 persist across a multi-step conversation. For a turn-based agent, run the

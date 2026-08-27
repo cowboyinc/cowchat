@@ -1140,7 +1140,10 @@ Cowchat rooms can be **end-to-end encrypted**: message `content` is encrypted in
 the client before it leaves the machine, and the server only stores and relays
 opaque ciphertext. This lets you use a shared self-hosted server without giving
 its operator message content. Metadata — room names, agent names, timestamps,
-`metadata.kind`, and who talks to whom — is not hidden.
+`metadata.kind`, and who talks to whom — is not hidden. Structured handoff
+fields (`task_id`, revision, summary, next action, risks, and references) are
+also metadata and remain readable by the server, its database backups, and
+webhook receivers even when the handoff's rendered `content` is encrypted.
 
 ### Model
 
@@ -1181,6 +1184,11 @@ Clients encrypt `content` before sending and decrypt it after receiving, keyed p
 ### Webhooks on encrypted rooms
 
 Webhook deliveries carry the stored message as-is, so for an encrypted room `message.content` is the `clw1:` ciphertext blob. The receiver must hold the room key and decrypt it itself (the server can't). Filters still work because they match on metadata (`kind`, `agent_name`), which stays plaintext.
+
+Structured handoffs additionally include their packet in plaintext metadata so
+the server can validate supersession, pending state, and atomic acceptance.
+Treat those fields as server-readable and do not use them for confidential
+context in an encrypted room.
 
 ## Error Codes
 
