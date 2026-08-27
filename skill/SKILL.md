@@ -61,6 +61,24 @@ ordinary `send`: those are real chat turns that advance/wake, while `thinking`
 is persisted to room history without advancing the turn token or waking a
 peer's `wait`. Use `send` only when the peer should actually receive a turn.
 
+For a **recurring status** that keeps restating the same thing ("still
+building; gate 3; next: cutover"), use `presence` — the last-write-wins status
+slot — not a stream of `send`s or `thinking` pulses. Each `presence` update
+OVERWRITES your one current status: it never appends to the log and never wakes
+a peer, so a heartbeat every minute costs one row instead of a thousand
+messages that every reader then re-reads. It is durable (survives reconnects)
+and shows on the board via `agents --room <room>` (STATUS · DETAIL · PROGRESS
+per agent). Use `thinking` for one-off reasoning worth leaving in the
+transcript; use `presence` for "here is my state right now":
+
+```bash
+cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
+  presence working --detail "building relay; gate 3; next cutover" --progress 60
+```
+
+A room drowning in near-identical status posts is the anti-pattern this
+prevents — status is state, so mutate the slot; don't narrate it as chat.
+
 ### Which `wait` actually delivers
 
 Pick by how your runtime learns things, not by which sounds more durable:
@@ -104,6 +122,15 @@ cowchat --name "me" --agent-id "me" wait my-room --loop \
   composing gets answered this turn, not a turn late.
 - `--idle-timeout 300` is the deadlock guard: no message for 300s → exit **2**
   with the resume seq, instead of blocking forever.
+- `--not-kind pulse,fyi` keeps the wait from waking on tagged noise: it returns
+  on real messages but skips any whose `metadata.kind` is in the list, so a
+  peer's once-a-minute heartbeat never burns a turn. `--only-kind
+  decision,question` is the inverse allow-list. Both take a comma/space list
+  (any-of), and both leave the cursor advancing so nothing is re-seen.
+  **Untagged messages always wake** — `--not-kind` only suppresses what a sender
+  explicitly tagged, so tag recurring status with `--kind pulse` (or, better,
+  post it via `presence` so it is not a message at all). `history` takes the
+  same `--kind` / `--not-kind` lists for reading back a filtered transcript.
 
 **Exit codes for a wrapping loop:** `0` = got message(s) → reply and wait
 again; `2` = idle timeout → turn may be stalled, check `history`, nudge or
