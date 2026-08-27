@@ -278,6 +278,21 @@ pub async fn handle_frame(
             )
             .await
         }
+        FrameType::AcceptHandoff => {
+            handle_accept_handoff(
+                req_id,
+                frame.payload,
+                agent_id,
+                agent_name,
+                broker,
+                store,
+                agent_api_key,
+                rate_limiter,
+                no_auth,
+                webhook_mgr,
+            )
+            .await
+        }
         FrameType::GetHistory => {
             handle_get_history(req_id, frame.payload, store, agent_api_key, no_auth).await
         }
@@ -930,6 +945,43 @@ async fn handle_send_message(
         );
     }
 
+    match p.metadata.get("kind").and_then(|value| value.as_str()) {
+        Some(HANDOFF_ACCEPTED_KIND) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::InvalidPayload,
+                    "handoff.accepted must use the atomic accept_handoff command",
+                ),
+            )
+        }
+        Some(HANDOFF_READY_KIND) => {
+            let packet = p
+                .metadata
+                .get("handoff")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<HandoffPacket>(value).ok());
+            if let Some(error) = packet
+                .as_ref()
+                .map(|packet| packet.validate())
+                .unwrap_or_else(|| Err("invalid handoff.ready metadata".to_string()))
+                .err()
+            {
+                return Frame::error(req_id, ErrorPayload::new(ErrorCode::InvalidPayload, error));
+            }
+            if let Err(error) = store.validate_handoff_supersession(
+                &p.room_id,
+                packet.as_ref().expect("validated handoff packet"),
+            ) {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InvalidPayload, error.to_string()),
+                );
+            }
+        }
+        _ => {}
+    }
+
     if let Some(err) = reject_plaintext_in_encrypted_room(req_id, &p.content, &p.room_id, store) {
         return err;
     }
@@ -1019,6 +1071,114 @@ async fn handle_send_message(
 
     // Fire-and-forget: enqueue webhook deliveries to any matching subscriptions.
     // This spawns a separate task internally, so it doesn't block the send path.
+    webhook_mgr.enqueue_for_message(&message);
+
+    Frame::ok(req_id, serde_json::to_value(&message).unwrap())
+}
+
+async fn handle_accept_handoff(
+    req_id: Option<&str>,
+    payload: serde_json::Value,
+    agent_id: &str,
+    agent_name: &str,
+    broker: &Arc<Broker>,
+    store: &Arc<Store>,
+    agent_api_key: &str,
+    rate_limiter: &Arc<RateLimiter>,
+    no_auth: bool,
+    webhook_mgr: &Arc<crate::webhooks::WebhookManager>,
+) -> Frame {
+    let p: AcceptHandoffPayload = match serde_json::from_value(payload) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, error.to_string()),
+            )
+        }
+    };
+    let acceptance = HandoffAcceptancePacket {
+        version: HANDOFF_SCHEMA_VERSION,
+        accepted_handoff_id: p.handoff_message_id.clone(),
+        note: p.note.clone(),
+    };
+    if let Err(error) = acceptance.validate() {
+        return Frame::error(req_id, ErrorPayload::new(ErrorCode::InvalidPayload, error));
+    }
+    if !broker.is_agent_in_room(agent_id, &p.room_id) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::NotInRoom, "Not in this room"),
+        );
+    }
+    if let Some(error) = reject_plaintext_in_encrypted_room(req_id, &p.content, &p.room_id, store) {
+        return error;
+    }
+    if !no_auth && !agent_api_key.is_empty() {
+        let tier = store
+            .get_key_tier(agent_api_key)
+            .unwrap_or_else(|_| "free".to_string());
+        let limits = TierLimits::for_tier(&tier);
+        if let Some(error) = reject_oversized(req_id, &p.content, &limits) {
+            return error;
+        }
+        if !rate_limiter.check_message_rate(agent_api_key, &limits) {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::RateLimitMessages, "Message rate limit exceeded"),
+            );
+        }
+    }
+
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let message = match store.accept_handoff(
+        &message_id,
+        &p.room_id,
+        agent_id,
+        agent_name,
+        &p.content,
+        &p.handoff_message_id,
+        p.note.as_deref(),
+    ) {
+        Ok(message) => message,
+        Err(crate::store::StoreError::HandoffAlreadyAccepted)
+        | Err(crate::store::StoreError::HandoffSuperseded) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::HandoffNotPending, "handoff is no longer pending"),
+            )
+        }
+        Err(crate::store::StoreError::HandoffNotFound)
+        | Err(crate::store::StoreError::InvalidHandoff) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::InvalidPayload,
+                    "message is not a valid handoff in this room",
+                ),
+            )
+        }
+        Err(error) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+            )
+        }
+    };
+
+    if !agent_api_key.is_empty() {
+        rate_limiter.increment_message(agent_api_key);
+    }
+    if let Some(mut agent) = broker.agents.get_mut(agent_id) {
+        agent.info.last_active = Some(chrono::Utc::now());
+    }
+    let event = Frame::event(
+        FrameType::MessageReceived,
+        serde_json::to_value(&message).unwrap(),
+    );
+    broker.broadcast_to_room(&p.room_id, agent_id, &event);
+    broker.advance_turn_from(&p.room_id, agent_id);
+    broadcast_turn_changed(broker, &p.room_id, "message_sent");
     webhook_mgr.enqueue_for_message(&message);
 
     Frame::ok(req_id, serde_json::to_value(&message).unwrap())

@@ -17,9 +17,11 @@ tokio.workspace = true
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 log.workspace = true
 env_logger.workspace = true
 directories = "5"
+toml.workspace = true
 
 [dev-dependencies]
 cowchat-server.workspace = true

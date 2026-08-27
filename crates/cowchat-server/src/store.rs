@@ -1,5 +1,8 @@
 use chrono::{DateTime, Utc};
-use cowchat_core::{ChatMessage, Room};
+use cowchat_core::{
+    ChatMessage, HandoffAcceptancePacket, HandoffPacket, Room, HANDOFF_ACCEPTED_KIND,
+    HANDOFF_READY_KIND, HANDOFF_SCHEMA_VERSION,
+};
 use dashmap::DashMap;
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
@@ -681,6 +684,180 @@ impl Store {
             timestamp: parse_timestamp(&created_at),
             seq,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_handoff(
+        &self,
+        message_id: &str,
+        room_id: &str,
+        agent_id: &str,
+        agent_name: &str,
+        content: &str,
+        handoff_message_id: &str,
+        note: Option<&str>,
+    ) -> Result<ChatMessage, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let target_metadata: String = tx
+            .query_row(
+                "SELECT metadata FROM messages WHERE room_id = ?1 AND message_id = ?2",
+                params![room_id, handoff_message_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => StoreError::HandoffNotFound,
+                other => StoreError::Db(other),
+            })?;
+        let target_metadata: serde_json::Value =
+            serde_json::from_str(&target_metadata).map_err(|_| StoreError::InvalidHandoff)?;
+        let target_packet = target_metadata
+            .get("handoff")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<HandoffPacket>(value).ok())
+            .filter(|packet| packet.validate().is_ok());
+        if target_metadata.get("kind").and_then(|value| value.as_str()) != Some(HANDOFF_READY_KIND)
+            || target_packet.is_none()
+        {
+            return Err(StoreError::InvalidHandoff);
+        }
+
+        {
+            let mut statement = tx.prepare(
+                "SELECT metadata FROM messages WHERE room_id = ?1 AND seq > 0 ORDER BY seq ASC",
+            )?;
+            let rows = statement.query_map(params![room_id], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&row?) else {
+                    continue;
+                };
+                match metadata.get("kind").and_then(|value| value.as_str()) {
+                    Some(HANDOFF_ACCEPTED_KIND) => {
+                        let acceptance = metadata
+                            .get("handoff")
+                            .cloned()
+                            .and_then(|value| {
+                                serde_json::from_value::<HandoffAcceptancePacket>(value).ok()
+                            })
+                            .filter(|packet| packet.validate().is_ok());
+                        if acceptance
+                            .is_some_and(|packet| packet.accepted_handoff_id == handoff_message_id)
+                        {
+                            return Err(StoreError::HandoffAlreadyAccepted);
+                        }
+                    }
+                    Some(HANDOFF_READY_KIND) => {
+                        let packet = metadata
+                            .get("handoff")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value::<HandoffPacket>(value).ok())
+                            .filter(|packet| packet.validate().is_ok());
+                        if packet.is_some_and(|packet| {
+                            packet.supersedes.as_deref() == Some(handoff_message_id)
+                        }) {
+                            return Err(StoreError::HandoffSuperseded);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let acceptance = HandoffAcceptancePacket {
+            version: HANDOFF_SCHEMA_VERSION,
+            accepted_handoff_id: handoff_message_id.to_string(),
+            note: note.map(str::to_string),
+        };
+        acceptance
+            .validate()
+            .map_err(|_| StoreError::InvalidHandoff)?;
+        let metadata = serde_json::json!({
+            "kind": HANDOFF_ACCEPTED_KIND,
+            "handoff": acceptance,
+        });
+        let metadata_str = serde_json::to_string(&metadata).unwrap_or_default();
+
+        tx.execute(
+            "INSERT OR IGNORE INTO room_sequences (room_id, high_water) VALUES (?1, 0)",
+            params![room_id],
+        )?;
+        let seq: i64 = tx.query_row(
+            "SELECT high_water + 1 FROM room_sequences WHERE room_id = ?1",
+            params![room_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO messages (message_id, room_id, agent_id, agent_name, content, reply_to_message, metadata, seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                message_id,
+                room_id,
+                agent_id,
+                agent_name,
+                content,
+                handoff_message_id,
+                metadata_str,
+                seq
+            ],
+        )?;
+        let created_at: String = tx.query_row(
+            "SELECT created_at FROM messages WHERE message_id = ?1",
+            params![message_id],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+
+        Ok(ChatMessage {
+            message_id: message_id.to_string(),
+            room_id: room_id.to_string(),
+            agent_id: agent_id.to_string(),
+            agent_name: agent_name.to_string(),
+            content: content.to_string(),
+            reply_to_message: Some(handoff_message_id.to_string()),
+            metadata,
+            timestamp: parse_timestamp(&created_at),
+            seq,
+        })
+    }
+
+    pub fn validate_handoff_supersession(
+        &self,
+        room_id: &str,
+        packet: &HandoffPacket,
+    ) -> Result<(), StoreError> {
+        let Some(superseded_id) = packet.supersedes.as_deref() else {
+            return Ok(());
+        };
+        let conn = self.conn.lock().unwrap();
+        let metadata: String = conn
+            .query_row(
+                "SELECT metadata FROM messages WHERE room_id = ?1 AND message_id = ?2",
+                params![room_id, superseded_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => StoreError::HandoffNotFound,
+                other => StoreError::Db(other),
+            })?;
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata).map_err(|_| StoreError::InvalidHandoff)?;
+        if metadata.get("kind").and_then(|value| value.as_str()) != Some(HANDOFF_READY_KIND) {
+            return Err(StoreError::InvalidHandoff);
+        }
+        let superseded = metadata
+            .get("handoff")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<HandoffPacket>(value).ok())
+            .filter(|packet| packet.validate().is_ok())
+            .ok_or(StoreError::InvalidHandoff)?;
+        if superseded.task_id != packet.task_id {
+            return Err(StoreError::HandoffTaskMismatch {
+                superseded_task: superseded.task_id,
+                replacement_task: packet.task_id.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Returns the durable high-water seq for a room, or 0 if it has never had
@@ -1915,6 +2092,24 @@ pub enum StoreError {
 
     #[error("already voted")]
     AlreadyVoted,
+
+    #[error("handoff not found")]
+    HandoffNotFound,
+
+    #[error("message is not a valid handoff")]
+    InvalidHandoff,
+
+    #[error("handoff was already accepted")]
+    HandoffAlreadyAccepted,
+
+    #[error("handoff was superseded")]
+    HandoffSuperseded,
+
+    #[error("superseded handoff belongs to task {superseded_task}, not {replacement_task}")]
+    HandoffTaskMismatch {
+        superseded_task: String,
+        replacement_task: String,
+    },
 }
 
 #[cfg(test)]

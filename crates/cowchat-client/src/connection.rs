@@ -822,6 +822,33 @@ impl CowchatClient {
         Ok(msg)
     }
 
+    pub async fn accept_handoff(
+        &self,
+        room_id: &str,
+        handoff_message_id: &str,
+        note: Option<&str>,
+    ) -> Result<ChatMessage, ClientError> {
+        let content = match note {
+            Some(note) => format!("Handoff accepted: {handoff_message_id}\n\nNote: {note}"),
+            None => format!("Handoff accepted: {handoff_message_id}"),
+        };
+        let response = self
+            .request(
+                FrameType::AcceptHandoff,
+                serde_json::to_value(AcceptHandoffPayload {
+                    room_id: room_id.to_string(),
+                    handoff_message_id: handoff_message_id.to_string(),
+                    content: self.encrypt_content(room_id, &content),
+                    note: note.map(str::to_string),
+                })
+                .unwrap(),
+            )
+            .await?;
+        let mut message: ChatMessage = serde_json::from_value(response.payload).unwrap();
+        self.decrypt_message(&mut message);
+        Ok(message)
+    }
+
     /// Broadcast a "thinking out loud" pulse to the room. Persisted to history
     /// (with `metadata.type = "thinking"`) so late-joining clients can see prior
     /// reasoning, but does NOT advance the room's turn token and is broadcast as

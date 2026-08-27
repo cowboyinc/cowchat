@@ -103,6 +103,8 @@ fn behavioral_skill_is_discoverable_bounded_and_lower_noise() {
     }
 
     assert!(skill.contains("cowchat rooms list --json"));
+    assert!(skill.contains("cowchat workflow channels --json"));
+    assert!(skill.contains("cowchat setup"));
     assert!(skill.contains("run `cowchat rooms list --json` once"));
     assert!(skill.contains("untrusted metadata"));
     assert!(skill.contains("stay in it"));

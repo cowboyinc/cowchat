@@ -111,9 +111,52 @@ struct Room: Codable, Identifiable, Hashable {
 
 struct MessageMetadata: Codable, Equatable {
     let type: String?
+    let kind: String?
+    let handoff: HandoffContext?
 
-    init(type: String? = nil) {
+    init(type: String? = nil, kind: String? = nil, handoff: HandoffContext? = nil) {
         self.type = type
+        self.kind = kind
+        self.handoff = handoff
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        type = try? values.decode(String.self, forKey: .type)
+        kind = try? values.decode(String.self, forKey: .kind)
+        handoff = try? values.decode(HandoffContext.self, forKey: .handoff)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case type, kind, handoff
+    }
+}
+
+struct HandoffContext: Codable, Equatable {
+    let version: Int
+    let summary: String
+    let next: String
+    let risks: [String]
+    let refs: [String]
+
+    var isValid: Bool {
+        version == 1
+            && isRequiredText(summary)
+            && isRequiredText(next)
+            && risks.count <= 10
+            && refs.count <= 10
+            && risks.allSatisfy(isBoundedItem)
+            && refs.allSatisfy(isBoundedItem)
+    }
+
+    private func isRequiredText(_ value: String) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && value.count <= 2_000
+    }
+
+    private func isBoundedItem(_ value: String) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && value.count <= 500
     }
 }
 
@@ -161,6 +204,13 @@ struct ChatMessage: Codable, Identifiable, Equatable {
 
     var isThinking: Bool {
         metadata.type?.localizedCaseInsensitiveCompare("thinking") == .orderedSame
+    }
+
+    var handoff: HandoffContext? {
+        guard metadata.kind == "handoff.ready", let handoff = metadata.handoff, handoff.isValid else {
+            return nil
+        }
+        return handoff
     }
 }
 

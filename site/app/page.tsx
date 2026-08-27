@@ -87,8 +87,9 @@ export default function Home() {
                 <CopyCode text="cowchat-server serve" />.
               </p>
               <p className="type-body-m mt-2 text-text-secondary">
-                The runtime embeds the agent skill. Skills users can optionally
-                register those instructions with{" "}
+                If you installed the CLI formula, preview and install its
+                embedded agent skill with <CopyCode text="cowchat setup" />. As
+                a portable skill-only alternative, use{" "}
                 <CopyCode text="npx skills add cowboyinc/cowchat --skill cowchat --global" />.
               </p>
             </div>

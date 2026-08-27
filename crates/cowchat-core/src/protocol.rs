@@ -97,6 +97,7 @@ pub enum FrameType {
     RenameRoom,
     DestroyRoom,
     SendMessage,
+    AcceptHandoff,
     GetHistory,
     ListRooms,
     ListAgents,

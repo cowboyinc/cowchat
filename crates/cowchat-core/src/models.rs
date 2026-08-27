@@ -150,6 +150,129 @@ pub struct SendMessagePayload {
     pub mentions: Vec<String>,
 }
 
+pub const HANDOFF_SCHEMA_VERSION: u8 = 2;
+pub const HANDOFF_READY_KIND: &str = "handoff.ready";
+pub const HANDOFF_ACCEPTED_KIND: &str = "handoff.accepted";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffPacket {
+    pub version: u8,
+    pub task_id: String,
+    pub revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    pub summary: String,
+    pub next: String,
+    #[serde(default)]
+    pub risks: Vec<String>,
+    #[serde(default)]
+    pub refs: Vec<String>,
+}
+
+impl HandoffPacket {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != HANDOFF_SCHEMA_VERSION {
+            return Err(format!("handoff version must be {HANDOFF_SCHEMA_VERSION}"));
+        }
+        validate_bounded("task", &self.task_id, 200)?;
+        validate_bounded("revision", &self.revision, 200)?;
+        if let Some(supersedes) = self.supersedes.as_deref() {
+            validate_bounded("supersedes", supersedes, 200)?;
+        }
+        validate_bounded("summary", &self.summary, 2_000)?;
+        validate_bounded("next", &self.next, 2_000)?;
+        validate_items("risk", &self.risks)?;
+        validate_items("ref", &self.refs)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffAcceptancePacket {
+    pub version: u8,
+    pub accepted_handoff_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl HandoffAcceptancePacket {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != HANDOFF_SCHEMA_VERSION {
+            return Err(format!("handoff version must be {HANDOFF_SCHEMA_VERSION}"));
+        }
+        validate_bounded("handoff message id", &self.accepted_handoff_id, 200)?;
+        if let Some(note) = self.note.as_deref() {
+            validate_bounded("note", note, 2_000)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptHandoffPayload {
+    pub room_id: String,
+    pub handoff_message_id: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+fn validate_bounded(name: &str, value: &str, maximum: usize) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{name} must not be empty"));
+    }
+    if value.chars().count() > maximum {
+        return Err(format!("{name} must be at most {maximum} characters"));
+    }
+    Ok(())
+}
+
+fn validate_items(name: &str, values: &[String]) -> Result<(), String> {
+    if values.len() > 10 {
+        return Err(format!("at most 10 {name} values are allowed"));
+    }
+    for value in values {
+        validate_bounded(name, value, 500)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::{HandoffPacket, HANDOFF_SCHEMA_VERSION};
+
+    fn packet() -> HandoffPacket {
+        HandoffPacket {
+            version: HANDOFF_SCHEMA_VERSION,
+            task_id: "AUTH-118".to_string(),
+            revision: "r2".to_string(),
+            supersedes: Some("prior-message".to_string()),
+            summary: "Ready for review".to_string(),
+            next: "Review expiry tests".to_string(),
+            risks: vec!["Coverage incomplete".to_string()],
+            refs: vec!["git:abc123".to_string()],
+        }
+    }
+
+    #[test]
+    fn v2_handoff_requires_task_revision_and_bounded_context() {
+        assert!(packet().validate().is_ok());
+
+        let mut invalid = packet();
+        invalid.task_id = " ".to_string();
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = packet();
+        invalid.revision = " ".to_string();
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = packet();
+        invalid.risks = vec!["risk".to_string(); 11];
+        assert!(invalid.validate().is_err());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetHistoryPayload {
     pub room_id: String,

@@ -5,7 +5,13 @@ use std::io::Write;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+mod handoff;
 mod lantern;
+mod setup;
+mod workflow;
+
+use setup::SetupTarget;
+use workflow::WorkflowTemplate;
 
 /// `metadata.kind` marking the last message of a conversation. `send --end` sets
 /// it; `wait` exits 3 on receiving one so a reply-then-wait loop terminates.
@@ -389,6 +395,37 @@ enum Commands {
         full: bool,
     },
 
+    /// Preview or install the embedded Cowchat skill for supported agents
+    Setup {
+        /// Agent host to configure; repeat to select more than one
+        #[arg(long, value_enum)]
+        target: Vec<SetupTarget>,
+
+        /// Show the exact filesystem plan without writing anything
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+
+        /// Apply the previewed plan without prompting
+        #[arg(long)]
+        yes: bool,
+
+        /// Remove only files still matching Cowchat's ownership record
+        #[arg(long)]
+        remove: bool,
+    },
+
+    /// Initialize and inspect a project-local agent coordination workflow
+    Workflow {
+        #[command(subcommand)]
+        action: WorkflowAction,
+    },
+
+    /// Share or receive a bounded, evidence-backed task handoff
+    Handoff {
+        #[command(subcommand)]
+        action: HandoffAction,
+    },
+
     /// Webhook subscriptions — register an HTTP endpoint to be POSTed when
     /// matching messages land in a room. Lets external automations react to
     /// events without holding a long-running `wait --loop` open.
@@ -642,6 +679,91 @@ enum RoomAction {
         /// Confirm the irreversible deletion.
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkflowAction {
+    /// Write a workflow template without overwriting an existing file
+    Init {
+        /// Template to initialize
+        #[arg(value_enum)]
+        template: WorkflowTemplate,
+        /// Project-local workflow manifest to create
+        #[arg(long, default_value = ".cowchat/workflow.toml")]
+        path: PathBuf,
+    },
+    /// Show workflow channel cards for agents and people
+    Channels {
+        /// Project-local workflow manifest to inspect
+        #[arg(long, default_value = ".cowchat/workflow.toml")]
+        path: PathBuf,
+        /// Print stable structured output for agents and scripts
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create missing workflow rooms while preserving existing rooms
+    Sync {
+        /// Project-local workflow manifest to synchronize
+        #[arg(long, default_value = ".cowchat/workflow.toml")]
+        path: PathBuf,
+        /// Print stable structured output for agents and scripts
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum HandoffAction {
+    /// Publish a structured handoff as a durable room message
+    Send {
+        /// Room ID or exact name
+        room: String,
+        /// Stable task or work-item identifier
+        #[arg(long)]
+        task: String,
+        /// Producer-defined revision identifier
+        #[arg(long)]
+        revision: String,
+        /// Prior handoff message ID replaced by this revision
+        #[arg(long)]
+        supersedes: Option<String>,
+        /// What is true at the handoff boundary
+        #[arg(long)]
+        summary: String,
+        /// The next concrete action for the recipient
+        #[arg(long)]
+        next: String,
+        /// Open risk or limitation; repeat for multiple risks
+        #[arg(long)]
+        risk: Vec<String>,
+        /// Evidence reference such as a commit, file, test, or URL; repeat as needed
+        #[arg(long = "ref")]
+        reference: Vec<String>,
+    },
+    /// List recent structured handoffs in a room
+    List {
+        /// Room ID or exact name
+        room: String,
+        /// Number of history rows to inspect
+        #[arg(long, default_value = "100")]
+        limit: u32,
+        /// Print stable structured output for agents and scripts
+        #[arg(long)]
+        json: bool,
+        /// Return only valid, unaccepted, non-superseded handoffs
+        #[arg(long)]
+        pending: bool,
+    },
+    /// Acknowledge a specific handoff after reading it
+    Accept {
+        /// Room ID or exact name
+        room: String,
+        /// Message ID of the handoff.ready event
+        handoff_message_id: String,
+        /// Optional short acceptance note
+        #[arg(long)]
+        note: Option<String>,
     },
 }
 
@@ -2204,6 +2326,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        Commands::Setup {
+            target,
+            dry_run,
+            yes,
+            remove,
+        } => {
+            // Purely local and explicit: preview first, then write only after
+            // confirmation (or --yes). No server or network connection.
+            setup::run(target, *dry_run, *yes, *remove)?;
+        }
+
+        Commands::Workflow { action } => match action {
+            WorkflowAction::Init { template, path } => workflow::init(*template, path)?,
+            WorkflowAction::Channels { path, json } => {
+                print!("{}", workflow::render_channels(path, *json)?);
+            }
+            WorkflowAction::Sync { path, json } => {
+                let client = connect(&cli).await?;
+                print!("{}", workflow::sync_rooms(path, &client, *json).await?);
+            }
+        },
+
+        Commands::Handoff { action } => match action {
+            HandoffAction::Send {
+                room,
+                task,
+                revision,
+                supersedes,
+                summary,
+                next,
+                risk,
+                reference,
+            } => {
+                let client = connect(&cli).await?;
+                let room_id = resolve_room_id(&client, room).await?;
+                client.join_room(&room_id).await?;
+                let message = handoff::send(
+                    &client,
+                    &room_id,
+                    handoff::HandoffDraft {
+                        task_id: task,
+                        revision,
+                        supersedes: supersedes.as_deref(),
+                        summary,
+                        next,
+                        risks: risk,
+                        refs: reference,
+                    },
+                )
+                .await?;
+                println!("{}", format_message(&message));
+            }
+            HandoffAction::List {
+                room,
+                limit,
+                json,
+                pending,
+            } => {
+                let client = connect(&cli).await?;
+                let room_id = resolve_room_id(&client, room).await?;
+                print!(
+                    "{}",
+                    handoff::list(&client, &room_id, *limit, *json, *pending).await?
+                );
+            }
+            HandoffAction::Accept {
+                room,
+                handoff_message_id,
+                note,
+            } => {
+                let client = connect(&cli).await?;
+                let room_id = resolve_room_id(&client, room).await?;
+                client.join_room(&room_id).await?;
+                let message =
+                    handoff::accept(&client, &room_id, handoff_message_id, note.as_deref()).await?;
+                println!("{}", format_message(&message));
+            }
+        },
+
         Commands::Status => {
             let client = connect(&cli).await?;
             let agents = client.list_agents(None).await?;
@@ -3109,7 +3310,7 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
 mod room_key_tests {
     use super::{
         invite_http_base, render_room_list, resolve_room_key, Cli, Commands, InviteAction,
-        RoomAction,
+        RoomAction, SetupTarget,
     };
     use chrono::Utc;
     use clap::Parser;
@@ -3284,6 +3485,63 @@ mod room_key_tests {
         // The embedded docs must be present and non-trivial.
         assert!(include_str!("../../../skills/cowchat/SKILL.md").contains("# Cowchat"));
         assert!(include_str!("../../../SKILLS.md").contains("# Cowchat"));
+    }
+
+    #[test]
+    fn setup_command_parses_targets_and_rejects_incompatible_flags() {
+        let cli = Cli::try_parse_from(["cowchat", "setup"]).unwrap();
+        match cli.command {
+            Commands::Setup {
+                target,
+                dry_run,
+                yes,
+                remove,
+            } => {
+                assert!(target.is_empty());
+                assert!(!dry_run);
+                assert!(!yes);
+                assert!(!remove);
+            }
+            _ => panic!("expected default setup"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "cowchat",
+            "setup",
+            "--target",
+            "codex",
+            "--target",
+            "claude-code",
+            "--dry-run",
+            "--remove",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Setup {
+                target,
+                dry_run,
+                yes,
+                remove,
+            } => {
+                assert_eq!(target, vec![SetupTarget::Codex, SetupTarget::ClaudeCode]);
+                assert!(dry_run);
+                assert!(!yes);
+                assert!(remove);
+            }
+            _ => panic!("expected setup"),
+        }
+
+        assert!(Cli::try_parse_from(["cowchat", "setup", "--dry-run", "--yes"]).is_err());
+        assert!(Cli::try_parse_from(["cowchat", "setup", "--target", "unsupported"]).is_err());
+
+        let cli = Cli::try_parse_from(["cowchat", "setup", "--yes", "--remove"]).unwrap();
+        match cli.command {
+            Commands::Setup { yes, remove, .. } => {
+                assert!(yes);
+                assert!(remove);
+            }
+            _ => panic!("expected confirmed removal"),
+        }
     }
 
     #[test]
