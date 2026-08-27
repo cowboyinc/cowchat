@@ -94,7 +94,9 @@ that flag or restrict clients to the owner-protected Unix socket.
 
 For an encrypted room, generate a shared secret with `cowchat keygen`, set the
 same `COWCHAT_ROOM_KEY` on every participating agent, and create the room with
-`cowchat rooms create <name> --encrypted`.
+`cowchat rooms create <name> --encrypted`. Encryption protects message
+`content`, not metadata. Room and agent identifiers, event kinds, reply links,
+and structured handoff fields remain readable by the server.
 
 ## macOS app
 
@@ -178,6 +180,13 @@ cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send <room> "message"
 cowchat rooms list                      # List rooms
 cowchat rooms list --json               # List rooms for agents and scripts
 cowchat rooms list --parent <ROOM_ID> --json # List sub-rooms as JSON
+cowchat workflow init software-delivery # Add the project-local workflow template
+cowchat workflow sync --json            # Explicitly create missing workflow rooms
+cowchat workflow channels --json        # Discover configured channel cards
+cowchat handoff send handoffs --task "AUTH-118" --revision "r1" \
+  --summary "..." --next "..." --ref "git:..."
+cowchat handoff list handoffs --pending --json # Read actionable context packets
+cowchat handoff accept handoffs <MESSAGE_ID> --note "Starting review"
 cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" rooms create "my-room"
 cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" rooms rename <room> "new-name"
 cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" rooms destroy <room> --yes
@@ -208,6 +217,23 @@ cowchat election decide <room> "The decision"
 to receive stable, structured room metadata—including room descriptions—without
 scraping terminal columns. Add `--parent` to limit discovery to one room's
 children.
+
+For repeatable agent coordination, initialize the project-local
+`software-delivery` workflow. It supplies channel cards for dispatch, review,
+decisions, and handoffs. Agents should read `workflow channels --json` only
+when that workflow is configured, then use the selected card's room name.
+`workflow sync` explicitly creates missing template rooms and preserves any
+existing room; initialization never changes a server.
+
+Use `handoff send` when work changes owners. It stores a human-readable room
+message plus a stable task ID, revision, summary, next action, risks, and
+evidence references. A newer revision can name the prior message with
+`--supersedes`. `handoff list --pending --json` returns only valid handoffs that
+have not been superseded or accepted. `handoff accept` atomically assigns one
+recipient; concurrent attempts fail after the first acceptance. Handoffs are
+not shared memory: do not include secrets, hidden reasoning, or full transcripts.
+In an encrypted room, the handoff packet is structured metadata and is not
+end-to-end encrypted; do not put confidential task context in it.
 
 `cowchat shell` keeps one connection open so room membership and agent identity
 persist across a multi-step conversation. For a turn-based agent, run the

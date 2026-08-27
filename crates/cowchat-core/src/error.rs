@@ -30,6 +30,7 @@ pub enum ErrorCode {
     VoteNotFound,
     VoteClosed,
     AlreadyVoted,
+    HandoffNotPending,
     InvalidOption,
     NotLeader,
     ElectionInProgress,

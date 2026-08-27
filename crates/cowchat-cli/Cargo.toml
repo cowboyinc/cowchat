@@ -21,6 +21,7 @@ sha2.workspace = true
 log.workspace = true
 env_logger.workspace = true
 directories = "5"
+toml.workspace = true
 
 [dev-dependencies]
 cowchat-server.workspace = true

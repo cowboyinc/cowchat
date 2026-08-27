@@ -65,6 +65,54 @@ final class ProtocolModelsTests: XCTestCase {
         }
     }
 
+    func testMessageDecodesValidStructuredHandoff() throws {
+        let data = Data(#"""
+        {
+          "message_id":"handoff-1",
+          "room_id":"handoffs",
+          "agent_id":"builder",
+          "agent_name":"Builder",
+          "content":"Handoff ready",
+          "metadata":{
+            "kind":"handoff.ready",
+            "handoff":{
+              "version":1,
+              "summary":"Auth change complete",
+              "next":"Review expiry tests",
+              "risks":["Coverage is incomplete"],
+              "refs":["git:abc123"]
+            }
+          },
+          "timestamp":"2026-07-11T12:00:00.123Z",
+          "seq":42
+        }
+        """#.utf8)
+
+        let message = try JSONDecoder().decode(ChatMessage.self, from: data)
+        XCTAssertEqual(message.handoff?.summary, "Auth change complete")
+        XCTAssertEqual(message.handoff?.next, "Review expiry tests")
+        XCTAssertEqual(message.handoff?.refs, ["git:abc123"])
+    }
+
+    func testMalformedHandoffFallsBackToNormalMessage() throws {
+        let data = Data(#"""
+        {
+          "message_id":"handoff-malformed",
+          "room_id":"handoffs",
+          "agent_id":"builder",
+          "agent_name":"Builder",
+          "content":"Keep this visible",
+          "metadata":{"kind":"handoff.ready","handoff":{"version":1,"summary":"missing next"}},
+          "timestamp":"2026-07-11T12:00:00.123Z",
+          "seq":43
+        }
+        """#.utf8)
+
+        let message = try JSONDecoder().decode(ChatMessage.self, from: data)
+        XCTAssertNil(message.handoff)
+        XCTAssertEqual(message.content, "Keep this visible")
+    }
+
     func testMessageArrivalIdentityChangesWhenTheCappedWindowAdvances() throws {
         func message(_ sequence: Int) throws -> ChatMessage {
             try JSONDecoder().decode(
