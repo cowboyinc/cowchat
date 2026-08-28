@@ -262,10 +262,14 @@ enum Commands {
         /// Only return messages with seq strictly greater than this value
         #[arg(long)]
         since_seq: Option<i64>,
-        /// Only return messages tagged with this `metadata.kind`
-        /// (e.g. `--kind verdict`).
+        /// Only return messages whose `metadata.kind` is in this list (comma-
+        /// or space-separated, any-of). E.g. `--kind verdict,decision`.
         #[arg(long)]
         kind: Option<String>,
+        /// Exclude messages whose `metadata.kind` is in this list (comma- or
+        /// space-separated) — e.g. `--not-kind pulse,fyi` to drop heartbeats.
+        #[arg(long)]
+        not_kind: Option<String>,
         /// Write to file instead of stdout
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
@@ -325,10 +329,17 @@ enum Commands {
         /// Skip messages from this `--name` (in addition to your own).
         #[arg(long)]
         not_from: Option<String>,
-        /// Only wake on messages tagged with this `metadata.kind`.
-        /// E.g. `--only-kind review_request`.
+        /// Only wake on messages whose `metadata.kind` is in this list
+        /// (comma- or space-separated, any-of). Untagged messages never match.
+        /// E.g. `--only-kind review_request,decision`.
         #[arg(long)]
         only_kind: Option<String>,
+        /// Do NOT wake on messages whose `metadata.kind` is in this list
+        /// (comma- or space-separated). Use it to suppress recurring heartbeats
+        /// while still waking on everything else — e.g. `--not-kind pulse,fyi`.
+        /// Untagged messages are never suppressed by this filter.
+        #[arg(long)]
+        not_kind: Option<String>,
         /// Print peer `thinking` pulses to stderr while blocked, for live
         /// visibility during long runs. Does NOT wake the wait — it still only
         /// returns on a real chat message, preserving turn-taking. Content is
@@ -1127,6 +1138,36 @@ fn spawn_wait_thinking_watcher(
     }))
 }
 
+/// Parse a `--only-kind` / `--not-kind` spec into a list of kinds. Accepts
+/// comma- or space-separated values (`decision,question` or `decision question`)
+/// and drops empty entries. `None` / empty → an empty list (filter inactive).
+fn parse_kinds(spec: Option<&String>) -> Vec<String> {
+    spec.map(|s| {
+        s.split([',', ' '])
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// True if a message carrying `msg_kind` should be SKIPPED (not woken on / not
+/// shown) under the given `only`/`not` kind lists. `only` is any-of allow-list;
+/// `not` is an exclude-list. An untagged message (`msg_kind == None`) is skipped
+/// only when an `only` list is set (it matches nothing) — a `not` list never
+/// suppresses untagged messages, so an actionable plain send still wakes while
+/// tagged heartbeats (e.g. `--not-kind pulse`) are filtered out.
+fn kind_skipped(msg_kind: Option<&str>, only: &[String], not: &[String]) -> bool {
+    if !only.is_empty() && !msg_kind.is_some_and(|kind| only.iter().any(|want| want == kind)) {
+        return true;
+    }
+    if !not.is_empty() && msg_kind.is_some_and(|kind| not.iter().any(|skip| skip == kind)) {
+        return true;
+    }
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_wait_follow(
     cli: &Cli,
@@ -1136,11 +1177,14 @@ async fn run_wait_follow(
     only_from: Option<&String>,
     not_from: Option<&String>,
     only_kind: Option<&String>,
+    not_kind: Option<&String>,
     show_thinking: bool,
     text: bool,
     output: Option<&PathBuf>,
     cursor_file: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let only_kinds = parse_kinds(only_kind);
+    let not_kinds = parse_kinds(not_kind);
     let mut cursor = cursor_file
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<i64>().ok());
@@ -1238,12 +1282,10 @@ async fn run_wait_follow(
                         advance_cursor(&mut cursor, cursor_file, message.seq)?;
                         continue;
                     }
+                    let msg_kind = message.metadata.get("kind").and_then(|v| v.as_str());
                     if only_from.is_some_and(|name| message.agent_name != *name)
                         || not_from.is_some_and(|name| message.agent_name == *name)
-                        || only_kind.is_some_and(|kind| {
-                            message.metadata.get("kind").and_then(|v| v.as_str())
-                                != Some(kind.as_str())
-                        })
+                        || kind_skipped(msg_kind, &only_kinds, &not_kinds)
                     {
                         advance_cursor(&mut cursor, cursor_file, message.seq)?;
                         continue;
@@ -1807,6 +1849,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             since,
             since_seq,
             kind,
+            not_kind,
             output,
         } => {
             let client = connect(&cli).await?;
@@ -1817,12 +1860,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .get_history_filtered(&room_id, *limit, None, since.as_deref(), *since_seq)
                 .await?;
 
-            // Optional kind filter (applied client-side).
+            // Optional kind filters (applied client-side): --kind allow-list,
+            // --not-kind exclude-list, both comma/space-separated.
+            let only_kinds = parse_kinds(kind.as_ref());
+            let not_kinds = parse_kinds(not_kind.as_ref());
             let filtered: Vec<&ChatMessage> = messages
                 .iter()
-                .filter(|m| match kind {
-                    Some(k) => m.metadata.get("kind").and_then(|v| v.as_str()) == Some(k.as_str()),
-                    None => true,
+                .filter(|m| {
+                    let msg_kind = m.metadata.get("kind").and_then(|v| v.as_str());
+                    !kind_skipped(msg_kind, &only_kinds, &not_kinds)
                 })
                 .collect();
 
@@ -1902,6 +1948,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             only_from,
             not_from,
             only_kind,
+            not_kind,
             show_thinking,
             output,
             drain,
@@ -1916,6 +1963,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     only_from.as_ref(),
                     not_from.as_ref(),
                     only_kind.as_ref(),
+                    not_kind.as_ref(),
                     *show_thinking,
                     *text,
                     output.as_ref(),
@@ -2015,6 +2063,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             // Helper closure: does a candidate message match all filters?
+            let only_kinds = parse_kinds(only_kind.as_ref());
+            let not_kinds = parse_kinds(not_kind.as_ref());
             let matches = |msg: &ChatMessage| -> bool {
                 if let Some(want) = only_from {
                     if &msg.agent_name != want {
@@ -2026,11 +2076,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return false;
                     }
                 }
-                if let Some(want_kind) = only_kind {
-                    let got_kind = msg.metadata.get("kind").and_then(|v| v.as_str());
-                    if got_kind != Some(want_kind.as_str()) {
-                        return false;
-                    }
+                let msg_kind = msg.metadata.get("kind").and_then(|v| v.as_str());
+                if kind_skipped(msg_kind, &only_kinds, &not_kinds) {
+                    return false;
                 }
                 true
             };
@@ -2195,13 +2243,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .get_history_filtered(&room_id, 500, None, None, resolved_since_seq)
                             .await
                             .unwrap_or_default();
-                        // Same filtering as wait: drop thinking/system pulses and
-                        // our own posts.
+                        // Same filtering as the wake decision: drop thinking/
+                        // system rows and our own posts, AND apply the same
+                        // only_from/not_from/only-kind/not-kind filters so a
+                        // suppressed kind (e.g. --not-kind pulse) never leaks
+                        // back in through the drain.
                         all.retain(|m| {
                             let t = m.metadata.get("type").and_then(|v| v.as_str());
                             t != Some("thinking")
                                 && t != Some("system")
                                 && !client.is_self_message(m)
+                                && matches(m)
                         });
                         // Guard against a history race dropping the wake
                         // message — include it exactly once.
@@ -3642,5 +3694,56 @@ mod room_key_tests {
             }
             _ => panic!("expected rooms rename"),
         }
+    }
+}
+
+#[cfg(test)]
+mod kind_filter_tests {
+    use super::{kind_skipped, parse_kinds};
+
+    #[test]
+    fn parse_kinds_splits_comma_and_space() {
+        assert!(parse_kinds(None).is_empty());
+        assert_eq!(parse_kinds(Some(&"".to_string())), Vec::<String>::new());
+        assert_eq!(
+            parse_kinds(Some(&"decision, question ,,result".to_string())),
+            vec!["decision", "question", "result"]
+        );
+        assert_eq!(
+            parse_kinds(Some(&"pulse fyi".to_string())),
+            vec!["pulse", "fyi"]
+        );
+    }
+
+    #[test]
+    fn only_kind_is_an_allow_list_and_drops_untagged() {
+        let only = parse_kinds(Some(&"decision,question".to_string()));
+        let none: Vec<String> = vec![];
+        // In the allow-list, so it wakes (not skipped).
+        assert!(!kind_skipped(Some("decision"), &only, &none));
+        // Not in the allow-list -> skipped.
+        assert!(kind_skipped(Some("pulse"), &only, &none));
+        // Untagged messages match no allow-list entry -> skipped.
+        assert!(kind_skipped(None, &only, &none));
+    }
+
+    #[test]
+    fn not_kind_excludes_only_tagged_noise() {
+        let not = parse_kinds(Some(&"pulse,fyi".to_string()));
+        let none: Vec<String> = vec![];
+        // Tagged as excluded -> skipped.
+        assert!(kind_skipped(Some("pulse"), &none, &not));
+        // A different kind still wakes.
+        assert!(!kind_skipped(Some("decision"), &none, &not));
+        // Crucially, an untagged plain send is NEVER suppressed by --not-kind,
+        // so an actionable message still wakes the turn.
+        assert!(!kind_skipped(None, &none, &not));
+    }
+
+    #[test]
+    fn no_filters_wakes_on_everything() {
+        let none: Vec<String> = vec![];
+        assert!(!kind_skipped(Some("anything"), &none, &none));
+        assert!(!kind_skipped(None, &none, &none));
     }
 }

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use cowchat_core::{ChatMessage, Room};
 use dashmap::DashMap;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -299,6 +299,14 @@ impl Store {
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             );
             CREATE INDEX IF NOT EXISTS idx_blobs_room ON blobs(room_id);
+            CREATE TABLE IF NOT EXISTS presence (
+                agent_id      TEXT PRIMARY KEY,
+                agent_name    TEXT NOT NULL,
+                status        TEXT NOT NULL,
+                status_detail TEXT,
+                progress      INTEGER,
+                updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
             ",
         )?;
 
@@ -854,6 +862,61 @@ impl Store {
             params![session_id],
         )?;
         Ok(())
+    }
+
+    /// Durable, last-write-wins presence per agent. Each update OVERWRITES the
+    /// prior row (never appends), so a recurring status heartbeat costs one row,
+    /// not a growing message log. Survives disconnects and restarts so a
+    /// reconnecting agent — or a late-joining reader — sees the current status.
+    pub fn upsert_presence(
+        &self,
+        agent_id: &str,
+        agent_name: &str,
+        status: &str,
+        status_detail: Option<&str>,
+        progress: Option<u8>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO presence (agent_id, agent_name, status, status_detail, progress, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT(agent_id) DO UPDATE SET
+                 agent_name    = excluded.agent_name,
+                 status        = excluded.status,
+                 status_detail = excluded.status_detail,
+                 progress      = excluded.progress,
+                 updated_at    = excluded.updated_at",
+            params![
+                agent_id,
+                agent_name,
+                status,
+                status_detail,
+                progress.map(|p| p as i64)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The stored status for one agent: (status, status_detail, progress).
+    #[allow(clippy::type_complexity)]
+    pub fn get_presence(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<(String, Option<String>, Option<u8>)>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT status, status_detail, progress FROM presence WHERE agent_id = ?1",
+                params![agent_id],
+                |row| {
+                    let status: String = row.get(0)?;
+                    let detail: Option<String> = row.get(1)?;
+                    let progress: Option<i64> = row.get(2)?;
+                    Ok((status, detail, progress.map(|p| p as u8)))
+                },
+            )
+            .optional()?;
+        Ok(row)
     }
 
     /// Permanently bind a public agent id to the credential that first claims
@@ -2152,6 +2215,37 @@ mod tests {
         let room = store.get_room("lobby").unwrap();
         assert!(room.is_some());
         assert_eq!(room.unwrap().name, "lobby");
+    }
+
+    #[test]
+    fn presence_upsert_is_last_write_wins() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.get_presence("a1").unwrap().is_none());
+
+        store
+            .upsert_presence("a1", "codex", "working", Some("building relay"), Some(40))
+            .unwrap();
+        let (status, detail, progress) = store.get_presence("a1").unwrap().unwrap();
+        assert_eq!(status, "working");
+        assert_eq!(detail.as_deref(), Some("building relay"));
+        assert_eq!(progress, Some(40));
+
+        // A second update OVERWRITES the same row (last-write-wins), it does not
+        // append — the whole point of the status slot.
+        store
+            .upsert_presence("a1", "codex", "idle", None, None)
+            .unwrap();
+        let (status, detail, progress) = store.get_presence("a1").unwrap().unwrap();
+        assert_eq!(status, "idle");
+        assert_eq!(detail, None);
+        assert_eq!(progress, None);
+
+        // Distinct agents keep independent rows.
+        store
+            .upsert_presence("a2", "claude", "waiting", None, None)
+            .unwrap();
+        assert_eq!(store.get_presence("a2").unwrap().unwrap().0, "waiting");
+        assert_eq!(store.get_presence("a1").unwrap().unwrap().0, "idle");
     }
 
     #[test]

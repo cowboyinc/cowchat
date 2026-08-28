@@ -358,7 +358,7 @@ pub async fn handle_frame(
             handle_set_typing(req_id, frame.payload, agent_id, agent_name, broker).await
         }
         FrameType::SetPresence => {
-            handle_set_presence(req_id, frame.payload, agent_id, agent_name, broker).await
+            handle_set_presence(req_id, frame.payload, agent_id, agent_name, broker, store).await
         }
 
         // Thinking pulse
@@ -1289,6 +1289,19 @@ async fn handle_list_agents(
             .collect(),
     };
 
+    // Overlay durable presence for agents whose live status is unset (e.g. after
+    // a reconnect) so the status board reflects the last-known state.
+    let mut agents = agents;
+    for info in &mut agents {
+        if info.status.is_none() {
+            if let Ok(Some((status, detail, progress))) = store.get_presence(&info.agent_id) {
+                info.status = Some(status);
+                info.status_detail = detail;
+                info.progress = progress;
+            }
+        }
+    }
+
     Frame {
         id: Some(uuid::Uuid::new_v4().to_string()),
         reply_to: req_id.map(String::from),
@@ -2055,6 +2068,7 @@ async fn handle_set_presence(
     agent_id: &str,
     agent_name: &str,
     broker: &Arc<Broker>,
+    store: &Arc<Store>,
 ) -> Frame {
     let p: SetPresencePayload = match serde_json::from_value(payload) {
         Ok(p) => p,
@@ -2096,6 +2110,18 @@ async fn handle_set_presence(
         agent.info.progress = p.progress;
         agent.info.last_active = Some(chrono::Utc::now());
     }
+
+    // Persist durably (last-write-wins) so the status survives reconnects and is
+    // visible to late-joining readers. This is the "status slot": a recurring
+    // heartbeat overwrites one row instead of appending a chat message.
+    let _ = store.upsert_presence(
+        agent_id,
+        agent_name,
+        &p.status,
+        p.status_detail.as_deref(),
+        p.progress,
+    );
+
     let rooms = broker.rooms_for_agent(agent_id);
 
     // Broadcast PresenceUpdate to all rooms the agent is in
