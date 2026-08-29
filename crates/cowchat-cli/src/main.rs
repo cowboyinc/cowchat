@@ -1731,7 +1731,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Agents { room } => {
             let client = connect(&cli).await?;
-            let agents = client.list_agents(room.as_deref()).await?;
+            // Resolve a --room NAME to its id up front: list_agents (and the
+            // history fetch below) take the room id, not the name — passing a
+            // name straight through returned RoomNotFound.
+            let resolved_room: Option<String> = match room {
+                Some(r) => Some(resolve_room_id(&client, r).await?),
+                None => None,
+            };
+            let agents = client.list_agents(resolved_room.as_deref()).await?;
 
             // If --room is set, also pull recent history so we can surface
             // agents who've been posting recently even if they're not currently
@@ -1740,8 +1747,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (last_in_room, room_id_for_history): (
                 std::collections::HashMap<String, (i64, String)>,
                 Option<String>,
-            ) = if let Some(r) = room {
-                let room_id = resolve_room_id(&client, r).await?;
+            ) = if let Some(room_id) = resolved_room.clone() {
                 let hist = client
                     .get_history(&room_id, 200, None)
                     .await

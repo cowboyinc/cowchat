@@ -1273,13 +1273,38 @@ async fn handle_list_agents(
         }
     }
 
-    let agents: Vec<AgentInfo> = match &p.room_id {
+    let mut agents: Vec<AgentInfo> = match &p.room_id {
         Some(room_id) => {
-            let member_ids = broker.get_room_members(room_id);
-            member_ids
+            let mut list: Vec<AgentInfo> = broker
+                .get_room_members(room_id)
                 .iter()
                 .filter_map(|id| broker.agents.get(id).map(|a| a.info.clone()))
-                .collect()
+                .collect();
+            // Agents reconnect per CLI call, so the live roster is usually
+            // sparse. Add recent room participants who hold a durable status but
+            // no live connection, so the board actually reflects who's working.
+            let live: std::collections::HashSet<String> =
+                list.iter().map(|a| a.agent_id.clone()).collect();
+            if let Ok(parts) = store.room_participants_with_presence(room_id, 50) {
+                for (agent_id, agent_name, pres) in parts {
+                    if live.contains(&agent_id) {
+                        continue;
+                    }
+                    if let Some((status, detail, progress)) = pres {
+                        list.push(AgentInfo {
+                            agent_id,
+                            name: agent_name,
+                            capabilities: Vec::new(),
+                            connected_at: None,
+                            last_active: None,
+                            status: Some(status),
+                            status_detail: detail,
+                            progress,
+                        });
+                    }
+                }
+            }
+            list
         }
         None => broker
             .agents
@@ -1289,16 +1314,15 @@ async fn handle_list_agents(
             .collect(),
     };
 
-    // Overlay durable presence for agents whose live status is unset (e.g. after
-    // a reconnect) so the status board reflects the last-known state.
-    let mut agents = agents;
+    // Overlay durable presence for every listed agent so the board reflects the
+    // agent's intentional status. A live connection often only carries the
+    // transient waiting/idle that an active `wait` set, so the durable row (set
+    // by an explicit `presence` command) is the source of truth here.
     for info in &mut agents {
-        if info.status.is_none() {
-            if let Ok(Some((status, detail, progress))) = store.get_presence(&info.agent_id) {
-                info.status = Some(status);
-                info.status_detail = detail;
-                info.progress = progress;
-            }
+        if let Ok(Some((status, detail, progress))) = store.get_presence(&info.agent_id) {
+            info.status = Some(status);
+            info.status_detail = detail;
+            info.progress = progress;
         }
     }
 
@@ -2111,16 +2135,20 @@ async fn handle_set_presence(
         agent.info.last_active = Some(chrono::Utc::now());
     }
 
-    // Persist durably (last-write-wins) so the status survives reconnects and is
-    // visible to late-joining readers. This is the "status slot": a recurring
-    // heartbeat overwrites one row instead of appending a chat message.
-    let _ = store.upsert_presence(
-        agent_id,
-        agent_name,
-        &p.status,
-        p.status_detail.as_deref(),
-        p.progress,
-    );
+    // Persist durably (last-write-wins) so an intentional status survives
+    // reconnects and shows on the board. Only an EXPLICIT status — one carrying
+    // a detail or progress — is persisted: `wait`/connect automatically set a
+    // bare `waiting`/`idle` for liveness, and those must NOT clobber the agent's
+    // real status. A bare status change updates only the live in-memory value.
+    if p.status_detail.is_some() || p.progress.is_some() {
+        let _ = store.upsert_presence(
+            agent_id,
+            agent_name,
+            &p.status,
+            p.status_detail.as_deref(),
+            p.progress,
+        );
+    }
 
     let rooms = broker.rooms_for_agent(agent_id);
 

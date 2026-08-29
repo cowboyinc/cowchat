@@ -1419,14 +1419,54 @@ async fn test_set_presence_updates_agent_info() {
     assert_eq!(me.status_detail.as_deref(), Some("considering option B"));
     assert_eq!(me.progress, None);
 
-    // Set to waiting (clears detail and progress)
+    // A bare status change (no detail/progress) is transient: it must NOT
+    // clobber the durable intentional status, so the board still shows the last
+    // explicit status. This is exactly what stops an automatic `wait` "waiting"
+    // from wiping an agent's real status out from under it.
     agent.set_presence("waiting", None, None).await.unwrap();
 
     let agents = agent.list_agents(None).await.unwrap();
     let me = agents.iter().find(|a| a.name == "agent-a").unwrap();
-    assert_eq!(me.status.as_deref(), Some("waiting"));
-    assert_eq!(me.status_detail, None);
+    assert_eq!(me.status.as_deref(), Some("thinking"));
+    assert_eq!(me.status_detail.as_deref(), Some("considering option B"));
     assert_eq!(me.progress, None);
+}
+
+#[tokio::test]
+async fn test_durable_status_survives_wait_and_shows_for_offline_participant() {
+    let (_handle, addr, key, _tmp) = start_test_server().await;
+
+    let worker = connect_agent(&addr, &key, "worker").await;
+    let room = worker.create_room("proj", None, None).await.unwrap();
+    worker.join_room(&room.room_id).await.unwrap();
+    // Post so the agent counts as a room participant, then set an explicit
+    // rich status, then a bare `waiting` (exactly what `wait` sets on its own).
+    worker
+        .send_message(&room.room_id, "starting", None, vec![])
+        .await
+        .unwrap();
+    worker
+        .set_presence("working", Some("building relay"), Some(60))
+        .await
+        .unwrap();
+    worker.set_presence("waiting", None, None).await.unwrap();
+
+    // Agents reconnect per CLI call: drop the worker's connection so it is no
+    // longer in the live roster, mirroring real usage.
+    drop(worker);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // A separate observer reads the room board and still sees the worker's last
+    // intentional status — not blank, and not the transient "waiting".
+    let observer = connect_agent(&addr, &key, "observer").await;
+    let agents = observer.list_agents(Some(&room.room_id)).await.unwrap();
+    let w = agents
+        .iter()
+        .find(|a| a.name == "worker")
+        .expect("offline participant with a durable status shows on the room board");
+    assert_eq!(w.status.as_deref(), Some("working"));
+    assert_eq!(w.status_detail.as_deref(), Some("building relay"));
+    assert_eq!(w.progress, Some(60));
 }
 
 #[tokio::test]
