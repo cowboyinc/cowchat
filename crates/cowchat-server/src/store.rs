@@ -897,6 +897,40 @@ impl Store {
         Ok(())
     }
 
+    /// Distinct agents that have posted in a room (most-recent first), each with
+    /// their durable presence if any. Agents reconnect per CLI call, so the live
+    /// roster is usually empty — this is how the room board shows recent
+    /// participants and their last intentional status while they're offline.
+    #[allow(clippy::type_complexity)]
+    pub fn room_participants_with_presence(
+        &self,
+        room_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, Option<(String, Option<String>, Option<u8>)>)>, StoreError>
+    {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT m.agent_id, m.agent_name, p.status, p.status_detail, p.progress
+               FROM (SELECT agent_id, MAX(agent_name) AS agent_name, MAX(seq) AS mseq
+                       FROM messages WHERE room_id = ?1 GROUP BY agent_id) m
+               LEFT JOIN presence p ON p.agent_id = m.agent_id
+              ORDER BY m.mseq DESC
+              LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![room_id, limit as i64], |row| {
+                let agent_id: String = row.get(0)?;
+                let agent_name: String = row.get(1)?;
+                let status: Option<String> = row.get(2)?;
+                let detail: Option<String> = row.get(3)?;
+                let progress: Option<i64> = row.get(4)?;
+                let pres = status.map(|s| (s, detail, progress.map(|p| p as u8)));
+                Ok((agent_id, agent_name, pres))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// The stored status for one agent: (status, status_detail, progress).
     #[allow(clippy::type_complexity)]
     pub fn get_presence(
