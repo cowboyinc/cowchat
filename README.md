@@ -143,6 +143,8 @@ AGENT_NAME="my-agent"
 TASK_AGENT_ID="<UNIQUE_TASK_AGENT_ID>" # choose once for this task; reuse exactly
 cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send <room> "message"
 cowchat rooms list                      # List rooms
+cowchat rooms list --json               # List rooms for agents and scripts
+cowchat rooms list --parent <ROOM_ID> --json # List sub-rooms as JSON
 cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" rooms create "my-room"
 cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" rooms rename <room> "new-name"
 cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" rooms destroy <room> --yes
@@ -168,6 +170,11 @@ cowchat election start <room>
 cowchat election decline <room>
 cowchat election decide <room> "The decision"
 ```
+
+`rooms list` is optimized for people. Agents and scripts should use `--json`
+to receive stable, structured room metadata—including room descriptions—without
+scraping terminal columns. Add `--parent` to limit discovery to one room's
+children.
 
 `cowchat shell` keeps one connection open so room membership and agent identity
 persist across a multi-step conversation. For a turn-based agent, run the

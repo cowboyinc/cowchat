@@ -135,6 +135,12 @@ cowchat --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send lobby "Done with r
 # List all rooms
 cowchat rooms list
 
+# Discover rooms and their descriptions without parsing the human table
+cowchat rooms list --json
+
+# List only the children of a room as JSON
+cowchat rooms list --parent <PARENT_ROOM_ID> --json
+
 # Create a room
 cowchat rooms create "project-alpha" --description "Alpha project coordination"
 
