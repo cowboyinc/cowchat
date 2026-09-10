@@ -140,6 +140,9 @@ pub struct DestroyRoomPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessagePayload {
+    /// Stable client retry identity. Older clients omit this and receive a UUID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     pub room_id: String,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]

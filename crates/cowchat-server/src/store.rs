@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use cowchat_core::{ChatMessage, Room};
 use dashmap::DashMap;
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -20,6 +21,40 @@ pub struct Store {
 }
 
 pub(crate) const MAX_ROOM_NAME_CHARS: usize = 100;
+
+/// Legacy decoded append projection. This is not the signed v3 wire envelope.
+pub struct MessageAppend<'a> {
+    pub message_id: &'a str,
+    pub room_id: &'a str,
+    pub agent_id: &'a str,
+    pub agent_name: &'a str,
+    pub content: &'a str,
+    pub reply_to: Option<&'a str>,
+    pub metadata: &'a serde_json::Value,
+    pub mentions: &'a [String],
+}
+
+pub struct AppendResult {
+    pub message: ChatMessage,
+    pub inserted: bool,
+}
+
+impl MessageAppend<'_> {
+    fn digest(&self) -> Result<Vec<u8>, StoreError> {
+        // Display name is authenticated presentation state, not retry identity.
+        // serde_json's default sorted maps give a stable decoded projection.
+        let bytes = serde_json::to_vec(&(
+            "cowchat/legacy-append/1",
+            self.room_id,
+            self.agent_id,
+            self.content,
+            self.reply_to,
+            self.metadata,
+            self.mentions,
+        ))?;
+        Ok(Sha256::digest(bytes).to_vec())
+    }
+}
 
 /// Canonicalize and validate a room name at the server boundary.
 ///
@@ -184,6 +219,19 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_messages_reply
                 ON messages(reply_to_message) WHERE reply_to_message IS NOT NULL;
+
+            -- Content-free retry receipts survive history retention by seven days.
+            -- They never retain content, metadata, or reply text as another transcript.
+            CREATE TABLE IF NOT EXISTS message_appends (
+                message_id TEXT PRIMARY KEY,
+                room_id TEXT NOT NULL REFERENCES rooms(room_id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                append_digest BLOB NOT NULL CHECK(length(append_digest) = 32),
+                agent_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                seq INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_appends_room_time ON message_appends(room_id, created_at);
             -- idx_messages_room_seq is created in Step 2, after the seq migration runs,
             -- because old DBs may not have the seq column at this point.
 
@@ -269,6 +317,10 @@ impl Store {
                 next_attempt_at  TEXT NOT NULL,
                 attempts         INTEGER NOT NULL DEFAULT 0,
                 last_error       TEXT,
+                status           TEXT NOT NULL DEFAULT 'pending',
+                -- Pending rows pin history for at most 24 hours after enqueue.
+                -- Worker and retention sweeps abandon expired rows, including after downtime.
+                deadline_at      TEXT NOT NULL DEFAULT '',
                 UNIQUE(subscription_id, message_seq)
             );
             CREATE INDEX IF NOT EXISTS idx_deliveries_pending ON subscription_deliveries(next_attempt_at);
@@ -326,6 +378,25 @@ impl Store {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         ensure_column_exists(&conn, "messages", "seq", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column_exists(
+            &conn,
+            "subscription_deliveries",
+            "status",
+            "TEXT NOT NULL DEFAULT 'pending'",
+        )?;
+        ensure_column_exists(
+            &conn,
+            "subscription_deliveries",
+            "deadline_at",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        conn.execute("UPDATE subscription_deliveries SET deadline_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 day') WHERE deadline_at = ''", [])?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_deliveries_message_pending
+                 ON subscription_deliveries(message_id) WHERE status = 'pending';
+             CREATE INDEX IF NOT EXISTS idx_deliveries_deadline
+                 ON subscription_deliveries(status, deadline_at);",
+        )?;
         // Backfill seq for any existing rows that predate the column. rowid order
         // approximates insertion order, so this gives stable per-room seqs.
         backfill_message_seq(&conn)?;
@@ -661,17 +732,35 @@ impl Store {
         tier: &str,
         age_modifier: &str,
     ) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().unwrap();
-        let affected = conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        expire_deliveries(&tx, Utc::now())?;
+        let affected = tx.execute(
             "DELETE FROM messages WHERE message_id IN (
                 SELECT m.message_id FROM messages m
                 JOIN rooms r ON m.room_id = r.room_id
                 LEFT JOIN api_keys k ON r.owner_key = k.api_key
                 WHERE COALESCE(k.tier, 'free') = ?1
                   AND m.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+                  AND NOT EXISTS (SELECT 1 FROM subscription_deliveries d
+                                  WHERE d.message_id = m.message_id AND d.status = 'pending')
             )",
             params![tier, age_modifier],
         )?;
+        // Dedupe is bounded by the room history window plus seven days. An ID
+        // older than both its receipt and history may be accepted as new.
+        tx.execute(
+            "DELETE FROM message_appends WHERE message_id IN (
+                SELECT a.message_id FROM message_appends a
+                JOIN rooms r ON a.room_id = r.room_id
+                LEFT JOIN api_keys k ON r.owner_key = k.api_key
+                WHERE COALESCE(k.tier, 'free') = ?1
+                  AND a.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2, '-7 days')
+                  AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.message_id = a.message_id)
+            )",
+            params![tier, age_modifier],
+        )?;
+        tx.commit()?;
         Ok(affected)
     }
 
@@ -687,45 +776,113 @@ impl Store {
         reply_to_message: Option<&str>,
         metadata: &serde_json::Value,
     ) -> Result<ChatMessage, StoreError> {
-        let mut conn = self.conn.lock().unwrap();
-        let metadata_str = serde_json::to_string(metadata).unwrap_or_default();
+        self.append_message(&MessageAppend {
+            message_id,
+            room_id,
+            agent_id,
+            agent_name,
+            content,
+            reply_to: reply_to_message,
+            metadata,
+            mentions: &[],
+        })
+        .map(|result| result.message)
+    }
 
-        // Allocate and insert in one transaction. The AFTER INSERT trigger
-        // advances high-water in the same transaction, so a failed insert cannot
-        // consume a seq. The counter is independent of retained message rows.
-        let tx = conn.transaction()?;
+    /// A read-only retry fast path before rate admission. append_message repeats
+    /// this check under the insert transaction; this lookup never admits a write.
+    pub fn replay_append(
+        &self,
+        append: &MessageAppend<'_>,
+    ) -> Result<Option<ChatMessage>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        replay_append_on(&conn, append, &append.digest()?)
+    }
+
+    /// Atomically commits the message, sequence, retry receipt and matching
+    /// subscription obligations. No network or post-commit enqueue is involved.
+    pub fn append_message(&self, append: &MessageAppend<'_>) -> Result<AppendResult, StoreError> {
+        let digest = append.digest()?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(message) = replay_append_on(&tx, append, &digest)? {
+            return Ok(AppendResult {
+                message,
+                inserted: false,
+            });
+        }
+        // Pre-upgrade messages have no receipt or durable mentions. Never guess
+        // their equality or let their IDs be reused while the row is retained.
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE message_id = ?1)",
+            [append.message_id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Err(StoreError::MessageConflict);
+        }
         tx.execute(
             "INSERT OR IGNORE INTO room_sequences (room_id, high_water) VALUES (?1, 0)",
-            params![room_id],
+            [append.room_id],
         )?;
         let seq: i64 = tx.query_row(
             "SELECT high_water + 1 FROM room_sequences WHERE room_id = ?1",
-            params![room_id],
+            [append.room_id],
             |row| row.get(0),
         )?;
         tx.execute(
             "INSERT INTO messages (message_id, room_id, agent_id, agent_name, content, reply_to_message, metadata, seq)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![message_id, room_id, agent_id, agent_name, content, reply_to_message, metadata_str, seq],
+            params![append.message_id, append.room_id, append.agent_id, append.agent_name, append.content,
+                append.reply_to, serde_json::to_string(append.metadata)?, seq],
         )?;
-
         let created_at: String = tx.query_row(
             "SELECT created_at FROM messages WHERE message_id = ?1",
-            params![message_id],
+            [append.message_id],
             |row| row.get(0),
         )?;
-        tx.commit()?;
-
-        Ok(ChatMessage {
-            message_id: message_id.to_string(),
-            room_id: room_id.to_string(),
-            agent_id: agent_id.to_string(),
-            agent_name: agent_name.to_string(),
-            content: content.to_string(),
-            reply_to_message: reply_to_message.map(String::from),
-            metadata: metadata.clone(),
+        let message = ChatMessage {
+            message_id: append.message_id.into(),
+            room_id: append.room_id.into(),
+            agent_id: append.agent_id.into(),
+            agent_name: append.agent_name.into(),
+            content: append.content.into(),
+            reply_to_message: append.reply_to.map(String::from),
+            metadata: append.metadata.clone(),
             timestamp: parse_timestamp(&created_at),
             seq,
+        };
+        tx.execute(
+            "INSERT INTO message_appends (message_id, room_id, agent_id, append_digest, agent_name, created_at, seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![append.message_id, append.room_id, append.agent_id, digest, append.agent_name, created_at, seq],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
+                        only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
+                        status, failure_count, created_at
+                 FROM subscriptions WHERE room_id = ?1 AND status = 'active'",
+            )?;
+            let subscriptions = stmt.query_map([append.room_id], map_subscription_row)?;
+            for subscription in subscriptions {
+                let (sub, _, _) = subscription?;
+                if crate::webhooks::matches_filter(&sub, &message) {
+                    enqueue_delivery_on(
+                        &tx,
+                        &uuid::Uuid::new_v4().to_string(),
+                        &sub.subscription_id,
+                        seq,
+                        append.message_id,
+                        Utc::now(),
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(AppendResult {
+            message,
+            inserted: true,
         })
     }
 
@@ -1792,24 +1949,22 @@ impl Store {
         message_id: &str,
         next_attempt_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, StoreError> {
-        // Returns true if a new row was inserted, false if a duplicate (sub, seq)
-        // was rejected by the UNIQUE constraint (idempotent enqueue).
         let conn = self.conn.lock().unwrap();
-        let ts = next_attempt_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-        match conn.execute(
-            "INSERT INTO subscription_deliveries
-             (delivery_id, subscription_id, message_seq, message_id, next_attempt_at, attempts)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-            params![delivery_id, subscription_id, message_seq, message_id, ts],
-        ) {
-            Ok(_) => Ok(true),
-            Err(rusqlite::Error::SqliteFailure(e, _))
-                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                Ok(false)
-            }
-            Err(e) => Err(e.into()),
-        }
+        enqueue_delivery_on(
+            &conn,
+            delivery_id,
+            subscription_id,
+            message_seq,
+            message_id,
+            next_attempt_at,
+        )
+    }
+
+    pub fn abandon_delivery(&self, delivery_id: &str, reason: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE subscription_deliveries SET status = 'abandoned', last_error = ?2 WHERE delivery_id = ?1",
+            params![delivery_id, reason])?;
+        Ok(())
     }
 
     /// Load pending deliveries due to fire by `now`. Limit caps batch size.
@@ -1820,13 +1975,15 @@ impl Store {
     ) -> Result<Vec<PendingDelivery>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let ts = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        expire_deliveries(&conn, now)?;
         let mut stmt = conn.prepare(
             "SELECT delivery_id, subscription_id, message_seq, message_id, attempts
              FROM subscription_deliveries AS candidate
-             WHERE next_attempt_at <= ?1
+             WHERE next_attempt_at <= ?1 AND candidate.status = 'pending'
                AND NOT EXISTS (
                    SELECT 1 FROM subscription_deliveries AS earlier
                    WHERE earlier.subscription_id = candidate.subscription_id
+                     AND earlier.status = 'pending'
                      AND earlier.message_seq < candidate.message_seq
                )
              ORDER BY next_attempt_at ASC, message_seq ASC
@@ -1856,7 +2013,7 @@ impl Store {
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT next_attempt_at FROM subscription_deliveries
+            "SELECT next_attempt_at FROM subscription_deliveries WHERE status = 'pending'
              ORDER BY next_attempt_at ASC LIMIT 1",
         )?;
         let mut rows = stmt.query([])?;
@@ -1892,7 +2049,7 @@ impl Store {
         conn.execute(
             "UPDATE subscription_deliveries
              SET next_attempt_at = ?1, attempts = ?2, last_error = ?3
-             WHERE delivery_id = ?4",
+             WHERE delivery_id = ?4 AND status = 'pending'",
             params![ts, attempts, last_error, delivery_id],
         )?;
         Ok(())
@@ -1968,6 +2125,71 @@ fn map_subscription_row(
 
 // --- Internal helpers that take an already-locked connection ---
 
+fn replay_append_on(
+    conn: &Connection,
+    append: &MessageAppend<'_>,
+    digest: &[u8],
+) -> Result<Option<ChatMessage>, StoreError> {
+    let receipt = conn.query_row(
+        "SELECT room_id, agent_id, append_digest, agent_name, created_at, seq FROM message_appends WHERE message_id = ?1",
+        [append.message_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, Vec<u8>>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, i64>(5)?)),
+    ).optional()?;
+    let Some((room, agent, original_digest, name, created_at, seq)) = receipt else {
+        return Ok(None);
+    };
+    if room != append.room_id || agent != append.agent_id || original_digest != digest {
+        return Err(StoreError::MessageConflict);
+    }
+    Ok(Some(ChatMessage {
+        message_id: append.message_id.into(),
+        room_id: room,
+        agent_id: agent,
+        agent_name: name,
+        content: append.content.into(),
+        reply_to_message: append.reply_to.map(String::from),
+        metadata: append.metadata.clone(),
+        timestamp: parse_timestamp(&created_at),
+        seq,
+    }))
+}
+
+fn enqueue_delivery_on(
+    conn: &Connection,
+    delivery_id: &str,
+    subscription_id: &str,
+    message_seq: i64,
+    message_id: &str,
+    next_attempt_at: DateTime<Utc>,
+) -> Result<bool, StoreError> {
+    let ts = next_attempt_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let deadline = (Utc::now() + chrono::Duration::hours(24))
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    // Only a duplicate (subscription, seq) is benign. FK failures, injected
+    // failures, or delivery-ID collisions must roll back the complete append.
+    Ok(conn.execute(
+        "INSERT INTO subscription_deliveries
+         (delivery_id, subscription_id, message_seq, message_id, next_attempt_at, attempts, deadline_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
+         ON CONFLICT(subscription_id, message_seq) DO NOTHING",
+        params![delivery_id, subscription_id, message_seq, message_id, ts, deadline],
+    )? > 0)
+}
+
+fn expire_deliveries(conn: &Connection, now: DateTime<Utc>) -> Result<(), StoreError> {
+    let ts = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    conn.execute("UPDATE subscription_deliveries SET status = 'abandoned', last_error = 'delivery deadline elapsed'
+                  WHERE status = 'pending' AND deadline_at <= ?1", [&ts])?;
+    // Terminal rows carry no message body. Keep diagnostics for seven days.
+    conn.execute(
+        "DELETE FROM subscription_deliveries WHERE status = 'abandoned'
+                  AND deadline_at < strftime('%Y-%m-%dT%H:%M:%fZ', ?1, '-7 days')",
+        [&ts],
+    )?;
+    Ok(())
+}
+
 fn delete_room_artifacts_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     room_id: &str,
@@ -1999,6 +2221,10 @@ fn delete_room_artifacts_in_transaction(
         params![room_id],
     )?;
     tx.execute("DELETE FROM messages WHERE room_id = ?1", params![room_id])?;
+    tx.execute(
+        "DELETE FROM message_appends WHERE room_id = ?1",
+        params![room_id],
+    )?;
     tx.execute(
         "DELETE FROM room_sequences WHERE room_id = ?1",
         params![room_id],
@@ -2219,6 +2445,12 @@ pub enum RenameRoomError {
 pub enum StoreError {
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
+
+    #[error("serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("message ID conflicts with an existing append")]
+    MessageConflict,
 
     #[error("room name already taken: {0}")]
     RoomNameTaken(String),
@@ -2860,7 +3092,8 @@ mod tests {
 
         let subscription = store.get_subscription("sub-1").unwrap().unwrap().0;
         assert_eq!(subscription.last_delivered_seq, 2);
-        assert!(store
+        // The insert already committed this obligation; manual enqueue is a retry.
+        assert!(!store
             .enqueue_delivery(
                 "delivery-3",
                 "sub-1",
@@ -3390,3 +3623,6 @@ mod tests {
         assert_eq!(message.seq, 10);
     }
 }
+
+#[cfg(test)]
+mod append_tests;
