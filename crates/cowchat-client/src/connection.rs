@@ -808,6 +808,7 @@ impl CowchatClient {
             .request(
                 FrameType::SendMessage,
                 serde_json::to_value(SendMessagePayload {
+                    message_id: None,
                     room_id: room_id.to_string(),
                     content: self.encrypt_content(room_id, content),
                     reply_to: reply_to.map(String::from),

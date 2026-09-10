@@ -2,13 +2,15 @@
 //!
 //! Implements the **Standard Webhooks v1** signature (standardwebhooks.com) so
 //! receivers can plug in `svix` or any compatible verifier. On every successful
-//! `send_message`, the handler asks this module to enqueue deliveries for any
-//! active subscriptions whose filter matches; a background worker drains the
+//! `send_message`, the store commits matching deliveries in the message insert
+//! transaction; a background worker drains the
 //! queue, POSTs each event, advances cursors on 2xx, and retries with
 //! exponential backoff on failure.
 //!
 //! The send path NEVER blocks on HTTP — it only inserts queue rows and pokes a
 //! `Notify`. All I/O happens on the worker task.
+//! Abandoned obligations no longer block later sequences; consumers recover
+//! gaps by sequence backfill, subject to the room's history retention window.
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -220,47 +222,6 @@ impl WebhookManager {
             .map(|_| ())
     }
 
-    /// Enqueue deliveries for `msg` to every matching active subscription on
-    /// the room. Idempotent: a duplicate (subscription, seq) is silently skipped.
-    /// This is the only entry point called from the message send path; it does
-    /// no HTTP I/O and returns quickly.
-    pub fn enqueue_for_message(&self, msg: &ChatMessage) {
-        let inner = self.inner.clone();
-        let msg = msg.clone();
-        // Spawned so a slow SQLite scan never blocks the send broadcast.
-        tokio::spawn(async move {
-            let subs = match inner.store.list_active_subscriptions_for_room(&msg.room_id) {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!("webhook enqueue: failed to list subs: {}", e);
-                    return;
-                }
-            };
-            let now = chrono::Utc::now();
-            let mut enqueued = 0;
-            for (sub, _owner, _secret) in subs {
-                if !matches_filter(&sub, &msg) {
-                    continue;
-                }
-                let delivery_id = Uuid::new_v4().to_string();
-                match inner.store.enqueue_delivery(
-                    &delivery_id,
-                    &sub.subscription_id,
-                    msg.seq,
-                    &msg.message_id,
-                    now,
-                ) {
-                    Ok(true) => enqueued += 1,
-                    Ok(false) => {}
-                    Err(e) => log::warn!("webhook enqueue: {}", e),
-                }
-            }
-            if enqueued > 0 {
-                inner.notify.notify_one();
-            }
-        });
-    }
-
     /// Wake the worker. Used after enqueueing the backfill on a fresh subscription.
     pub fn wake(&self) {
         self.inner.notify.notify_one();
@@ -341,7 +302,9 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
     };
     let (sub, _owner, secret) = sub_lookup;
     if sub.status != "active" {
-        let _ = inner.store.delete_delivery(&d.delivery_id);
+        let _ = inner
+            .store
+            .abandon_delivery(&d.delivery_id, "subscription inactive");
         return;
     }
 
@@ -352,7 +315,9 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
                 "webhook delivery: message {} not found, dropping",
                 d.message_id
             );
-            let _ = inner.store.delete_delivery(&d.delivery_id);
+            let _ = inner
+                .store
+                .abandon_delivery(&d.delivery_id, "message missing");
             return;
         }
         Err(e) => {
@@ -385,6 +350,9 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
                 "failed",
                 Some(d.attempts + 1),
             );
+            let _ = inner
+                .store
+                .abandon_delivery(&d.delivery_id, "webhook address rejected");
             return;
         }
     };
@@ -425,7 +393,9 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
             let idx = (new_attempts as usize).saturating_sub(1);
             if idx >= RETRY_SCHEDULE_SECS.len() {
                 // Give up on this delivery and mark the sub failed.
-                let _ = inner.store.delete_delivery(&d.delivery_id);
+                let _ = inner
+                    .store
+                    .abandon_delivery(&d.delivery_id, "retry budget exhausted");
                 let _ = inner.store.set_subscription_status(
                     &sub.subscription_id,
                     "failed",
@@ -579,3 +549,6 @@ mod tests {
         assert!(!matches_filter(&s, &think_msg));
     }
 }
+
+#[cfg(test)]
+mod append_tests;

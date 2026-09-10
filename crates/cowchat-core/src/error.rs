@@ -39,6 +39,8 @@ pub enum ErrorCode {
     RateLimitRooms,
     /// Message content exceeds the per-tier byte cap.
     MessageTooLarge,
+    /// A retained message ID was reused with a different append or sender.
+    MessageConflict,
     /// The client's wire protocol version is outside the server's supported range.
     UnsupportedProtocol,
     AccessDenied,
