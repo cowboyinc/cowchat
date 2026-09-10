@@ -1,0 +1,72 @@
+[
+  {
+    "id": "generation-secret",
+    "room": "test-room",
+    "gen": 2,
+    "info_hex": "636f77636861742f76332f726f6f6d6b65798269746573742d726f6f6d02",
+    "recipient_private_hex": "5726be7d4c57c3d5b6378145a8a57f87ea8390d7f6f6320ecde1c4a915031116",
+    "recipient_public_hex": "eb9bd4304696e2aa45faa4bce6ff0b10c4cb80e2d7372fb8fc6aaa3cbf61c600",
+    "enc_hex": "eb61a207694a9d587024d78cdc5a0552946baa5bcc86f6168690737f4414f70a",
+    "ciphertext_hex": "3f05ff2dafa76982fa6fef9752b2341d2eb2a3d70f5c465b6d6293d9f629ea81343e695e76858d923324c6c4ca0b4534",
+    "generation_secret_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "cbss_released_secret_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "derived_aead_key_hex": "39151f5e0342b1c5e03e35105b3c75cd32331117e43bd1e4f928ff14b490d737",
+    "expected": "accept"
+  },
+  {
+    "id": "wrong-room",
+    "room": "other-room",
+    "gen": 2,
+    "info_hex": "636f77636861742f76332f726f6f6d6b65798269746573742d726f6f6d02",
+    "recipient_private_hex": "5726be7d4c57c3d5b6378145a8a57f87ea8390d7f6f6320ecde1c4a915031116",
+    "recipient_public_hex": "eb9bd4304696e2aa45faa4bce6ff0b10c4cb80e2d7372fb8fc6aaa3cbf61c600",
+    "enc_hex": "eb61a207694a9d587024d78cdc5a0552946baa5bcc86f6168690737f4414f70a",
+    "ciphertext_hex": "3f05ff2dafa76982fa6fef9752b2341d2eb2a3d70f5c465b6d6293d9f629ea81343e695e76858d923324c6c4ca0b4534",
+    "generation_secret_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "cbss_released_secret_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "derived_aead_key_hex": "39151f5e0342b1c5e03e35105b3c75cd32331117e43bd1e4f928ff14b490d737",
+    "expected": "decrypt"
+  },
+  {
+    "id": "wrong-generation",
+    "room": "test-room",
+    "gen": 3,
+    "info_hex": "636f77636861742f76332f726f6f6d6b65798269746573742d726f6f6d02",
+    "recipient_private_hex": "5726be7d4c57c3d5b6378145a8a57f87ea8390d7f6f6320ecde1c4a915031116",
+    "recipient_public_hex": "eb9bd4304696e2aa45faa4bce6ff0b10c4cb80e2d7372fb8fc6aaa3cbf61c600",
+    "enc_hex": "eb61a207694a9d587024d78cdc5a0552946baa5bcc86f6168690737f4414f70a",
+    "ciphertext_hex": "3f05ff2dafa76982fa6fef9752b2341d2eb2a3d70f5c465b6d6293d9f629ea81343e695e76858d923324c6c4ca0b4534",
+    "generation_secret_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "cbss_released_secret_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "derived_aead_key_hex": "39151f5e0342b1c5e03e35105b3c75cd32331117e43bd1e4f928ff14b490d737",
+    "expected": "decrypt"
+  },
+  {
+    "id": "wrong-recipient",
+    "room": "test-room",
+    "gen": 2,
+    "info_hex": "636f77636861742f76332f726f6f6d6b65798269746573742d726f6f6d02",
+    "recipient_private_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+    "recipient_public_hex": "eb9bd4304696e2aa45faa4bce6ff0b10c4cb80e2d7372fb8fc6aaa3cbf61c600",
+    "enc_hex": "eb61a207694a9d587024d78cdc5a0552946baa5bcc86f6168690737f4414f70a",
+    "ciphertext_hex": "3f05ff2dafa76982fa6fef9752b2341d2eb2a3d70f5c465b6d6293d9f629ea81343e695e76858d923324c6c4ca0b4534",
+    "generation_secret_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "cbss_released_secret_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "derived_aead_key_hex": "39151f5e0342b1c5e03e35105b3c75cd32331117e43bd1e4f928ff14b490d737",
+    "expected": "decrypt"
+  },
+  {
+    "id": "tampered-wrap",
+    "room": "test-room",
+    "gen": 2,
+    "info_hex": "636f77636861742f76332f726f6f6d6b65798269746573742d726f6f6d02",
+    "recipient_private_hex": "5726be7d4c57c3d5b6378145a8a57f87ea8390d7f6f6320ecde1c4a915031116",
+    "recipient_public_hex": "eb9bd4304696e2aa45faa4bce6ff0b10c4cb80e2d7372fb8fc6aaa3cbf61c600",
+    "enc_hex": "eb61a207694a9d587024d78cdc5a0552946baa5bcc86f6168690737f4414f70a",
+    "ciphertext_hex": "3e05ff2dafa76982fa6fef9752b2341d2eb2a3d70f5c465b6d6293d9f629ea81343e695e76858d923324c6c4ca0b4534",
+    "generation_secret_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "cbss_released_secret_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "derived_aead_key_hex": "39151f5e0342b1c5e03e35105b3c75cd32331117e43bd1e4f928ff14b490d737",
+    "expected": "decrypt"
+  }
+]
