@@ -283,7 +283,7 @@ for name, field, value in [("wrong-room", "room", "other-room"), ("wrong-generat
 write("hpke.json", wraps)
 
 write("manifest.json", dict(
-    version=3, status="M0 crypto fixture slice; not full service conformance",
+    version=3, status="Production cowchat-crypto API fixtures; not full service conformance",
     map_order="RFC8949 core deterministic: bytewise lexicographic encoded keys; spec listed order is documentation only",
     profile="Definite lengths; text map keys; unsigned u64, bytes, text, arrays, maps, bool, null; no tags/floats; unknown signed fields rejected",
     public_test_ed25519_seed_hex=SEED.hex(),
@@ -294,7 +294,7 @@ write("manifest.json", dict(
     files=[dict(path=name, sha256=hashlib.sha256((ROOT / name).read_bytes()).hexdigest(),
                 cases=len(json.loads((ROOT / name).read_text())))
            for name in ["encoding.json", "requests.json", "envelopes.json", "replay-sequence.json", "certificates.json", "hpke.json"]],
-    pending=["production verifier/crypto crate and binding parity", "HTTP/WS handlers and raw-target binding",
+    pending=["wasm/Swift binding parity", "HTTP/WS handlers and service raw-target binding",
              "durable nonce cache, message-id dedupe and archive/outbox recovery", "wake HMAC/CloudEvents/filter contracts",
              "certificate/controller/manage-chain authorization against finalized state", "rekey publication and history-cutoff integration",
              "explicit actor-controller commitment mismatch vector at WP1 caller gate",

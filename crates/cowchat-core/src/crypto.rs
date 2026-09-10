@@ -21,8 +21,7 @@ use base64::engine::general_purpose::STANDARD_NO_PAD as B64;
 use base64::Engine as _;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-use hkdf::Hkdf;
-use sha2::Sha256;
+pub use cowchat_crypto::keys::derive_room_key;
 
 /// Prefix marking a string as a Cowchat v1 encrypted blob.
 const PREFIX: &str = "cow1:";
@@ -52,21 +51,6 @@ pub fn generate_secret() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Derive the 32-byte AEAD key for `room_id` from the pre-shared `secret`.
-///
-/// Binding the room id into the HKDF `info` means the same passphrase yields a
-/// distinct key per room, so a leaked per-room key doesn't compromise other
-/// rooms and a blob can't be replayed across rooms.
-pub fn derive_room_key(secret: &[u8], room_id: &str) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(None, secret);
-    let mut info = b"cowchat-e2e-v1:".to_vec();
-    info.extend_from_slice(room_id.as_bytes());
-    let mut key = [0u8; 32];
-    hk.expand(&info, &mut key)
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
-    key
 }
 
 /// Encrypt `plaintext` for `room_id`, returning a self-describing `cow1:` blob.

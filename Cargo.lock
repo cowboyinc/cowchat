@@ -473,18 +473,30 @@ dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
  "chrono",
+ "cowchat-crypto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "cowchat-crypto"
+version = "0.9.1"
+dependencies = [
+ "base64 0.22.1",
+ "chacha20poly1305",
  "ciborium",
  "ed25519-dalek",
  "hex",
  "hkdf",
  "hpke",
  "k256",
- "serde",
+ "rand 0.9.2",
  "serde_json",
  "sha2",
  "sha3",
- "thiserror 2.0.18",
- "uuid",
+ "zeroize",
 ]
 
 [[package]]

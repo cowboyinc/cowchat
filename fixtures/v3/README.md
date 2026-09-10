@@ -1,18 +1,17 @@
 # Cowchat v3 M0 crypto fixtures
 
-These are public test vectors and an executable **reference contract**, not
-production room authentication or evidence that the hosted service supports v3.
-The existing server and client paths are unchanged. WP1/WP1b must run these
-vectors through their actual implementations. The manifest lists the remaining
-contracts and integration work; passing this suite does not finish M0.
+These public vectors now exercise the production `cowchat-crypto` crate.
+They do not prove full room authorization or hosted v3 support: the existing
+server/client wire paths are unchanged. Service integration and bindings still
+need their own gates; the manifest lists those remaining contracts.
 
 ## Run
 
 From the cowchat checkout:
 
 ```sh
-cargo test -p cowchat-core
-cargo clippy -p cowchat-core --all-targets -- -D warnings
+cargo test -p cowchat-crypto
+cargo clippy -p cowchat-crypto -p cowchat-core --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
@@ -67,7 +66,7 @@ implementation checks for the covered cryptographic/encoding operations. A
 browser or Swift wrapper of the same Rust crate will establish binding parity,
 not another independent crypto implementation.
 
-The certificate tests supply an owner/admin trust context. They do not prove
+The certificate tests supply an owner/admin trust context to production APIs. They do not prove
 the delegation/manage chain, door forwarding authority, actor control record,
 or finalized checkpoint lookup. The replay map is in-memory test state, not a
 durable server cache. The CBSS input in the HPKE test is a supplied fixture,
