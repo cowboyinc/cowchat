@@ -92,6 +92,8 @@ fn write_owner_only_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 pub(crate) fn harden_file_permissions(path: &Path) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
