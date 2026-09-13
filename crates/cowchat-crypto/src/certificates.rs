@@ -5,6 +5,9 @@ use crate::{canonical, fields::Fields, signatures, Error, Result};
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 
+mod actor;
+pub use actor::verify_actor_membership;
+
 pub const IDENTITY: u32 = 1;
 pub const MEMBERSHIP: u32 = 2;
 pub const INVOCATION: u32 = 3;
