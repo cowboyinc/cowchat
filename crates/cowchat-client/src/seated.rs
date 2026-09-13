@@ -123,6 +123,22 @@ pub struct PreparedReply {
     message_id: String,
     bytes: Vec<u8>,
 }
+/// A signed reply found through the current seat's authenticated history read.
+/// Contains no plaintext or reusable authorization. The position is service
+/// metadata, not an independently verified archive or accounting receipt.
+#[derive(Debug)]
+pub struct AuthenticatedReply {
+    message_id: String,
+    position: i64,
+}
+impl AuthenticatedReply {
+    pub fn message_id(&self) -> &str {
+        &self.message_id
+    }
+    pub fn position(&self) -> i64 {
+        self.position
+    }
+}
 impl PreparedReply {
     /// Persist these ciphertext bytes before retrying the same candidate.
     pub fn bytes(&self) -> &[u8] {
@@ -495,6 +511,52 @@ impl SeatedHttpClient {
         }
         bounded_json(response).await
     }
+
+    /// Recover a stable reply without retaining or regenerating its candidate.
+    /// Only the currently installed seat key, certificate and generation are
+    /// accepted. A missing reply is not permission to repeat a paid invocation.
+    pub async fn find_reply_with_signer(
+        &self,
+        trigger: &str,
+        signer: &dyn SeatedRequestSigner,
+    ) -> Result<Option<AuthenticatedReply>, RoomError> {
+        if Uuid::parse_str(trigger)
+            .map_err(|_| RoomError::Invalid)?
+            .to_string()
+            != trigger
+        {
+            return Err(RoomError::Invalid);
+        }
+        let id = self.reply_id(trigger)?;
+        let page = self
+            .read_ciphertext_message_with_signer(&id, signer)
+            .await?;
+        self.authenticated_reply(&page, trigger, &id)
+    }
+
+    fn authenticated_reply(
+        &self,
+        page: &Value,
+        trigger: &str,
+        id: &str,
+    ) -> Result<Option<AuthenticatedReply>, RoomError> {
+        let rows = page["records"].as_array().ok_or(RoomError::Invalid)?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        if rows.len() != 1 {
+            return Err(RoomError::Invalid);
+        }
+        let position = rows[0]["position"]
+            .as_i64()
+            .filter(|seq| *seq > 0)
+            .ok_or(RoomError::Invalid)?;
+        self.validate_winner(&rows[0]["record"], trigger, id)?;
+        Ok(Some(AuthenticatedReply {
+            message_id: id.into(),
+            position,
+        }))
+    }
     /// Retries send the identical sealed bytes under a fresh HTTP nonce. On a
     /// conflict, only a signature-verified record for this exact reply is success.
     pub async fn submit_reply(
@@ -542,16 +604,12 @@ impl SeatedHttpClient {
             return Err(RoomError::UnresolvedConflict);
         }
         let page = bounded_json(response).await?;
-        let rows = page["records"]
-            .as_array()
+        let winner = self
+            .authenticated_reply(&page, &reply.trigger, &reply.message_id)
+            .map_err(|_| RoomError::UnresolvedConflict)?
             .ok_or(RoomError::UnresolvedConflict)?;
-        if rows.len() != 1 || rows[0]["position"].as_i64().is_none_or(|seq| seq <= 0) {
-            return Err(RoomError::UnresolvedConflict);
-        }
-        self.validate_winner(&rows[0]["record"], &reply.trigger, &reply.message_id)
-            .map_err(|_| RoomError::UnresolvedConflict)?;
         Ok(
-            serde_json::json!({"message_id":reply.message_id,"seq":rows[0]["position"],"status":"existing"}),
+            serde_json::json!({"message_id":winner.message_id(),"seq":winner.position(),"status":"existing"}),
         )
     }
 }

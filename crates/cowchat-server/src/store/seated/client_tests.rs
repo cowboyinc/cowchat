@@ -1,8 +1,17 @@
 use super::*;
-use cowchat_client::seated::{verify_wake, RoomError, RoomSeat, SeatedHttpClient};
+use cowchat_client::seated::{
+    verify_wake, RoomError, RoomSeat, SeatedHttpClient, SeatedRequestSigner,
+};
 use hmac::{Hmac, Mac};
 
 const WEBHOOK_SECRET: &[u8] = &[75; 32];
+
+struct FixtureSigner;
+impl SeatedRequestSigner for FixtureSigner {
+    fn sign_request(&self, projection: &[u8]) -> Result<Vec<u8>, RoomError> {
+        cowchat_crypto::request::sign(projection, &seed()).map_err(|_| RoomError::Invalid)
+    }
+}
 
 fn wake_bytes() -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
@@ -88,6 +97,11 @@ async fn room_client_retries_exact_ciphertext_and_reconciles_authenticated_winne
     let store = state.store.clone();
     let (server, addr) = crate::web::tests::start_test_web_server(state).await;
     let client = SeatedHttpClient::new(&format!("http://{addr}"), seat()).unwrap();
+    assert!(client
+        .find_reply_with_signer(ID, &FixtureSigner)
+        .await
+        .unwrap()
+        .is_none());
     let body = wake_bytes();
     let wake = verify_wake(
         &wake_headers(&body, now / 1000),
@@ -127,6 +141,15 @@ async fn room_client_retries_exact_ciphertext_and_reconciles_authenticated_winne
     client.submit_reply(&first, &seed()).await.unwrap();
     drop(client);
     let client = SeatedHttpClient::new(&format!("http://{addr}"), seat()).unwrap();
+    // Recover from the trigger alone before restoring any local reply bytes.
+    // This performs a real signed HTTP read and verifies the winning envelope.
+    let found = client
+        .find_reply_with_signer(ID, &FixtureSigner)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.message_id(), first.message_id());
+    assert_eq!(found.position(), 2);
     let restored = client.restore_reply(ID, first.bytes()).unwrap();
     assert_eq!(restored.bytes(), first.bytes());
     assert_eq!(

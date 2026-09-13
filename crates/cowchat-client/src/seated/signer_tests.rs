@@ -155,11 +155,103 @@ async fn denied_lease_never_sends_history_or_append() {
             .await,
         Err(RoomError::Refused(403))
     ));
-    assert_eq!(signer.checks.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        client.find_reply_with_signer(TRIGGER, &signer).await,
+        Err(RoomError::Refused(403))
+    ));
+    assert_eq!(signer.checks.load(Ordering::SeqCst), 3);
     assert_eq!(signer.signatures.load(Ordering::SeqCst), 0);
     assert!(timeout(Duration::from_millis(50), listener.accept())
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn recovery_distinguishes_absence_from_invalid_or_refused_history() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = SeatedHttpClient::new(
+        &format!("http://{}/", listener.local_addr().unwrap()),
+        seat(),
+    )
+    .unwrap();
+    let signer = signer(Arc::new(AtomicBool::new(false)));
+    let candidate = reply(&client);
+    let winner: Value = serde_json::from_slice(candidate.bytes()).unwrap();
+    let id = candidate.message_id().to_owned();
+    let mut forged = winner.clone();
+    forged["sig"] = B64.encode([0; 64]).into();
+    // A correctly signed record for a different reply cannot win either.
+    let other = client
+        .prepare_reply(
+            &VerifiedWake {
+                data: WakeData {
+                    room: ROOM.into(),
+                    message_id: "00000000-0000-4000-8000-000000000003".into(),
+                    seq: 2,
+                    tip: 2,
+                    since_seq: 0,
+                    dispatch_id: "fixture".into(),
+                    transport_generation: 0,
+                },
+            },
+            b"other",
+            &seed(),
+            &[42; 32],
+        )
+        .unwrap();
+    let other: Value = serde_json::from_slice(other.bytes()).unwrap();
+    let row = serde_json::json!({"position":2,"record":winner});
+    let pages = vec![
+        serde_json::json!({"records":[]}),
+        serde_json::json!({}),
+        serde_json::json!({"records":[{"position":2,"record":forged}]}),
+        serde_json::json!({"records":[{"position":2,"record":other}]}),
+        serde_json::json!({"records":[{"position":0,"record":winner}]}),
+        serde_json::json!({"records":[row.clone(), row.clone()]}),
+        serde_json::json!({"records":[row]}),
+    ];
+    let server = tokio::spawn(async move {
+        for page in pages {
+            let (mut stream, line) = accept_request(&listener).await;
+            assert_eq!(line, format!("GET /rooms/{ROOM}/messages?transport_generation=0&after=0&limit=1&message_id={id} HTTP/1.1"));
+            respond(&mut stream, "200 OK", &page).await;
+        }
+        let (mut stream, _) = accept_request(&listener).await;
+        respond(
+            &mut stream,
+            "403 Forbidden",
+            &serde_json::json!({"records":[]}),
+        )
+        .await;
+    });
+    assert!(client
+        .find_reply_with_signer(TRIGGER, &signer)
+        .await
+        .unwrap()
+        .is_none());
+    for _ in 0..5 {
+        assert!(matches!(
+            client.find_reply_with_signer(TRIGGER, &signer).await,
+            Err(RoomError::Invalid)
+        ));
+    }
+    let found = client
+        .find_reply_with_signer(TRIGGER, &signer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.message_id(), candidate.message_id());
+    assert_eq!(found.position(), 2);
+    assert!(matches!(
+        client.find_reply_with_signer(TRIGGER, &signer).await,
+        Err(RoomError::Refused(403))
+    ));
+    assert!(matches!(
+        client.find_reply_with_signer("bad&id", &signer).await,
+        Err(RoomError::Invalid)
+    ));
+    assert_eq!(signer.signatures.load(Ordering::SeqCst), 8);
+    server.await.unwrap();
 }
 
 #[tokio::test]
