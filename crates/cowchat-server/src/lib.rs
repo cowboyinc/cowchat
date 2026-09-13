@@ -4,6 +4,7 @@
     clippy::type_complexity
 )]
 
+pub mod actor_proof;
 pub mod auth;
 pub mod broker;
 pub mod connection;

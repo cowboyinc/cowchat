@@ -17,6 +17,8 @@ path = "src/lib.rs"
 [dependencies]
 cowchat-core.workspace = true
 cowchat-crypto = { path = "../cowchat-crypto" }
+cowboy-protocol-codec = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "0d5e8b69ced97bd3cd45314c17a3ae9dd854e1e8" }
+cowboy-protocol-light-client = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "0d5e8b69ced97bd3cd45314c17a3ae9dd854e1e8" }
 ciborium = "0.2"
 tokio.workspace = true
 serde.workspace = true
@@ -44,6 +46,11 @@ fs2 = "0.4"
 libc = "0.2"
 
 [dev-dependencies]
+cowboy-protocol-light-client = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "0d5e8b69ced97bd3cd45314c17a3ae9dd854e1e8", features = ["test-fixtures"] }
+commonware-codec = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba" }
+commonware-consensus = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba", features = ["mocks"] }
+commonware-cryptography = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba", features = ["mocks"] }
+commonware-parallel = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba", default-features = false }
 k256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = "0.10"
 cowchat-client.workspace = true
