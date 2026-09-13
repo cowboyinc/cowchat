@@ -53,6 +53,10 @@ pub(crate) fn can_access_room(
     auth_disabled: bool,
     store: &crate::store::Store,
 ) -> bool {
+    // Bearer credentials, invite grants, and no-auth mode never grant seated access.
+    if store.is_seated_room(&room.room_id).unwrap_or(true) {
+        return false;
+    }
     can_access_room_parts(
         &room.visibility,
         room.owner_key.as_deref(),

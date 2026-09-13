@@ -241,3 +241,109 @@ pub fn sign_admin(certificate: &[u8], signing_seed: &[u8]) -> Result<Vec<u8>> {
     signatures::verify_ed25519(&key, &sig, &bytes)?;
     Ok(sig)
 }
+
+/// Authenticate the initial owner of a newly created room using wallet-signed
+/// identity and membership certificates. No chain I/O or private keys are needed.
+/// Returns CBOR `[identity_id_bstr, seat_text, public_key_bstr, append_context_bstr,
+/// wallet_address_bstr]`. The service must separately authorize the existing room
+/// creator, require an empty room, and atomically install this as generation zero.
+/// This is an owner-only bootstrap; it cannot enroll an actor or assert control of one.
+pub fn verify_initial_owner(
+    room: &str,
+    identity: &[u8],
+    identity_signature: &[u8],
+    membership: &[u8],
+    membership_signature: &[u8],
+    now_ms: u64,
+) -> Result<Vec<u8>> {
+    let identity_cert = Certificate::decode(IDENTITY, identity)?;
+    let membership_cert = Certificate::decode(MEMBERSHIP, membership)?;
+    let seat = identity_cert.fields.text("address")?;
+    let wallet = address(&seat)?;
+    // Use one spelling for seat identity, not multiple hex aliases.
+    if seat != format!("0x{}", hex::encode(wallet))
+        || identity_cert.fields.text("role")? != "owner"
+        || identity_cert.generation != 0
+        || membership_cert.generation != 0
+        || membership_cert.fields.uint("from_gen")? != 0
+        || membership_cert.fields.text("seat")? != seat
+        || membership_cert.fields.text("signer_kind")? != "wallet"
+        || membership_cert.fields.nullable_text("door_kind")?.is_some()
+        || membership_cert
+            .fields
+            .nullable_text("bound_sender")?
+            .is_some()
+        || membership_cert.fields.strings("rights")? != ["manage", "read", "write"]
+    {
+        return Err(Error::Authority);
+    }
+    let trusted = canonical::encode(Value::Map(vec![
+        (Value::Text("chain_id".into()), identity_cert.chain.into()),
+        (Value::Text("room".into()), Value::Text(room.into())),
+        (Value::Text("gen".into()), 0u64.into()),
+        (Value::Text("now_ms".into()), now_ms.into()),
+        (
+            Value::Text("wallet_address".into()),
+            Value::Bytes(wallet.to_vec()),
+        ),
+        (Value::Text("admin_key".into()), Value::Null),
+    ]))?;
+    let identity_id = certificate_id(IDENTITY, identity)?;
+    verify(
+        IDENTITY,
+        identity,
+        identity_signature,
+        &identity_id,
+        &trusted,
+    )?;
+    verify(
+        MEMBERSHIP,
+        membership,
+        membership_signature,
+        &certificate_id(MEMBERSHIP, membership)?,
+        &trusted,
+    )?;
+    let public = identity_cert.fields.bytes::<32>("pubkey")?;
+    let expiry = match (identity_cert.expiry, membership_cert.expiry) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let context = canonical::encode(Value::Map(vec![
+        (Value::Text("chain_id".into()), identity_cert.chain.into()),
+        (Value::Text("room".into()), Value::Text(room.into())),
+        (Value::Text("gen".into()), 0u64.into()),
+        (Value::Text("seat".into()), Value::Text(seat.clone())),
+        (Value::Text("role".into()), Value::Text("owner".into())),
+        (
+            Value::Text("cert".into()),
+            Value::Text(hex::encode(&identity_id)),
+        ),
+        (
+            Value::Text("public_key".into()),
+            Value::Bytes(public.to_vec()),
+        ),
+        (
+            Value::Text("rights".into()),
+            Value::Array(
+                ["manage", "read", "write"]
+                    .into_iter()
+                    .map(|s| Value::Text(s.into()))
+                    .collect(),
+            ),
+        ),
+        (
+            Value::Text("expires_at".into()),
+            expiry.map_or(Value::Null, |v| v.into()),
+        ),
+        (Value::Text("door_kind".into()), Value::Null),
+        (Value::Text("bound_sender".into()), Value::Null),
+        (Value::Text("forwarded_seat".into()), Value::Null),
+    ]))?;
+    canonical::encode(Value::Array(vec![
+        Value::Bytes(identity_id),
+        Value::Text(seat),
+        Value::Bytes(public.to_vec()),
+        Value::Bytes(context),
+        Value::Bytes(wallet.to_vec()),
+    ]))
+}

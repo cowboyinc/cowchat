@@ -90,6 +90,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/status", get(api_status))
         .route("/api/rooms", get(api_list_rooms))
         .route("/api/agents", get(api_list_agents))
+        .route(
+            "/rooms/{room_id}/owner",
+            post(crate::seated::enroll_owner).layer(DefaultBodyLimit::max(512 * 1024)),
+        )
+        .route(
+            "/rooms/{room_id}/messages",
+            post(crate::seated::append).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
         .route("/api/rooms/{room_id}/history", get(api_room_history))
         .route(
             "/api/rooms/{room_id}/blobs",
@@ -115,6 +123,8 @@ pub fn router(state: AppState) -> Router {
                     header::CONTENT_TYPE,
                     header::HeaderName::from_static(ADMIN_HEADER),
                     header::HeaderName::from_static(API_KEY_HEADER),
+                    header::HeaderName::from_static("x-cowchat-request"),
+                    header::HeaderName::from_static("x-cowchat-signature"),
                 ]),
         )
     }
@@ -535,7 +545,7 @@ async fn api_room_history(
 // --- Blob attachments ---
 
 /// The API key presented in `x-cowchat-key`, if it's valid on this server.
-fn authenticated_key(state: &AppState, headers: &HeaderMap) -> Option<String> {
+pub(crate) fn authenticated_key(state: &AppState, headers: &HeaderMap) -> Option<String> {
     let key = headers.get(API_KEY_HEADER)?.to_str().ok()?;
     if key.is_empty() {
         return None;
@@ -716,13 +726,13 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use cowchat_core::{ErrorCode, ErrorPayload, Frame, FrameType, RegisterPayload};
     use dashmap::DashMap;
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
-    fn test_state() -> AppState {
+    pub(crate) fn test_state() -> AppState {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let broker = Arc::new(Broker::new(
             Arc::new(DashMap::new()),
@@ -745,7 +755,9 @@ mod tests {
         }
     }
 
-    async fn start_test_web_server(state: AppState) -> (tokio::task::JoinHandle<()>, SocketAddr) {
+    pub(crate) async fn start_test_web_server(
+        state: AppState,
+    ) -> (tokio::task::JoinHandle<()>, SocketAddr) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = router(state);

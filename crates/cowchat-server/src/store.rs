@@ -9,6 +9,8 @@ use std::sync::Mutex;
 
 use crate::connection::{matches_room_owner, LEGACY_UNOWNED_OWNER_KEY};
 
+pub(crate) mod seated;
+
 pub struct Store {
     conn: Mutex<Connection>,
     /// In-memory mirror of `room_grants` (api_key -> granted room_ids).
@@ -406,6 +408,8 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_id, seq);",
         )?;
 
+        seated::initialize(&conn)?;
+
         // Step 3: Seed data (runs after migrations so visibility column is guaranteed to exist)
         conn.execute_batch(
             "INSERT OR IGNORE INTO rooms (room_id, name, description, visibility)
@@ -614,6 +618,9 @@ impl Store {
         let name = normalize_room_name(name).map_err(RenameRoomError::InvalidName)?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if seated::is_seated_on(&tx, room_id).unwrap_or(true) {
+            return Err(RenameRoomError::AccessDenied);
+        }
         let mut room = match tx.query_row(
             "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted
              FROM rooms WHERE room_id = ?1",
@@ -664,6 +671,9 @@ impl Store {
     ) -> Result<Room, DestroyRoomError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if seated::is_seated_on(&tx, room_id).unwrap_or(true) {
+            return Err(DestroyRoomError::AccessDenied);
+        }
         let room = match tx.query_row(
             "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted
              FROM rooms WHERE room_id = ?1",
@@ -743,6 +753,7 @@ impl Store {
                 JOIN rooms r ON m.room_id = r.room_id
                 LEFT JOIN api_keys k ON r.owner_key = k.api_key
                 WHERE COALESCE(k.tier, 'free') = ?1
+                  AND NOT EXISTS (SELECT 1 FROM seated_rooms sr WHERE sr.room_id = r.room_id)
                   AND m.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
                   AND NOT EXISTS (SELECT 1 FROM subscription_deliveries d
                                   WHERE d.message_id = m.message_id AND d.status = 'pending')
@@ -757,6 +768,7 @@ impl Store {
                 JOIN rooms r ON a.room_id = r.room_id
                 LEFT JOIN api_keys k ON r.owner_key = k.api_key
                 WHERE COALESCE(k.tier, 'free') = ?1
+                  AND NOT EXISTS (SELECT 1 FROM seated_rooms sr WHERE sr.room_id = r.room_id)
                   AND a.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2, '-7 days')
                   AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.message_id = a.message_id)
             )",
@@ -798,16 +810,31 @@ impl Store {
         append: &MessageAppend<'_>,
     ) -> Result<Option<ChatMessage>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        if seated::is_seated_on(&conn, append.room_id)? {
+            return Err(StoreError::SeatedRequestRequired);
+        }
         replay_append_on(&conn, append, &append.digest()?)
     }
 
     /// Atomically commits the message, sequence, retry receipt and matching
     /// subscription obligations. No network or post-commit enqueue is involved.
     pub fn append_message(&self, append: &MessageAppend<'_>) -> Result<AppendResult, StoreError> {
-        let digest = append.digest()?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if let Some(message) = replay_append_on(&tx, append, &digest)? {
+        if seated::is_seated_on(&tx, append.room_id)? {
+            return Err(StoreError::SeatedRequestRequired);
+        }
+        let result = Self::append_on(&tx, append)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn append_on(
+        conn: &Connection,
+        append: &MessageAppend<'_>,
+    ) -> Result<AppendResult, StoreError> {
+        let digest = append.digest()?;
+        if let Some(message) = replay_append_on(conn, append, &digest)? {
             return Ok(AppendResult {
                 message,
                 inserted: false,
@@ -815,7 +842,7 @@ impl Store {
         }
         // Pre-upgrade messages have no receipt or durable mentions. Never guess
         // their equality or let their IDs be reused while the row is retained.
-        let exists: bool = tx.query_row(
+        let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM messages WHERE message_id = ?1)",
             [append.message_id],
             |row| row.get(0),
@@ -823,22 +850,22 @@ impl Store {
         if exists {
             return Err(StoreError::MessageConflict);
         }
-        tx.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO room_sequences (room_id, high_water) VALUES (?1, 0)",
             [append.room_id],
         )?;
-        let seq: i64 = tx.query_row(
+        let seq: i64 = conn.query_row(
             "SELECT high_water + 1 FROM room_sequences WHERE room_id = ?1",
             [append.room_id],
             |row| row.get(0),
         )?;
-        tx.execute(
+        conn.execute(
             "INSERT INTO messages (message_id, room_id, agent_id, agent_name, content, reply_to_message, metadata, seq, mentions)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![append.message_id, append.room_id, append.agent_id, append.agent_name, append.content,
                 append.reply_to, serde_json::to_string(append.metadata)?, seq, serde_json::to_string(append.mentions)?],
         )?;
-        let created_at: String = tx.query_row(
+        let created_at: String = conn.query_row(
             "SELECT created_at FROM messages WHERE message_id = ?1",
             [append.message_id],
             |row| row.get(0),
@@ -854,13 +881,13 @@ impl Store {
             timestamp: parse_timestamp(&created_at),
             seq,
         };
-        tx.execute(
+        conn.execute(
             "INSERT INTO message_appends (message_id, room_id, agent_id, append_digest, agent_name, created_at, seq)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![append.message_id, append.room_id, append.agent_id, digest, append.agent_name, created_at, seq],
         )?;
         {
-            let mut stmt = tx.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                         only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
                         status, failure_count, created_at, only_mention
@@ -871,7 +898,7 @@ impl Store {
                 let (sub, _, _) = subscription?;
                 if crate::webhooks::matches_filter_with_mentions(&sub, &message, append.mentions) {
                     enqueue_delivery_on(
-                        &tx,
+                        conn,
                         &uuid::Uuid::new_v4().to_string(),
                         &sub.subscription_id,
                         seq,
@@ -881,7 +908,6 @@ impl Store {
                 }
             }
         }
-        tx.commit()?;
         Ok(AppendResult {
             message,
             inserted: true,
@@ -933,6 +959,9 @@ impl Store {
         since_seq: Option<i64>,
     ) -> Result<Vec<ChatMessage>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        if seated::is_seated_on(&conn, room_id)? {
+            return Err(StoreError::SeatedRequestRequired);
+        }
         let mut messages = Vec::new();
 
         if let Some(seq_floor) = since_seq {
@@ -1651,13 +1680,13 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT blob_id FROM blobs b
                  WHERE b.room_id NOT IN (SELECT room_id FROM rooms)
-                    OR MAX(
+                    OR (NOT EXISTS (SELECT 1 FROM seated_rooms sr WHERE sr.room_id = b.room_id) AND MAX(
                          COALESCE(
                              (SELECT MAX(m.created_at) FROM messages m WHERE m.room_id = b.room_id),
                              b.created_at
                          ),
                          b.created_at
-                       ) < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+                       ) < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1))",
             )?;
             let ids = stmt
                 .query_map(params![modifier], |row| row.get::<_, String>(0))?
@@ -1814,6 +1843,9 @@ impl Store {
     ) -> Result<cowchat_core::Subscription, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if seated::is_seated_on(&tx, room_id)? {
+            return Err(StoreError::SeatedRequestRequired);
+        }
         let kinds_json = if kinds.is_empty() {
             None
         } else {
@@ -1979,6 +2011,9 @@ impl Store {
         let Some((sub, _, _)) = lookup else {
             return Ok(false);
         };
+        if seated::is_seated_on(&tx, &sub.room_id)? {
+            return Err(StoreError::SeatedRequestRequired);
+        }
         enqueue_subscription_backfill_on(&tx, &sub)?;
         tx.execute(
             "UPDATE subscription_deliveries SET status = 'pending', attempts = 0, last_error = NULL,
@@ -2594,6 +2629,15 @@ pub enum StoreError {
 
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("seated room requires a signed request")]
+    SeatedRequestRequired,
+
+    #[error("seated authorization failed")]
+    SeatedAuthorization,
+
+    #[error("signed request nonce was already used")]
+    SeatedReplay,
 
     #[error("message ID conflicts with an existing append")]
     MessageConflict,

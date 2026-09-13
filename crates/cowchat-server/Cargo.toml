@@ -16,6 +16,8 @@ path = "src/lib.rs"
 
 [dependencies]
 cowchat-core.workspace = true
+cowchat-crypto = { path = "../cowchat-crypto" }
+ciborium = "0.2"
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -42,6 +44,8 @@ fs2 = "0.4"
 libc = "0.2"
 
 [dev-dependencies]
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
 cowchat-client.workspace = true
 tempfile = "3"
 tokio-tungstenite = "0.26"

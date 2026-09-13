@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 pub const MAX_BODY_BYTES: usize = 1_048_576;
 const DOMAIN: &[u8] = b"cowchat/v3/envelope";
-const FIELDS: &[&str] = &[
+pub(crate) const HEADER_FIELDS: &[&str] = &[
     "v",
     "message_id",
     "chain_id",
@@ -36,7 +36,7 @@ struct Header {
 }
 impl Header {
     fn decode(raw: &[u8]) -> Result<Self> {
-        let f = Fields::new(canonical::decode(raw)?, FIELDS)?;
+        let f = Fields::new(canonical::decode(raw)?, HEADER_FIELDS)?;
         if f.uint("v")? != 3 {
             return Err(Error::Schema);
         }

@@ -1,0 +1,162 @@
+//! Signed v3 append transport. Credential provisioning is a separate trusted
+//! path; this endpoint never accepts membership or controller claims from a caller.
+use axum::{
+    body::Bytes,
+    extract::{Path, State},
+    http::{HeaderMap, Method, StatusCode, Uri},
+    response::IntoResponse,
+    Json,
+};
+use base64::{engine::general_purpose::STANDARD_NO_PAD as B64, Engine};
+use cowchat_crypto::canonical;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecordHeader {
+    pub v: u64,
+    pub message_id: String,
+    pub chain_id: u64,
+    pub room: String,
+    pub seat: String,
+    pub role: String,
+    pub via: Option<String>,
+    pub via_sender: Option<String>,
+    pub class: String,
+    pub reply_to: Option<String>,
+    pub mentions: Vec<String>,
+    pub wake_hint: String,
+    pub gen: u64,
+    pub cert: String,
+    pub nonce: String,
+}
+
+pub(crate) struct SealedRecord {
+    pub header: RecordHeader,
+    pub header_cbor: Vec<u8>,
+    pub body: String,
+    pub signature: Vec<u8>,
+}
+impl SealedRecord {
+    pub fn parse(raw: &[u8]) -> Result<Self, crate::store::StoreError> {
+        use crate::store::StoreError::SeatedAuthorization as Invalid;
+        // Also bounded by the HTTP framework. Keep this bound for internal callers.
+        if raw.len() > 2 * 1024 * 1024 {
+            return Err(Invalid);
+        }
+        let mut record: serde_json::Value = serde_json::from_slice(raw).map_err(|_| Invalid)?;
+        let fields = record.as_object_mut().ok_or(Invalid)?;
+        let body = fields
+            .remove("body")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or(Invalid)?;
+        let signature = fields
+            .remove("sig")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or(Invalid)?;
+        let signature = B64.decode(signature).map_err(|_| Invalid)?;
+        let header: RecordHeader = serde_json::from_value(record).map_err(|_| Invalid)?;
+        uuid::Uuid::parse_str(&header.message_id).map_err(|_| Invalid)?;
+        uuid::Uuid::parse_str(&header.room).map_err(|_| Invalid)?;
+        if let Some(reply) = &header.reply_to {
+            uuid::Uuid::parse_str(reply).map_err(|_| Invalid)?;
+        }
+        let mut header_cbor = Vec::new();
+        ciborium::into_writer(&header, &mut header_cbor).map_err(|_| Invalid)?;
+        let header_cbor = canonical::canonicalize(&header_cbor).map_err(|_| Invalid)?;
+        Ok(Self {
+            header,
+            header_cbor,
+            body,
+            signature,
+        })
+    }
+}
+
+pub(crate) async fn append(
+    State(state): State<crate::web::AppState>,
+    Path(room): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let decode_header = |name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| B64.decode(value).ok())
+    };
+    let (Some(projection), Some(signature)) = (
+        decode_header("x-cowchat-request"),
+        decode_header("x-cowchat-signature"),
+    ) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let target = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or(uri.path());
+    match state.store.append_seated_record(
+        &room,
+        method.as_str(),
+        target,
+        &body,
+        &projection,
+        &signature,
+        now,
+    ) {
+        Ok(result) => {
+            state.webhook_mgr.wake();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"message_id": result.message.message_id,
+                "status":"accepted", "seq":result.message.seq})),
+            )
+                .into_response()
+        }
+        Err(crate::store::StoreError::MessageConflict) => StatusCode::CONFLICT.into_response(),
+        Err(crate::store::StoreError::SeatedReplay) => StatusCode::CONFLICT.into_response(),
+        Err(
+            crate::store::StoreError::SeatedAuthorization
+            | crate::store::StoreError::SeatedRequestRequired,
+        ) => StatusCode::UNAUTHORIZED.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OwnerEnrollment {
+    pub identity: String,
+    pub identity_signature: String,
+    pub membership: String,
+    pub membership_signature: String,
+}
+
+pub(crate) async fn enroll_owner(
+    State(state): State<crate::web::AppState>,
+    Path(room): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let Some(key) = crate::web::authenticated_key(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match state
+        .store
+        .enroll_seated_owner(&room, &key, &body, chrono::Utc::now().timestamp_millis())
+    {
+        Ok((seat, cert)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"room_id":room,"seat":seat,"cert":cert,"mode":"seated"})),
+        )
+            .into_response(),
+        Err(crate::store::StoreError::MessageConflict) => StatusCode::CONFLICT.into_response(),
+        Err(crate::store::StoreError::SeatedAuthorization) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}

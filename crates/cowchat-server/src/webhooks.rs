@@ -63,6 +63,15 @@ pub fn matches_filter_with_mentions(
     {
         return false;
     }
+    if msg.metadata.get("v").and_then(|value| value.as_u64()) == Some(3)
+        && msg
+            .metadata
+            .get("wake_hint")
+            .and_then(|value| value.as_str())
+            == Some("none")
+    {
+        return false;
+    }
     if msg.seq <= sub.last_delivered_seq {
         return false;
     }

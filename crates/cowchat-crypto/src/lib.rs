@@ -2,6 +2,7 @@
 //! future bindings. Public operations use bytes and scalars, never an ABI
 //! depending on a Rust struct layout. This crate does not resolve trust or do
 //! network I/O: a valid signature is not room membership or spend authority.
+pub mod authorization;
 pub mod canonical;
 pub mod certificates;
 pub mod envelope;
