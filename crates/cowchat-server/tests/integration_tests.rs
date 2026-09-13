@@ -4190,3 +4190,59 @@ async fn test_mention_wake_authenticated_client_backfill_and_live_delivery() {
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn test_mention_wake_reenable_backfills_past_one_thousand_without_waking_on_other_messages() {
+    let (server, addr, key, tmp) = start_test_server().await;
+    let (hook_url, captured) = spawn_test_receiver(200).await;
+    let human = connect_agent(&addr, &key, "Human").await;
+    human.join_room("lobby").await.unwrap();
+    let sub = human
+        .create_subscription_with_mention(
+            "lobby",
+            &hook_url,
+            "test-secret",
+            vec![],
+            None,
+            None,
+            true,
+            None,
+            Some("actor"),
+        )
+        .await
+        .unwrap();
+    let store = cowchat_server::store::Store::open(&tmp.path().join("test.db")).unwrap();
+    store
+        .set_subscription_status(&sub.subscription_id, "failed", Some(6))
+        .unwrap();
+    // The matching message is beyond the old handler's one-page backfill.
+    for index in 0..1001 {
+        store
+            .insert_message(
+                &format!("background-{index}"),
+                "lobby",
+                "human",
+                "Human",
+                "background",
+                None,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+    }
+    let mentioned = human
+        .send_message("lobby", "wake after repair", None, vec!["actor".into()])
+        .await
+        .unwrap();
+    human
+        .enable_subscription(&sub.subscription_id)
+        .await
+        .unwrap();
+    assert!(wait_for_deliveries(&captured, 1, Duration::from_secs(3)).await);
+    let requests = captured.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert!(verify_signature(&requests[0], "test-secret"));
+    let event: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(event["message"]["message_id"], mentioned.message_id);
+    drop(requests);
+    server.abort();
+}

@@ -1957,6 +1957,42 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Repair an owned subscription without exposing a live subscription before
+    /// its older obligations exist. Retained abandoned wakes reuse their identity.
+    pub fn enable_subscription_with_backfill(
+        &self,
+        subscription_id: &str,
+        owner_key: &str,
+    ) -> Result<bool, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let lookup = tx
+            .query_row(
+                "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
+                    only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
+                    status, failure_count, created_at, only_mention
+             FROM subscriptions WHERE subscription_id = ?1 AND owner_key = ?2",
+                params![subscription_id, owner_key],
+                map_subscription_row,
+            )
+            .optional()?;
+        let Some((sub, _, _)) = lookup else {
+            return Ok(false);
+        };
+        enqueue_subscription_backfill_on(&tx, &sub)?;
+        tx.execute(
+            "UPDATE subscription_deliveries SET status = 'pending', attempts = 0, last_error = NULL,
+                 next_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 deadline_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 day')
+             WHERE subscription_id = ?1 AND status = 'abandoned' AND message_seq > ?2
+               AND EXISTS (SELECT 1 FROM messages WHERE messages.message_id = subscription_deliveries.message_id)",
+            params![subscription_id, sub.last_delivered_seq],
+        )?;
+        tx.execute("UPDATE subscriptions SET status = 'active', failure_count = 0 WHERE subscription_id = ?1", [subscription_id])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn set_subscription_status(
         &self,
         subscription_id: &str,

@@ -582,3 +582,99 @@ fn mention_subscription_backfill_is_atomic_and_completed_wake_cannot_be_recreate
     assert_eq!(next.len(), 1);
     assert_eq!(next[0].message_id, "live");
 }
+
+#[test]
+fn mention_reenable_preserves_failed_wake_identity_and_atomically_recovers_backlog() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .create_subscription_with_mention(
+            "repair",
+            "lobby",
+            "owner",
+            "https://example.com/hook",
+            "secret",
+            &[],
+            None,
+            None,
+            true,
+            0,
+            Some("actor"),
+        )
+        .unwrap();
+    let metadata = json!({});
+    let mentions = vec!["actor".into()];
+    let mut request = append("failed-wake", &metadata);
+    request.mentions = &mentions;
+    store.append_message(&request).unwrap();
+    let delivery = store
+        .load_due_deliveries(Utc::now(), 32)
+        .unwrap()
+        .pop()
+        .unwrap();
+    store
+        .abandon_delivery(&delivery.delivery_id, "retry exhausted")
+        .unwrap();
+    store
+        .set_subscription_status("repair", "failed", Some(6))
+        .unwrap();
+    request.message_id = "while-failed";
+    store.append_message(&request).unwrap();
+    request.message_id = "not-for-actor";
+    request.mentions = &[];
+    store.append_message(&request).unwrap();
+    assert!(!store
+        .enable_subscription_with_backfill("repair", "outsider")
+        .unwrap());
+    assert_eq!(
+        store.get_subscription("repair").unwrap().unwrap().0.status,
+        "failed"
+    );
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_reenable BEFORE UPDATE OF status ON subscriptions
+         BEGIN SELECT RAISE(ABORT, 'injected repair failure'); END;",
+        )
+        .unwrap();
+    assert!(store
+        .enable_subscription_with_backfill("repair", "owner")
+        .is_err());
+    assert!(store
+        .load_due_deliveries(Utc::now(), 32)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.get_subscription("repair").unwrap().unwrap().0.status,
+        "failed"
+    );
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_reenable")
+        .unwrap();
+    assert!(store
+        .enable_subscription_with_backfill("repair", "owner")
+        .unwrap());
+    let first = store.load_due_deliveries(Utc::now(), 32).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].delivery_id, delivery.delivery_id);
+    store.complete_delivery(&first[0].delivery_id).unwrap();
+    let next = store.load_due_deliveries(Utc::now(), 32).unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].message_id, "while-failed");
+    store.complete_delivery(&next[0].delivery_id).unwrap();
+    assert!(store
+        .load_due_deliveries(Utc::now(), 32)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .enable_subscription_with_backfill("repair", "owner")
+        .unwrap());
+    assert!(store
+        .load_due_deliveries(Utc::now(), 32)
+        .unwrap()
+        .is_empty());
+}

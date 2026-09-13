@@ -2505,63 +2505,26 @@ async fn handle_enable_subscription(
             )
         }
     };
-    let lookup = match store.get_subscription(&p.subscription_id) {
-        Ok(Some(v)) => v,
-        Ok(None) => {
+    match store.enable_subscription_with_backfill(&p.subscription_id, agent_api_key) {
+        Ok(true) => (),
+        Ok(false) => {
             return Frame::error(
                 req_id,
                 ErrorPayload::new(ErrorCode::AccessDenied, "Subscription not found"),
             )
         }
-        Err(e) => {
+        Err(error) => {
             return Frame::error(
                 req_id,
-                ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+                ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
             )
-        }
-    };
-    let (sub, owner_key, _secret) = lookup;
-    if owner_key != agent_api_key {
-        return Frame::error(
-            req_id,
-            ErrorPayload::new(ErrorCode::AccessDenied, "Not your subscription"),
-        );
-    }
-    if let Err(e) = store.set_subscription_status(&sub.subscription_id, "active", Some(0)) {
-        return Frame::error(
-            req_id,
-            ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
-        );
-    }
-
-    // Re-enqueue the backlog of messages past last_delivered_seq so the user
-    // sees the events that piled up while the sub was failed.
-    let now = chrono::Utc::now();
-    if let Ok(backlog) =
-        store.get_history_filtered(&sub.room_id, 1000, None, None, Some(sub.last_delivered_seq))
-    {
-        for msg in backlog {
-            let Ok(mentions) = store.get_message_mentions(&msg.message_id) else {
-                continue;
-            };
-            if !crate::webhooks::matches_filter_with_mentions(&sub, &msg, &mentions) {
-                continue;
-            }
-            let delivery_id = uuid::Uuid::new_v4().to_string();
-            let _ = store.enqueue_delivery(
-                &delivery_id,
-                &sub.subscription_id,
-                msg.seq,
-                &msg.message_id,
-                now,
-            );
         }
     }
     webhook_mgr.wake();
 
     Frame::ok(
         req_id,
-        serde_json::json!({"subscription_id": sub.subscription_id, "status": "active"}),
+        serde_json::json!({"subscription_id": p.subscription_id, "status": "active"}),
     )
 }
 
