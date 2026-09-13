@@ -200,3 +200,14 @@ async fn actor_control_fetch_verifies_actual_finalized_proof_and_freshness() {
     assert!(authority.verify(actor, &bad_control, now).is_err());
     server.abort();
 }
+
+/// Test fixture still runs the real threshold-finality and QMDB verifier.
+pub(crate) fn verified_control(timestamp: u64, value: Vec<u8>) -> VerifiedActorControl {
+    let (checkpoint, bytes, actor) = proof(timestamp, value);
+    authority(
+        checkpoint,
+        "http://127.0.0.1:1/proof/finalized-state".into(),
+    )
+    .verify(actor, &bytes, timestamp)
+    .unwrap()
+}

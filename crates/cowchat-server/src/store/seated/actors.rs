@@ -85,6 +85,34 @@ fn room_authority(conn: &Connection, room: &str) -> Result<RoomAuthority, StoreE
     })
 }
 impl Store {
+    /// Ingest a fresh finalized control proof for an already tracked actor.
+    /// This only revokes superseded credentials; it grants no membership, keys,
+    /// or compute authority. Production callers obtain proofs from the configured
+    /// release-pinned ActorProofAuthority, never from caller-authored JSON.
+    pub fn ingest_actor_control(
+        &self,
+        proof: &VerifiedActorControl,
+        now: i64,
+    ) -> Result<usize, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tracked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM seated_actor_floors WHERE chain_id=?1 AND actor=?2)",
+            params![
+                i64::try_from(proof.chain_id()).map_err(|_| invalid())?,
+                proof.actor().as_slice()
+            ],
+            |r| r.get(0),
+        )?;
+        if !tracked {
+            return Err(invalid());
+        }
+        record_actor_control_on(&tx, proof, now)?;
+        let revoked = invalidate_actor_credentials_on(&tx, proof)?;
+        tx.commit()?;
+        Ok(revoked)
+    }
+
     pub(crate) fn prepare_actor_enrollment(
         &self,
         room: &str,
@@ -234,23 +262,9 @@ impl Store {
         )
         .map_err(|_| invalid())?;
         claim_nonce_on(&tx, &token, &p.public, now)?;
+        record_actor_control_on(&tx, &proof, now)?;
         let chain = i64::try_from(proof.chain_id()).map_err(|_| invalid())?;
-        let height = i64::try_from(proof.height()).map_err(|_| invalid())?;
         let actor_gen = i64::try_from(proof.authorization_generation()).map_err(|_| invalid())?;
-        let prior:Option<(Vec<u8>,i64,Vec<u8>,Vec<u8>,i64,Vec<u8>)>=tx.query_row(
-            "SELECT chain_instance,height,block_hash,state_root,authorization_generation,commitment FROM seated_actor_floors WHERE chain_id=?1 AND actor=?2",
-            params![chain,p.actor.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
-        ).optional()?;
-        if let Some((instance, floor, hash, root, generation, commitment)) = prior {
-            if instance != proof.chain_instance()
-                || height < floor
-                || actor_gen < generation
-                || (height == floor && (hash != proof.block_hash() || root != proof.state_root()))
-                || (actor_gen == generation && commitment != proof.commitment())
-            {
-                return Err(invalid());
-            }
-        }
         let cert = id.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let digest = Sha256::digest(serde_json::to_vec(&(
             &p.identity,
@@ -261,7 +275,7 @@ impl Store {
         .to_vec();
         // A newer independently proven actor authorization invalidates older
         // actor credentials across rooms on this chain, never owner seats.
-        tx.execute("DELETE FROM seated_credentials WHERE actor_chain_id=?1 AND seat=?2 AND actor_authorization_generation<?3",params![chain,seat,actor_gen])?;
+        invalidate_actor_credentials_on(&tx, &proof)?;
         let existing: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT enrollment_digest FROM seated_credentials WHERE room_id=?1 AND cert_id=?2",
@@ -287,10 +301,69 @@ impl Store {
                 VALUES (?1,?2,?3,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                 params![p.room,cert,seat,i64::try_from(p.snapshot.membership).map_err(|_|invalid())?,public,context,p.identity,p.identity_sig,p.membership,p.membership_sig,i64::try_from(from_gen).map_err(|_|invalid())?,chain,actor_gen,digest])?;
         }
-        tx.execute("INSERT INTO seated_actor_floors VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-            ON CONFLICT(chain_id,actor) DO UPDATE SET height=excluded.height,block_hash=excluded.block_hash,state_root=excluded.state_root,authorization_generation=excluded.authorization_generation,commitment=excluded.commitment",
-            params![chain,p.actor.as_slice(),proof.chain_instance().as_slice(),height,proof.block_hash().as_slice(),proof.state_root().as_slice(),actor_gen,proof.commitment().as_slice()])?;
         tx.commit()?;
         Ok((seat, cert))
     }
+}
+
+/// Shared by enrollment and passive proof ingestion. The caller owns the
+/// Immediate transaction; a proof must never advance the floor separately
+/// from invalidating the credentials it supersedes.
+fn record_actor_control_on(
+    conn: &Connection,
+    proof: &VerifiedActorControl,
+    now: i64,
+) -> Result<(), StoreError> {
+    if now < 0 || !proof.is_fresh_at(now as u64) {
+        return Err(invalid());
+    }
+    let chain = i64::try_from(proof.chain_id()).map_err(|_| invalid())?;
+    let height = i64::try_from(proof.height()).map_err(|_| invalid())?;
+    let actor_gen = i64::try_from(proof.authorization_generation()).map_err(|_| invalid())?;
+    let prior:Option<(Vec<u8>,i64,Vec<u8>,Vec<u8>,i64,Vec<u8>)>=conn.query_row(
+            "SELECT chain_instance,height,block_hash,state_root,authorization_generation,commitment FROM seated_actor_floors WHERE chain_id=?1 AND actor=?2",
+            params![chain,proof.actor().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+        ).optional()?;
+    if let Some((instance, floor, hash, root, generation, commitment)) = prior {
+        if instance != proof.chain_instance()
+            || height < floor
+            || actor_gen < generation
+            || (height == floor && (hash != proof.block_hash() || root != proof.state_root()))
+            || (actor_gen == generation && commitment != proof.commitment())
+        {
+            return Err(invalid());
+        }
+    }
+
+    conn.execute("INSERT INTO seated_actor_floors VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+        ON CONFLICT(chain_id,actor) DO UPDATE SET height=excluded.height,block_hash=excluded.block_hash,state_root=excluded.state_root,authorization_generation=excluded.authorization_generation,commitment=excluded.commitment",
+        params![chain,proof.actor().as_slice(),proof.chain_instance().as_slice(),height,proof.block_hash().as_slice(),proof.state_root().as_slice(),actor_gen,proof.commitment().as_slice()])?;
+    Ok(())
+}
+
+fn invalidate_actor_credentials_on(
+    conn: &Connection,
+    proof: &VerifiedActorControl,
+) -> Result<usize, StoreError> {
+    let chain = i64::try_from(proof.chain_id()).map_err(|_| invalid())?;
+    let generation = i64::try_from(proof.authorization_generation()).map_err(|_| invalid())?;
+    let seat = format!(
+        "0x{}",
+        proof
+            .actor()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    // Fence any in-flight responses before removing the credentials. Retain
+    // queued immutable pointers for an explicitly authorized later repair.
+    conn.execute(
+        "UPDATE subscriptions SET status='failed',revision=revision+1
+        WHERE subscription_id IN (SELECT s.subscription_id FROM seated_subscriptions s
+        JOIN seated_credentials c ON c.room_id=s.room_id AND c.cert_id=s.cert_id
+        WHERE c.actor_chain_id=?1 AND c.seat=?2 AND c.actor_authorization_generation<?3)",
+        params![chain, seat, generation],
+    )?;
+    Ok(conn.execute("DELETE FROM seated_credentials WHERE actor_chain_id=?1 AND seat=?2 AND actor_authorization_generation<?3",
+        params![chain,seat,generation])?)
 }

@@ -320,3 +320,193 @@ async fn actor_http_enrollment_verifies_fetched_control_installs_atomically_and_
     server.abort();
     courier_task.abort();
 }
+
+fn control_proof(
+    now: i64,
+    generation: u64,
+    commitment: u8,
+) -> crate::actor_proof::VerifiedActorControl {
+    let control = encode(&Value::Map(vec![
+        (text("controller"), Value::Bytes(vec![7; 20])),
+        (
+            text("certificate_commitment"),
+            Value::Bytes(vec![commitment; 32]),
+        ),
+        (text("authorization_generation"), generation.into()),
+    ]));
+    crate::actor_proof::tests::verified_control(now as u64, control)
+}
+
+// These store fixtures exercise revocation durability, not actor enrollment.
+// The observed control proof still passes the real finality/QMDB verifier.
+fn tracked_actor_fixture(store: &Store, now: i64) -> crate::actor_proof::VerifiedActorControl {
+    install_fixture(store);
+    let proof = control_proof(now, 3, 8);
+    let seat = "0x0000000000000000000000000000000000000009";
+    let conn = store.conn.lock().unwrap();
+    conn.execute(
+        "INSERT INTO seated_actor_floors VALUES (?1,?2,?3,9,?4,?5,2,?6)",
+        params![
+            42,
+            proof.actor().as_slice(),
+            proof.chain_instance().as_slice(),
+            vec![4u8; 32],
+            vec![5u8; 32],
+            vec![6u8; 32]
+        ],
+    )
+    .unwrap();
+    conn.execute("INSERT INTO seated_credentials(room_id,cert_id,seat,display_name,auth_generation,public_key,trusted_context,actor_chain_id,actor_authorization_generation)
+        SELECT room_id,'actor-cert',?1,'Actor',auth_generation,public_key,trusted_context,42,2
+        FROM seated_credentials WHERE cert_id='fixture-cert'",[seat]).unwrap();
+    conn.execute(
+        "INSERT INTO seated_subscriptions VALUES ('wake',?1,'actor-cert',?2,1,0,X'')",
+        params![ROOM, seat],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE subscriptions SET only_mention=?1 WHERE subscription_id='wake'",
+        [seat],
+    )
+    .unwrap();
+    drop(conn);
+    let mut header = crate::seated::SealedRecord::parse(&sealed(b"trigger"))
+        .unwrap()
+        .header;
+    header.mentions = vec![seat.into()];
+    append(store, &seal_header(header, b"private trigger"), 80, now).unwrap();
+    proof
+}
+
+#[test]
+fn passive_actor_control_revokes_atomically_and_fences_inflight_wake_across_rooms() {
+    let store = Store::open_in_memory().unwrap();
+    let now = Utc::now().timestamp_millis();
+    let proof = tracked_actor_fixture(&store, now);
+    // A second room shares the actor authority; another chain and owner do not.
+    store
+        .create_room("other-room", "other-room", None, None, Some("fixture"))
+        .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute("INSERT INTO seated_rooms(room_id,auth_generation,key_generation) VALUES ('other-room',1,2)",[]).unwrap();
+        conn.execute("INSERT INTO seated_credentials(room_id,cert_id,seat,display_name,auth_generation,public_key,trusted_context,actor_chain_id,actor_authorization_generation)
+            SELECT 'other-room',cert_id,seat,display_name,auth_generation,public_key,trusted_context,actor_chain_id,actor_authorization_generation
+            FROM seated_credentials WHERE cert_id='actor-cert'",[]).unwrap();
+        conn.execute("INSERT INTO seated_credentials(room_id,cert_id,seat,display_name,auth_generation,public_key,trusted_context,actor_chain_id,actor_authorization_generation)
+            SELECT room_id,'other-chain',seat,display_name,auth_generation,public_key,trusted_context,43,2
+            FROM seated_credentials WHERE room_id=?1 AND cert_id='actor-cert'",[ROOM]).unwrap();
+    }
+    let old = store.load_due_deliveries(Utc::now(), 10).unwrap().remove(0);
+    let payload = store
+        .seated_wake_payload("wake", &old.delivery_id, now)
+        .unwrap();
+    store.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_revocation BEFORE DELETE ON seated_credentials BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(store.ingest_actor_control(&proof, now).is_err());
+    assert_eq!(
+        store.get_subscription("wake").unwrap().unwrap().0.status,
+        "active"
+    );
+    assert!(store.webhook_attempt_current(&old).unwrap());
+    let height: i64 = store
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT height FROM seated_actor_floors", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(height, 9);
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_revocation")
+        .unwrap();
+    assert_eq!(store.ingest_actor_control(&proof, now).unwrap(), 2);
+    assert_eq!(
+        store.get_subscription("wake").unwrap().unwrap().0.status,
+        "failed"
+    );
+    assert!(!store
+        .finish_webhook_attempt(&old, crate::store::WebhookOutcome::Complete)
+        .unwrap());
+    assert_eq!(
+        store
+            .get_subscription("wake")
+            .unwrap()
+            .unwrap()
+            .0
+            .last_delivered_seq,
+        0
+    );
+    assert!(matches!(
+        store.seated_wake_payload("wake", &old.delivery_id, now),
+        Err(StoreError::SeatedAuthorization)
+    ));
+    let conn = store.conn.lock().unwrap();
+    let retained: String = conn
+        .query_row(
+            "SELECT payload FROM seated_wakes WHERE delivery_id=?1",
+            [&old.delivery_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(Some(retained), payload);
+    let certs:i64=conn.query_row("SELECT count(*) FROM seated_credentials WHERE cert_id IN ('fixture-cert','other-chain')",[],|r|r.get(0)).unwrap();
+    assert_eq!(certs, 2);
+    drop(conn);
+    assert_eq!(store.ingest_actor_control(&proof, now).unwrap(), 0);
+}
+
+#[test]
+fn passive_actor_control_rejects_unknown_stale_regressed_or_conflicting_proofs_after_restart() {
+    let now = Utc::now().timestamp_millis();
+    let proof = control_proof(now, 3, 8);
+    let empty = Store::open_in_memory().unwrap();
+    assert!(empty.ingest_actor_control(&proof, now).is_err());
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("revocations.db");
+    {
+        let store = Store::open(&db).unwrap();
+        tracked_actor_fixture(&store, now);
+        store.ingest_actor_control(&proof, now).unwrap();
+    }
+    let store = Store::open(&db).unwrap();
+    assert!(store.ingest_actor_control(&proof, now + 60_001).is_err());
+    assert!(store.ingest_actor_control(&proof, -1).is_err());
+    // Real finality proofs of conflicting same-height roots cannot replace the local floor.
+    assert!(store
+        .ingest_actor_control(&control_proof(now, 4, 9), now)
+        .is_err());
+    assert!(store
+        .ingest_actor_control(&control_proof(now, 2, 8), now)
+        .is_err());
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE seated_actor_floors SET height=9", [])
+        .unwrap();
+    assert!(store
+        .ingest_actor_control(&control_proof(now, 3, 9), now)
+        .is_err());
+    assert!(store
+        .ingest_actor_control(&control_proof(now, 2, 8), now)
+        .is_err());
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE seated_actor_floors SET height=11", [])
+        .unwrap();
+    assert!(store.ingest_actor_control(&proof, now).is_err());
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE seated_actor_floors SET height=9,chain_instance=?1",
+            [vec![0u8; 32]],
+        )
+        .unwrap();
+    assert!(store.ingest_actor_control(&proof, now).is_err());
+}

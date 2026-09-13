@@ -47,8 +47,20 @@ at the same height, changed chain instance, actor authorization regression, or
 a changed certificate commitment without advancing actor authorization. The
 height/hash/root/generation/commitment floor is local SQLite state. A newly proven
 higher actor authorization generation invalidates older actor credentials across
-rooms on the same chain. This does not yet provide passive chain-revocation
-subscriptions; a later enrollment/refresh is what supplies the new proof.
+rooms on the same chain. `Store::ingest_actor_control` can also consume a fresh
+`VerifiedActorControl` for an already tracked actor without installing any
+credential. It uses the same rollback-floor checks as enrollment. In one local
+Immediate transaction it advances that floor, removes superseded actor
+credentials across rooms, and fails their subscriptions while incrementing the
+local revision to fence in-flight webhook responses. Queued pointer bytes remain
+available for an explicitly authorized future repair. Owner credentials and actors
+on other chains are unaffected. A failed transaction changes none of these states.
+
+This ingestion core does not yet run a background refresh worker, ingest proofs
+of control-key absence, or expire cached authority during a courier outage. Those
+remain the next lifecycle slice. It must not be presented as a complete passive
+revocation service. Fetch failures and caller JSON never constitute revocation
+proof. There is no new HTTP proof-ingestion endpoint or consensus write.
 
 History and initial subscription backfill exclude records from key generations
 before membership's `from_gen`. History advances its cursor past excluded records
@@ -59,6 +71,7 @@ key delivery must also enforce that floor when it is connected.
 cargo test --offline --locked -p cowchat-crypto --test actor_membership
 cargo test --offline --locked -p cowchat-server --lib actor_control_fetch
 cargo test --offline --locked -p cowchat-server --lib actor_http_enrollment
+cargo test --offline --locked -p cowchat-server --lib passive_actor_control
 ```
 
 The second test fetches an actual threshold-signed finality and QMDB inclusion
@@ -71,5 +84,11 @@ check complete rollback, exercises exact retry and preflight/install state races
 rejects an older proof than the local floor, and appends/reads/decrypts an
 authenticated actor record while excluding an older key generation. The actor
 record is written by the test client; wake-triggered actor execution through a
-generic gateway remains to connect. All proof reads belong to enrollment;
-room append, history, and wake delivery continue against local service state.
+generic gateway is separately covered by the [local fixture proof](local-m-echo.md).
+Proof fetching currently belongs to enrollment; the new ingestion core accepts
+only already verified proof values. Room append, history, and wake delivery
+continue against local service state. Ingestion tests use real synthetic
+threshold-finality/QMDB verification with provisioned store fixtures, not a live
+chain. They cover cross-room revocation, isolation of owners/other chains,
+rollback on an injected deletion failure, stale in-flight wake outcomes, repeated
+proof ingestion, persisted rollback floors, and stale/conflicting proof rejection.
