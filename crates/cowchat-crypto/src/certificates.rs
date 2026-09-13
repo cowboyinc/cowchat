@@ -350,3 +350,17 @@ pub fn verify_initial_owner(
         Value::Bytes(wallet.to_vec()),
     ]))
 }
+
+/// Extract the encryption key from an already authenticated human/builder
+/// identity. The caller must independently establish current room membership;
+/// an identity ID match alone is not authorization.
+pub fn recipient_key(identity: &[u8], expected_id: &[u8]) -> Result<Vec<u8>> {
+    let cert = Certificate::decode(IDENTITY, identity)?;
+    if certificate_id(IDENTITY, identity)? != expected_id {
+        return Err(Error::CertificateId);
+    }
+    if !matches!(cert.fields.text("role")?.as_str(), "owner" | "builder") {
+        return Err(Error::Authority);
+    }
+    Ok(cert.fields.bytes::<32>("enc_pubkey")?.to_vec())
+}

@@ -7,6 +7,7 @@ use cowchat_crypto::{authorization, request};
 mod actors;
 mod enrollment;
 mod history;
+mod key_envelopes;
 mod lifecycle;
 mod revocation;
 mod subscriptions;
@@ -24,6 +25,13 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
         cert_id TEXT NOT NULL, seat TEXT NOT NULL, display_name TEXT NOT NULL,
         auth_generation INTEGER NOT NULL, public_key BLOB NOT NULL,
         trusted_context BLOB NOT NULL, PRIMARY KEY(room_id, cert_id)
+    );
+    CREATE TABLE IF NOT EXISTS seated_key_envelopes (
+        room_id TEXT NOT NULL REFERENCES seated_rooms(room_id) ON DELETE CASCADE,
+        recipient_cert TEXT NOT NULL, key_generation INTEGER NOT NULL,
+        auth_generation INTEGER NOT NULL, transport_generation INTEGER NOT NULL,
+        scope BLOB NOT NULL, wrapped BLOB NOT NULL, signature BLOB NOT NULL,
+        PRIMARY KEY(room_id, recipient_cert, key_generation, auth_generation, transport_generation)
     );
     CREATE TABLE IF NOT EXISTS seated_request_nonces (
         public_key BLOB NOT NULL, nonce BLOB NOT NULL, retain_through_ms INTEGER NOT NULL,

@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 mod actor_tests;
 #[path = "client_tests.rs"]
 mod client_tests;
+#[path = "key_envelope_tests.rs"]
+mod key_envelope_tests;
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
 

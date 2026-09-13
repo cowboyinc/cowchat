@@ -528,3 +528,68 @@ pub(crate) async fn history(
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeyEnvelope {
+    pub publisher_cert: String,
+    pub transport_generation: u64,
+    pub scope: String,
+    pub wrapped: String,
+    pub signature: String,
+}
+
+pub(crate) async fn key_envelope(
+    State(state): State<crate::web::AppState>,
+    Path((room, recipient, generation)): Path<(String, String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let single = |name| {
+        let mut values = headers.get_all(name).iter();
+        let value = values.next()?.to_str().ok()?;
+        if values.next().is_some() {
+            return None;
+        }
+        Some(value)
+    };
+    let (Some(cert), Some(projection), Some(signature)) = (
+        single("x-cowchat-certificate"),
+        single("x-cowchat-request").and_then(|v| B64.decode(v).ok()),
+        single("x-cowchat-signature").and_then(|v| B64.decode(v).ok()),
+    ) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let target = uri
+        .path_and_query()
+        .map(|v| v.as_str())
+        .unwrap_or(uri.path());
+    let result = state.store.seated_key_envelope(
+        &room,
+        &recipient,
+        &generation,
+        cert,
+        method.as_str(),
+        target,
+        &body,
+        &projection,
+        &signature,
+        chrono::Utc::now().timestamp_millis(),
+    );
+    let mut response = match result {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(crate::store::StoreError::SeatedReplay | crate::store::StoreError::MessageConflict) => {
+            StatusCode::CONFLICT.into_response()
+        }
+        Err(crate::store::StoreError::SeatedAuthorization) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    response
+        .headers_mut()
+        .insert("cache-control", "no-store".parse().unwrap());
+    response
+}

@@ -113,6 +113,12 @@ pub fn router(state: AppState) -> Router {
             "/rooms/{room_id}/subscriptions/{subscription_id}/lifecycle",
             post(crate::seated::subscription_lifecycle).layer(DefaultBodyLimit::max(16 * 1024)),
         )
+        .route(
+            "/rooms/{room_id}/key-envelopes/{cert}/{generation}",
+            axum::routing::put(crate::seated::key_envelope)
+                .get(crate::seated::key_envelope)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route("/api/rooms/{room_id}/history", get(api_room_history))
         .route(
             "/api/rooms/{room_id}/blobs",

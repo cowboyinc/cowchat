@@ -7,6 +7,7 @@ pub mod canonical;
 pub mod certificates;
 pub mod envelope;
 mod fields;
+pub mod key_envelope;
 pub mod keys;
 pub mod request;
 mod signatures;
