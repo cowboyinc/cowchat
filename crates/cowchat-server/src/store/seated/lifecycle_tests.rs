@@ -571,3 +571,79 @@ fn seated_subscription_repair_renews_same_seat_and_drops_unreadable_pending_wake
         .mutate_seated_subscription(ROOM, SUB, "renewed", "POST", &target, &body, &p, &s, now)
         .is_ok());
 }
+
+#[tokio::test]
+async fn seated_worker_transport_failure_does_not_persist_callback_url_credentials() {
+    use std::{sync::Arc, time::Duration};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://{}/private-path-canary/wake?token=callback-token-canary",
+        listener.local_addr().unwrap()
+    );
+    let sink = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut discard = [0; 4096];
+            let _ = stream.read(&mut discard).await;
+            let _ = stream.write_all(b"not-an-http-response\r\n\r\n").await;
+        }
+    });
+    // Reproduce the upstream diagnostic behavior without printing credentials.
+    let error = reqwest::Client::new().post(&url).send().await.unwrap_err();
+    assert!(error.to_string().contains("callback-token-canary"));
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let now = Utc::now().timestamp_millis();
+    setup(&store, now);
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE subscriptions SET webhook_url=?1 WHERE subscription_id=?2",
+            params![url, SUB],
+        )
+        .unwrap();
+    append(&store, &mentioned(ID), 2, now).unwrap();
+    let manager = crate::webhooks::WebhookManager::new(store.clone(), true);
+    let worker = manager.start();
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let row: Option<(i64, String)> = store
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT attempts,last_error FROM subscription_deliveries
+                 WHERE subscription_id=?1 AND last_error IS NOT NULL",
+                    [SUB],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .unwrap();
+            if let Some(row) = row {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    sink.abort();
+    let (attempts, reason) = result.unwrap();
+    assert_eq!(attempts, 1);
+    assert_eq!(reason, "transport request failed");
+    assert!(!reason.contains("canary"));
+    assert!(!reason.contains("http"));
+    // The configured URL remains in its intended subscription field.
+    let configured: String = store
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT webhook_url FROM subscriptions WHERE subscription_id=?1",
+            [SUB],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(configured, url);
+}

@@ -442,7 +442,16 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
                 Err(format!("HTTP {}", status.as_u16()))
             }
         }
-        Err(e) => Err(format!("transport: {}", e)),
+        // reqwest Display embeds the full URL, including callback tokens in
+        // its path/query. This value is both persisted and logged below.
+        Err(e) => Err(if e.is_timeout() {
+            "transport timeout"
+        } else if e.is_connect() {
+            "transport connection failed"
+        } else {
+            "transport request failed"
+        }
+        .to_owned()),
     };
 
     match outcome {
