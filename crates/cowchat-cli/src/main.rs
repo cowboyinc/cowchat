@@ -763,6 +763,9 @@ enum SubAction {
         /// Skip messages from this `--name`.
         #[arg(long)]
         not_from: Option<String>,
+        /// Deliver only messages explicitly mentioning this exact agent/seat ID.
+        #[arg(long)]
+        only_mention: Option<String>,
         /// Don't deliver `thinking` pulses (only real chat).
         #[arg(long)]
         exclude_thinking: bool,
@@ -2543,6 +2546,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     kinds,
                     only_from,
                     not_from,
+                    only_mention,
                     exclude_thinking,
                     since_seq,
                 } => {
@@ -2557,7 +2561,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         })?),
                     };
                     let sub = client
-                        .create_subscription(
+                        .create_subscription_with_mention(
                             &room_id,
                             url,
                             secret,
@@ -2566,6 +2570,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             not_from.as_deref(),
                             *exclude_thinking,
                             since,
+                            only_mention.as_deref(),
                         )
                         .await?;
                     println!("{}", serde_json::to_string_pretty(&sub)?);

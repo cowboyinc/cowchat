@@ -414,6 +414,9 @@ pub struct SubscribePayload {
     pub only_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_from: Option<String>,
+    /// Deliver only when the explicit mentions list includes this exact ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_mention: Option<String>,
     #[serde(default)]
     pub exclude_thinking: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -540,6 +543,9 @@ pub struct Subscription {
     pub only_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_from: Option<String>,
+    /// Deliver only when the explicit mentions list includes this exact ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_mention: Option<String>,
     pub exclude_thinking: bool,
     pub since_seq: i64,
     pub last_delivered_seq: i64,

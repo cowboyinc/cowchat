@@ -4101,3 +4101,92 @@ async fn test_list_invites_reports_metadata_and_revoke_by_id() {
         })
     ));
 }
+
+/// Runnable C1 delivery proof: the real authenticated client/server and generic
+/// HTTP worker, without a node, runner, or consensus admission. Seat auth is separate.
+#[tokio::test]
+async fn test_mention_wake_authenticated_client_backfill_and_live_delivery() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let (hook_url, captured) = spawn_test_receiver(200).await;
+    let human = connect_agent(&addr, &key, "Human").await;
+    human.join_room("lobby").await.unwrap();
+    human
+        .send_message_with_metadata(
+            "lobby",
+            "@actor text is not a mention",
+            None,
+            vec![],
+            serde_json::json!({"mentions":["actor"]}),
+        )
+        .await
+        .unwrap();
+    let past = human
+        .send_message("lobby", "past request", None, vec!["actor".into()])
+        .await
+        .unwrap();
+    let sub = human
+        .create_subscription_with_mention(
+            "lobby",
+            &hook_url,
+            "test-secret",
+            vec![],
+            None,
+            None,
+            true,
+            Some(0),
+            Some("actor"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sub.only_mention.as_deref(), Some("actor"));
+    assert_eq!(
+        human.list_subscriptions(Some("lobby")).await.unwrap()[0]
+            .only_mention
+            .as_deref(),
+        Some("actor")
+    );
+    assert!(wait_for_deliveries(&captured, 1, Duration::from_secs(3)).await);
+    human
+        .send_message("lobby", "wrong target", None, vec!["actor-other".into()])
+        .await
+        .unwrap();
+    human.thinking("lobby", "thinking @actor").await.unwrap();
+    let live = human
+        .send_message(
+            "lobby",
+            "live request",
+            None,
+            vec!["actor".into(), "actor".into()],
+        )
+        .await
+        .unwrap();
+    assert!(wait_for_deliveries(&captured, 2, Duration::from_secs(3)).await);
+    let requests = captured.lock().await;
+    assert_eq!(requests.len(), 2);
+    for (request, expected) in requests.iter().zip([&past, &live]) {
+        assert!(verify_signature(request, "test-secret"));
+        let event: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(event["message"]["message_id"], expected.message_id);
+        assert_eq!(event["dispatch_id"], request.webhook_id);
+    }
+    assert_ne!(requests[0].webhook_id, requests[1].webhook_id);
+    println!("C1: authenticated send -> explicit mention filter -> signed HTTP wake; backfill and live sends delivered once, no consensus service present");
+    drop(requests);
+    for invalid in ["".to_string(), "x".repeat(257)] {
+        assert!(human
+            .create_subscription_with_mention(
+                "lobby",
+                &hook_url,
+                "test-secret",
+                vec![],
+                None,
+                None,
+                true,
+                None,
+                Some(&invalid)
+            )
+            .await
+            .is_err());
+    }
+    server.abort();
+}

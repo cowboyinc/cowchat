@@ -21,7 +21,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
-use uuid::Uuid;
 
 use crate::store::Store;
 
@@ -49,6 +48,21 @@ pub fn sign_request(secret: &str, webhook_id: &str, timestamp: i64, body: &str) 
 /// Decide whether `msg` matches `sub`'s filter. Cross-field semantics are AND;
 /// within `kinds`, semantics are OR.
 pub fn matches_filter(sub: &Subscription, msg: &ChatMessage) -> bool {
+    matches_filter_with_mentions(sub, msg, &[])
+}
+
+pub fn matches_filter_with_mentions(
+    sub: &Subscription,
+    msg: &ChatMessage,
+    mentions: &[String],
+) -> bool {
+    if sub
+        .only_mention
+        .as_ref()
+        .is_some_and(|target| !mentions.contains(target))
+    {
+        return false;
+    }
     if msg.seq <= sub.last_delivered_seq {
         return false;
     }
@@ -326,16 +340,18 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
         }
     };
 
-    let webhook_id = Uuid::new_v4().to_string();
+    // One event identity across redelivery, including a lost HTTP acknowledgement.
+    let webhook_id = &d.delivery_id;
     let timestamp = chrono::Utc::now().timestamp();
     let envelope = serde_json::json!({
         "type": "cowchat.message.created",
+        "dispatch_id": d.delivery_id,
         "subscription_id": sub.subscription_id,
         "room_id": sub.room_id,
         "message": msg,
     });
     let body = serde_json::to_string(&envelope).unwrap_or_default();
-    let signature = sign_request(&secret, &webhook_id, timestamp, &body);
+    let signature = sign_request(&secret, webhook_id, timestamp, &body);
 
     let (http, pinned_url) = match pinned_http_client(&sub.webhook_url, inner.allow_private).await {
         Ok(value) => value,
@@ -359,7 +375,7 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
     let req = http
         .post(pinned_url)
         .header("content-type", "application/json")
-        .header("webhook-id", &webhook_id)
+        .header("webhook-id", webhook_id.as_str())
         .header("webhook-timestamp", timestamp.to_string())
         .header("webhook-signature", &signature)
         .body(body);
@@ -378,10 +394,13 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
 
     match outcome {
         Ok(()) => {
-            let _ = inner.store.delete_delivery(&d.delivery_id);
-            let _ = inner
-                .store
-                .advance_subscription_cursor(&sub.subscription_id, d.message_seq);
+            // Commit the acknowledgement and cursor together. A crash between
+            // deleting the obligation and advancing the cursor could otherwise
+            // recreate a new event identity during backfill.
+            if let Err(error) = inner.store.complete_delivery(&d.delivery_id) {
+                log::warn!("webhook acknowledgement not committed: {}", error);
+                return;
+            }
             log::debug!(
                 "webhook delivered sub={} seq={}",
                 sub.subscription_id,
@@ -469,6 +488,7 @@ mod tests {
             kinds: vec![],
             only_from: None,
             not_from: None,
+            only_mention: None,
             exclude_thinking: false,
             since_seq: 0,
             last_delivered_seq: 0,

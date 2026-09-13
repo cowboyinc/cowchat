@@ -378,6 +378,8 @@ impl Store {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         ensure_column_exists(&conn, "messages", "seq", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column_exists(&conn, "messages", "mentions", "TEXT NOT NULL DEFAULT '[]'")?;
+        ensure_column_exists(&conn, "subscriptions", "only_mention", "TEXT")?;
         ensure_column_exists(
             &conn,
             "subscription_deliveries",
@@ -831,10 +833,10 @@ impl Store {
             |row| row.get(0),
         )?;
         tx.execute(
-            "INSERT INTO messages (message_id, room_id, agent_id, agent_name, content, reply_to_message, metadata, seq)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO messages (message_id, room_id, agent_id, agent_name, content, reply_to_message, metadata, seq, mentions)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![append.message_id, append.room_id, append.agent_id, append.agent_name, append.content,
-                append.reply_to, serde_json::to_string(append.metadata)?, seq],
+                append.reply_to, serde_json::to_string(append.metadata)?, seq, serde_json::to_string(append.mentions)?],
         )?;
         let created_at: String = tx.query_row(
             "SELECT created_at FROM messages WHERE message_id = ?1",
@@ -861,13 +863,13 @@ impl Store {
             let mut stmt = tx.prepare(
                 "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                         only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-                        status, failure_count, created_at
+                        status, failure_count, created_at, only_mention
                  FROM subscriptions WHERE room_id = ?1 AND status = 'active'",
             )?;
             let subscriptions = stmt.query_map([append.room_id], map_subscription_row)?;
             for subscription in subscriptions {
                 let (sub, _, _) = subscription?;
-                if crate::webhooks::matches_filter(&sub, &message) {
+                if crate::webhooks::matches_filter_with_mentions(&sub, &message, append.mentions) {
                     enqueue_delivery_on(
                         &tx,
                         &uuid::Uuid::new_v4().to_string(),
@@ -1744,6 +1746,23 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Db)
     }
 
+    /// Explicit routing metadata, persisted independently of content and caller metadata.
+    /// Old messages have no provable mentions and therefore cannot trigger mention backfill.
+    pub fn get_message_mentions(&self, message_id: &str) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT mentions FROM messages WHERE message_id = ?1",
+                [message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match value {
+            Some(value) => serde_json::from_str(&value)?,
+            None => Vec::new(),
+        })
+    }
+
     // --- Subscription operations ---
 
     /// Insert a new subscription. `subscription_id` and `created_at` are caller-provided
@@ -1762,7 +1781,39 @@ impl Store {
         exclude_thinking: bool,
         since_seq: i64,
     ) -> Result<cowchat_core::Subscription, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        self.create_subscription_with_mention(
+            subscription_id,
+            room_id,
+            owner_key,
+            webhook_url,
+            secret,
+            kinds,
+            only_from,
+            not_from,
+            exclude_thinking,
+            since_seq,
+            None,
+        )
+    }
+
+    /// The mention filter is stored with the subscription before it can receive messages.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_subscription_with_mention(
+        &self,
+        subscription_id: &str,
+        room_id: &str,
+        owner_key: &str,
+        webhook_url: &str,
+        secret: &str,
+        kinds: &[String],
+        only_from: Option<&str>,
+        not_from: Option<&str>,
+        exclude_thinking: bool,
+        since_seq: i64,
+        only_mention: Option<&str>,
+    ) -> Result<cowchat_core::Subscription, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let kinds_json = if kinds.is_empty() {
             None
         } else {
@@ -1770,12 +1821,12 @@ impl Store {
         };
         let now = chrono::Utc::now();
         let now_str = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-        conn.execute(
+        tx.execute(
             "INSERT INTO subscriptions
              (subscription_id, room_id, owner_key, webhook_url, secret, kinds,
               only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-              status, failure_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, 'active', 0, ?11)",
+              status, failure_count, created_at, only_mention)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, 'active', 0, ?11, ?12)",
             params![
                 subscription_id,
                 room_id,
@@ -1788,22 +1839,27 @@ impl Store {
                 exclude_thinking as i64,
                 since_seq,
                 now_str,
+                only_mention,
             ],
         )?;
-        Ok(cowchat_core::Subscription {
+        let subscription = cowchat_core::Subscription {
             subscription_id: subscription_id.to_string(),
             room_id: room_id.to_string(),
             webhook_url: webhook_url.to_string(),
             kinds: kinds.to_vec(),
             only_from: only_from.map(String::from),
             not_from: not_from.map(String::from),
+            only_mention: only_mention.map(String::from),
             exclude_thinking,
             since_seq,
             last_delivered_seq: since_seq,
             status: "active".to_string(),
             failure_count: 0,
             created_at: now,
-        })
+        };
+        enqueue_subscription_backfill_on(&tx, &subscription)?;
+        tx.commit()?;
+        Ok(subscription)
     }
 
     pub fn get_subscription(
@@ -1816,7 +1872,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                     only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-                    status, failure_count, created_at
+                    status, failure_count, created_at, only_mention
              FROM subscriptions WHERE subscription_id = ?1",
         )?;
         let mut rows = stmt.query(params![subscription_id])?;
@@ -1837,7 +1893,7 @@ impl Store {
             Some(_) => (
                 "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                         only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-                        status, failure_count, created_at
+                        status, failure_count, created_at, only_mention
                  FROM subscriptions
                  WHERE owner_key = ?1 AND room_id = ?2
                  ORDER BY created_at DESC",
@@ -1846,7 +1902,7 @@ impl Store {
             None => (
                 "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                         only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-                        status, failure_count, created_at
+                        status, failure_count, created_at, only_mention
                  FROM subscriptions
                  WHERE owner_key = ?1
                  ORDER BY created_at DESC",
@@ -1877,7 +1933,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                     only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-                    status, failure_count, created_at
+                    status, failure_count, created_at, only_mention
              FROM subscriptions WHERE room_id = ?1 AND status = 'active'",
         )?;
         let mut rows = stmt.query(params![room_id])?;
@@ -1958,6 +2014,26 @@ impl Store {
             message_id,
             next_attempt_at,
         )
+    }
+
+    /// Atomically consume a successful obligation and advance its subscription.
+    /// If acknowledgement is lost, the original pending delivery remains retryable.
+    pub fn complete_delivery(&self, delivery_id: &str) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE subscriptions SET last_delivered_seq = MAX(last_delivered_seq,
+                 (SELECT message_seq FROM subscription_deliveries WHERE delivery_id = ?1)),
+                 failure_count = 0
+             WHERE subscription_id = (SELECT subscription_id FROM subscription_deliveries WHERE delivery_id = ?1)",
+            [delivery_id],
+        )?;
+        tx.execute(
+            "DELETE FROM subscription_deliveries WHERE delivery_id = ?1",
+            [delivery_id],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn abandon_delivery(&self, delivery_id: &str, reason: &str) -> Result<(), StoreError> {
@@ -2111,6 +2187,7 @@ fn map_subscription_row(
             kinds,
             only_from,
             not_from,
+            only_mention: row.get(14)?,
             exclude_thinking: exclude_thinking != 0,
             since_seq,
             last_delivered_seq,
@@ -2154,6 +2231,37 @@ fn replay_append_on(
     }))
 }
 
+/// Initial backlog and subscription become visible together, before any live
+/// delivery can advance the cursor past older messages. This is local SQLite only.
+fn enqueue_subscription_backfill_on(
+    conn: &Connection,
+    sub: &cowchat_core::Subscription,
+) -> Result<(), StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT message_id, room_id, agent_id, agent_name, content, reply_to_message,
+                metadata, created_at, seq, mentions FROM messages
+         WHERE room_id = ?1 AND seq > ?2 ORDER BY seq ASC",
+    )?;
+    let rows = statement.query_map(params![sub.room_id, sub.last_delivered_seq], |row| {
+        Ok((map_message_row(row)?, row.get::<_, String>(9)?))
+    })?;
+    for row in rows {
+        let (message, mentions) = row?;
+        let mentions: Vec<String> = serde_json::from_str(&mentions)?;
+        if crate::webhooks::matches_filter_with_mentions(sub, &message, &mentions) {
+            enqueue_delivery_on(
+                conn,
+                &uuid::Uuid::new_v4().to_string(),
+                &sub.subscription_id,
+                message.seq,
+                &message.message_id,
+                Utc::now(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn enqueue_delivery_on(
     conn: &Connection,
     delivery_id: &str,
@@ -2171,7 +2279,9 @@ fn enqueue_delivery_on(
     Ok(conn.execute(
         "INSERT INTO subscription_deliveries
          (delivery_id, subscription_id, message_seq, message_id, next_attempt_at, attempts, deadline_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
+         SELECT ?1, ?2, ?3, ?4, ?5, 0, ?6
+         WHERE NOT EXISTS (SELECT 1 FROM subscriptions
+                           WHERE subscription_id = ?2 AND last_delivered_seq >= ?3)
          ON CONFLICT(subscription_id, message_seq) DO NOTHING",
         params![delivery_id, subscription_id, message_seq, message_id, ts, deadline],
     )? > 0)

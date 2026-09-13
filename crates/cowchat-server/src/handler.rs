@@ -2363,6 +2363,18 @@ async fn handle_subscribe(
     if let Err(error) = webhook_mgr.validate_url(&p.webhook_url).await {
         return Frame::error(req_id, ErrorPayload::new(ErrorCode::InvalidPayload, error));
     }
+    if p.only_mention
+        .as_ref()
+        .is_some_and(|value| value.is_empty() || value.len() > 256)
+    {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(
+                ErrorCode::InvalidPayload,
+                "only_mention must be a nonempty ID of at most 256 bytes",
+            ),
+        );
+    }
     if p.secret.is_empty() {
         return Frame::error(
             req_id,
@@ -2382,7 +2394,7 @@ async fn handle_subscribe(
 
     let subscription_id = uuid::Uuid::new_v4().to_string();
     let owner_key = if no_auth { "no-auth" } else { agent_api_key };
-    let sub = match store.create_subscription(
+    let sub = match store.create_subscription_with_mention(
         &subscription_id,
         &p.room_id,
         owner_key,
@@ -2393,6 +2405,7 @@ async fn handle_subscribe(
         p.not_from.as_deref(),
         p.exclude_thinking,
         since_seq,
+        p.only_mention.as_deref(),
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -2414,39 +2427,8 @@ async fn handle_subscribe(
         );
     }
 
-    // Backfill: enqueue every chat message with seq > since_seq that matches.
-    let now = chrono::Utc::now();
-    let mut backfill_cursor = since_seq;
-    loop {
-        let backlog =
-            match store.get_history_filtered(&p.room_id, 1000, None, None, Some(backfill_cursor)) {
-                Ok(backlog) => backlog,
-                Err(_) => break,
-            };
-        if backlog.is_empty() {
-            break;
-        }
-        for msg in &backlog {
-            if !crate::webhooks::matches_filter(&sub, msg) {
-                continue;
-            }
-            let delivery_id = uuid::Uuid::new_v4().to_string();
-            let _ = store.enqueue_delivery(
-                &delivery_id,
-                &sub.subscription_id,
-                msg.seq,
-                &msg.message_id,
-                now,
-            );
-        }
-        backfill_cursor = backlog
-            .last()
-            .map(|message| message.seq)
-            .unwrap_or(backfill_cursor);
-        if backlog.len() < 1000 {
-            break;
-        }
-    }
+    // The initial backlog was committed with the subscription. The worker
+    // cannot deliver a newer append before those older obligations exist.
     webhook_mgr.wake();
 
     Frame::ok(req_id, serde_json::to_value(&sub).unwrap_or_default())
@@ -2559,7 +2541,10 @@ async fn handle_enable_subscription(
         store.get_history_filtered(&sub.room_id, 1000, None, None, Some(sub.last_delivered_seq))
     {
         for msg in backlog {
-            if !crate::webhooks::matches_filter(&sub, &msg) {
+            let Ok(mentions) = store.get_message_mentions(&msg.message_id) else {
+                continue;
+            };
+            if !crate::webhooks::matches_filter_with_mentions(&sub, &msg, &mentions) {
                 continue;
             }
             let delivery_id = uuid::Uuid::new_v4().to_string();

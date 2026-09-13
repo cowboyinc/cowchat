@@ -1263,6 +1263,34 @@ impl CowchatClient {
         exclude_thinking: bool,
         since_seq: Option<i64>,
     ) -> Result<Subscription, ClientError> {
+        self.create_subscription_with_mention(
+            room_id,
+            webhook_url,
+            secret,
+            kinds,
+            only_from,
+            not_from,
+            exclude_thinking,
+            since_seq,
+            None,
+        )
+        .await
+    }
+
+    /// Subscribe to an exact explicit mention target; other filters still apply.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_subscription_with_mention(
+        &self,
+        room_id: &str,
+        webhook_url: &str,
+        secret: &str,
+        kinds: Vec<String>,
+        only_from: Option<&str>,
+        not_from: Option<&str>,
+        exclude_thinking: bool,
+        since_seq: Option<i64>,
+        only_mention: Option<&str>,
+    ) -> Result<Subscription, ClientError> {
         let resp = self
             .request(
                 FrameType::Subscribe,
@@ -1273,6 +1301,7 @@ impl CowchatClient {
                     kinds,
                     only_from: only_from.map(String::from),
                     not_from: not_from.map(String::from),
+                    only_mention: only_mention.map(String::from),
                     exclude_thinking,
                     since_seq,
                 })

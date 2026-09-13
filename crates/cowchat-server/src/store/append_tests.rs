@@ -373,3 +373,212 @@ fn append_upgrade_adds_receipts_and_bounds_legacy_pending_deliveries() {
         2
     );
 }
+
+#[test]
+fn mention_subscription_filters_explicit_ids_and_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mentions.db");
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .create_subscription_with_mention(
+                "mention-sub",
+                "lobby",
+                "owner",
+                "https://example.com/hook",
+                "secret",
+                &[],
+                None,
+                None,
+                true,
+                0,
+                Some("actor"),
+            )
+            .unwrap();
+        let spoof = json!({"mentions":["actor"]});
+        let mut input = append("unmentioned", &spoof);
+        input.content = "@actor this is only text";
+        store.append_message(&input).unwrap();
+        let mentions = vec!["different-actor".to_string()];
+        input.message_id = "wrong-target";
+        input.mentions = &mentions;
+        store.append_message(&input).unwrap();
+        assert!(store
+            .load_due_deliveries(Utc::now(), 32)
+            .unwrap()
+            .is_empty());
+        let mentions = vec!["actor".to_string(), "actor".to_string()];
+        input.message_id = "mentioned";
+        input.mentions = &mentions;
+        store.append_message(&input).unwrap();
+        store.append_message(&input).unwrap();
+        let thinking = json!({"type":"thinking"});
+        input.metadata = &thinking;
+        input.message_id = "thought";
+        store.append_message(&input).unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let subscription = store.get_subscription("mention-sub").unwrap().unwrap().0;
+    assert_eq!(subscription.only_mention.as_deref(), Some("actor"));
+    assert_eq!(
+        store.list_subscriptions("owner", None).unwrap()[0].only_mention,
+        subscription.only_mention
+    );
+    assert_eq!(
+        store.get_message_mentions("mentioned").unwrap(),
+        ["actor", "actor"]
+    );
+    let due = store.load_due_deliveries(Utc::now(), 32).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].message_id, "mentioned");
+}
+
+#[test]
+fn mention_upgrade_does_not_invent_legacy_mentions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-mentions.db");
+    {
+        let store = Store::open(&path).unwrap();
+        subscribe(&store);
+        store
+            .append_message(&append("legacy", &json!({"mentions":["actor"]})))
+            .unwrap();
+        store.conn.lock().unwrap().execute_batch(
+            "ALTER TABLE messages DROP COLUMN mentions; ALTER TABLE subscriptions DROP COLUMN only_mention;"
+        ).unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert!(store.get_message_mentions("legacy").unwrap().is_empty());
+    assert!(store
+        .get_subscription("sub")
+        .unwrap()
+        .unwrap()
+        .0
+        .only_mention
+        .is_none());
+}
+
+#[test]
+fn webhook_acknowledgement_failure_preserves_delivery_and_cursor_together() {
+    let store = Store::open_in_memory().unwrap();
+    subscribe(&store);
+    store.append_message(&append("ack", &json!({}))).unwrap();
+    let original = store
+        .load_due_deliveries(Utc::now(), 32)
+        .unwrap()
+        .pop()
+        .unwrap();
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_ack BEFORE DELETE ON subscription_deliveries
+         BEGIN SELECT RAISE(ABORT, 'injected acknowledgement failure'); END;",
+        )
+        .unwrap();
+    assert!(store.complete_delivery(&original.delivery_id).is_err());
+    assert_eq!(
+        store
+            .get_subscription("sub")
+            .unwrap()
+            .unwrap()
+            .0
+            .last_delivered_seq,
+        0
+    );
+    assert_eq!(
+        store.load_due_deliveries(Utc::now(), 32).unwrap()[0].delivery_id,
+        original.delivery_id
+    );
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_ack")
+        .unwrap();
+    store.complete_delivery(&original.delivery_id).unwrap();
+    store.complete_delivery(&original.delivery_id).unwrap();
+    assert_eq!(
+        store
+            .get_subscription("sub")
+            .unwrap()
+            .unwrap()
+            .0
+            .last_delivered_seq,
+        1
+    );
+    assert!(store
+        .load_due_deliveries(Utc::now(), 32)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn mention_subscription_backfill_is_atomic_and_completed_wake_cannot_be_recreated() {
+    let store = Store::open_in_memory().unwrap();
+    let metadata = json!({});
+    let mentions = vec!["actor".into()];
+    let mut request = append("past", &metadata);
+    request.mentions = &mentions;
+    store.append_message(&request).unwrap();
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_initial_backfill BEFORE INSERT ON subscription_deliveries
+         BEGIN SELECT RAISE(ABORT, 'injected initial backlog failure'); END;",
+        )
+        .unwrap();
+    assert!(store
+        .create_subscription_with_mention(
+            "atomic-sub",
+            "lobby",
+            "owner",
+            "https://example.com/hook",
+            "secret",
+            &[],
+            None,
+            None,
+            true,
+            0,
+            Some("actor")
+        )
+        .is_err());
+    assert!(store.get_subscription("atomic-sub").unwrap().is_none());
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_initial_backfill")
+        .unwrap();
+    store
+        .create_subscription_with_mention(
+            "atomic-sub",
+            "lobby",
+            "owner",
+            "https://example.com/hook",
+            "secret",
+            &[],
+            None,
+            None,
+            true,
+            0,
+            Some("actor"),
+        )
+        .unwrap();
+    request.message_id = "live";
+    store.append_message(&request).unwrap();
+    let first = store.load_due_deliveries(Utc::now(), 32).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].message_id, "past");
+    store.complete_delivery(&first[0].delivery_id).unwrap();
+    // A stale backfill snapshot must not invent a second dispatch after an ack.
+    assert!(!store
+        .enqueue_delivery("different-dispatch", "atomic-sub", 1, "past", Utc::now())
+        .unwrap());
+    let next = store.load_due_deliveries(Utc::now(), 32).unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].message_id, "live");
+}
