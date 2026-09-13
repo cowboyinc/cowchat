@@ -72,6 +72,9 @@ impl VerifiedWake {
     pub fn tip(&self) -> i64 {
         self.data.tip
     }
+    pub fn seq(&self) -> i64 {
+        self.data.seq
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -334,6 +337,33 @@ impl SeatedHttpClient {
     pub async fn read_ciphertext_page(&self, after: i64, seed: &[u8]) -> Result<Value, RoomError> {
         let target = format!(
             "/rooms/{}/messages?transport_generation={}&after={after}&limit=100",
+            self.seat.room, self.seat.transport_generation
+        );
+        let response = self
+            .send(reqwest::Method::GET, &target, vec![], seed)
+            .await?;
+        if !response.status().is_success() {
+            return Err(RoomError::Refused(response.status().as_u16()));
+        }
+        bounded_json(response).await
+    }
+
+    /// Fetch one ciphertext record by ID within this seat's current read bounds.
+    /// The caller must still authenticate the sender and signed record before use.
+    pub async fn read_ciphertext_message(
+        &self,
+        message_id: &str,
+        seed: &[u8],
+    ) -> Result<Value, RoomError> {
+        if Uuid::parse_str(message_id)
+            .map_err(|_| RoomError::Invalid)?
+            .to_string()
+            != message_id
+        {
+            return Err(RoomError::Invalid);
+        }
+        let target = format!(
+            "/rooms/{}/messages?transport_generation={}&after=0&limit=1&message_id={message_id}",
             self.seat.room, self.seat.transport_generation
         );
         let response = self

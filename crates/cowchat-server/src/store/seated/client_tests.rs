@@ -54,6 +54,7 @@ fn receiver_rejects_untrusted_wake_before_using_pointer() {
     assert_eq!(wake.dispatch_id(), "fixture-dispatch");
     assert_eq!(wake.since_seq(), 0);
     assert_eq!(wake.tip(), 1);
+    assert_eq!(wake.seq(), 1);
     assert!(verify_wake(&headers, b"{}", WEBHOOK_SECRET, ROOM, 0, now).is_err());
     assert!(verify_wake(&headers, &body, &[74; 32], ROOM, 0, now).is_err());
     assert!(verify_wake(&headers, &body, WEBHOOK_SECRET, ROOM, 0, now + 301).is_err());
@@ -137,6 +138,17 @@ async fn room_client_retries_exact_ciphertext_and_reconciles_authenticated_winne
     assert_eq!(reconciled["status"], "existing");
     let page = client.read_ciphertext_page(0, &seed()).await.unwrap();
     assert_eq!(page["records"].as_array().unwrap().len(), 2);
+    let trigger = client
+        .read_ciphertext_message(wake.message_id(), &seed())
+        .await
+        .unwrap();
+    assert_eq!(trigger["records"].as_array().unwrap().len(), 1);
+    assert_eq!(trigger["records"][0]["position"], wake.seq());
+    assert_eq!(trigger["records"][0]["record"]["message_id"], ID);
+    assert!(client
+        .read_ciphertext_message("bad&id", &seed())
+        .await
+        .is_err());
     let record = crate::seated::SealedRecord::parse(
         &serde_json::to_vec(&page["records"][1]["record"]).unwrap(),
     )
