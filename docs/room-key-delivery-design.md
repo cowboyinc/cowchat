@@ -241,3 +241,19 @@ cut. Delegated identity renewal stays out of scope pending the stage 2 ruling.
 Claude's message 1664 approved the builder HTTP enrollment and owner-to-builder
 delivery proof, completing stage 1 (committed a5f98ab). This does not complete
 automatic renewal or production key recovery.
+
+
+## Stage 2 direction confirmed (#1799)
+
+Chad approved the owner-delegated access-authority boundary and standing grants
+restricted to preapproved runtime identity keys. Initial CBSS secret, committee
+and policy setup may write chain state once; acquire, renew, wake, read, sign and
+reply remain entirely off-chain. This resolves the earlier stage-2 trust/setup
+questions above. It does not authorize live setup or weaken job-release checks.
+
+The next review artifact is [CBSS room-session release v1](cbss-room-session-v1.md),
+with separate canonical request and response domains, no job ID, exact scope,
+sealed partials and public golden framing/signature vectors. It is a proposal,
+not implemented wire behavior. Claude must review it before proxy/client secret
+handling starts. Historical-generation acquisition and automatic certificate/key
+rotation are explicitly outside that first exact-version release surface.
