@@ -38,7 +38,7 @@ fn operation(actor: Address, key: &[u8], value: &[u8], next: &[u8]) -> Vec<u8> {
     out
 }
 
-fn proof(timestamp: u64, value: Vec<u8>) -> (Vec<u8>, Vec<u8>, [u8; 20]) {
+pub(crate) fn proof(timestamp: u64, value: Vec<u8>) -> (Vec<u8>, Vec<u8>, [u8; 20]) {
     let actor = Address::from_low_u64(9);
     let key = ACTOR_CONTROL_KEY;
     let next = actor_storage_state_key_v1(actor, b"z").unwrap();
@@ -130,6 +130,15 @@ fn proof(timestamp: u64, value: Vec<u8>) -> (Vec<u8>, Vec<u8>, [u8; 20]) {
         bundle.encode().to_vec(),
         *actor.as_bytes(),
     )
+}
+
+pub(crate) fn authority(checkpoint: Vec<u8>, endpoint: String) -> ActorProofAuthority {
+    ActorProofAuthority {
+        checkpoint,
+        checkpoint_height: 9,
+        endpoint: endpoint.parse().unwrap(),
+        client: reqwest::Client::new(),
+    }
 }
 
 fn control() -> Vec<u8> {

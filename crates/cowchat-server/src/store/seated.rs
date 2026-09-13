@@ -4,9 +4,11 @@ use super::*;
 use base64::{engine::general_purpose::STANDARD_NO_PAD as B64, Engine};
 use cowchat_crypto::{authorization, request};
 
+mod actors;
 mod enrollment;
 mod history;
 mod subscriptions;
+pub(super) use subscriptions::allows_message_on;
 pub(super) use subscriptions::record_wake_on;
 
 pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -35,6 +37,11 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
     CREATE TABLE IF NOT EXISTS seated_wakes (
         delivery_id TEXT PRIMARY KEY REFERENCES subscription_deliveries(delivery_id) ON DELETE CASCADE,
         payload TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS seated_actor_floors (
+        chain_id INTEGER NOT NULL, actor BLOB NOT NULL, chain_instance BLOB NOT NULL,
+        height INTEGER NOT NULL, block_hash BLOB NOT NULL, state_root BLOB NOT NULL,
+        authorization_generation INTEGER NOT NULL, commitment BLOB NOT NULL, PRIMARY KEY(chain_id,actor)
     );",
     )?;
     ensure_column_exists(
@@ -68,6 +75,25 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
             "BLOB NOT NULL DEFAULT X''",
         )?;
     }
+    ensure_column_exists(
+        conn,
+        "seated_credentials",
+        "from_key_generation",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(conn, "seated_credentials", "actor_chain_id", "INTEGER")?;
+    ensure_column_exists(
+        conn,
+        "seated_credentials",
+        "actor_authorization_generation",
+        "INTEGER",
+    )?;
+    ensure_column_exists(
+        conn,
+        "seated_credentials",
+        "enrollment_digest",
+        "BLOB NOT NULL DEFAULT X''",
+    )?;
     Ok(())
 }
 

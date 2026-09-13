@@ -2344,6 +2344,9 @@ fn enqueue_delivery_on(
     message_id: &str,
     next_attempt_at: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
+    if !seated::allows_message_on(conn, subscription_id, message_id)? {
+        return Ok(false);
+    }
     let seated_non_message:bool=conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM seated_subscriptions WHERE subscription_id=?1)
          AND NOT EXISTS(SELECT 1 FROM messages WHERE message_id=?2 AND json_extract(metadata,'$.type')='message')",

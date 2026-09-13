@@ -203,3 +203,44 @@ pub(in crate::store) fn record_wake_on(
     }
     Ok(())
 }
+
+pub(in crate::store) fn allows_message_on(
+    conn: &Connection,
+    subscription: &str,
+    message: &str,
+) -> Result<bool, StoreError> {
+    let seated: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM seated_subscriptions WHERE subscription_id=?1)",
+        [subscription],
+        |r| r.get(0),
+    )?;
+    if !seated {
+        return Ok(true);
+    }
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT c.from_key_generation,m.metadata FROM seated_subscriptions s
+         JOIN seated_credentials c ON c.room_id=s.room_id AND c.cert_id=s.cert_id
+         JOIN messages m ON m.room_id=s.room_id AND m.message_id=?2 WHERE s.subscription_id=?1",
+            params![subscription, message],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((floor, metadata)) = row else {
+        return Ok(false);
+    };
+    if floor < 0 {
+        return Err(StoreError::SeatedAuthorization);
+    }
+    let metadata: serde_json::Value = serde_json::from_str(&metadata)?;
+    let raw = B64
+        .decode(
+            metadata["header_cbor"]
+                .as_str()
+                .ok_or(StoreError::SeatedAuthorization)?,
+        )
+        .map_err(|_| StoreError::SeatedAuthorization)?;
+    let header: crate::seated::RecordHeader =
+        ciborium::from_reader(raw.as_slice()).map_err(|_| StoreError::SeatedAuthorization)?;
+    Ok(header.gen >= floor as u64)
+}

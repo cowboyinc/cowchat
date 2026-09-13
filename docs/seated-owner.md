@@ -77,7 +77,8 @@ Signed subscription update/delete/re-enable and broader owner-approved filters
 remain to implement. Existing delivery retry deadlines still apply.
 
 The owner endpoint, signed append, owner history, and mention-subscription creation
-are implemented; owner credential renewal/revocation endpoints, actor enrollment from a
-verified finalized control record, and the full actor wake/reply proof remain to
-be connected. Tests that directly install trusted actor-like contexts are explicitly
+are implemented. [Actor enrollment](actor-enrollment.md) now verifies a fetched
+finalized control proof before installation. Owner credential renewal/revocation
+endpoints and the full actor wake/reply proof remain to be connected.
+Tests that directly install trusted actor-like contexts are explicitly
 provisioning fixtures, not evidence of live actor identity verification.

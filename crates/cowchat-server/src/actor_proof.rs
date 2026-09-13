@@ -230,4 +230,4 @@ fn parse_control(raw: &[u8]) -> Result<([u8; 20], [u8; 32], u64), ActorProofErro
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -1242,6 +1242,7 @@ dependencies = [
  "cowchat-crypto",
  "dashmap",
  "directories",
+ "ed25519-dalek",
  "env_logger",
  "fs2",
  "futures",

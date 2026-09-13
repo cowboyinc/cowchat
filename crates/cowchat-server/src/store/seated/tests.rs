@@ -3,6 +3,9 @@ use ciborium::value::Value;
 use cowchat_crypto::{canonical, envelope};
 use sha2::{Digest, Sha256};
 
+#[path = "actor_tests.rs"]
+mod actor_tests;
+
 const ROOM: &str = "10000000-0000-4000-8000-000000000001";
 const ID: &str = "20000000-0000-4000-8000-000000000001";
 const SEAT: &str = "0x1111111111111111111111111111111111111111";
@@ -488,6 +491,14 @@ async fn seated_http_append_binds_actual_request_and_returns_only_ciphertext_rec
 }
 
 fn owner_enrollment(room: &str, role: &str, expiry: u64) -> (Vec<u8>, String, String) {
+    owner_enrollment_on_chain(room, role, expiry, 1)
+}
+fn owner_enrollment_on_chain(
+    room: &str,
+    role: &str,
+    expiry: u64,
+    chain: u64,
+) -> (Vec<u8>, String, String) {
     use cowchat_crypto::certificates;
     use k256::ecdsa::SigningKey;
     use sha3::Keccak256;
@@ -510,7 +521,7 @@ fn owner_enrollment(room: &str, role: &str, expiry: u64) -> (Vec<u8>, String, St
         .collect();
     let identity = encode(&Value::Map(vec![
         (text("v"), 3u64.into()),
-        (text("chain_id"), 1u64.into()),
+        (text("chain_id"), chain.into()),
         (text("address"), text(&seat)),
         (text("pubkey"), Value::Bytes(public)),
         (text("enc_pubkey"), Value::Bytes(vec![8; 32])),
@@ -528,7 +539,7 @@ fn owner_enrollment(room: &str, role: &str, expiry: u64) -> (Vec<u8>, String, St
     ]));
     let membership = encode(&Value::Map(vec![
         (text("v"), 3u64.into()),
-        (text("chain_id"), 1u64.into()),
+        (text("chain_id"), chain.into()),
         (text("room"), text(room)),
         (text("seat"), text(&seat)),
         (

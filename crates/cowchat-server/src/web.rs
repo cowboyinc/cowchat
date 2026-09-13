@@ -75,6 +75,7 @@ pub struct AppState {
     pub reconnect_mgr: Arc<ReconnectManager>,
     pub task_mgr: Arc<TaskManager>,
     pub webhook_mgr: Arc<crate::webhooks::WebhookManager>,
+    pub actor_proof_authority: Option<Arc<crate::actor_proof::ActorProofAuthority>>,
     pub signup_enabled: bool,
     pub admin_secret: Option<String>,
     pub allowed_origins: Vec<String>,
@@ -93,6 +94,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/rooms/{room_id}/owner",
             post(crate::seated::enroll_owner).layer(DefaultBodyLimit::max(512 * 1024)),
+        )
+        .route(
+            "/rooms/{room_id}/actors",
+            post(crate::seated::enroll_actor).layer(DefaultBodyLimit::max(512 * 1024)),
         )
         .route(
             "/rooms/{room_id}/messages",
@@ -755,6 +760,7 @@ pub(crate) mod tests {
             reconnect_mgr: Arc::new(ReconnectManager::new()),
             task_mgr: Arc::new(TaskManager::new(store.clone())),
             webhook_mgr: Arc::new(crate::webhooks::WebhookManager::new(store, true)),
+            actor_proof_authority: None,
             signup_enabled: false,
             admin_secret: None,
             allowed_origins: vec![],

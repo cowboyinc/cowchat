@@ -111,6 +111,7 @@ pub struct ServerConfig {
 }
 
 pub struct CowchatServer {
+    actor_proof_authority: Option<Arc<crate::actor_proof::ActorProofAuthority>>,
     config: ServerConfig,
     _instance_lock: File,
     listeners: Mutex<Option<PreparedListeners>>,
@@ -335,6 +336,13 @@ fn bind_tcp_listener(addr: &str) -> io::Result<std::net::TcpListener> {
 }
 
 impl CowchatServer {
+    pub fn with_actor_proof_authority(
+        mut self,
+        authority: crate::actor_proof::ActorProofAuthority,
+    ) -> Self {
+        self.actor_proof_authority = Some(Arc::new(authority));
+        self
+    }
     pub fn new(mut config: ServerConfig) -> Result<Self, Box<dyn std::error::Error>> {
         // Lock the canonical database identity before touching SQLite, auth,
         // webhooks, or any listener path. A losing launch cannot migrate the
@@ -380,6 +388,7 @@ impl CowchatServer {
 
         Ok(Self {
             config,
+            actor_proof_authority: None,
             _instance_lock: instance_lock,
             listeners: Mutex::new(Some(PreparedListeners {
                 uds: uds_listener,
@@ -544,6 +553,7 @@ impl CowchatServer {
                 reconnect_mgr: self.reconnect_mgr.clone(),
                 task_mgr: self.task_mgr.clone(),
                 webhook_mgr: self.webhook_mgr.clone(),
+                actor_proof_authority: self.actor_proof_authority.clone(),
                 signup_enabled: self.config.http_signup_enabled,
                 admin_secret: self.config.http_admin_secret.clone(),
                 allowed_origins: self.config.http_allowed_origins.clone(),

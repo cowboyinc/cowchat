@@ -24,12 +24,12 @@ impl Store {
         }
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let (public,context,generation):(Vec<u8>,Vec<u8>,i64)=tx.query_row(
-            "SELECT c.public_key,c.trusted_context,r.transport_generation FROM seated_credentials c JOIN seated_rooms r ON r.room_id=c.room_id
+        let (public,context,generation,from_gen):(Vec<u8>,Vec<u8>,i64,i64)=tx.query_row(
+            "SELECT c.public_key,c.trusted_context,r.transport_generation,c.from_key_generation FROM seated_credentials c JOIN seated_rooms r ON r.room_id=c.room_id
              WHERE c.room_id=?1 AND c.cert_id=?2 AND c.auth_generation=r.auth_generation",
-            params![room,cert],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            params![room,cert],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
         ).optional()?.ok_or_else(invalid)?;
-        if generation < 0 || query.transport_generation != generation as u64 {
+        if generation < 0 || from_gen < 0 || query.transport_generation != generation as u64 {
             return Err(invalid());
         }
         authorization::verify_member_access(&context, "read", now_ms as u64)
@@ -63,6 +63,12 @@ impl Store {
                 let bytes = B64.decode(header).map_err(|_| invalid())?;
                 let header: crate::seated::RecordHeader =
                     ciborium::from_reader(bytes.as_slice()).map_err(|_| invalid())?;
+                // Advance over inaccessible old generations so a bounded page
+                // cannot strand the reader before its first authorized record.
+                if header.gen < from_gen as u64 {
+                    position = message.seq;
+                    continue;
+                }
                 let mut record = serde_json::to_value(header)?;
                 record["body"] = message.content.into();
                 record["sig"] = message.metadata.get("sig").cloned().ok_or_else(invalid)?;

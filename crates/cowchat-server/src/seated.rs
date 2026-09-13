@@ -161,6 +161,66 @@ pub(crate) async fn enroll_owner(
     }
 }
 
+pub(crate) async fn enroll_actor(
+    State(state): State<crate::web::AppState>,
+    Path(room): Path<String>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let Some(authority) = state.actor_proof_authority.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let decode = |name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| B64.decode(v).ok())
+    };
+    let (Some(projection), Some(signature)) =
+        (decode("x-cowchat-request"), decode("x-cowchat-signature"))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let target = uri
+        .path_and_query()
+        .map(|v| v.as_str())
+        .unwrap_or(uri.path());
+    let prepared = match state.store.prepare_actor_enrollment(
+        &room,
+        target,
+        &body,
+        &projection,
+        &signature,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let proof = match authority.fetch(prepared.actor()).await {
+        Ok(proof) => proof,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    match state.store.install_actor_enrollment(
+        prepared,
+        proof,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok((seat, cert)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"room_id":room,"seat":seat,"cert":cert,"mode":"seated"})),
+        )
+            .into_response(),
+        Err(crate::store::StoreError::MessageConflict | crate::store::StoreError::SeatedReplay) => {
+            StatusCode::CONFLICT.into_response()
+        }
+        Err(crate::store::StoreError::SeatedAuthorization) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HistoryQuery {

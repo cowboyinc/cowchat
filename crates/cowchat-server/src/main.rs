@@ -54,6 +54,10 @@ enum Commands {
         #[arg(long)]
         http: Option<String>,
 
+        /// RPC courier for actor enrollment; requires a release-pinned checkpoint build.
+        #[arg(long, requires = "http")]
+        actor_proof_rpc: Option<String>,
+
         /// Allow POST /api/keys. Open self-serve (per-IP rate-limited) unless
         /// --http-admin-secret gates it.
         #[arg(long)]
@@ -235,6 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tcp,
             no_tcp,
             http,
+            actor_proof_rpc,
             enable_http_signup,
             http_admin_secret,
             http_origins,
@@ -262,6 +267,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let server = CowchatServer::new(config)?;
+            let server = if let Some(origin) = actor_proof_rpc {
+                server.with_actor_proof_authority(
+                    cowchat_server::actor_proof::ActorProofAuthority::from_release(&origin)?,
+                )
+            } else {
+                server
+            };
             if no_auth {
                 log::info!("Running in NO-AUTH mode (open access)");
             } else {
