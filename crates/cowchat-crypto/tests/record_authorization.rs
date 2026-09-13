@@ -173,3 +173,26 @@ fn actor_and_builder_use_distinct_authenticated_seats() {
         assert_eq!(verify(header, context), Ok(()));
     }
 }
+
+#[test]
+fn member_read_access_requires_explicit_read_right_and_current_credentials() {
+    let (_, mut context) = owner_fixture();
+    assert_eq!(
+        authorization::verify_member_access(&encode(context.clone()).unwrap(), "read", 1000),
+        Ok(())
+    );
+    put(&mut context, "rights", Value::Array(vec![text("write")]));
+    assert_eq!(
+        authorization::verify_member_access(&encode(context.clone()).unwrap(), "read", 1000),
+        Err(Error::Authority)
+    );
+    assert_eq!(
+        authorization::verify_member_access(&encode(context.clone()).unwrap(), "write", 1000),
+        Ok(())
+    );
+    put(&mut context, "expires_at", 999u64.into());
+    assert_eq!(
+        authorization::verify_member_access(&encode(context).unwrap(), "write", 1000),
+        Err(Error::Expiry)
+    );
+}

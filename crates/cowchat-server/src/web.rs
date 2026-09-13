@@ -96,7 +96,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/rooms/{room_id}/messages",
-            post(crate::seated::append).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+            post(crate::seated::append)
+                .get(crate::seated::history)
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
         .route("/api/rooms/{room_id}/history", get(api_room_history))
         .route(
@@ -125,6 +127,7 @@ pub fn router(state: AppState) -> Router {
                     header::HeaderName::from_static(API_KEY_HEADER),
                     header::HeaderName::from_static("x-cowchat-request"),
                     header::HeaderName::from_static("x-cowchat-signature"),
+                    header::HeaderName::from_static("x-cowchat-certificate"),
                 ]),
         )
     }

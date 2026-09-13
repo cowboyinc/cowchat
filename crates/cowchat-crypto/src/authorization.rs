@@ -23,23 +23,7 @@ pub fn verify_member_record(
     trusted_context: &[u8],
     now_ms: u64,
 ) -> Result<()> {
-    let context = Fields::new(
-        canonical::decode(trusted_context)?,
-        &[
-            "chain_id",
-            "room",
-            "gen",
-            "seat",
-            "role",
-            "cert",
-            "public_key",
-            "rights",
-            "expires_at",
-            "door_kind",
-            "bound_sender",
-            "forwarded_seat",
-        ],
-    )?;
+    let context = context(trusted_context)?;
     let public_key = context.bytes::<32>("public_key")?;
     envelope::verify_record(header, body, &public_key, signature)?;
     let record = Fields::new(canonical::decode(header)?, envelope::HEADER_FIELDS)?;
@@ -50,20 +34,8 @@ pub fn verify_member_record(
     {
         return Err(Error::Scope);
     }
-    if context
-        .nullable_uint("expires_at")?
-        .is_some_and(|expiry| now_ms > expiry)
-    {
-        return Err(Error::Expiry);
-    }
-    let rights = context.strings("rights")?;
-    if !rights.iter().any(|right| right == "write")
-        || rights
-            .iter()
-            .any(|right| !["manage", "read", "write"].contains(&right.as_str()))
-        || rights.windows(2).any(|pair| pair[0] >= pair[1])
-        || record.text("class")? == "system"
-    {
+    check_access(&context, "write", now_ms)?;
+    if record.text("class")? == "system" {
         return Err(Error::Authority);
     }
     let seat = record.text("seat")?;
@@ -108,4 +80,53 @@ pub fn verify_member_record(
         _ => return Err(Error::Authority),
     }
     Ok(())
+}
+
+fn context(trusted_context: &[u8]) -> Result<Fields> {
+    Fields::new(
+        canonical::decode(trusted_context)?,
+        &[
+            "chain_id",
+            "room",
+            "gen",
+            "seat",
+            "role",
+            "cert",
+            "public_key",
+            "rights",
+            "expires_at",
+            "door_kind",
+            "bound_sender",
+            "forwarded_seat",
+        ],
+    )
+}
+
+fn check_access(context: &Fields, required: &str, now_ms: u64) -> Result<()> {
+    if !["read", "write", "manage"].contains(&required) {
+        return Err(Error::Authority);
+    }
+    if context
+        .nullable_uint("expires_at")?
+        .is_some_and(|expiry| now_ms > expiry)
+    {
+        return Err(Error::Expiry);
+    }
+    let rights = context.strings("rights")?;
+    if !rights.iter().any(|right| right == required)
+        || rights
+            .iter()
+            .any(|right| !["manage", "read", "write"].contains(&right.as_str()))
+        || rights.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(Error::Authority);
+    }
+    Ok(())
+}
+
+/// Check a service operation against already-authenticated, current membership.
+/// The caller still binds the signed request and rechecks live room generation
+/// in its transaction. This never grants invocation/spend authority.
+pub fn verify_member_access(trusted_context: &[u8], required: &str, now_ms: u64) -> Result<()> {
+    check_access(&context(trusted_context)?, required, now_ms)
 }

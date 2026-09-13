@@ -114,9 +114,12 @@ fn seal_header(header: crate::seated::RecordHeader, plaintext: &[u8]) -> Vec<u8>
     serde_json::to_vec(&wire).unwrap()
 }
 fn signed(body: &[u8], nonce: u8, now: i64) -> (Vec<u8>, Vec<u8>) {
+    signed_for("POST", TARGET, body, nonce, now)
+}
+fn signed_for(method: &str, target: &str, body: &[u8], nonce: u8, now: i64) -> (Vec<u8>, Vec<u8>) {
     let projection = encode(&Value::Array(vec![
-        text("POST"),
-        text(TARGET),
+        text(method),
+        text(target),
         Value::Bytes(Sha256::digest(body).to_vec()),
         (now as u64).into(),
         Value::Bytes(vec![nonce; 16]),
@@ -472,5 +475,137 @@ async fn owner_enrolls_through_real_http_then_posts_signed_encrypted_record() {
         .unwrap()
         .contains("only the owner"));
     assert_eq!(persisted.agent_name, "Owner");
+    server.abort();
+}
+
+#[tokio::test]
+async fn seated_signed_history_returns_verifiable_ciphertext_and_binds_cursor_query() {
+    let state = crate::web::tests::test_state();
+    create_empty_owned_room(&state.store);
+    let now = Utc::now().timestamp_millis();
+    let (enrollment, seat, cert) = owner_enrollment(ROOM, "owner", now as u64 + 60_000);
+    state
+        .store
+        .enroll_seated_owner(ROOM, "master", &enrollment, now)
+        .unwrap();
+    let mut header = crate::seated::SealedRecord::parse(&sealed(b"template"))
+        .unwrap()
+        .header;
+    header.seat = seat;
+    header.cert = cert.clone();
+    header.gen = 0;
+    header.mentions.clear();
+    let body = seal_header(header, b"owner reads this locally");
+    append(&state.store, &body, 60, now).unwrap();
+    let store = state.store.clone();
+    let (server, addr) = crate::web::tests::start_test_web_server(state).await;
+    let target = format!("{TARGET}?transport_generation=0&after=0&limit=1");
+    let (projection, signature) = signed_for("GET", &target, b"", 61, now);
+    let http = reqwest::Client::new();
+    let get = |target: String, projection: Vec<u8>, signature: Vec<u8>| {
+        http.get(format!("http://{addr}{target}"))
+            .header("x-cowchat-certificate", &cert)
+            .header("x-cowchat-request", B64.encode(projection))
+            .header("x-cowchat-signature", B64.encode(signature))
+    };
+    let response = get(target.clone(), projection.clone(), signature.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let page: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        page["cursor"],
+        serde_json::json!({"room":ROOM,"transport_generation":0,"position":1})
+    );
+    assert_eq!(page["records"].as_array().unwrap().len(), 1);
+    let raw = serde_json::to_vec(&page["records"][0]["record"]).unwrap();
+    let record = crate::seated::SealedRecord::parse(&raw).unwrap();
+    assert_eq!(record.header.message_id, ID);
+    let public: Vec<u8> = store
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT public_key FROM seated_credentials WHERE room_id=?1",
+            [ROOM],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        envelope::open(
+            &record.header_cbor,
+            &record.body,
+            &public,
+            &record.signature,
+            &[42; 32]
+        )
+        .unwrap(),
+        b"owner reads this locally"
+    );
+    assert_eq!(
+        get(target.clone(), projection.clone(), signature.clone())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    assert_eq!(
+        get(target.replace("limit=1", "limit=2"), projection, signature)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let changed = target.replace("generation=0", "generation=1");
+    let (body_projection, body_signature) = signed_for("GET", &target, b"", 64, now);
+    assert_eq!(
+        get(
+            target.clone(),
+            body_projection.clone(),
+            body_signature.clone()
+        )
+        .body("unsigned bytes")
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    // A rejected HTTP request must not consume its signed nonce.
+    assert_eq!(
+        get(target.clone(), body_projection, body_signature)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::OK
+    );
+    let (projection, signature) = signed_for("GET", &changed, b"", 62, now);
+    assert_eq!(
+        get(changed, projection, signature)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE seated_rooms SET auth_generation=1", [])
+        .unwrap();
+    let (projection, signature) = signed_for("GET", &target, b"", 63, now);
+    assert_eq!(
+        get(target, projection, signature)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
     server.abort();
 }

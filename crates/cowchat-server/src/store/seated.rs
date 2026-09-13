@@ -5,6 +5,7 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD as B64, Engine};
 use cowchat_crypto::{authorization, request};
 
 mod enrollment;
+mod history;
 
 pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
@@ -34,6 +35,12 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
         "seated_rooms",
         "enrollment_digest",
         "BLOB NOT NULL DEFAULT X''",
+    )?;
+    ensure_column_exists(
+        conn,
+        "seated_rooms",
+        "transport_generation",
+        "INTEGER NOT NULL DEFAULT 0",
     )?;
     for column in [
         "identity_certificate",
@@ -138,24 +145,7 @@ impl Store {
         .map_err(|_| invalid())?;
         // Recheck authority and consume the request nonce in the same transaction
         // as the append/outbox; no revocation or crash can split these effects.
-        let token: (Vec<u8>, Vec<u8>, u64) =
-            ciborium::from_reader(token.as_slice()).map_err(|_| invalid())?;
-        if token.0 != public_key {
-            return Err(invalid());
-        }
-        let retain = i64::try_from(token.2).map_err(|_| invalid())?;
-        tx.execute(
-            "DELETE FROM seated_request_nonces WHERE retain_through_ms < ?1",
-            [now_ms],
-        )?;
-        if tx.execute(
-            "INSERT INTO seated_request_nonces(public_key, nonce, retain_through_ms)
-            VALUES (?1, ?2, ?3) ON CONFLICT(public_key, nonce) DO NOTHING",
-            params![public_key, token.1, retain],
-        )? == 0
-        {
-            return Err(StoreError::SeatedReplay);
-        }
+        claim_nonce_on(&tx, &token, &public_key, now_ms)?;
         let metadata = serde_json::json!({"v":3, "header_cbor":B64.encode(&record.header_cbor),
             "sig":B64.encode(&record.signature), "type":record.header.class,
             "wake_hint":record.header.wake_hint, "signer_seat":principal});
@@ -173,6 +163,33 @@ impl Store {
         tx.commit()?;
         Ok(result)
     }
+}
+
+fn claim_nonce_on(
+    tx: &Connection,
+    token: &[u8],
+    public_key: &[u8],
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let invalid = || StoreError::SeatedAuthorization;
+    let token: (Vec<u8>, Vec<u8>, u64) = ciborium::from_reader(token).map_err(|_| invalid())?;
+    if token.0.as_slice() != public_key {
+        return Err(invalid());
+    }
+    let retain = i64::try_from(token.2).map_err(|_| invalid())?;
+    tx.execute(
+        "DELETE FROM seated_request_nonces WHERE retain_through_ms < ?1",
+        [now_ms],
+    )?;
+    if tx.execute(
+        "INSERT INTO seated_request_nonces(public_key, nonce, retain_through_ms)
+        VALUES (?1, ?2, ?3) ON CONFLICT(public_key, nonce) DO NOTHING",
+        params![public_key, token.1, retain],
+    )? == 0
+    {
+        return Err(StoreError::SeatedReplay);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

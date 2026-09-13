@@ -160,3 +160,71 @@ pub(crate) async fn enroll_owner(
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HistoryQuery {
+    pub transport_generation: u64,
+    #[serde(default)]
+    pub after: i64,
+    #[serde(default = "default_page_limit")]
+    pub limit: u32,
+}
+fn default_page_limit() -> u32 {
+    100
+}
+
+pub(crate) async fn history(
+    State(state): State<crate::web::AppState>,
+    Path(room): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    // History signs an empty body. Reject unexpected bytes instead of verifying
+    // a different request from the one the HTTP peer actually sent.
+    if !body.is_empty() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let decode_header = |name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| B64.decode(value).ok())
+    };
+    let (Some(cert), Some(projection), Some(signature)) = (
+        headers
+            .get("x-cowchat-certificate")
+            .and_then(|value| value.to_str().ok()),
+        decode_header("x-cowchat-request"),
+        decode_header("x-cowchat-signature"),
+    ) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if query.after < 0 || query.limit == 0 || query.limit > 100 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let target = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or(uri.path());
+    match state.store.read_seated_history(
+        &room,
+        cert,
+        method.as_str(),
+        target,
+        &projection,
+        &signature,
+        &query,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
+        Err(crate::store::StoreError::SeatedReplay) => StatusCode::CONFLICT.into_response(),
+        Err(crate::store::StoreError::SeatedAuthorization) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
