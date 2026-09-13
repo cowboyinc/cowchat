@@ -42,6 +42,11 @@ The test verifies and decrypts the returned record on the client, and exercises
 altered queries, unexpected bodies, replay, wrong generations, and revocation.
 The server never receives a room decryption key.
 
+An optional signed `message_id=<canonical UUID>` query restricts that page to one
+record, within the same room, cursor, membership and key-generation bounds. This
+lets a reply producer recover a conflicting append's authenticated winner without
+scanning the room. An absent or inaccessible record returns an empty page.
+
 Legacy bearer writes, history, and room access cannot bypass seated authentication.
 Legacy rename/destroy and re-enable paths are also blocked. Seated messages,
 receipts, and blob rows are exempt from legacy age retention.

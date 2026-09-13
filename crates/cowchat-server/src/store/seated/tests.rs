@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 
 #[path = "actor_tests.rs"]
 mod actor_tests;
+#[path = "client_tests.rs"]
+mod client_tests;
 
 const ROOM: &str = "10000000-0000-4000-8000-000000000001";
 const ID: &str = "20000000-0000-4000-8000-000000000001";
@@ -825,6 +827,34 @@ async fn seated_signed_history_returns_verifiable_ciphertext_and_binds_cursor_qu
         reqwest::StatusCode::UNAUTHORIZED
     );
     let changed = target.replace("generation=0", "generation=1");
+    let exact = format!("{target}&message_id={ID}");
+    let (projection, signature) = signed_for("GET", &exact, b"", 65, now);
+    let page: serde_json::Value = get(exact.clone(), projection.clone(), signature.clone())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["records"][0]["record"]["message_id"], ID);
+    let missing = exact.replace(ID, "30000000-0000-4000-8000-000000000001");
+    assert_eq!(
+        get(missing.clone(), projection, signature)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let (projection, signature) = signed_for("GET", &missing, b"", 66, now);
+    let page: serde_json::Value = get(missing, projection, signature)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["records"], serde_json::json!([]));
     let (body_projection, body_signature) = signed_for("GET", &target, b"", 64, now);
     assert_eq!(
         get(

@@ -19,6 +19,9 @@ impl Store {
             || query.after < 0
             || query.limit == 0
             || query.limit > 100
+            || query.message_id.as_ref().is_some_and(|id| {
+                !uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == *id)
+            })
         {
             return Err(invalid());
         }
@@ -50,9 +53,11 @@ impl Store {
         let mut response_bytes = 0;
         {
             let mut statement=tx.prepare("SELECT message_id,room_id,agent_id,agent_name,content,reply_to_message,metadata,created_at,seq
-                FROM messages WHERE room_id=?1 AND seq>?2 ORDER BY seq ASC LIMIT ?3")?;
-            let rows =
-                statement.query_map(params![room, query.after, query.limit], map_message_row)?;
+                FROM messages WHERE room_id=?1 AND seq>?2 AND (?4 IS NULL OR message_id=?4) ORDER BY seq ASC LIMIT ?3")?;
+            let rows = statement.query_map(
+                params![room, query.after, query.limit, query.message_id],
+                map_message_row,
+            )?;
             for message in rows {
                 let message = message?;
                 let header = message

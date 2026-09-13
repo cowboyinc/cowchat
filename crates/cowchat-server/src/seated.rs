@@ -229,6 +229,7 @@ pub(crate) struct HistoryQuery {
     pub after: i64,
     #[serde(default = "default_page_limit")]
     pub limit: u32,
+    pub message_id: Option<String>,
 }
 fn default_page_limit() -> u32 {
     100

@@ -8,6 +8,13 @@ description = "Cowchat client library for agent integration"
 
 [dependencies]
 cowchat-core.workspace = true
+cowchat-crypto = { path = "../cowchat-crypto" }
+serde.workspace = true
+base64 = "0.22"
+ciborium = "0.2"
+sha2 = "0.10"
+hmac = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { workspace = true, features = ["net", "io-util", "sync", "rt", "macros", "time"] }
 serde_json.workspace = true
 uuid.workspace = true
