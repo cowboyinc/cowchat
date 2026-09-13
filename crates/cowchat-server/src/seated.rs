@@ -237,6 +237,70 @@ fn default_page_limit() -> u32 {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct DiagnosticsQuery {
+    pub transport_generation: u64,
+}
+
+pub(crate) async fn diagnostics(
+    State(state): State<crate::web::AppState>,
+    Path(room): Path<String>,
+    query: Result<axum::extract::Query<DiagnosticsQuery>, axum::extract::rejection::QueryRejection>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let Ok(axum::extract::Query(query)) = query else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if !body.is_empty() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let decode_header = |name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| B64.decode(value).ok())
+    };
+    let (Some(cert), Some(projection), Some(signature)) = (
+        headers
+            .get("x-cowchat-certificate")
+            .and_then(|value| value.to_str().ok()),
+        decode_header("x-cowchat-request"),
+        decode_header("x-cowchat-signature"),
+    ) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let target = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or(uri.path());
+    match state.store.read_seated_diagnostics(
+        &room,
+        cert,
+        method.as_str(),
+        target,
+        &projection,
+        &signature,
+        query.transport_generation,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(snapshot) => (
+            StatusCode::OK,
+            [("cache-control", "no-store")],
+            Json(snapshot),
+        )
+            .into_response(),
+        Err(crate::store::StoreError::SeatedReplay) => StatusCode::CONFLICT.into_response(),
+        Err(crate::store::StoreError::SeatedAuthorization) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct MentionSubscription {
     pub subscription_id: String,
     pub transport_generation: u64,

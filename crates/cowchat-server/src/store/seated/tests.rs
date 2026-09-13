@@ -9,6 +9,8 @@ mod actor_tests;
 mod builder_tests;
 #[path = "client_tests.rs"]
 mod client_tests;
+#[path = "diagnostics_tests.rs"]
+mod diagnostics_tests;
 #[path = "door_filter_tests.rs"]
 mod door_filter_tests;
 #[path = "key_envelope_tests.rs"]

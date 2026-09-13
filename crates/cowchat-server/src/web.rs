@@ -110,6 +110,10 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
         .route(
+            "/rooms/{room_id}/diagnostics",
+            get(crate::seated::diagnostics).layer(DefaultBodyLimit::max(1024)),
+        )
+        .route(
             "/rooms/{room_id}/subscriptions",
             post(crate::seated::subscribe),
         )

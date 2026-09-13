@@ -6,6 +6,7 @@ use cowchat_crypto::{authorization, request};
 
 mod actors;
 mod builders;
+mod diagnostics;
 mod enrollment;
 mod history;
 mod key_envelopes;
