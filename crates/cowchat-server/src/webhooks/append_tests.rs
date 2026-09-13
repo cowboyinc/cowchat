@@ -151,6 +151,14 @@ async fn append_exhausted_webhook_is_terminal_and_releases_retention() {
         .unwrap()
         .pop()
         .unwrap();
+    store
+        .reschedule_delivery(
+            &delivery.delivery_id,
+            chrono::Utc::now(),
+            5,
+            "fixture retry exhaustion",
+        )
+        .unwrap();
     delivery.attempts = 5;
     let manager = WebhookManager::new(store.clone(), true);
     process_delivery(manager.inner.clone(), delivery).await;

@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 mod actor_tests;
 #[path = "client_tests.rs"]
 mod client_tests;
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 const ROOM: &str = "10000000-0000-4000-8000-000000000001";
 const ID: &str = "20000000-0000-4000-8000-000000000001";

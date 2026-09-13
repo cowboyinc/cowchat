@@ -345,6 +345,135 @@ pub(crate) async fn subscribe(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SubscriptionMutation {
+    pub operation_id: String,
+    pub transport_generation: u64,
+    pub expected_revision: i64,
+    pub action: SubscriptionAction,
+}
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum SubscriptionAction {
+    Update { webhook_url: String, secret: String },
+    Repair,
+    Delete,
+}
+impl SubscriptionMutation {
+    pub(crate) fn validate(&self) -> Result<(), ()> {
+        if uuid::Uuid::parse_str(&self.operation_id)
+            .map(|id| id.to_string() != self.operation_id)
+            .unwrap_or(true)
+            || self.expected_revision < 0
+            || self.expected_revision == i64::MAX
+        {
+            return Err(());
+        }
+        if let SubscriptionAction::Update {
+            webhook_url,
+            secret,
+        } = &self.action
+        {
+            if webhook_url.len() > 2048 || !(32..=512).contains(&secret.len()) {
+                return Err(());
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn subscription_lifecycle(
+    State(state): State<crate::web::AppState>,
+    Path((room, subscription)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if body.len() > 16 * 1024 {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let Some(cert) = headers
+        .get("x-cowchat-certificate")
+        .and_then(|v| v.to_str().ok())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let decode = |name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| B64.decode(v).ok())
+    };
+    let (Some(projection), Some(signature)) =
+        (decode("x-cowchat-request"), decode("x-cowchat-signature"))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Ok(input) = serde_json::from_slice::<SubscriptionMutation>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let target = uri
+        .path_and_query()
+        .map(|v| v.as_str())
+        .unwrap_or(uri.path());
+    if state
+        .store
+        .preflight_seated_subscription(
+            &room,
+            cert,
+            method.as_str(),
+            target,
+            &body,
+            &projection,
+            &signature,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .is_err()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if input.validate().is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if let SubscriptionAction::Update { webhook_url, .. } = &input.action {
+        if state.webhook_mgr.validate_url(webhook_url).await.is_err() {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    }
+    if target != format!("/rooms/{room}/subscriptions/{subscription}/lifecycle") {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let target = uri
+        .path_and_query()
+        .map(|v| v.as_str())
+        .unwrap_or(uri.path());
+    match state.store.mutate_seated_subscription(
+        &room,
+        &subscription,
+        cert,
+        method.as_str(),
+        target,
+        &body,
+        &projection,
+        &signature,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(result) => {
+            state.webhook_mgr.wake();
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        Err(crate::store::StoreError::MessageConflict | crate::store::StoreError::SeatedReplay) => {
+            StatusCode::CONFLICT.into_response()
+        }
+        Err(crate::store::StoreError::SeatedAuthorization) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 pub(crate) async fn history(
     State(state): State<crate::web::AppState>,
     Path(room): Path<String>,

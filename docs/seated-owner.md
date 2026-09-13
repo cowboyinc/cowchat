@@ -78,12 +78,61 @@ The HTTP test uses real owner enrollment and a local HTTP receiver, verifies
 signed pointer-only redelivery, checks lost-response create retries, injects a
 backlog-write failure to verify full rollback including the nonce, and checks
 revocation before delivery. It does not execute an actor or establish its identity.
-Signed subscription update/delete/re-enable and broader owner-approved filters
-remain to implement. Existing delivery retry deadlines still apply.
+Signed subscription update/delete/repair are implemented through
+`POST /rooms/{room_id}/subscriptions/{subscription_id}/lifecycle` with the same
+certificate and request-signature headers. The signed JSON is:
+
+```json
+{
+  "operation_id": "40000000-0000-4000-8000-000000000001",
+  "transport_generation": 0,
+  "expected_revision": 0,
+  "action": {"kind": "repair"}
+}
+```
+
+Creation returns revision zero. Each mutation compares and increments the local
+revision. `action.kind` is `repair`, `delete`, or `update`; update requires both
+`webhook_url` and `secret` inside `action`. It preserves status, cursor and queued
+wakes. Repair explicitly activates the binding, backfills messages after its
+acknowledged cursor, and resets eligible unacknowledged attempts. Retained wakes
+keep their delivery IDs and exact CloudEvent bytes. Missing history is not
+invented; existing retention/deadline policies still apply.
+
+Only a current credential for the same seat can mutate a binding. Repair can
+rebind an independently enrolled replacement certificate and excludes records
+below its readable key floor. Update requires the existing current certificate;
+renewal must repair first. Transport generation changes require deleting the old
+binding and creating a new one, never rewriting the generation in retained wakes.
+
+Repeat the exact operation body with a fresh signed request nonce to recover its
+historical receipt without applying the action again. Conflicting operation UUIDs
+or revisions return 409. Receipt recovery still requires current membership and,
+for update, endpoint validation. Delete atomically removes the subscription and
+its pending wakes, freeing the seat. A durable tombstone prevents reuse of the
+old subscription UUID. Receipts/tombstones contain IDs, seat, revision/status,
+cursor and a request digest, never endpoint/secret values or room content.
+
+Standard Webhooks timestamp/HMAC headers are generated per attempt. An attempt
+started after endpoint/secret update uses the new configuration; an already-sent
+attempt retains its old headers. The durable pointer body and ID never change.
+The worker checks the local revision before sending and atomically compares it
+again with outcome writes. A late acknowledgement/failure from an old revision
+cannot advance the new cursor or disable a repaired subscription. Delete cannot
+recall a network request already in flight. All lifecycle state is local SQLite;
+there are no consensus reads or writes in these operations.
+
+`cargo test --offline --locked -p cowchat-server --lib seated_subscription`
+covers real HTTP lifecycle requests, nonce replay and conflicting retries,
+delete/recreation, receipt persistence across restart, transaction rollback,
+revocation during URL validation, replacement credential history bounds, and
+an actual blocked webhook response released after repair/secret rotation.
+Broader owner-approved filters remain to implement.
 
 The owner endpoint, signed append, owner history, and mention-subscription creation
 are implemented. [Actor enrollment](actor-enrollment.md) now verifies a fetched
 finalized control proof before installation. Owner credential renewal/revocation
-endpoints and the full actor wake/reply proof remain to be connected.
+endpoints remain to be connected. The [local actor wake/reply proof](local-m-echo.md)
+uses fixture keys and does not establish production key release.
 Tests that directly install trusted actor-like contexts are explicitly
 provisioning fixtures, not evidence of live actor identity verification.

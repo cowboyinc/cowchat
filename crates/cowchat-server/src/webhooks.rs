@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 
-use crate::store::Store;
+use crate::store::{Store, WebhookOutcome};
 
 /// Retry schedule (seconds from the failed attempt). After this many failures
 /// (== length of this slice) the subscription is marked `failed` and stops
@@ -324,10 +324,17 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
         }
     };
     let (sub, _owner, secret) = sub_lookup;
+    if !inner.store.webhook_attempt_current(&d).unwrap_or(false) {
+        return;
+    }
     if sub.status != "active" {
-        let _ = inner
-            .store
-            .abandon_delivery(&d.delivery_id, "subscription inactive");
+        let _ = inner.store.finish_webhook_attempt(
+            &d,
+            WebhookOutcome::Abandon {
+                reason: "subscription inactive",
+                fail_subscription: false,
+            },
+        );
         return;
     }
 
@@ -342,12 +349,13 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
         Err(crate::store::StoreError::SeatedAuthorization) => {
             // Stop accumulating new obligations for credentials that cannot
             // read the room. A future signed renewal must explicitly repair it.
-            let _ = inner
-                .store
-                .set_subscription_status(&sub.subscription_id, "failed", None);
-            let _ = inner
-                .store
-                .abandon_delivery(&d.delivery_id, "membership no longer current");
+            let _ = inner.store.finish_webhook_attempt(
+                &d,
+                WebhookOutcome::Abandon {
+                    reason: "membership no longer current",
+                    fail_subscription: true,
+                },
+            );
             return;
         }
         Err(error) => {
@@ -365,9 +373,13 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
                     "webhook delivery: message {} not found, dropping",
                     d.message_id
                 );
-                let _ = inner
-                    .store
-                    .abandon_delivery(&d.delivery_id, "message missing");
+                let _ = inner.store.finish_webhook_attempt(
+                    &d,
+                    WebhookOutcome::Abandon {
+                        reason: "message missing",
+                        fail_subscription: false,
+                    },
+                );
                 return;
             }
             Err(e) => {
@@ -398,17 +410,21 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
                 sub.subscription_id,
                 error
             );
-            let _ = inner.store.set_subscription_status(
-                &sub.subscription_id,
-                "failed",
-                Some(d.attempts + 1),
+            let _ = inner.store.finish_webhook_attempt(
+                &d,
+                WebhookOutcome::Abandon {
+                    reason: "webhook address rejected",
+                    fail_subscription: true,
+                },
             );
-            let _ = inner
-                .store
-                .abandon_delivery(&d.delivery_id, "webhook address rejected");
             return;
         }
     };
+    // URL resolution can overlap a repair/delete. An already-sent request can
+    // still arrive, but its stale completion cannot mutate the new revision.
+    if !inner.store.webhook_attempt_current(&d).unwrap_or(false) {
+        return;
+    }
     let req = http
         .post(pinned_url)
         .header("content-type", "application/json")
@@ -434,7 +450,10 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
             // Commit the acknowledgement and cursor together. A crash between
             // deleting the obligation and advancing the cursor could otherwise
             // recreate a new event identity during backfill.
-            if let Err(error) = inner.store.complete_delivery(&d.delivery_id) {
+            if let Err(error) = inner
+                .store
+                .finish_webhook_attempt(&d, WebhookOutcome::Complete)
+            {
                 log::warn!("webhook acknowledgement not committed: {}", error);
                 return;
             }
@@ -449,13 +468,12 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
             let idx = (new_attempts as usize).saturating_sub(1);
             if idx >= RETRY_SCHEDULE_SECS.len() {
                 // Give up on this delivery and mark the sub failed.
-                let _ = inner
-                    .store
-                    .abandon_delivery(&d.delivery_id, "retry budget exhausted");
-                let _ = inner.store.set_subscription_status(
-                    &sub.subscription_id,
-                    "failed",
-                    Some(new_attempts),
+                let _ = inner.store.finish_webhook_attempt(
+                    &d,
+                    WebhookOutcome::Abandon {
+                        reason: "retry budget exhausted",
+                        fail_subscription: true,
+                    },
                 );
                 log::warn!(
                     "webhook delivery failed permanently sub={} seq={} err={}",
@@ -468,7 +486,7 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
                 let next = chrono::Utc::now() + chrono::Duration::from_std(delay).unwrap();
                 let _ = inner
                     .store
-                    .reschedule_delivery(&d.delivery_id, next, new_attempts, &err);
+                    .finish_webhook_attempt(&d, WebhookOutcome::Retry { reason: &err, next });
                 log::debug!(
                     "webhook delivery retry sub={} seq={} attempt={} in={:?} err={}",
                     sub.subscription_id,

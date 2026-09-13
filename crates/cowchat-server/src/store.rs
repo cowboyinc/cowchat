@@ -1,3 +1,4 @@
+mod webhook_attempts;
 use chrono::{DateTime, Utc};
 use cowchat_core::{ChatMessage, Room};
 use dashmap::DashMap;
@@ -6,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+pub(crate) use webhook_attempts::WebhookOutcome;
 
 use crate::connection::{matches_room_owner, LEGACY_UNOWNED_OWNER_KEY};
 
@@ -2127,7 +2129,8 @@ impl Store {
         let ts = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         expire_deliveries(&conn, now)?;
         let mut stmt = conn.prepare(
-            "SELECT delivery_id, subscription_id, message_seq, message_id, attempts
+            "SELECT delivery_id, subscription_id, message_seq, message_id, attempts,
+                    (SELECT revision FROM subscriptions WHERE subscription_id=candidate.subscription_id)
              FROM subscription_deliveries AS candidate
              WHERE next_attempt_at <= ?1 AND candidate.status = 'pending'
                AND NOT EXISTS (
@@ -2146,6 +2149,7 @@ impl Store {
                 message_seq: row.get(2)?,
                 message_id: row.get(3)?,
                 attempts: row.get(4)?,
+                revision: row.get(5)?,
             })
         })?;
         let mut out = Vec::new();
@@ -2227,6 +2231,7 @@ pub struct PendingDelivery {
     pub message_seq: i64,
     pub message_id: String,
     pub attempts: i64,
+    pub revision: i64,
 }
 
 fn map_subscription_row(

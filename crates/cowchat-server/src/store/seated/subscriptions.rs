@@ -18,7 +18,7 @@ impl Store {
         now: i64,
     ) -> Result<(), StoreError> {
         let invalid = || StoreError::SeatedAuthorization;
-        if now < 0 || method != "POST" || target != format!("/rooms/{room}/subscriptions") {
+        if now < 0 || method != "POST" {
             return Err(invalid());
         }
         let conn = self.conn.lock().unwrap();
@@ -86,7 +86,8 @@ impl Store {
         } else {
             let collision: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE subscription_id=?1)
-                 OR EXISTS(SELECT 1 FROM seated_subscriptions WHERE room_id=?2 AND seat=?3)",
+                 OR EXISTS(SELECT 1 FROM seated_subscriptions WHERE room_id=?2 AND seat=?3)
+                 OR EXISTS(SELECT 1 FROM seated_subscription_operations WHERE subscription_id=?1 AND deleted=1)",
                 params![input.subscription_id, room, seat],
                 |row| row.get(0),
             )?;
@@ -127,14 +128,14 @@ impl Store {
             )?.0;
             enqueue_subscription_backfill_on(&tx, &sub)?;
         }
-        let (position, status): (i64, String) = tx.query_row(
-            "SELECT last_delivered_seq,status FROM subscriptions WHERE subscription_id=?1",
+        let (position, status, revision): (i64, String, i64) = tx.query_row(
+            "SELECT last_delivered_seq,status,revision FROM subscriptions WHERE subscription_id=?1",
             [&input.subscription_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         tx.commit()?;
         Ok(
-            serde_json::json!({"subscription_id":input.subscription_id,"seat":seat,"status":status,
+            serde_json::json!({"subscription_id":input.subscription_id,"seat":seat,"status":status,"revision":revision,
             "cursor":{"room":room,"transport_generation":transport,"position":position}}),
         )
     }
@@ -169,6 +170,13 @@ impl Store {
         }
         authorization::verify_member_access(&context, "read", now as u64)
             .map_err(|_| StoreError::SeatedAuthorization)?;
+        let message: String = conn.query_row(
+            "SELECT message_id FROM subscription_deliveries WHERE delivery_id=?1 AND subscription_id=?2",
+            params![delivery,subscription], |r| r.get(0),
+        )?;
+        if !allows_message_on(&conn, subscription, &message)? {
+            return Err(StoreError::SeatedAuthorization);
+        }
         let payload=conn.query_row(
             "SELECT w.payload FROM seated_wakes w JOIN subscription_deliveries d ON d.delivery_id=w.delivery_id
              WHERE w.delivery_id=?1 AND d.subscription_id=?2",params![delivery,subscription],|row| row.get(0),

@@ -7,6 +7,7 @@ use cowchat_crypto::{authorization, request};
 mod actors;
 mod enrollment;
 mod history;
+mod lifecycle;
 mod subscriptions;
 pub(super) use subscriptions::allows_message_on;
 pub(super) use subscriptions::record_wake_on;
@@ -38,11 +39,23 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
         delivery_id TEXT PRIMARY KEY REFERENCES subscription_deliveries(delivery_id) ON DELETE CASCADE,
         payload TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS seated_subscription_operations (
+        operation_id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL REFERENCES seated_rooms(room_id) ON DELETE CASCADE,
+        subscription_id TEXT NOT NULL, seat TEXT NOT NULL,
+        request_digest BLOB NOT NULL, response TEXT NOT NULL, deleted INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS seated_actor_floors (
         chain_id INTEGER NOT NULL, actor BLOB NOT NULL, chain_instance BLOB NOT NULL,
         height INTEGER NOT NULL, block_hash BLOB NOT NULL, state_root BLOB NOT NULL,
         authorization_generation INTEGER NOT NULL, commitment BLOB NOT NULL, PRIMARY KEY(chain_id,actor)
     );",
+    )?;
+    ensure_column_exists(
+        conn,
+        "subscriptions",
+        "revision",
+        "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column_exists(
         conn,
