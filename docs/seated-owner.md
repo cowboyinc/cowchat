@@ -102,7 +102,10 @@ invented; existing retention/deadline policies still apply.
 Only a current credential for the same seat can mutate a binding. Repair can
 rebind an independently enrolled replacement certificate and excludes records
 below its readable key floor. Update requires the existing current certificate;
-renewal must repair first. Transport generation changes require deleting the old
+renewal must repair first. Actor creation/binding onto a new certificate also
+requires a cached finalized control proof within 60 seconds; ordinary retries and
+steady-state room traffic do not fetch a chain proof. See the two-tier availability
+policy in [actor enrollment](actor-enrollment.md). Transport generation changes require deleting the old
 binding and creating a new one, never rewriting the generation in retained wakes.
 
 Repeat the exact operation body with a fresh signed request nonce to recover its

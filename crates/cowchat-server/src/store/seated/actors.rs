@@ -301,6 +301,10 @@ impl Store {
                 VALUES (?1,?2,?3,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                 params![p.room,cert,seat,i64::try_from(p.snapshot.membership).map_err(|_|invalid())?,public,context,p.identity,p.identity_sig,p.membership,p.membership_sig,i64::try_from(from_gen).map_err(|_|invalid())?,chain,actor_gen,digest])?;
         }
+        tx.execute(
+            "UPDATE seated_credentials SET actor_controller=?3 WHERE room_id=?1 AND cert_id=?2",
+            params![p.room, cert, proof.controller().as_slice()],
+        )?;
         tx.commit()?;
         Ok((seat, cert))
     }
@@ -335,9 +339,18 @@ fn record_actor_control_on(
         }
     }
 
-    conn.execute("INSERT INTO seated_actor_floors VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+    let absent_generation: Option<i64> = conn.query_row(
+        "SELECT authorization_generation FROM seated_actor_floors WHERE chain_id=?1 AND actor=?2 AND absent=1",
+        params![chain,proof.actor().as_slice()], |r| r.get(0),
+    ).optional()?;
+    if absent_generation.is_some_and(|generation| actor_gen <= generation) {
+        return Err(invalid());
+    }
+    conn.execute("INSERT INTO seated_actor_floors(chain_id,actor,chain_instance,height,block_hash,state_root,authorization_generation,commitment) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
         ON CONFLICT(chain_id,actor) DO UPDATE SET height=excluded.height,block_hash=excluded.block_hash,state_root=excluded.state_root,authorization_generation=excluded.authorization_generation,commitment=excluded.commitment",
         params![chain,proof.actor().as_slice(),proof.chain_instance().as_slice(),height,proof.block_hash().as_slice(),proof.state_root().as_slice(),actor_gen,proof.commitment().as_slice()])?;
+    conn.execute("UPDATE seated_actor_floors SET proof_timestamp=?3,absent=0,controller=?4 WHERE chain_id=?1 AND actor=?2",
+        params![chain,proof.actor().as_slice(),i64::try_from(proof.timestamp()).map_err(|_|invalid())?,proof.controller().as_slice()])?;
     Ok(())
 }
 
@@ -361,9 +374,9 @@ fn invalidate_actor_credentials_on(
         "UPDATE subscriptions SET status='failed',revision=revision+1
         WHERE subscription_id IN (SELECT s.subscription_id FROM seated_subscriptions s
         JOIN seated_credentials c ON c.room_id=s.room_id AND c.cert_id=s.cert_id
-        WHERE c.actor_chain_id=?1 AND c.seat=?2 AND c.actor_authorization_generation<?3)",
-        params![chain, seat, generation],
+        WHERE c.actor_chain_id=?1 AND c.seat=?2 AND (c.actor_authorization_generation<?3 OR c.actor_controller!=?4))",
+        params![chain, seat, generation, proof.controller().as_slice()],
     )?;
-    Ok(conn.execute("DELETE FROM seated_credentials WHERE actor_chain_id=?1 AND seat=?2 AND actor_authorization_generation<?3",
-        params![chain,seat,generation])?)
+    Ok(conn.execute("DELETE FROM seated_credentials WHERE actor_chain_id=?1 AND seat=?2 AND (actor_authorization_generation<?3 OR actor_controller!=?4)",
+        params![chain,seat,generation,proof.controller().as_slice()])?)
 }

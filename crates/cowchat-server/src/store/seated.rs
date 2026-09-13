@@ -8,6 +8,7 @@ mod actors;
 mod enrollment;
 mod history;
 mod lifecycle;
+mod revocation;
 mod subscriptions;
 pub(super) use subscriptions::allows_message_on;
 pub(super) use subscriptions::record_wake_on;
@@ -56,6 +57,30 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
         "subscriptions",
         "revision",
         "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        conn,
+        "seated_actor_floors",
+        "proof_timestamp",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        conn,
+        "seated_actor_floors",
+        "absent",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        conn,
+        "seated_actor_floors",
+        "controller",
+        "BLOB NOT NULL DEFAULT X''",
+    )?;
+    ensure_column_exists(
+        conn,
+        "seated_credentials",
+        "actor_controller",
+        "BLOB NOT NULL DEFAULT X''",
     )?;
     ensure_column_exists(
         conn,

@@ -84,6 +84,7 @@ impl Store {
             // Retries acknowledge the existing subscription without reviving it,
             // changing its endpoint, or resetting its cursor.
         } else {
+            revocation::require_recent_actor_control_on(&tx, room, cert, now)?;
             let collision: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE subscription_id=?1)
                  OR EXISTS(SELECT 1 FROM seated_subscriptions WHERE room_id=?2 AND seat=?3)

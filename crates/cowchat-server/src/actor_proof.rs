@@ -1,4 +1,4 @@
-//! Enrollment-only finalized actor-control reads. This module has no write RPC,
+//! Finalized actor-control reads for enrollment and background revocation. This module has no write RPC,
 //! wake path, or constructor accepting a caller's trust anchor.
 use cowboy_protocol_codec::{
     decode_trusted_checkpoint_v1, MAX_FINALIZED_STATE_PROOF_BUNDLE_BYTES_V1,
@@ -51,6 +51,47 @@ pub struct VerifiedActorControl {
     controller: [u8; 20],
     commitment: [u8; 32],
     authorization_generation: u64,
+}
+/// An authenticated absence is distinct from a missing/invalid RPC response.
+pub enum VerifiedActorState {
+    Present(VerifiedActorControl),
+    Absent(VerifiedActorAbsence),
+}
+
+pub struct VerifiedActorAbsence {
+    actor: [u8; 20],
+    chain_id: u64,
+    chain_instance: [u8; 32],
+    height: u64,
+    block_hash: [u8; 32],
+    state_root: [u8; 32],
+    timestamp: u64,
+}
+impl VerifiedActorAbsence {
+    pub fn actor(&self) -> [u8; 20] {
+        self.actor
+    }
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+    pub fn chain_instance(&self) -> [u8; 32] {
+        self.chain_instance
+    }
+    pub fn height(&self) -> u64 {
+        self.height
+    }
+    pub fn block_hash(&self) -> [u8; 32] {
+        self.block_hash
+    }
+    pub fn state_root(&self) -> [u8; 32] {
+        self.state_root
+    }
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+    pub fn is_fresh_at(&self, now: u64) -> bool {
+        fresh(now, self.timestamp)
+    }
 }
 impl VerifiedActorControl {
     pub fn actor(&self) -> [u8; 20] {
@@ -137,6 +178,16 @@ impl ActorProofAuthority {
     /// Fetch highest available finalized state from the configured service RPC.
     /// No proof bytes, URL, trust anchor, or time value come from the HTTP client.
     pub async fn fetch(&self, actor: [u8; 20]) -> Result<VerifiedActorControl, ActorProofError> {
+        match self.fetch_state(actor).await? {
+            VerifiedActorState::Present(control) => Ok(control),
+            VerifiedActorState::Absent(_) => Err(ActorProofError::Proof),
+        }
+    }
+
+    pub async fn fetch_state(
+        &self,
+        actor: [u8; 20],
+    ) -> Result<VerifiedActorState, ActorProofError> {
         let mut response=self.client.post(self.endpoint.clone()).json(&serde_json::json!({
             "checkpoint_height":self.checkpoint_height,
             "claims":[{"actor":format!("0x{}",hex(&actor)),"logical_key_hex":format!("0x{}",hex(ACTOR_CONTROL_KEY))}]
@@ -153,19 +204,49 @@ impl ActorProofAuthority {
         }
         let now = u64::try_from(chrono::Utc::now().timestamp_millis())
             .map_err(|_| ActorProofError::Proof)?;
-        self.verify(actor, &bytes, now)
+        self.verify_state(actor, &bytes, now)
     }
 
+    #[cfg(test)]
     fn verify(
         &self,
         actor: [u8; 20],
         bytes: &[u8],
         now: u64,
     ) -> Result<VerifiedActorControl, ActorProofError> {
+        match self.verify_state(actor, bytes, now)? {
+            VerifiedActorState::Present(control) => Ok(control),
+            VerifiedActorState::Absent(_) => Err(ActorProofError::Proof),
+        }
+    }
+
+    fn verify_state(
+        &self,
+        actor: [u8; 20],
+        bytes: &[u8],
+        now: u64,
+    ) -> Result<VerifiedActorState, ActorProofError> {
         let view = verify_finalized_state_proof_v1(&self.checkpoint, bytes)
             .map_err(|_| ActorProofError::Proof)?;
         if !fresh(now, view.target_timestamp()) {
             return Err(ActorProofError::Proof);
+        }
+        if view
+            .require_absent(
+                cowboy_protocol_codec::Address::from_bytes(actor),
+                ACTOR_CONTROL_KEY,
+            )
+            .is_ok()
+        {
+            return Ok(VerifiedActorState::Absent(VerifiedActorAbsence {
+                actor,
+                chain_id: view.chain_id(),
+                chain_instance: view.chain_instance_id(),
+                height: view.height(),
+                block_hash: view.block_hash(),
+                state_root: view.state_root(),
+                timestamp: view.target_timestamp(),
+            }));
         }
         let value = view
             .require_present(
@@ -174,7 +255,7 @@ impl ActorProofAuthority {
             )
             .map_err(|_| ActorProofError::Proof)?;
         let (controller, commitment, authorization_generation) = parse_control(value)?;
-        Ok(VerifiedActorControl {
+        Ok(VerifiedActorState::Present(VerifiedActorControl {
             actor,
             chain_id: view.chain_id(),
             chain_instance: view.chain_instance_id(),
@@ -185,7 +266,7 @@ impl ActorProofAuthority {
             controller,
             commitment,
             authorization_generation,
-        })
+        }))
     }
 }
 

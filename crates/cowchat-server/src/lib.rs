@@ -5,6 +5,7 @@
 )]
 
 pub mod actor_proof;
+mod actor_refresh;
 pub mod auth;
 pub mod broker;
 pub mod connection;

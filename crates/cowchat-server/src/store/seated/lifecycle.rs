@@ -96,6 +96,14 @@ impl Store {
                 status = "deleted".into();
             }
             action => {
+                let changes_certificate: bool = tx.query_row(
+                    "SELECT cert_id!=?2 FROM seated_subscriptions WHERE subscription_id=?1",
+                    params![subscription, cert],
+                    |r| r.get(0),
+                )?;
+                if changes_certificate {
+                    revocation::require_recent_actor_control_on(&tx, room, cert, now)?;
+                }
                 // Renewal is limited to the same seat under current, independently enrolled authority.
                 tx.execute("UPDATE seated_subscriptions SET cert_id=?2,auth_generation=?3 WHERE subscription_id=?1",
                     params![subscription,cert,auth])?;

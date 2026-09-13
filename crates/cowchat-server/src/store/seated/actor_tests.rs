@@ -188,6 +188,43 @@ async fn actor_http_enrollment_verifies_fetched_control_installs_atomically_and_
     let subscription=serde_json::to_vec(&serde_json::json!({"subscription_id":uuid::Uuid::new_v4().to_string(),"transport_generation":0,
         "webhook_url":proof_endpoint,"secret":"0123456789abcdef0123456789abcdef","after":0})).unwrap();
     let sub_target = format!("/rooms/{ROOM}/subscriptions");
+    // A new binding requires recent cached authority, without issuing an RPC
+    // in this handler. Failed creation must not consume the request nonce.
+    for (stamp, expected) in [
+        (now - 60_001, reqwest::StatusCode::UNAUTHORIZED),
+        (now, reqwest::StatusCode::OK),
+    ] {
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE seated_actor_floors SET proof_timestamp=?1", [stamp])
+            .unwrap();
+        let (p, s) = signed("POST", &sub_target, &subscription, 110);
+        assert_eq!(
+            http.post(format!("http://{addr}{sub_target}"))
+                .header("x-cowchat-certificate", &cert)
+                .header("x-cowchat-request", B64.encode(p))
+                .header("x-cowchat-signature", B64.encode(s))
+                .body(subscription.clone())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            expected
+        );
+    }
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE seated_actor_floors SET proof_timestamp=?1",
+            [now - 60_001],
+        )
+        .unwrap();
+    // Exact binding retry, then actual signed append/history below, continue
+    // under the last verified state even when the refresh courier is unavailable.
     let (p, s) = signed("POST", &sub_target, &subscription, 108);
     assert_eq!(
         http.post(format!("http://{addr}{sub_target}"))
@@ -345,7 +382,7 @@ fn tracked_actor_fixture(store: &Store, now: i64) -> crate::actor_proof::Verifie
     let seat = "0x0000000000000000000000000000000000000009";
     let conn = store.conn.lock().unwrap();
     conn.execute(
-        "INSERT INTO seated_actor_floors VALUES (?1,?2,?3,9,?4,?5,2,?6)",
+        "INSERT INTO seated_actor_floors(chain_id,actor,chain_instance,height,block_hash,state_root,authorization_generation,commitment) VALUES (?1,?2,?3,9,?4,?5,2,?6)",
         params![
             42,
             proof.actor().as_slice(),
@@ -509,4 +546,174 @@ fn passive_actor_control_rejects_unknown_stale_regressed_or_conflicting_proofs_a
         )
         .unwrap();
     assert!(store.ingest_actor_control(&proof, now).is_err());
+}
+
+#[test]
+fn actor_absence_revokes_and_requires_generation_advance_before_reenrollment() {
+    let store = Store::open_in_memory().unwrap();
+    let now = Utc::now().timestamp_millis();
+    tracked_actor_fixture(&store, now);
+    let absence = crate::actor_proof::tests::verified_absence(now as u64);
+    let old = store.load_due_deliveries(Utc::now(), 10).unwrap().remove(0);
+    assert_eq!(store.ingest_actor_absence(&absence, now).unwrap(), 1);
+    assert!(!store
+        .finish_webhook_attempt(&old, crate::store::WebhookOutcome::Complete)
+        .unwrap());
+    assert_eq!(store.ingest_actor_absence(&absence, now).unwrap(), 0);
+    assert!(store.ingest_actor_absence(&absence, now + 60_001).is_err());
+    // Lower the fixture height to isolate the authorization-generation check
+    // from the separately tested same-height finality conflict check.
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE seated_actor_floors SET height=9", [])
+        .unwrap();
+    assert!(store
+        .ingest_actor_control(&control_proof(now, 2, 6), now)
+        .is_err());
+    assert_eq!(
+        store
+            .ingest_actor_control(&control_proof(now, 3, 8), now)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store.get_subscription("wake").unwrap().unwrap().0.status,
+        "failed"
+    );
+    let remaining: i64 = store
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM seated_credentials WHERE actor_chain_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0); // A new proof never recreates credentials or repairs subscriptions.
+}
+
+#[tokio::test]
+async fn actor_background_refresh_preserves_state_on_courier_failure_and_ingests_real_absence() {
+    use axum::{routing::post, Json, Router};
+    let now = Utc::now().timestamp_millis();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    tracked_actor_fixture(&store, now);
+    let (checkpoint, absence, actor) = crate::actor_proof::tests::state_proof(now as u64, None);
+    let mode = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (m, c) = (mode.clone(), calls.clone());
+    let router = Router::new().route(
+        "/proof/finalized-state",
+        post(move |Json(request): Json<serde_json::Value>| {
+            let (m, c, absence) = (m.clone(), c.clone(), absence.clone());
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(
+                    request["claims"][0]["actor"],
+                    "0x0000000000000000000000000000000000000009"
+                );
+                assert_eq!(request["checkpoint_height"], 9);
+                match m.load(Ordering::SeqCst) {
+                    0 => (reqwest::StatusCode::SERVICE_UNAVAILABLE, vec![]),
+                    1 => (
+                        reqwest::StatusCode::OK,
+                        b"invalid proof is not deletion".to_vec(),
+                    ),
+                    _ => (reqwest::StatusCode::OK, absence),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let authority = Arc::new(crate::actor_proof::tests::authority(
+        checkpoint,
+        format!(
+            "http://{}/proof/finalized-state",
+            listener.local_addr().unwrap()
+        ),
+    ));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    for failed in [0, 1] {
+        mode.store(failed, Ordering::SeqCst);
+        crate::actor_refresh::refresh_once(store.clone(), authority.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_subscription("wake").unwrap().unwrap().0.status,
+            "active"
+        );
+        let height: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT height FROM seated_actor_floors", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(height, 9);
+    }
+    mode.store(2, Ordering::SeqCst);
+    crate::actor_refresh::refresh_once(store.clone(), authority.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_subscription("wake").unwrap().unwrap().0.status,
+        "failed"
+    );
+    assert!(store.actors_for_refresh(None, 32).unwrap().is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        actor,
+        crate::actor_proof::tests::verified_absence(now as u64).actor()
+    );
+    server.abort();
+}
+
+#[test]
+fn actor_authority_changes_require_recent_control_but_steady_wakes_do_not() {
+    let store = Store::open_in_memory().unwrap();
+    let now = Utc::now().timestamp_millis();
+    let proof = tracked_actor_fixture(&store, now);
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute("UPDATE seated_credentials SET actor_authorization_generation=3,actor_controller=?1 WHERE cert_id='actor-cert'",[proof.controller().to_vec()]).unwrap();
+    }
+    assert_eq!(store.ingest_actor_control(&proof, now).unwrap(), 0);
+    {
+        let conn = store.conn.lock().unwrap();
+        super::super::revocation::require_recent_actor_control_on(&conn, ROOM, "actor-cert", now)
+            .unwrap();
+        conn.execute(
+            "UPDATE seated_actor_floors SET proof_timestamp=?1",
+            [now - 60_001],
+        )
+        .unwrap();
+        assert!(super::super::revocation::require_recent_actor_control_on(
+            &conn,
+            ROOM,
+            "actor-cert",
+            now
+        )
+        .is_err());
+        super::super::revocation::require_recent_actor_control_on(&conn, ROOM, "fixture-cert", now)
+            .unwrap();
+    }
+    let pending = store.load_due_deliveries(Utc::now(), 10).unwrap().remove(0);
+    assert!(store
+        .seated_wake_payload("wake", &pending.delivery_id, now)
+        .unwrap()
+        .is_some());
+    // Even without a generation advance, a controller mismatch revokes the old
+    // credential rather than refreshing its authority under a different wallet.
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE seated_credentials SET actor_controller=?1 WHERE cert_id='actor-cert'",
+            [vec![9u8; 20]],
+        )
+        .unwrap();
+    assert_eq!(store.ingest_actor_control(&proof, now).unwrap(), 1);
 }

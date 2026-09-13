@@ -56,11 +56,42 @@ local revision to fence in-flight webhook responses. Queued pointer bytes remain
 available for an explicitly authorized future repair. Owner credentials and actors
 on other chains are unaffected. A failed transaction changes none of these states.
 
-This ingestion core does not yet run a background refresh worker, ingest proofs
-of control-key absence, or expire cached authority during a courier outage. Those
-remain the next lifecycle slice. It must not be presented as a complete passive
-revocation service. Fetch failures and caller JSON never constitute revocation
-proof. There is no new HTTP proof-ingestion endpoint or consensus write.
+A server configured with `--actor-proof-rpc` and its release-pinned checkpoint
+now starts a background refresh worker immediately. It scans tracked actors that
+still have credentials, in pages of 32 with at most four proof requests in flight,
+and waits 15 seconds after each completed sweep. The guard cancels the sweep and
+its child requests when the server task ends. Each request uses the existing
+10-second timeout and bounded finalized-proof response; there is no message-path
+RPC and no new HTTP proof-ingestion endpoint or consensus write.
+
+Freshness has two tiers. Enrollment/re-enrollment and a new subscription binding
+(or repair onto a replacement certificate) require a verified control proof no
+older than 60 seconds, allowing at most 5 seconds of future clock skew. Binding
+checks consult only the cached proof timestamp, generation and controller in the
+local transaction. An exact subscription retry is not a new binding. Existing
+reads, appends, replies and wakes continue on last-ingested verified authority,
+subject to current membership and certificate expiry. A courier outage does not
+by itself delete credentials or stop steady-state flow.
+
+The healthy-courier target is a refresh every 15 seconds plus sweep time. A sweep
+of N actors makes N requests at concurrency four; network time can approach
+`ceil(N/4) * 10 seconds`, plus local proof verification and database work. This is
+not a hard revocation deadline: a courier may return a proof up to 60 seconds old,
+and outages, withheld proofs or overload can delay revocation indefinitely until
+a newer valid proof arrives (or a separately set credential expiry denies access).
+A successfully ingested newer proof applies locally and atomically immediately.
+
+Only a verified QMDB absence claim for the exact actor/control key revokes via
+delete. Missing claims, malformed proofs, fetch errors and timeouts leave state
+unchanged. Authenticated absence advances the local height/root floor, removes
+all of that actor's credentials on the chain, and fails/fences its subscriptions.
+The tombstone retains the last known authorization generation: restoration needs
+a strictly higher generation and a separate enrollment, never automatic revival.
+Present proofs also invalidate a credential whose enrolled controller differs
+from the proven controller, even if the numeric generation did not change.
+Existing databases gain local proof timestamp, controller and absence columns;
+legacy actor credentials without a recorded controller must re-enroll after the
+first successful refresh. Owner credentials remain independent.
 
 History and initial subscription backfill exclude records from key generations
 before membership's `from_gen`. History advances its cursor past excluded records
@@ -85,10 +116,17 @@ rejects an older proof than the local floor, and appends/reads/decrypts an
 authenticated actor record while excluding an older key generation. The actor
 record is written by the test client; wake-triggered actor execution through a
 generic gateway is separately covered by the [local fixture proof](local-m-echo.md).
-Proof fetching currently belongs to enrollment; the new ingestion core accepts
-only already verified proof values. Room append, history, and wake delivery
+Proof fetching belongs to enrollment and the background refresh worker; store
+ingestion accepts only privately constructed verified proof values. Room append, history, and wake delivery
 continue against local service state. Ingestion tests use real synthetic
 threshold-finality/QMDB verification with provisioned store fixtures, not a live
 chain. They cover cross-room revocation, isolation of owners/other chains,
 rollback on an injected deletion failure, stale in-flight wake outcomes, repeated
 proof ingestion, persisted rollback floors, and stale/conflicting proof rejection.
+
+The refresh tests exercise actual local HTTP courier failures, invalid proof bytes,
+and a real threshold-signed QMDB absence proof: failures preserve state, while
+absence fails the subscription and removes the actor from subsequent scans. Tests
+also cover same-generation controller mismatch, authority-changing cached-proof
+freshness versus steady-state wake availability, and cancellation on server guard
+drop. These remain local synthetic-chain tests, not a deployed Canyon watcher.

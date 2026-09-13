@@ -39,10 +39,19 @@ fn operation(actor: Address, key: &[u8], value: &[u8], next: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) fn proof(timestamp: u64, value: Vec<u8>) -> (Vec<u8>, Vec<u8>, [u8; 20]) {
+    state_proof(timestamp, Some(value))
+}
+
+pub(crate) fn state_proof(timestamp: u64, value: Option<Vec<u8>>) -> (Vec<u8>, Vec<u8>, [u8; 20]) {
     let actor = Address::from_low_u64(9);
     let key = ACTOR_CONTROL_KEY;
     let next = actor_storage_state_key_v1(actor, b"z").unwrap();
-    let first = operation(actor, key, &value, &next);
+    let first = operation(
+        actor,
+        if value.is_some() { key } else { b"!" },
+        value.as_deref().unwrap_or(b"predecessor"),
+        &next,
+    );
     let second = operation(
         actor,
         b"z",
@@ -119,9 +128,12 @@ pub(crate) fn proof(timestamp: u64, value: Vec<u8>) -> (Vec<u8>, Vec<u8>, [u8; 2
         claims: vec![ActorStorageClaimV1 {
             actor,
             logical_key: key.to_vec(),
-            result: ActorStorageClaimResultV1::Present {
-                value,
-                proof: state_proof,
+            result: match value {
+                Some(value) => ActorStorageClaimResultV1::Present {
+                    value,
+                    proof: state_proof,
+                },
+                None => ActorStorageClaimResultV1::Absent { proof: state_proof },
             },
         }],
     };
@@ -210,4 +222,39 @@ pub(crate) fn verified_control(timestamp: u64, value: Vec<u8>) -> VerifiedActorC
     )
     .verify(actor, &bytes, timestamp)
     .unwrap()
+}
+
+#[test]
+fn actor_absence_is_authenticated_and_never_accepted_for_enrollment() {
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let (checkpoint, bytes, actor) = state_proof(now, None);
+    let authority = authority(
+        checkpoint,
+        "http://127.0.0.1:1/proof/finalized-state".into(),
+    );
+    let VerifiedActorState::Absent(absent) = authority.verify_state(actor, &bytes, now).unwrap()
+    else {
+        panic!("absence required")
+    };
+    assert_eq!(absent.actor(), actor);
+    assert!(authority.verify(actor, &bytes, now).is_err());
+    assert!(authority.verify_state([0; 20], &bytes, now).is_err());
+    assert!(authority.verify_state(actor, &bytes, now + 60_001).is_err());
+    let mut forged = bytes;
+    let last = forged.len() - 1;
+    forged[last] ^= 1;
+    assert!(authority.verify_state(actor, &forged, now).is_err());
+}
+
+pub(crate) fn verified_absence(timestamp: u64) -> VerifiedActorAbsence {
+    let (checkpoint, bytes, actor) = state_proof(timestamp, None);
+    let VerifiedActorState::Absent(absent) = authority(
+        checkpoint,
+        "http://127.0.0.1:1/proof/finalized-state".into(),
+    )
+    .verify_state(actor, &bytes, timestamp)
+    .unwrap() else {
+        panic!()
+    };
+    absent
 }

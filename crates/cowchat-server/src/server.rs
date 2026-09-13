@@ -425,6 +425,11 @@ impl CowchatServer {
         // we don't await it here — when `run` returns the task is dropped along
         // with the server.
         let _webhook_worker = self.webhook_mgr.start();
+        // Drop cancels both the sweep and its JoinSet of in-flight proof reads.
+        let _actor_refresh = self
+            .actor_proof_authority
+            .as_ref()
+            .map(|authority| crate::actor_refresh::start(self.store.clone(), authority.clone()));
 
         log::info!("Listening on UDS: {:?}", self.config.socket_path);
 
