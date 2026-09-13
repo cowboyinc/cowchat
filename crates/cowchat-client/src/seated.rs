@@ -8,7 +8,7 @@ use base64::{
 use ciborium::value::Value as Cbor;
 use cowchat_crypto::{canonical, envelope, request};
 use hmac::{Hmac, Mac};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -36,6 +36,66 @@ pub struct RoomSeat {
     pub role: String,
     pub certificate: String,
     pub public_key: [u8; 32],
+}
+
+/// The service's local metadata snapshot, not an independent health attestation.
+/// Only v1 fields and fixed enum values are accepted; raw server text is never
+/// part of a parsed result or error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoomDiagnostics {
+    pub version: u64,
+    pub transport: DiagnosticsTransport,
+    pub authorization_generation: u64,
+    pub key_generation: u64,
+    // Required nullable field: a missing field is not silently treated as null.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub subscription: Option<DiagnosticsSubscription>,
+    pub checks: DiagnosticsChecks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsTransport {
+    pub kind: DiagnosticsTransportKind,
+    pub generation: u64,
+    pub local_tip: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsTransportKind {
+    Sqlite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsSubscription {
+    pub state: DiagnosticsSubscriptionState,
+    pub binding_current: bool,
+    pub pending_wakes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsSubscriptionState {
+    Active,
+    Failed,
+    Disabled,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsChecks {
+    pub archive: DiagnosticsCheck,
+    pub production_runtime: DiagnosticsCheck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsCheck {
+    Unsupported,
 }
 pub struct SeatedHttpClient {
     origin: reqwest::Url,
@@ -332,6 +392,30 @@ impl SeatedHttpClient {
             .await
             .map_err(|_| RoomError::Transport)
     }
+    /// Read the authenticated seat's local diagnostics. Requires only its
+    /// signing seed, never a room decryption key. No retry, repair or health
+    /// inference is performed. The service is the source of these counters.
+    pub async fn diagnostics(&self, seed: &[u8]) -> Result<RoomDiagnostics, RoomError> {
+        let target = format!(
+            "/rooms/{}/diagnostics?transport_generation={}",
+            self.seat.room, self.seat.transport_generation
+        );
+        let response = self
+            .send(reqwest::Method::GET, &target, vec![], seed)
+            .await?;
+        if !response.status().is_success() {
+            return Err(RoomError::Refused(response.status().as_u16()));
+        }
+        let bytes = bounded_bytes(response, 16 * 1024).await?;
+        let snapshot: RoomDiagnostics =
+            serde_json::from_slice(&bytes).map_err(|_| RoomError::Invalid)?;
+        if snapshot.version != 1 || snapshot.transport.generation != self.seat.transport_generation
+        {
+            return Err(RoomError::Invalid);
+        }
+        Ok(snapshot)
+    }
+
     /// HTTP authentication does not authenticate individual senders. Verify each
     /// record with independently provisioned sender credentials before opening.
     pub async fn read_ciphertext_page(&self, after: i64, seed: &[u8]) -> Result<Value, RoomError> {
@@ -423,13 +507,21 @@ impl SeatedHttpClient {
         )
     }
 }
-async fn bounded_json(mut response: reqwest::Response) -> Result<Value, RoomError> {
+async fn bounded_json(response: reqwest::Response) -> Result<Value, RoomError> {
+    let bytes = bounded_bytes(response, 5 * 1024 * 1024).await?;
+    serde_json::from_slice(&bytes).map_err(|_| RoomError::Invalid)
+}
+
+async fn bounded_bytes(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, RoomError> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|_| RoomError::Transport)? {
-        if bytes.len().saturating_add(chunk.len()) > 5 * 1024 * 1024 {
+        if bytes.len().saturating_add(chunk.len()) > limit {
             return Err(RoomError::Invalid);
         }
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|_| RoomError::Invalid)
+    Ok(bytes)
 }

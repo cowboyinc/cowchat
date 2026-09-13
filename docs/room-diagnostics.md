@@ -39,3 +39,21 @@ replay, revoked/expired credentials, incorrect room/generation/signature, and
 secret canaries in persisted data. Credentials and keys are public fixtures;
 these tests do not establish production provisioning or runtime health. CLI
 presentation and credential loading are a separate follow-up.
+
+## Rust client
+
+`SeatedHttpClient::diagnostics(signing_seed)` returns a typed `RoomDiagnostics`
+snapshot. It reuses the client's signed requests, fresh nonces, restricted origin,
+disabled redirects and timeout. It borrows the enrolled seat's signing seed for
+the operation and never needs a room decryption key. Provisioning that seat is
+the caller's responsibility; the method does not create or repair credentials.
+
+The client accepts at most 16 KiB of response bytes. It rejects unknown versions,
+unknown or duplicate fields, missing required fields, negative counters, unknown
+enum values and a transport generation different from its configured seat. The
+nullable subscription field must still be present. HTTP refusals return only a
+status code; parser/transport errors never include a server body or raw URL.
+Unsupported checks remain typed `Unsupported` values, not a successful health
+assessment. The snapshot is a report from the configured service, not a signed
+archive receipt or independently verified state. Existing history reads retain
+their separate 5 MiB response limit.

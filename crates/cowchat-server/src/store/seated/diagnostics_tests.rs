@@ -1,4 +1,8 @@
 use super::*;
+use cowchat_client::seated::{
+    DiagnosticsCheck, DiagnosticsSubscriptionState, DiagnosticsTransportKind, RoomError, RoomSeat,
+    SeatedHttpClient,
+};
 
 const SUB: &str = "30000000-0000-4000-8000-000000000099";
 const CANARY: &str = "private-diagnostics-canary";
@@ -282,5 +286,159 @@ async fn diagnostics_http_authentication_replay_and_query_binding_fail_closed() 
             .status(),
         401
     );
+    server.abort();
+}
+
+fn client(addr: std::net::SocketAddr) -> SeatedHttpClient {
+    SeatedHttpClient::new(
+        &format!("http://{addr}"),
+        RoomSeat {
+            room: ROOM.into(),
+            chain_id: 1,
+            transport_generation: 0,
+            key_generation: 2,
+            seat: SEAT.into(),
+            role: "owner".into(),
+            certificate: "fixture-cert".into(),
+            public_key: ed25519_dalek::SigningKey::from_bytes(&seed().try_into().unwrap())
+                .verifying_key()
+                .to_bytes(),
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn typed_diagnostics_client_interoperates_with_signed_service_and_fresh_nonces() {
+    let state = crate::web::tests::test_state();
+    let store = state.store.clone();
+    install_fixture(&store);
+    let now = Utc::now().timestamp_millis();
+    subscribe(&store, now);
+    append(&store, &sealed(CANARY.as_bytes()), 2, now).unwrap();
+    let (server, addr) = crate::web::tests::start_test_web_server(state).await;
+    let client = client(addr);
+    let first = client.diagnostics(&seed()).await.unwrap();
+    assert_eq!(first.version, 1);
+    assert_eq!(first.transport.kind, DiagnosticsTransportKind::Sqlite);
+    assert_eq!(first.transport.local_tip, 1);
+    assert_eq!(first.checks.archive, DiagnosticsCheck::Unsupported);
+    assert_eq!(
+        first.checks.production_runtime,
+        DiagnosticsCheck::Unsupported
+    );
+    let subscription = first.subscription.as_ref().unwrap();
+    assert_eq!(subscription.state, DiagnosticsSubscriptionState::Active);
+    assert!(subscription.binding_current);
+    assert_eq!(subscription.pending_wakes, 1);
+    assert_eq!(client.diagnostics(&seed()).await.unwrap(), first);
+    let count: i64 = store
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM seated_request_nonces", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 4); // Subscribe, append, and two independently signed reads.
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE seated_rooms SET auth_generation=2", [])
+        .unwrap();
+    assert!(matches!(
+        client.diagnostics(&seed()).await,
+        Err(RoomError::Refused(401))
+    ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn typed_diagnostics_client_rejects_untrusted_response_shapes_without_echoing_them() {
+    use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
+    let valid = serde_json::json!({
+        "version":1,"transport":{"kind":"sqlite","generation":0,"local_tip":1},
+        "authorization_generation":1,"key_generation":2,"subscription":null,
+        "checks":{"archive":"unsupported","production_runtime":"unsupported"}
+    });
+    let mut malformed = Vec::new();
+    for (field, value) in [
+        ("/version", serde_json::json!(2)),
+        ("/transport/generation", serde_json::json!(1)),
+        ("/transport/local_tip", serde_json::json!(-1)),
+        ("/transport/kind", serde_json::json!(CANARY)),
+        ("/checks/archive", serde_json::json!("healthy")),
+        ("/key_generation", serde_json::json!(-1)),
+        (
+            "/subscription",
+            serde_json::json!({"state":CANARY,"binding_current":true,"pending_wakes":0}),
+        ),
+        (
+            "/subscription",
+            serde_json::json!({"state":"active","binding_current":true,"pending_wakes":-1}),
+        ),
+    ] {
+        let mut changed = valid.clone();
+        *changed.pointer_mut(field).unwrap() = value;
+        malformed.push(changed.to_string());
+    }
+    let mut missing = valid.clone();
+    missing.as_object_mut().unwrap().remove("subscription");
+    malformed.push(missing.to_string());
+    let mut extra = valid.clone();
+    extra["transport"]["secret"] = CANARY.into();
+    malformed.push(extra.to_string());
+    malformed.push(format!("{{\"version\":1,{}", &valid.to_string()[1..])); // Duplicate field.
+    malformed.push(CANARY.into());
+    malformed.push(format!("{}{}", valid, " ".repeat(16 * 1024))); // Valid JSON, too large.
+    let bad_count = malformed.len();
+    let mut responses: VecDeque<_> = malformed
+        .into_iter()
+        .map(|body| (StatusCode::OK, body))
+        .collect();
+    responses.push_back((StatusCode::UNAUTHORIZED, CANARY.into()));
+    responses.push_back((StatusCode::FOUND, CANARY.into()));
+    responses.push_back((StatusCode::OK, valid.to_string()));
+    let responses = Arc::new(Mutex::new(responses));
+    let remaining = responses.clone();
+    let app = Router::new().route(
+        &format!("/rooms/{ROOM}/diagnostics"),
+        get(move || {
+            let responses = responses.clone();
+            async move {
+                let (status, body) = responses.lock().unwrap().pop_front().unwrap();
+                // A redirect back to this path must be returned as Refused(302),
+                // never followed with a signed authorization request.
+                (
+                    status,
+                    [("location", format!("/rooms/{ROOM}/diagnostics"))],
+                    body,
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = client(addr);
+    for _ in 0..bad_count {
+        let error = client.diagnostics(&seed()).await.unwrap_err();
+        assert!(matches!(error, RoomError::Invalid), "{error}");
+        assert!(!format!("{error:?} {error}").contains(CANARY));
+    }
+    for code in [401, 302] {
+        let error = client.diagnostics(&seed()).await.unwrap_err();
+        assert!(matches!(error, RoomError::Refused(status) if status == code));
+        assert!(!format!("{error:?} {error}").contains(CANARY));
+    }
+    let parsed = client.diagnostics(&seed()).await.unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), valid);
+    assert!(remaining.lock().unwrap().is_empty());
     server.abort();
 }
