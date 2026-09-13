@@ -15,6 +15,8 @@ mod door_filter_tests;
 mod key_envelope_tests;
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
+#[path = "transport_contract_tests.rs"]
+mod transport_contract_tests;
 
 const ROOM: &str = "10000000-0000-4000-8000-000000000001";
 const ID: &str = "20000000-0000-4000-8000-000000000001";
