@@ -26,6 +26,22 @@ pub enum RoomError {
     #[error("conflicting reply has no authenticated winner")]
     UnresolvedConflict,
 }
+/// Host-installed signer for one acquired seat lease. Called synchronously at
+/// every HTTP request, including a conflict reconciliation read. Implementations
+/// must check the same lease's current authority and sign within one bounded
+/// fence; they must not perform network I/O or return a reusable authorization.
+/// No fence is held by this client while awaiting the HTTP response.
+pub trait SeatedRequestSigner: Send + Sync {
+    fn sign_request(&self, projection: &[u8]) -> Result<Vec<u8>, RoomError>;
+}
+
+struct SeedSigner<'a>(&'a [u8]);
+impl SeatedRequestSigner for SeedSigner<'_> {
+    fn sign_request(&self, projection: &[u8]) -> Result<Vec<u8>, RoomError> {
+        request::sign(projection, self.0).map_err(|_| RoomError::Invalid)
+    }
+}
+
 #[derive(Clone)]
 pub struct RoomSeat {
     pub room: String,
@@ -369,6 +385,17 @@ impl SeatedHttpClient {
         body: Vec<u8>,
         seed: &[u8],
     ) -> Result<reqwest::Response, RoomError> {
+        self.send_with_signer(method, target, body, &SeedSigner(seed))
+            .await
+    }
+
+    async fn send_with_signer(
+        &self,
+        method: reqwest::Method,
+        target: &str,
+        body: Vec<u8>,
+        signer: &dyn SeatedRequestSigner,
+    ) -> Result<reqwest::Response, RoomError> {
         let now =
             u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| RoomError::Invalid)?;
         let projection = cbor(&Cbor::Array(vec![
@@ -378,7 +405,7 @@ impl SeatedHttpClient {
             now.into(),
             Cbor::Bytes(Uuid::new_v4().as_bytes().to_vec()),
         ]))?;
-        let signature = request::sign(&projection, seed).map_err(|_| RoomError::Invalid)?;
+        let signature = signer.sign_request(&projection)?;
         self.http
             .request(
                 method,
@@ -439,6 +466,16 @@ impl SeatedHttpClient {
         message_id: &str,
         seed: &[u8],
     ) -> Result<Value, RoomError> {
+        self.read_ciphertext_message_with_signer(message_id, &SeedSigner(seed))
+            .await
+    }
+
+    /// Read one record with a host lease check at the actual HTTP signing point.
+    pub async fn read_ciphertext_message_with_signer(
+        &self,
+        message_id: &str,
+        signer: &dyn SeatedRequestSigner,
+    ) -> Result<Value, RoomError> {
         if Uuid::parse_str(message_id)
             .map_err(|_| RoomError::Invalid)?
             .to_string()
@@ -451,7 +488,7 @@ impl SeatedHttpClient {
             self.seat.room, self.seat.transport_generation
         );
         let response = self
-            .send(reqwest::Method::GET, &target, vec![], seed)
+            .send_with_signer(reqwest::Method::GET, &target, vec![], signer)
             .await?;
         if !response.status().is_success() {
             return Err(RoomError::Refused(response.status().as_u16()));
@@ -465,10 +502,21 @@ impl SeatedHttpClient {
         reply: &PreparedReply,
         seed: &[u8],
     ) -> Result<Value, RoomError> {
+        self.submit_reply_with_signer(reply, &SeedSigner(seed))
+            .await
+    }
+
+    /// Submit a sealed reply, checking the host lease independently before both
+    /// the append signature and any later conflict reconciliation signature.
+    pub async fn submit_reply_with_signer(
+        &self,
+        reply: &PreparedReply,
+        signer: &dyn SeatedRequestSigner,
+    ) -> Result<Value, RoomError> {
         self.restore_reply(&reply.trigger, &reply.bytes)?;
         let target = format!("/rooms/{}/messages", self.seat.room);
         let response = self
-            .send(reqwest::Method::POST, &target, reply.bytes.clone(), seed)
+            .send_with_signer(reqwest::Method::POST, &target, reply.bytes.clone(), signer)
             .await?;
         let status = response.status();
         if status.is_success() {
@@ -488,7 +536,7 @@ impl SeatedHttpClient {
             self.seat.transport_generation, reply.message_id
         );
         let response = self
-            .send(reqwest::Method::GET, &target, vec![], seed)
+            .send_with_signer(reqwest::Method::GET, &target, vec![], signer)
             .await?;
         if !response.status().is_success() {
             return Err(RoomError::UnresolvedConflict);
@@ -525,3 +573,6 @@ async fn bounded_bytes(
     }
     Ok(bytes)
 }
+
+#[cfg(test)]
+mod signer_tests;

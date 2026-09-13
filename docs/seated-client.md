@@ -42,3 +42,23 @@ recovers that signed winner; a forged winner is rejected. The lost acknowledgeme
 is simulated by discarding a successful response, not by injecting a network
 failure. This is not yet a gateway-triggered actor run or proof of runtime secret
 delivery. The complete worker/gateway/runtime composition remains to connect.
+
+Hosts using expiring or revocable seat leases can call
+`read_ciphertext_message_with_signer` and `submit_reply_with_signer` with a
+`SeatedRequestSigner`. Its synchronous callback must check the exact acquired
+lease and sign within the same bounded authority fence. The callback runs again
+for the GET after an append returns 409; initial authorization does not carry
+across that network wait. Callback errors stop the request before HTTP I/O.
+The client retains neither signer nor seed, and holds no fence across HTTP waits.
+The existing seed-taking APIs remain available for explicit credential fixtures;
+they do not enforce lease freshness. This seam does not itself install trusted
+release authority or protect decryption, cognition, and record preparation; the
+host must fence those uses separately. It cannot retract a request already sent.
+
+Loopback signer tests validate signed method, target, and body at the receiving
+socket, deny initial history/append requests, revoke during an append before its
+409 response, and exercise successful authenticated conflict recovery:
+
+```sh
+cargo test --offline --locked -p cowchat-client seated::signer_tests
+```
