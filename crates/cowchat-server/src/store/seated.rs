@@ -6,6 +6,8 @@ use cowchat_crypto::{authorization, request};
 
 mod enrollment;
 mod history;
+mod subscriptions;
+pub(super) use subscriptions::record_wake_on;
 
 pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
@@ -22,6 +24,17 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
     CREATE TABLE IF NOT EXISTS seated_request_nonces (
         public_key BLOB NOT NULL, nonce BLOB NOT NULL, retain_through_ms INTEGER NOT NULL,
         PRIMARY KEY(public_key, nonce)
+    );
+    CREATE TABLE IF NOT EXISTS seated_subscriptions (
+        subscription_id TEXT PRIMARY KEY REFERENCES subscriptions(subscription_id) ON DELETE CASCADE,
+        room_id TEXT NOT NULL REFERENCES seated_rooms(room_id) ON DELETE CASCADE,
+        cert_id TEXT NOT NULL, seat TEXT NOT NULL, auth_generation INTEGER NOT NULL,
+        transport_generation INTEGER NOT NULL, request_digest BLOB NOT NULL,
+        UNIQUE(room_id, seat)
+    );
+    CREATE TABLE IF NOT EXISTS seated_wakes (
+        delivery_id TEXT PRIMARY KEY REFERENCES subscription_deliveries(delivery_id) ON DELETE CASCADE,
+        payload TEXT NOT NULL
     );",
     )?;
     ensure_column_exists(

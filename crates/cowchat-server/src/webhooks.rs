@@ -331,35 +331,63 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
         return;
     }
 
-    let msg = match inner.store.get_message(&d.message_id) {
-        Ok(Some(m)) => m,
-        Ok(None) => {
-            log::warn!(
-                "webhook delivery: message {} not found, dropping",
-                d.message_id
-            );
+    // Seated wakes contain only immutable pointers. Membership is checked again
+    // on every attempt, and each subsequent history read authenticates itself.
+    let seated_body = match inner.store.seated_wake_payload(
+        &sub.subscription_id,
+        &d.delivery_id,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(body) => body,
+        Err(crate::store::StoreError::SeatedAuthorization) => {
+            // Stop accumulating new obligations for credentials that cannot
+            // read the room. A future signed renewal must explicitly repair it.
             let _ = inner
                 .store
-                .abandon_delivery(&d.delivery_id, "message missing");
+                .set_subscription_status(&sub.subscription_id, "failed", None);
+            let _ = inner
+                .store
+                .abandon_delivery(&d.delivery_id, "membership no longer current");
             return;
         }
-        Err(e) => {
-            log::warn!("webhook delivery: get_message {}: {}", d.message_id, e);
+        Err(error) => {
+            log::warn!("webhook seated authorization failed: {}", error);
             return;
         }
     };
+    let body = if let Some(body) = seated_body {
+        body
+    } else {
+        let msg = match inner.store.get_message(&d.message_id) {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                log::warn!(
+                    "webhook delivery: message {} not found, dropping",
+                    d.message_id
+                );
+                let _ = inner
+                    .store
+                    .abandon_delivery(&d.delivery_id, "message missing");
+                return;
+            }
+            Err(e) => {
+                log::warn!("webhook delivery: get_message {}: {}", d.message_id, e);
+                return;
+            }
+        };
 
-    // One event identity across redelivery, including a lost HTTP acknowledgement.
+        // One event identity across redelivery, including a lost HTTP acknowledgement.
+        let envelope = serde_json::json!({
+            "type": "cowchat.message.created",
+            "dispatch_id": d.delivery_id,
+            "subscription_id": sub.subscription_id,
+            "room_id": sub.room_id,
+            "message": msg,
+        });
+        serde_json::to_string(&envelope).unwrap_or_default()
+    };
     let webhook_id = &d.delivery_id;
     let timestamp = chrono::Utc::now().timestamp();
-    let envelope = serde_json::json!({
-        "type": "cowchat.message.created",
-        "dispatch_id": d.delivery_id,
-        "subscription_id": sub.subscription_id,
-        "room_id": sub.room_id,
-        "message": msg,
-    });
-    let body = serde_json::to_string(&envelope).unwrap_or_default();
     let signature = sign_request(&secret, webhook_id, timestamp, &body);
 
     let (http, pinned_url) = match pinned_http_client(&sub.webhook_url, inner.allow_private).await {

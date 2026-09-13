@@ -116,6 +116,260 @@ fn seal_header(header: crate::seated::RecordHeader, plaintext: &[u8]) -> Vec<u8>
 fn signed(body: &[u8], nonce: u8, now: i64) -> (Vec<u8>, Vec<u8>) {
     signed_for("POST", TARGET, body, nonce, now)
 }
+
+#[tokio::test]
+async fn seated_subscription_http_backfills_immutable_content_free_wake_and_rechecks_revocation() {
+    use axum::{
+        body::Bytes,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+        Router,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    let (sent, mut received) = tokio::sync::mpsc::channel(8);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let receiver = Router::new().route(
+        "/wake",
+        post(move |headers: HeaderMap, body: Bytes| {
+            let sent = sent.clone();
+            let attempts = attempts.clone();
+            async move {
+                sent.send((headers, String::from_utf8(body.to_vec()).unwrap()))
+                    .await
+                    .unwrap();
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::OK
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/wake", listener.local_addr().unwrap());
+    let sink = tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+    let state = crate::web::tests::test_state();
+    create_empty_owned_room(&state.store);
+    let now = Utc::now().timestamp_millis();
+    let (enrollment, seat, cert) = owner_enrollment(ROOM, "owner", now as u64 + 60_000);
+    state
+        .store
+        .enroll_seated_owner(ROOM, "master", &enrollment, now)
+        .unwrap();
+    let mut header = crate::seated::SealedRecord::parse(&sealed(b"template"))
+        .unwrap()
+        .header;
+    header.seat = seat.clone();
+    header.cert = cert.clone();
+    header.gen = 0;
+    header.mentions = vec![seat.clone()];
+    let body = seal_header(header, b"private content never belongs in a wake");
+    append(&state.store, &body, 70, now).unwrap();
+    let store = state.store.clone();
+    let manager = state.webhook_mgr.clone();
+    let (server, addr) = crate::web::tests::start_test_web_server(state).await;
+    let target = format!("/rooms/{ROOM}/subscriptions");
+    let id = "30000000-0000-4000-8000-000000000001";
+    let secret = "0123456789abcdef0123456789abcdef";
+    let input = serde_json::to_vec(
+        &serde_json::json!({"subscription_id":id,"transport_generation":0,
+        "webhook_url":endpoint,"secret":secret,"after":0}),
+    )
+    .unwrap();
+    let http = reqwest::Client::new();
+    let post = |bytes: Vec<u8>, nonce| {
+        let (projection, signature) = signed_for("POST", &target, &bytes, nonce, now);
+        http.post(format!("http://{addr}{target}"))
+            .header("x-cowchat-certificate", &cert)
+            .header("x-cowchat-request", B64.encode(projection))
+            .header("x-cowchat-signature", B64.encode(signature))
+            .body(bytes)
+    };
+    store.conn.lock().unwrap().execute_batch(
+        "CREATE TRIGGER fail_seated_wake BEFORE INSERT ON seated_wakes BEGIN SELECT RAISE(ABORT,'injected'); END;"
+    ).unwrap();
+    assert_eq!(
+        post(input.clone(), 71).send().await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert!(store.get_subscription(id).unwrap().is_none());
+    assert!(store
+        .load_due_deliveries(Utc::now(), 10)
+        .unwrap()
+        .is_empty());
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_seated_wake;")
+        .unwrap();
+    // The failed backlog transaction did not consume the request nonce either.
+    let response = post(input.clone(), 71).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(result["seat"], seat);
+    assert_eq!(result["cursor"]["position"], 0);
+    assert_eq!(
+        post(input.clone(), 71).send().await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        post(input.clone(), 72).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    let mut changed: serde_json::Value = serde_json::from_slice(&input).unwrap();
+    changed["after"] = 1.into();
+    assert_eq!(
+        post(serde_json::to_vec(&changed).unwrap(), 73)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert!(store.list_subscriptions("", None).unwrap().is_empty());
+    assert!(!store.delete_subscription(id, "").unwrap());
+    assert!(matches!(
+        store.enable_subscription_with_backfill(id, ""),
+        Err(StoreError::SeatedRequestRequired)
+    ));
+    let pending = store.load_due_deliveries(Utc::now(), 10).unwrap();
+    assert_eq!(pending.len(), 1);
+    let payload = store
+        .seated_wake_payload(id, &pending[0].delivery_id, now)
+        .unwrap()
+        .unwrap();
+    // Even a later cursor cannot change an existing event body.
+    store.advance_subscription_cursor(id, 1).unwrap();
+    assert_eq!(
+        store
+            .seated_wake_payload(id, &pending[0].delivery_id, now)
+            .unwrap()
+            .unwrap(),
+        payload
+    );
+    let worker = manager.start();
+    let first = tokio::time::timeout(Duration::from_secs(3), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(3), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.1, second.1);
+    assert_eq!(first.0["webhook-id"], second.0["webhook-id"]);
+    for (headers, body) in [&first, &second] {
+        let event: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(event["data"]["message_id"], ID);
+        assert_eq!(
+            event["data"]["dispatch_id"],
+            headers["webhook-id"].to_str().unwrap()
+        );
+        assert!(event.get("message").is_none());
+        assert!(event["data"].get("body").is_none());
+        assert!(!body.contains("private content"));
+        let timestamp = headers["webhook-timestamp"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            headers["webhook-signature"].to_str().unwrap(),
+            crate::webhooks::sign_request(
+                secret,
+                headers["webhook-id"].to_str().unwrap(),
+                timestamp,
+                body
+            )
+        );
+    }
+    worker.abort();
+    let _ = worker.await;
+    let mut header = crate::seated::SealedRecord::parse(&body).unwrap().header;
+    header.message_id = uuid::Uuid::new_v4().to_string();
+    let next = seal_header(header, b"revoked wake");
+    append(&store, &next, 74, now).unwrap();
+    let pending = store.load_due_deliveries(Utc::now(), 10).unwrap();
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE seated_rooms SET auth_generation=1", [])
+        .unwrap();
+    for delivery in pending {
+        assert!(matches!(
+            store.seated_wake_payload(id, &delivery.delivery_id, now),
+            Err(StoreError::SeatedAuthorization)
+        ));
+    }
+    let worker = manager.start();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), received.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.get_subscription(id).unwrap().unwrap().0.status,
+        "failed"
+    );
+    worker.abort();
+    server.abort();
+    sink.abort();
+}
+
+#[test]
+fn seated_subscription_default_filters_use_signed_class_hint_and_exact_seat() {
+    let store = Store::open_in_memory().unwrap();
+    install_fixture(&store);
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM subscriptions WHERE subscription_id='wake'", [])
+        .unwrap();
+    let now = Utc::now().timestamp_millis();
+    let target = format!("/rooms/{ROOM}/subscriptions");
+    let input=serde_json::to_vec(&serde_json::json!({"subscription_id":uuid::Uuid::new_v4().to_string(),
+        "transport_generation":0,"webhook_url":"https://example.com/wake","secret":"0123456789abcdef0123456789abcdef","after":0})).unwrap();
+    let (projection, signature) = signed_for("POST", &target, &input, 80, now);
+    store
+        .subscribe_seated(
+            ROOM,
+            "fixture-cert",
+            "POST",
+            &target,
+            &input,
+            &projection,
+            &signature,
+            now,
+        )
+        .unwrap();
+    for (index, (class, hint, mentioned)) in [
+        ("message", "normal", false),
+        ("thinking", "none", true),
+        ("message", "none", true),
+        ("message", "normal", true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut header = crate::seated::SealedRecord::parse(&sealed(b"template"))
+            .unwrap()
+            .header;
+        header.message_id = uuid::Uuid::new_v4().to_string();
+        header.class = class.into();
+        header.wake_hint = hint.into();
+        header.mentions = if mentioned { vec![SEAT.into()] } else { vec![] };
+        let body = seal_header(header, b"private");
+        append(&store, &body, 81 + index as u8, now).unwrap();
+    }
+    let due = store.load_due_deliveries(Utc::now(), 10).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].message_seq, 4);
+}
 fn signed_for(method: &str, target: &str, body: &[u8], nonce: u8, now: i64) -> (Vec<u8>, Vec<u8>) {
     let projection = encode(&Value::Array(vec![
         text(method),

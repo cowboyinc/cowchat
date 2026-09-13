@@ -1928,6 +1928,7 @@ impl Store {
                         status, failure_count, created_at, only_mention
                  FROM subscriptions
                  WHERE owner_key = ?1 AND room_id = ?2
+                 AND NOT EXISTS (SELECT 1 FROM seated_rooms WHERE seated_rooms.room_id=subscriptions.room_id)
                  ORDER BY created_at DESC",
                 true,
             ),
@@ -1937,6 +1938,7 @@ impl Store {
                         status, failure_count, created_at, only_mention
                  FROM subscriptions
                  WHERE owner_key = ?1
+                 AND NOT EXISTS (SELECT 1 FROM seated_rooms WHERE seated_rooms.room_id=subscriptions.room_id)
                  ORDER BY created_at DESC",
                 false,
             ),
@@ -1983,7 +1985,8 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
-            "DELETE FROM subscriptions WHERE subscription_id = ?1 AND owner_key = ?2",
+            "DELETE FROM subscriptions WHERE subscription_id = ?1 AND owner_key = ?2
+             AND NOT EXISTS (SELECT 1 FROM seated_rooms WHERE seated_rooms.room_id=subscriptions.room_id)",
             params![subscription_id, owner_key],
         )?;
         Ok(n > 0)
@@ -2341,13 +2344,21 @@ fn enqueue_delivery_on(
     message_id: &str,
     next_attempt_at: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
+    let seated_non_message:bool=conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM seated_subscriptions WHERE subscription_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM messages WHERE message_id=?2 AND json_extract(metadata,'$.type')='message')",
+        params![subscription_id,message_id],|row| row.get(0),
+    )?;
+    if seated_non_message {
+        return Ok(false);
+    }
     let ts = next_attempt_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
     let deadline = (Utc::now() + chrono::Duration::hours(24))
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
     // Only a duplicate (subscription, seq) is benign. FK failures, injected
     // failures, or delivery-ID collisions must roll back the complete append.
-    Ok(conn.execute(
+    let inserted=conn.execute(
         "INSERT INTO subscription_deliveries
          (delivery_id, subscription_id, message_seq, message_id, next_attempt_at, attempts, deadline_at)
          SELECT ?1, ?2, ?3, ?4, ?5, 0, ?6
@@ -2355,7 +2366,11 @@ fn enqueue_delivery_on(
                            WHERE subscription_id = ?2 AND last_delivered_seq >= ?3)
          ON CONFLICT(subscription_id, message_seq) DO NOTHING",
         params![delivery_id, subscription_id, message_seq, message_id, ts, deadline],
-    )? > 0)
+    )? > 0;
+    if inserted {
+        seated::record_wake_on(conn, delivery_id, subscription_id, message_id, message_seq)?;
+    }
+    Ok(inserted)
 }
 
 fn expire_deliveries(conn: &Connection, now: DateTime<Utc>) -> Result<(), StoreError> {

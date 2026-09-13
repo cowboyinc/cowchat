@@ -46,8 +46,38 @@ Legacy bearer writes, history, and room access cannot bypass seated authenticati
 Legacy rename/destroy and re-enable paths are also blocked. Seated messages,
 receipts, and blob rows are exempt from legacy age retention.
 
-The owner endpoint, signed append, and owner history are implemented; signed
-subscription management, owner credential renewal/revocation endpoints, actor enrollment from a
+`POST /rooms/{room_id}/subscriptions` uses the same signature and certificate
+headers. Its JSON contains a client UUID `subscription_id`, `transport_generation`,
+`webhook_url`, a per-subscription `secret` (32–512 bytes), and optional `after`.
+Omitting `after` starts at the current tip. This slice supports one subscription
+per authenticated seat, for explicit mentions in `message` records with a nonzero
+wake hint. It cannot subscribe as another seat or enable broader data/broadcast
+filters. Creating a notification subscription does not grant compute authority.
+
+Membership is checked before URL validation and again in the local transaction
+that consumes the nonce and installs the subscription, backlog, and immutable
+CloudEvents wake payloads. Retries with a fresh signed request nonce and the exact
+same body acknowledge the existing subscription without resetting or reviving it.
+Changed inputs conflict. Wakes contain only room/message/cursor/dispatch pointers,
+use Standard Webhooks signatures, and preserve their body and ID across retries.
+The worker rechecks local membership, expiry, and generations on each attempt.
+An already-sent pointer may race revocation; subsequent history access still
+requires current credentials. Legacy subscription APIs cannot manage seated rows.
+
+```sh
+cargo test --offline --locked -p cowchat-server --lib seated_subscription_http
+cargo test --offline --locked -p cowchat-server --lib seated_subscription_default_filters
+```
+
+The HTTP test uses real owner enrollment and a local HTTP receiver, verifies
+signed pointer-only redelivery, checks lost-response create retries, injects a
+backlog-write failure to verify full rollback including the nonce, and checks
+revocation before delivery. It does not execute an actor or establish its identity.
+Signed subscription update/delete/re-enable and broader owner-approved filters
+remain to implement. Existing delivery retry deadlines still apply.
+
+The owner endpoint, signed append, owner history, and mention-subscription creation
+are implemented; owner credential renewal/revocation endpoints, actor enrollment from a
 verified finalized control record, and the full actor wake/reply proof remain to
 be connected. Tests that directly install trusted actor-like contexts are explicitly
 provisioning fixtures, not evidence of live actor identity verification.

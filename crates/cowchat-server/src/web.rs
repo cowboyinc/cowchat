@@ -100,6 +100,10 @@ pub fn router(state: AppState) -> Router {
                 .get(crate::seated::history)
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
+        .route(
+            "/rooms/{room_id}/subscriptions",
+            post(crate::seated::subscribe),
+        )
         .route("/api/rooms/{room_id}/history", get(api_room_history))
         .route(
             "/api/rooms/{room_id}/blobs",

@@ -174,6 +174,116 @@ fn default_page_limit() -> u32 {
     100
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MentionSubscription {
+    pub subscription_id: String,
+    pub transport_generation: u64,
+    pub webhook_url: String,
+    pub secret: String,
+    pub after: Option<i64>,
+}
+impl MentionSubscription {
+    pub(crate) fn validate(&self) -> Result<(), ()> {
+        if uuid::Uuid::parse_str(&self.subscription_id).is_err()
+            || self.after.is_some_and(|value| value < 0)
+            || !(32..=512).contains(&self.secret.len())
+            || self.webhook_url.len() > 2048
+        {
+            return Err(());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn subscribe(
+    State(state): State<crate::web::AppState>,
+    Path(room): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if body.len() > 16 * 1024 {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let Some(cert) = headers
+        .get("x-cowchat-certificate")
+        .and_then(|v| v.to_str().ok())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let decode = |name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| B64.decode(v).ok())
+    };
+    let (Some(projection), Some(signature)) =
+        (decode("x-cowchat-request"), decode("x-cowchat-signature"))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Ok(input) = serde_json::from_slice::<MentionSubscription>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let target = uri
+        .path_and_query()
+        .map(|v| v.as_str())
+        .unwrap_or(uri.path());
+    if state
+        .store
+        .preflight_seated_subscription(
+            &room,
+            cert,
+            method.as_str(),
+            target,
+            &body,
+            &projection,
+            &signature,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .is_err()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if input.validate().is_err()
+        || state
+            .webhook_mgr
+            .validate_url(&input.webhook_url)
+            .await
+            .is_err()
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let target = uri
+        .path_and_query()
+        .map(|v| v.as_str())
+        .unwrap_or(uri.path());
+    match state.store.subscribe_seated(
+        &room,
+        cert,
+        method.as_str(),
+        target,
+        &body,
+        &projection,
+        &signature,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(result) => {
+            state.webhook_mgr.wake();
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        Err(crate::store::StoreError::MessageConflict | crate::store::StoreError::SeatedReplay) => {
+            StatusCode::CONFLICT.into_response()
+        }
+        Err(crate::store::StoreError::SeatedAuthorization) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 pub(crate) async fn history(
     State(state): State<crate::web::AppState>,
     Path(room): Path<String>,
