@@ -46,6 +46,41 @@ fn reply(client: &SeatedHttpClient) -> PreparedReply {
         .prepare_reply(&wake, b"fixture reply", &seed(), &[42; 32])
         .unwrap()
 }
+
+#[test]
+fn reference_reply_preserves_identity_and_refuses_wrong_signing_key() {
+    let client = SeatedHttpClient::new("http://127.0.0.1:1", seat()).unwrap();
+    let old = reply(&client);
+    let recovered = client
+        .prepare_reply_for_trigger(TRIGGER, b"fixture reply", &seed(), &[42; 32])
+        .unwrap();
+    assert_eq!(old.message_id(), recovered.message_id());
+    client.restore_reply(TRIGGER, recovered.bytes()).unwrap();
+    let record: Value = serde_json::from_slice(recovered.bytes()).unwrap();
+    let (header, body, signature) = record_parts(&record).unwrap();
+    assert_eq!(
+        envelope::open(&header, &body, &seat().public_key, &signature, &[42; 32]).unwrap(),
+        b"fixture reply"
+    );
+    for trigger in [
+        "bad&id",
+        "00000000-0000-0000-0000-000000000000",
+        "00000000000040008000000000000002",
+    ] {
+        assert!(client
+            .prepare_reply_for_trigger(trigger, b"reply", &seed(), &[42; 32])
+            .is_err());
+    }
+    assert!(client
+        .prepare_reply_for_trigger(TRIGGER, b"reply", &[99; 32], &[42; 32])
+        .is_err());
+    let mut other = seat();
+    other.room = "00000000-0000-4000-8000-000000000003".into();
+    assert!(SeatedHttpClient::new("http://127.0.0.1:1", other)
+        .unwrap()
+        .restore_reply(TRIGGER, recovered.bytes())
+        .is_err());
+}
 struct FencedSigner {
     revoked: Arc<AtomicBool>,
     checks: AtomicUsize,
@@ -175,7 +210,9 @@ async fn recovery_distinguishes_absence_from_invalid_or_refused_history() {
     )
     .unwrap();
     let signer = signer(Arc::new(AtomicBool::new(false)));
-    let candidate = reply(&client);
+    let candidate = client
+        .prepare_reply_for_trigger(TRIGGER, b"fixture reply", &seed(), &[42; 32])
+        .unwrap();
     let winner: Value = serde_json::from_slice(candidate.bytes()).unwrap();
     let id = candidate.message_id().to_owned();
     let mut forged = winner.clone();

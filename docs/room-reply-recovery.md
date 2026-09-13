@@ -23,6 +23,16 @@ facts and current room authority before completing a run. The service position
 is not an independently verified archive receipt, and this lookup does not
 finish accounting or establish final SENT.
 
+For an authorized new execution from a durable reference,
+`prepare_reply_for_trigger` seals using the installed seat and the same stable
+reply identity. It requires a canonical nonzero trigger UUID and verifies the
+resulting signature against the installed seat key. The existing `prepare_reply`
+entry retains its verified-wake room/generation checks and delegates sealing to
+this method. Neither method grants access or permission to run a model: the host
+must first refetch and authenticate the trigger, obtain its paid permit, and
+carry the original current lease through sealing and submission. Recovery of an
+already dispatched attempt still uses lookup, not a replacement candidate.
+
 Tests cover a real service read before append and after a lost append
 acknowledgement with a recreated client. Adversarial HTTP tests cover malformed
 pages, a forged signature, a validly signed different reply, duplicate rows,

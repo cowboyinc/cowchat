@@ -341,9 +341,29 @@ impl SeatedHttpClient {
         {
             return Err(RoomError::Invalid);
         }
-        let id = self.reply_id(wake.message_id())?;
+        self.prepare_reply_for_trigger(wake.message_id(), plaintext, signing_seed, room_secret)
+    }
+
+    /// Seal a reply after the host has independently authorized and authenticated
+    /// this exact trigger under its current room lease. A durable trigger ID is
+    /// not a webhook, access grant or execution permit. The host must fence this
+    /// call and every later submission using its carried room/paid authority.
+    /// This performs no I/O and retains the same stable reply ID and own-seat
+    /// signature validation as the verified-wake entry point.
+    pub fn prepare_reply_for_trigger(
+        &self,
+        trigger: &str,
+        plaintext: &[u8],
+        signing_seed: &[u8],
+        room_secret: &[u8],
+    ) -> Result<PreparedReply, RoomError> {
+        let parsed = Uuid::parse_str(trigger).map_err(|_| RoomError::Invalid)?;
+        if parsed.is_nil() || parsed.to_string() != trigger {
+            return Err(RoomError::Invalid);
+        }
+        let id = self.reply_id(trigger)?;
         let header = serde_json::json!({"v":3,"message_id":id,"chain_id":self.seat.chain_id,"room":self.seat.room,"seat":self.seat.seat,"role":self.seat.role,
-            "via":null,"via_sender":null,"class":"message","reply_to":wake.message_id(),"mentions":[],"wake_hint":"none","gen":self.seat.key_generation,"cert":self.seat.certificate,"nonce":B64.encode([0;12])});
+            "via":null,"via_sender":null,"class":"message","reply_to":trigger,"mentions":[],"wake_hint":"none","gen":self.seat.key_generation,"cert":self.seat.certificate,"nonce":B64.encode([0;12])});
         let sealed = envelope::seal(&cbor(&header)?, room_secret, plaintext, signing_seed)
             .map_err(|_| RoomError::Invalid)?;
         let Cbor::Array(parts) =
@@ -359,7 +379,7 @@ impl SeatedHttpClient {
         record["body"] = body.clone().into();
         record["sig"] = B64.encode(sig).into();
         self.restore_reply(
-            wake.message_id(),
+            trigger,
             &serde_json::to_vec(&record).map_err(|_| RoomError::Invalid)?,
         )
     }
