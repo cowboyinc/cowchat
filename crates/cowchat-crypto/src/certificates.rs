@@ -6,7 +6,9 @@ use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 
 mod actor;
+mod builder;
 pub use actor::verify_actor_membership;
+pub use builder::verify_builder_membership;
 
 pub const IDENTITY: u32 = 1;
 pub const MEMBERSHIP: u32 = 2;

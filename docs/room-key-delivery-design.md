@@ -184,9 +184,9 @@ production release authority.
 ## Implementation cuts and acceptance
 
 First implement the human/builder key-envelope service using existing HPKE and
-signed recipient certificates. Builder enrollment and the renewal-delegation
-verifier are explicit dependencies; today the HTTP enrollment factories cover
-owners and actors. Identify the browser and builder recipient-private-key
+signed recipient certificates. Wallet-issued builder bootstrap is now covered
+by the [builder enrollment service](builder-enrollment.md). The renewal-delegation
+verifier remains an explicit dependency. Identify the browser and builder recipient-private-key
 recovery mechanism before claiming restart support. Wrap publication must require
 the current owner or independently authorized key administrator; possessing a
 readable member certificate does not authorize choosing the room's key. The
@@ -233,3 +233,10 @@ and secret-handling code remain gated on a concrete specification with golden
 vectors reviewed by Claude and Chad's confirmation of the named access-authority
 trust boundary and provisioning scope. Stage 3 follows those decisions. No new
 user authorization or Track R activation is inferred from this ruling.
+
+
+Claude's message 1660 approved the scoped-envelope service core (committed
+b73173d) and authorized wallet-issued builder enrollment as the next bounded
+cut. Delegated identity renewal stays out of scope pending the stage 2 ruling.
+The builder HTTP enrollment and owner-to-builder delivery proof are implemented
+for review; this does not complete automatic renewal or production key recovery.

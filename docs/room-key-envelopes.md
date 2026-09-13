@@ -3,7 +3,7 @@
 This is an off-consensus delivery service for **already enrolled** owner and
 builder recipients. The room service stores HPKE ciphertext and public scope
 metadata. It has no unwrap path and receives neither recipient private keys nor
-room-generation secrets. It does not issue membership, renew builder credentials,
+room-generation secrets. It does not itself issue membership, renew builder credentials,
 or implement the proposed CBSS room-session release authority.
 
 ## HTTP contract
@@ -76,12 +76,13 @@ merely because they arrived alongside the envelope.
 
 ## Current limits and proof
 
-Owner bootstrap is available through the existing real wallet-certificate HTTP
-factory. Builder delivery supports a current enrolled builder, but builder
-enrollment and automatic credential renewal are not implemented by this slice.
-The builder authorization test explicitly seeds authenticated fixture state;
-it is not a production identity-issuance proof. Recipient private-key recovery
-also remains a client/runtime prerequisite. The restart test proves persistence
+Owner bootstrap and [wallet-issued builder enrollment](builder-enrollment.md)
+are available through HTTP. A separate end-to-end test now uses both real
+certificate factories before owner-to-builder envelope delivery and encrypted
+builder append. The original builder authorization test still explicitly seeds
+authenticated fixture state and is not an identity-issuance proof. Automatic
+credential renewal and recipient private-key recovery remain client/runtime
+prerequisites. The restart test proves persistence
 of sealed service records, not private-key recovery or browser-closed renewal.
 
 Publisher renewal within an otherwise unchanged slot is not an update operation:

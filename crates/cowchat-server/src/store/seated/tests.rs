@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 
 #[path = "actor_tests.rs"]
 mod actor_tests;
+#[path = "builder_tests.rs"]
+mod builder_tests;
 #[path = "client_tests.rs"]
 mod client_tests;
 #[path = "key_envelope_tests.rs"]

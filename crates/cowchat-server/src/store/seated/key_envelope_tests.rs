@@ -1,7 +1,7 @@
 use super::*;
 use cowchat_crypto::{certificates, key_envelope, keys};
 
-fn hpke(name: &str) -> Vec<u8> {
+pub(super) fn hpke(name: &str) -> Vec<u8> {
     let v: serde_json::Value =
         serde_json::from_str(include_str!("../../../../../fixtures/v3/hpke.json")).unwrap();
     let h = v[0][name].as_str().unwrap();
@@ -10,7 +10,7 @@ fn hpke(name: &str) -> Vec<u8> {
         .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
         .collect()
 }
-fn replace(raw: &[u8], name: &str, value: Value) -> Vec<u8> {
+pub(super) fn replace(raw: &[u8], name: &str, value: Value) -> Vec<u8> {
     let mut map: std::collections::BTreeMap<String, Value> = ciborium::from_reader(raw).unwrap();
     map.insert(name.into(), value);
     encode(&map)
@@ -39,7 +39,7 @@ fn setup(store: &Store, now: i64) -> (String, String) {
         .unwrap();
     (seat, cert)
 }
-fn make_scope(seat: &str, cert: &str) -> Vec<u8> {
+pub(super) fn make_scope(seat: &str, cert: &str) -> Vec<u8> {
     encode(&Value::Map(vec![
         (text("v"), 1u64.into()),
         (text("chain_id"), 1u64.into()),
@@ -57,7 +57,7 @@ fn make_scope(seat: &str, cert: &str) -> Vec<u8> {
         (text("purpose"), text("room-generation-secret")),
     ]))
 }
-fn wire(scope: &[u8], wrapped: &[u8], cert: &str, transport: u64) -> Vec<u8> {
+pub(super) fn wire(scope: &[u8], wrapped: &[u8], cert: &str, transport: u64) -> Vec<u8> {
     serde_json::to_vec(&crate::seated::KeyEnvelope {
         publisher_cert: cert.into(),
         transport_generation: transport,

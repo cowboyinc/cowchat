@@ -96,6 +96,10 @@ pub fn router(state: AppState) -> Router {
             post(crate::seated::enroll_owner).layer(DefaultBodyLimit::max(512 * 1024)),
         )
         .route(
+            "/rooms/{room_id}/builder",
+            post(crate::seated::enroll_builder).layer(DefaultBodyLimit::max(512 * 1024)),
+        )
+        .route(
             "/rooms/{room_id}/actors",
             post(crate::seated::enroll_actor).layer(DefaultBodyLimit::max(512 * 1024)),
         )

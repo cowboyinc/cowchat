@@ -593,3 +593,50 @@ pub(crate) async fn key_envelope(
         .insert("cache-control", "no-store".parse().unwrap());
     response
 }
+
+pub(crate) async fn enroll_builder(
+    State(state): State<crate::web::AppState>,
+    Path(room): Path<String>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let decode = |name| {
+        let mut values = headers.get_all(name).iter();
+        let value = values.next()?.to_str().ok()?;
+        if values.next().is_some() {
+            return None;
+        }
+        B64.decode(value).ok()
+    };
+    let (Some(projection), Some(signature)) =
+        (decode("x-cowchat-request"), decode("x-cowchat-signature"))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let target = uri
+        .path_and_query()
+        .map(|v| v.as_str())
+        .unwrap_or(uri.path());
+    match state.store.enroll_seated_builder(
+        &room,
+        target,
+        &body,
+        &projection,
+        &signature,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok((seat, cert)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"room_id":room,"seat":seat,"cert":cert,"mode":"seated"})),
+        )
+            .into_response(),
+        Err(crate::store::StoreError::MessageConflict | crate::store::StoreError::SeatedReplay) => {
+            StatusCode::CONFLICT.into_response()
+        }
+        Err(crate::store::StoreError::SeatedAuthorization) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}

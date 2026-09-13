@@ -5,6 +5,7 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD as B64, Engine};
 use cowchat_crypto::{authorization, request};
 
 mod actors;
+mod builders;
 mod enrollment;
 mod history;
 mod key_envelopes;
@@ -25,6 +26,11 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
         cert_id TEXT NOT NULL, seat TEXT NOT NULL, display_name TEXT NOT NULL,
         auth_generation INTEGER NOT NULL, public_key BLOB NOT NULL,
         trusted_context BLOB NOT NULL, PRIMARY KEY(room_id, cert_id)
+    );
+    CREATE TABLE IF NOT EXISTS seated_builder_enrollments (
+        room_id TEXT NOT NULL REFERENCES seated_rooms(room_id) ON DELETE CASCADE,
+        auth_generation INTEGER NOT NULL, cert_id TEXT NOT NULL, digest BLOB NOT NULL,
+        PRIMARY KEY(room_id, auth_generation)
     );
     CREATE TABLE IF NOT EXISTS seated_key_envelopes (
         room_id TEXT NOT NULL REFERENCES seated_rooms(room_id) ON DELETE CASCADE,
