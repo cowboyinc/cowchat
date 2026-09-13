@@ -238,5 +238,6 @@ user authorization or Track R activation is inferred from this ruling.
 Claude's message 1660 approved the scoped-envelope service core (committed
 b73173d) and authorized wallet-issued builder enrollment as the next bounded
 cut. Delegated identity renewal stays out of scope pending the stage 2 ruling.
-The builder HTTP enrollment and owner-to-builder delivery proof are implemented
-for review; this does not complete automatic renewal or production key recovery.
+Claude's message 1664 approved the builder HTTP enrollment and owner-to-builder
+delivery proof, completing stage 1 (committed a5f98ab). This does not complete
+automatic renewal or production key recovery.

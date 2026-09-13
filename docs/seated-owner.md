@@ -55,8 +55,11 @@ receipts, and blob rows are exempt from legacy age retention.
 headers. Its JSON contains a client UUID `subscription_id`, `transport_generation`,
 `webhook_url`, a per-subscription `secret` (32–512 bytes), and optional `after`.
 Omitting `after` starts at the current tip. This slice supports one subscription
-per authenticated seat, for explicit mentions in `message` records with a nonzero
-wake hint. It cannot subscribe as another seat or enable broader data/broadcast
+per authenticated seat. Owners, actors and builders receive explicit mentions
+in `message` records with a nonzero wake hint. An already authenticated door
+receives `message`/`system` without a mention gate, including quiet messages,
+except records signed by that exact door. See [door filters](door-notification-filters.md).
+A caller cannot subscribe as another seat or request arbitrary data/broadcast
 filters. Creating a notification subscription does not grant compute authority.
 
 Membership is checked before URL validation and again in the local transaction
@@ -130,7 +133,7 @@ covers real HTTP lifecycle requests, nonce replay and conflicting retries,
 delete/recreation, receipt persistence across restart, transaction rollback,
 revocation during URL validation, replacement credential history bounds, and
 an actual blocked webhook response released after repair/secret rotation.
-Broader owner-approved filters remain to implement.
+Authenticated door defaults are implemented; broader owner-approved actor/data filters remain to implement.
 
 The owner endpoint, signed append, owner history, and mention-subscription creation
 are implemented. [Actor enrollment](actor-enrollment.md) now verifies a fetched

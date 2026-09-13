@@ -898,7 +898,7 @@ impl Store {
             let subscriptions = stmt.query_map([append.room_id], map_subscription_row)?;
             for subscription in subscriptions {
                 let (sub, _, _) = subscription?;
-                if crate::webhooks::matches_filter_with_mentions(&sub, &message, append.mentions) {
+                if subscription_matches_on(conn, &sub, &message, append.mentions)? {
                     enqueue_delivery_on(
                         conn,
                         &uuid::Uuid::new_v4().to_string(),
@@ -2327,7 +2327,7 @@ fn enqueue_subscription_backfill_on(
     for row in rows {
         let (message, mentions) = row?;
         let mentions: Vec<String> = serde_json::from_str(&mentions)?;
-        if crate::webhooks::matches_filter_with_mentions(sub, &message, &mentions) {
+        if subscription_matches_on(conn, sub, &message, &mentions)? {
             enqueue_delivery_on(
                 conn,
                 &uuid::Uuid::new_v4().to_string(),
@@ -2341,6 +2341,29 @@ fn enqueue_subscription_backfill_on(
     Ok(())
 }
 
+// Seated routing uses authenticated record fields and current seat authority.
+// Legacy display-name/kind filters must not veto door system/quiet mirroring.
+fn subscription_matches_on(
+    conn: &Connection,
+    sub: &cowchat_core::Subscription,
+    message: &ChatMessage,
+    mentions: &[String],
+) -> Result<bool, StoreError> {
+    let seated: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM seated_subscriptions WHERE subscription_id=?1)",
+        [&sub.subscription_id],
+        |r| r.get(0),
+    )?;
+    if seated {
+        Ok(message.seq > sub.last_delivered_seq
+            && seated::allows_message_on(conn, &sub.subscription_id, &message.message_id)?)
+    } else {
+        Ok(crate::webhooks::matches_filter_with_mentions(
+            sub, message, mentions,
+        ))
+    }
+}
+
 fn enqueue_delivery_on(
     conn: &Connection,
     delivery_id: &str,
@@ -2350,14 +2373,6 @@ fn enqueue_delivery_on(
     next_attempt_at: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
     if !seated::allows_message_on(conn, subscription_id, message_id)? {
-        return Ok(false);
-    }
-    let seated_non_message:bool=conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM seated_subscriptions WHERE subscription_id=?1)
-         AND NOT EXISTS(SELECT 1 FROM messages WHERE message_id=?2 AND json_extract(metadata,'$.type')='message')",
-        params![subscription_id,message_id],|row| row.get(0),
-    )?;
-    if seated_non_message {
         return Ok(false);
     }
     let ts = next_attempt_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();

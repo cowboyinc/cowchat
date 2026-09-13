@@ -1,4 +1,4 @@
-//! Authenticated, mentions-only subscriptions. These deliver notifications; they
+//! Authenticated role-derived notification subscriptions. These deliver notifications; they
 //! do not authorize paid compute or any other external effect.
 use super::*;
 use sha2::{Digest, Sha256};
@@ -108,7 +108,8 @@ impl Store {
                 "INSERT INTO subscriptions(subscription_id,room_id,owner_key,webhook_url,secret,
                  exclude_thinking,since_seq,last_delivered_seq,status,failure_count,created_at,only_mention)
                  VALUES (?1,?2,'',?3,?4,1,?5,?5,'active',0,?6,?7)",
-                params![input.subscription_id,room,input.webhook_url,input.secret,after,Utc::now().to_rfc3339(),seat],
+                params![input.subscription_id,room,input.webhook_url,input.secret,after,Utc::now().to_rfc3339(),
+                    if is_door_context(&context)? { None } else { Some(seat.as_str()) }],
             )?;
             tx.execute(
                 "INSERT INTO seated_subscriptions VALUES (?1,?2,?3,?4,?5,?6,?7)",
@@ -226,16 +227,17 @@ pub(in crate::store) fn allows_message_on(
     if !seated {
         return Ok(true);
     }
-    let row: Option<(i64, String)> = conn
+    let row: Option<(i64, String, Vec<u8>, String)> = conn
         .query_row(
-            "SELECT c.from_key_generation,m.metadata FROM seated_subscriptions s
-         JOIN seated_credentials c ON c.room_id=s.room_id AND c.cert_id=s.cert_id
+            "SELECT c.from_key_generation,m.metadata,c.trusted_context,s.seat FROM seated_subscriptions s
+         JOIN seated_rooms r ON r.room_id=s.room_id AND r.auth_generation=s.auth_generation AND r.transport_generation=s.transport_generation
+         JOIN seated_credentials c ON c.room_id=s.room_id AND c.cert_id=s.cert_id AND c.seat=s.seat AND c.auth_generation=r.auth_generation
          JOIN messages m ON m.room_id=s.room_id AND m.message_id=?2 WHERE s.subscription_id=?1",
             params![subscription, message],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((floor, metadata)) = row else {
+    let Some((floor, metadata, context, seat)) = row else {
         return Ok(false);
     };
     if floor < 0 {
@@ -251,5 +253,43 @@ pub(in crate::store) fn allows_message_on(
         .map_err(|_| StoreError::SeatedAuthorization)?;
     let header: crate::seated::RecordHeader =
         ciborium::from_reader(raw.as_slice()).map_err(|_| StoreError::SeatedAuthorization)?;
-    Ok(header.gen >= floor as u64)
+    if header.gen < floor as u64 {
+        return Ok(false);
+    }
+    if is_door_context(&context)? {
+        // signer_seat is written only after append signature/membership checks;
+        // unlike header.seat, it still names the door when forwarding for its owner.
+        let signer = metadata["signer_seat"]
+            .as_str()
+            .ok_or(StoreError::SeatedAuthorization)?;
+        Ok(matches!(header.class.as_str(), "message" | "system") && signer != seat)
+    } else {
+        Ok(header.class == "message"
+            && header.wake_hint != "none"
+            && header.mentions.contains(&seat))
+    }
+}
+
+fn is_door_context(raw: &[u8]) -> Result<bool, StoreError> {
+    let fields: std::collections::BTreeMap<String, ciborium::value::Value> =
+        ciborium::from_reader(raw).map_err(|_| StoreError::SeatedAuthorization)?;
+    match fields.get("role") {
+        Some(ciborium::value::Value::Text(role)) if role == "door" => {
+            // The identity factory must have authenticated the connection binding.
+            // This predicate never accepts a caller's role or provider assertion.
+            for key in ["door_kind", "bound_sender", "forwarded_seat"] {
+                if !matches!(fields.get(key),Some(ciborium::value::Value::Text(s)) if !s.is_empty())
+                {
+                    return Err(StoreError::SeatedAuthorization);
+                }
+            }
+            Ok(true)
+        }
+        Some(ciborium::value::Value::Text(role))
+            if matches!(role.as_str(), "owner" | "actor" | "builder") =>
+        {
+            Ok(false)
+        }
+        _ => Err(StoreError::SeatedAuthorization),
+    }
 }
