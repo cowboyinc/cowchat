@@ -1,70 +1,65 @@
 # Local M-ECHO composition
 
-This runs three separate processes: the real Cowchat service and durable webhook
-worker, the real generic gateway router/dispatch/proxy, and the real harness
-`cowchat_wake` handler. It uses explicit test-only credentials, in-memory gateway
-discovery, and a fixture runtime grant. It starts no node and makes no consensus
-calls. Production actor enrollment and secret delivery are separate boundaries.
+This proof runs the actual Cowchat HTTP/SQLite service and webhook worker, the
+generic Gateway router and runner proxy, Harness room execution, supervised CBSS
+fixture writers and HTTP release, and the Cattle Guard PostgreSQL coordinator,
+journal, and serving accounting. It uses explicit fixture keys, funding, model
+output, and discovery. It starts no node and makes no consensus calls.
 
-The local implementation cohort is:
+Use Rust 1.93 and a disposable PostgreSQL database named `room_runs_test` on an
+explicit `127.0.0.1` port other than 5432. The Harness build must resolve to the
+Cattle Guard and CBSS revisions containing the room coordinator, builder-seat
+migration, and supervised process fixtures.
 
-| Repository | Branch | Reviewed implementation |
-| --- | --- | --- |
-| Cowchat | `jw/dashboard-cowchat-room-wake` | `c4a487b` |
-| Gateway | `jw/dashboard-room-wake-forwarding` | `75986c8` |
-| Harness | `jw/harness-cowchat-wake` | `4856e05` |
-
-Build each example in its own repository with Rust 1.93. The harness dependency
-pin is the real Cowchat git commit; no local path patches are needed. Unpublished
-local commits must be available to Cargo's git cache before using `--offline`.
+Build the fixture binaries in their respective checkouts:
 
 ```sh
-# Cowchat checkout:
+# Cowchat
 cargo build --offline --locked -p cowchat-server --example cowchat_room_fixture
-# Gateway checkout:
+
+# Gateway
 cargo build --offline --locked -p gateway-server --example cowchat_gateway_fixture
-# Harness checkout:
-cargo build --offline --locked -p harness-serve --example cowchat_harness_fixture
+
+# Harness
+cargo build --offline --locked -p harness-room-journal \
+  --example cowchat_paid_harness_fixture
 ```
 
-From the Cowchat checkout, with these sibling worktree names (adjust paths if your
-checkouts are elsewhere):
+Run the driver from the Cowchat checkout, adjusting binary paths for the local
+worktrees:
 
 ```sh
 python3 scripts/local_m_echo.py \
-  --room-bin target/debug/examples/cowchat_room_fixture \
-  --gateway-bin ../gateway-room-wake-forwarding/target/debug/examples/cowchat_gateway_fixture \
-  --harness-bin ../harness-cowchat-wake/target/debug/examples/cowchat_harness_fixture
+  --room-bin /path/to/cowchat_room_fixture \
+  --gateway-bin /path/to/cowchat_gateway_fixture \
+  --harness-bin /path/to/cowchat_paid_harness_fixture \
+  --database-url postgres://postgres@127.0.0.1:55440/room_runs_test
 ```
 
-The driver creates an isolated temporary directory and loopback ports. It retains
-a report, encrypted room SQLite database, ciphertext trigger, pointer-only
-execution log, and process stderr. It stops all fixture processes on exit,
-including on failure. It does not affect the local collaboration server.
+The driver creates isolated state and loopback ports and performs this sequence:
 
-The binary assertions cover:
+1. Harness publishes one verified actor seat and one verified builder seat from
+   a shared CBSS fixture publication.
+2. Cowchat installs mention-only subscriptions for both seats and appends two
+   encrypted triggers. Exact ciphertext retries return the original receipts;
+   changed ciphertext under the same message ID conflicts.
+3. Cowchat stops with both seated wakes durable in SQLite. Gateway and Harness
+   start, a forged Standard Webhooks request is rejected before durable
+   admission, and Cowchat restarts and drains the original wake obligations.
+4. Cattle Guard admits only authenticated room references. The worker decrypts
+   in Harness, uses the paid model path, stages signed usage and an encrypted
+   reply, closes accounting, and then the Harness process exits before Cattle
+   Guard can mark that room run complete.
+5. Harness restarts from PostgreSQL. It reconciles the first seat without a
+   second model call, executes the other seat once, and finishes both stable run
+   references. Cowchat verifies both signatures and decrypts exactly two replies.
 
-1. A signed encrypted mention persists; an exact ciphertext retry returns its
-   original receipt, and an independently encrypted candidate with the same ID
-   conflicts.
-2. The service is killed with one durable wake pending. The same dispatch ID and
-   exact stored wake bytes survive service restart and receiver failure.
-3. After appending its reply, the harness process crashes before acknowledging the
-   gateway request. Restart causes a second execution with fresh encryption; the
-   sink retains exactly one visible reply and the wake is eventually acknowledged.
-4. The returned reply verifies under the bound actor's key and decrypts locally.
-   The driver sees exactly the request and reply, and checks captured state/logs
-   for the fixture plaintext. A forged wake through the gateway is refused before
-   any room access or runtime execution.
-5. Every wake travels through generic gateway dispatch into the actual harness
-   handler. No Telegram-specific code or external provider API is involved.
+The final report asserts one model call per seat, exactly one recovered lease
+(the two lease epochs are 1 and 2), zero held accounting balance, both signed
+charges, no pending wakes, live CBSS writers, unchanged dispatch IDs, and zero
+consensus calls. It also scans captured files and the relevant PostgreSQL
+content sinks for the fixture plaintext canaries.
 
-The observed stderr streams were empty; the pointer-only execution log contained
-both attempts. This does not establish privacy for production logging configurations.
-
-The runtime's keys and authorization are explicit fixture inputs, not a live PKE
-release proof. The gateway route/runner discovery is an in-memory fixture; it does
-not prove deployed registry freshness. The handler is a fixture callback rather
-than a generic Python executor. There is no paid-effect or exactly-once charge
-claim, and no production default serving is enabled. This is the first local flow
-proof, not completion of the full non-UI implementation or launch scope.
+The report does not claim real CBQS transport, CBFS archive, provider delivery,
+separately operated CBSS, production key custody or funding, or deployed-network
+readiness. No provider-specific gateway API participates in the proof.
