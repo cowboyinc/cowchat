@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "status": "M0 crypto fixture slice; not full service conformance",
+  "status": "Production cowchat-crypto API fixtures; not full service conformance",
   "map_order": "RFC8949 core deterministic: bytewise lexicographic encoded keys; spec listed order is documentation only",
   "profile": "Definite lengths; text map keys; unsigned u64, bytes, text, arrays, maps, bool, null; no tags/floats; unknown signed fields rejected",
   "public_test_ed25519_seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
@@ -57,8 +57,8 @@
     }
   ],
   "pending": [
-    "production verifier/crypto crate and binding parity",
-    "HTTP/WS handlers and raw-target binding",
+    "wasm/Swift binding parity",
+    "HTTP/WS handlers and service raw-target binding",
     "durable nonce cache, message-id dedupe and archive/outbox recovery",
     "wake HMAC/CloudEvents/filter contracts",
     "certificate/controller/manage-chain authorization against finalized state",
