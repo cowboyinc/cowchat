@@ -1,8 +1,10 @@
-//! Strict Cowchat v3 envelope profile for chain-authorized actor seats.
+//! Strict Cowchat v3 envelope profile for chain-authorized source seats.
 //!
 //! The caller must obtain every expected field and the record-signing key from
-//! one finalized room-authority proof. Human and builder wallet-issued
-//! identities use their certificate path and are outside this native profile.
+//! one finalized room-authority proof. Actor and human seats use the same
+//! signature boundary because chain seat admission has already verified their
+//! controller authorization. Gateway ingress requires a separate attribution
+//! profile and is refused here.
 use crate::{canonical, envelope, fields::Fields, Error, Result};
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
@@ -30,11 +32,29 @@ const HEADER_FIELDS: &[&str] = &[
 /// retain their own tighter bounds.
 pub const MAX_SEALED_RECORD_BYTES: usize = envelope::MAX_BODY_BYTES + canonical::MAX_BYTES + 256;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceSeatKindV1 {
+    Actor,
+    Human,
+    Gateway,
+}
+
+impl SourceSeatKindV1 {
+    fn header_role(self) -> Result<&'static str> {
+        match self {
+            Self::Actor => Ok("actor"),
+            Self::Human => Ok("human"),
+            Self::Gateway => Err(Error::Scope),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExpectedActorRecordV1 {
+pub struct ExpectedSourceSeatRecordV1 {
     pub chain_id: u64,
     pub room_id: [u8; 32],
     pub source_seat_id: [u8; 32],
+    pub source_seat_kind: SourceSeatKindV1,
     pub source_key_binding_commitment: [u8; 32],
     pub key_generation: u64,
     /// A routed actor message must authenticate the target mention in the
@@ -43,7 +63,7 @@ pub struct ExpectedActorRecordV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenedActorRecordV1 {
+pub struct OpenedSourceSeatRecordV1 {
     pub message_id: [u8; 32],
     pub reply_to: Option<[u8; 32]>,
     pub mentions: Vec<[u8; 32]>,
@@ -67,7 +87,7 @@ struct SealedRecord {
     signature: Vec<u8>,
 }
 
-struct CheckedActorHeader {
+struct CheckedSourceSeatHeader {
     message_id: [u8; 32],
     reply_to: Option<[u8; 32]>,
     mentions: Vec<[u8; 32]>,
@@ -130,10 +150,10 @@ fn parse_header(header: &[u8]) -> Result<Fields> {
     Fields::new(canonical::decode(header)?, HEADER_FIELDS)
 }
 
-fn check_actor_record_header(
+fn check_source_seat_record_header(
     header: &[u8],
-    expected: &ExpectedActorRecordV1,
-) -> Result<CheckedActorHeader> {
+    expected: &ExpectedSourceSeatRecordV1,
+) -> Result<CheckedSourceSeatHeader> {
     if expected.chain_id == 0 || expected.key_generation == 0 {
         return Err(Error::Schema);
     }
@@ -146,6 +166,7 @@ fn check_actor_record_header(
         nonzero_32(value)?;
     }
 
+    let expected_role = expected.source_seat_kind.header_role()?;
     let fields = parse_header(header)?;
     let mentions = fields
         .strings("mentions")?
@@ -165,7 +186,7 @@ fn check_actor_record_header(
         || fields.uint("chain_id")? != expected.chain_id
         || fields.text("room")? != expected_room
         || fields.text("seat")? != expected_seat
-        || fields.text("role")? != "actor"
+        || fields.text("role")? != expected_role
         || fields.nullable_text("via")?.is_some()
         || fields.nullable_text("via_sender")?.is_some()
         || fields.text("class")? != "message"
@@ -176,21 +197,25 @@ fn check_actor_record_header(
     {
         return Err(Error::Scope);
     }
-    Ok(CheckedActorHeader {
+    Ok(CheckedSourceSeatHeader {
         message_id,
         reply_to,
         mentions,
     })
 }
 
-/// Verify the source seat signature and every proof-derived actor identity
-/// coordinate before releasing plaintext to the caller.
-pub fn open_actor_record_v1(
+/// Verify the source seat signature, principal-kind role and every
+/// proof-derived identity coordinate before releasing plaintext to the caller.
+pub fn open_source_seat_record_v1(
     sealed_record: &[u8],
-    expected: &ExpectedActorRecordV1,
+    expected: &ExpectedSourceSeatRecordV1,
     source_record_signing_key: &[u8; 32],
     generation_secret: &[u8; 32],
-) -> Result<OpenedActorRecordV1> {
+) -> Result<OpenedSourceSeatRecordV1> {
+    // Gateway records require provider attribution fields that this direct
+    // seat profile does not understand. Refuse them before parsing or opening
+    // any caller-controlled ciphertext.
+    expected.source_seat_kind.header_role()?;
     nonzero_32(source_record_signing_key)?;
     let sealed = parse_sealed_record(sealed_record)?;
     envelope::verify_record(
@@ -199,7 +224,7 @@ pub fn open_actor_record_v1(
         source_record_signing_key,
         &sealed.signature,
     )?;
-    let checked = check_actor_record_header(&sealed.header, expected)?;
+    let checked = check_source_seat_record_header(&sealed.header, expected)?;
     let plaintext = envelope::open(
         &sealed.header,
         &sealed.body,
@@ -207,7 +232,7 @@ pub fn open_actor_record_v1(
         &sealed.signature,
         generation_secret,
     )?;
-    Ok(OpenedActorRecordV1 {
+    Ok(OpenedSourceSeatRecordV1 {
         message_id: checked.message_id,
         reply_to: checked.reply_to,
         mentions: checked.mentions,

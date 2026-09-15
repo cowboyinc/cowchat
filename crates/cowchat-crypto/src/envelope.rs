@@ -47,7 +47,9 @@ impl Header {
         }
         f.nullable_text("reply_to")?;
         f.strings("mentions")?;
-        if !["owner", "builder", "actor", "door", "external"].contains(&f.text("role")?.as_str()) {
+        if !["owner", "builder", "human", "actor", "door", "external"]
+            .contains(&f.text("role")?.as_str())
+        {
             return Err(Error::Schema);
         }
         let class = f.text("class")?;

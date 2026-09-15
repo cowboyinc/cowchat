@@ -8,13 +8,14 @@ fn encode(value: Value) -> Vec<u8> {
     canonical::canonicalize(&raw).unwrap()
 }
 
-fn actor_input_header(
+fn source_input_header(
     chain_id: u64,
     room: [u8; 32],
     source: [u8; 32],
     target: [u8; 32],
     cert: [u8; 32],
     generation: u64,
+    role: &str,
 ) -> Vec<u8> {
     encode(Value::Map(vec![
         (Value::Text("v".into()), Value::Integer(3.into())),
@@ -28,7 +29,7 @@ fn actor_input_header(
         ),
         (Value::Text("room".into()), Value::Text(hex::encode(room))),
         (Value::Text("seat".into()), Value::Text(hex::encode(source))),
-        (Value::Text("role".into()), Value::Text("actor".into())),
+        (Value::Text("role".into()), Value::Text(role.into())),
         (Value::Text("via".into()), Value::Null),
         (Value::Text("via_sender".into()), Value::Null),
         (Value::Text("class".into()), Value::Text("message".into())),
@@ -59,19 +60,20 @@ fn actor_input_is_bound_to_finalized_identity_before_plaintext() {
     let generation_secret = [0x55; 32];
     let seed = [0x77; 32];
     let public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
-    let header = actor_input_header(31337, room, source, target, cert, 9);
+    let header = source_input_header(31337, room, source, target, cert, 9, "actor");
     let sealed = envelope::seal(&header, &generation_secret, b"private trigger", &seed).unwrap();
-    let expected = native_actor::ExpectedActorRecordV1 {
+    let expected = native_actor::ExpectedSourceSeatRecordV1 {
         chain_id: 31337,
         room_id: room,
         source_seat_id: source,
+        source_seat_kind: native_actor::SourceSeatKindV1::Actor,
         source_key_binding_commitment: cert,
         key_generation: 9,
         target_seat_id: target,
     };
 
     let opened =
-        native_actor::open_actor_record_v1(&sealed, &expected, &public, &generation_secret)
+        native_actor::open_source_seat_record_v1(&sealed, &expected, &public, &generation_secret)
             .unwrap();
     assert_eq!(opened.message_id, [0x66; 32]);
     assert_eq!(opened.reply_to, None);
@@ -81,29 +83,80 @@ fn actor_input_is_bound_to_finalized_identity_before_plaintext() {
     let mut wrong_room = expected.clone();
     wrong_room.room_id[0] ^= 1;
     assert_eq!(
-        native_actor::open_actor_record_v1(&sealed, &wrong_room, &public, &[0; 32]),
+        native_actor::open_source_seat_record_v1(&sealed, &wrong_room, &public, &[0; 32]),
         Err(Error::Scope),
         "authority mismatch must win before decryption"
     );
     let mut wrong_cert = expected.clone();
     wrong_cert.source_key_binding_commitment[0] ^= 1;
     assert_eq!(
-        native_actor::open_actor_record_v1(&sealed, &wrong_cert, &public, &generation_secret),
+        native_actor::open_source_seat_record_v1(&sealed, &wrong_cert, &public, &generation_secret),
         Err(Error::Scope)
     );
     let mut wrong_target = expected.clone();
     wrong_target.target_seat_id[0] ^= 1;
     assert_eq!(
-        native_actor::open_actor_record_v1(&sealed, &wrong_target, &public, &generation_secret),
+        native_actor::open_source_seat_record_v1(
+            &sealed,
+            &wrong_target,
+            &public,
+            &generation_secret
+        ),
         Err(Error::Scope)
     );
     assert_eq!(
-        native_actor::open_actor_record_v1(&sealed, &expected, &[0x99; 32], &generation_secret),
+        native_actor::open_source_seat_record_v1(
+            &sealed,
+            &expected,
+            &[0x99; 32],
+            &generation_secret
+        ),
         Err(Error::Signature)
     );
     assert_eq!(
-        native_actor::open_actor_record_v1(&sealed, &expected, &public, &[0; 32]),
+        native_actor::open_source_seat_record_v1(&sealed, &expected, &public, &[0; 32]),
         Err(Error::Decrypt)
+    );
+}
+
+#[test]
+fn human_input_uses_the_finalized_seat_key_and_gateway_input_is_refused() {
+    let room = [0x11; 32];
+    let source = [0x22; 32];
+    let target = [0x33; 32];
+    let cert = [0x44; 32];
+    let generation_secret = [0x55; 32];
+    let seed = [0x77; 32];
+    let public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+    let header = source_input_header(31337, room, source, target, cert, 9, "human");
+    let sealed = envelope::seal(&header, &generation_secret, b"human trigger", &seed).unwrap();
+    let mut expected = native_actor::ExpectedSourceSeatRecordV1 {
+        chain_id: 31337,
+        room_id: room,
+        source_seat_id: source,
+        source_seat_kind: native_actor::SourceSeatKindV1::Human,
+        source_key_binding_commitment: cert,
+        key_generation: 9,
+        target_seat_id: target,
+    };
+
+    let opened =
+        native_actor::open_source_seat_record_v1(&sealed, &expected, &public, &generation_secret)
+            .unwrap();
+    assert_eq!(opened.plaintext, b"human trigger");
+
+    expected.source_seat_kind = native_actor::SourceSeatKindV1::Actor;
+    assert_eq!(
+        native_actor::open_source_seat_record_v1(&sealed, &expected, &public, &generation_secret),
+        Err(Error::Scope),
+        "the signed header role must match finalized principal_kind"
+    );
+
+    expected.source_seat_kind = native_actor::SourceSeatKindV1::Gateway;
+    assert_eq!(
+        native_actor::open_source_seat_record_v1(&sealed, &expected, &[0; 32], &[0; 32]),
+        Err(Error::Scope),
+        "gateway attribution requires its own ingress profile"
     );
 }
 
@@ -167,9 +220,10 @@ fn native_actor_profile_rejects_noncanonical_identity_text() {
     let secret = [0x55; 32];
     let seed = [0x77; 32];
     let public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
-    let mut value: Value =
-        ciborium::from_reader(actor_input_header(31337, room, source, target, cert, 9).as_slice())
-            .unwrap();
+    let mut value: Value = ciborium::from_reader(
+        source_input_header(31337, room, source, target, cert, 9, "actor").as_slice(),
+    )
+    .unwrap();
     let Value::Map(fields) = &mut value else {
         panic!()
     };
@@ -180,16 +234,17 @@ fn native_actor_profile_rejects_noncanonical_identity_text() {
     cert_value.1 = Value::Text(hex::encode(cert).to_uppercase());
     let header = encode(value);
     let sealed = envelope::seal(&header, &secret, b"private trigger", &seed).unwrap();
-    let expected = native_actor::ExpectedActorRecordV1 {
+    let expected = native_actor::ExpectedSourceSeatRecordV1 {
         chain_id: 31337,
         room_id: room,
         source_seat_id: source,
+        source_seat_kind: native_actor::SourceSeatKindV1::Actor,
         source_key_binding_commitment: cert,
         key_generation: 9,
         target_seat_id: target,
     };
     assert_eq!(
-        native_actor::open_actor_record_v1(&sealed, &expected, &public, &secret),
+        native_actor::open_source_seat_record_v1(&sealed, &expected, &public, &secret),
         Err(Error::Scope)
     );
 }
