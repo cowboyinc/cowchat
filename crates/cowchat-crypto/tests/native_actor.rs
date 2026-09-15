@@ -187,6 +187,14 @@ fn actor_reply_builder_is_exact_and_signer_bound() {
     )
     .unwrap();
     assert_eq!(
+        native_actor::authenticated_record_message_id_v1(&sealed, &public).unwrap(),
+        expected.message_id
+    );
+    assert_eq!(
+        native_actor::authenticated_record_message_id_v1(&sealed, &[0x77; 32]),
+        Err(Error::Signature)
+    );
+    assert_eq!(
         native_actor::open_actor_reply_v1(&sealed, &expected, &public, &generation_secret).unwrap(),
         b"private reply"
     );

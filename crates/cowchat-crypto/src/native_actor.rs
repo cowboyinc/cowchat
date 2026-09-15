@@ -240,6 +240,26 @@ pub fn open_source_seat_record_v1(
     })
 }
 
+/// Read the signed public message id without decrypting the room body.
+///
+/// Recovery code uses this to find a previously appended sealed reply after an
+/// ambiguous transport result. The id is returned only after the record
+/// signature verifies under the finalized seat key supplied by the caller.
+pub fn authenticated_record_message_id_v1(
+    sealed_record: &[u8],
+    record_signing_key: &[u8; 32],
+) -> Result<[u8; 32]> {
+    nonzero_32(record_signing_key)?;
+    let sealed = parse_sealed_record(sealed_record)?;
+    envelope::verify_record(
+        &sealed.header,
+        &sealed.body,
+        record_signing_key,
+        &sealed.signature,
+    )?;
+    parse_hex32(parse_header(&sealed.header)?.text("message_id")?)
+}
+
 /// Build the one canonical direct actor-reply header. Native replies carry no
 /// gateway attribution and do not wake another seat implicitly.
 pub fn actor_reply_header_v1(reply: &ActorReplyHeaderV1) -> Result<Vec<u8>> {
