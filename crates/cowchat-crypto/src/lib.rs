@@ -7,6 +7,7 @@ pub mod certificates;
 pub mod envelope;
 mod fields;
 pub mod keys;
+pub mod native_actor;
 pub mod request;
 mod signatures;
 
