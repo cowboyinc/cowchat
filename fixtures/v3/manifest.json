@@ -1,0 +1,71 @@
+{
+  "version": 3,
+  "status": "M0 crypto fixture slice; not full service conformance",
+  "map_order": "RFC8949 core deterministic: bytewise lexicographic encoded keys; spec listed order is documentation only",
+  "profile": "Definite lengths; text map keys; unsigned u64, bytes, text, arrays, maps, bool, null; no tags/floats; unknown signed fields rejected",
+  "public_test_ed25519_seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "domains": [
+    "cowchat/v3/envelope",
+    "cowchat/v3/request",
+    "cowchat/v3/cert/identity",
+    "cowchat/v3/cert/membership",
+    "cowchat/v3/cert/invocation",
+    "cowchat/v3/roomkey"
+  ],
+  "replay": {
+    "window_ms": 300000,
+    "bounds": "inclusive",
+    "retain": "through signed timestamp_ms + window_ms inclusive; checked arithmetic or saturation"
+  },
+  "source_room": "91e48412-213c-445f-84cd-c5bdd1965ff3",
+  "ruling_sequences": [
+    18,
+    21,
+    23,
+    26
+  ],
+  "files": [
+    {
+      "path": "encoding.json",
+      "sha256": "cdbad2218a5126685548b3fa9d7d4f97f9efc5ac698ba6dd475cb82386387ce1",
+      "cases": 7
+    },
+    {
+      "path": "requests.json",
+      "sha256": "88afe947df6b0a56706232ee369386bb65b7786b66b43a57e5d3eb53a10f9acb",
+      "cases": 15
+    },
+    {
+      "path": "envelopes.json",
+      "sha256": "8e8cf58edc778d5ce329132e17479704dccc2408a5b2cbed1ba3075b1e79be7b",
+      "cases": 19
+    },
+    {
+      "path": "replay-sequence.json",
+      "sha256": "d092f13e114c0b9bff436077c9b511ccf1502bcccb089147b438d9647a4dca63",
+      "cases": 5
+    },
+    {
+      "path": "certificates.json",
+      "sha256": "42144407a1307c1cb5b58150f816ce37f340bff93fc5980d68d28a8be9a0b1cd",
+      "cases": 26
+    },
+    {
+      "path": "hpke.json",
+      "sha256": "151024b020bd8e8c8940428c5b266cebc9cda54928a61ce02c3af6c93e846893",
+      "cases": 5
+    }
+  ],
+  "pending": [
+    "production verifier/crypto crate and binding parity",
+    "HTTP/WS handlers and raw-target binding",
+    "durable nonce cache, message-id dedupe and archive/outbox recovery",
+    "wake HMAC/CloudEvents/filter contracts",
+    "certificate/controller/manage-chain authorization against finalized state",
+    "rekey publication and history-cutoff integration",
+    "explicit actor-controller commitment mismatch vector at WP1 caller gate",
+    "seat-id grammar and door membership manage-right rejection at WP1 service gate",
+    "storage adapter and cursor service conformance",
+    "live phase-A route/job/CBSS/debit/settlement evidence"
+  ]
+}

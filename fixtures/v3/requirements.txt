@@ -1,0 +1,17 @@
+annotated-types==0.8.0
+cbor2==6.1.4
+cffi==2.1.1
+cryptography==50.0.1
+cytoolz==1.1.0
+eth-hash==0.8.0
+eth-keys==0.8.0
+eth-typing==6.0.0
+eth-utils==6.0.0
+pycparser==3.0
+pycryptodome==3.23.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+pyhpke==0.6.5
+toolz==1.1.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
