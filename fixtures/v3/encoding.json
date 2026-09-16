@@ -1,0 +1,56 @@
+[
+  {
+    "id": "mixed-text-key-lengths",
+    "input": {
+      "aa": 1,
+      "b": 2
+    },
+    "cbor_hex": "a261620262616101",
+    "expected": "accept"
+  },
+  {
+    "id": "explicit-null",
+    "input": {
+      "x": null
+    },
+    "cbor_hex": "a16178f6",
+    "expected": "accept"
+  },
+  {
+    "id": "wrong-map-order",
+    "input": {
+      "aa": 1,
+      "b": 2
+    },
+    "cbor_hex": "a262616101616202",
+    "expected": "encoding"
+  },
+  {
+    "id": "duplicate-key",
+    "input": {
+      "x": 1
+    },
+    "cbor_hex": "a2617801617801",
+    "expected": "encoding"
+  },
+  {
+    "id": "nonminimal-integer",
+    "input": 1,
+    "cbor_hex": "1801",
+    "expected": "encoding"
+  },
+  {
+    "id": "trailing-data",
+    "input": null,
+    "cbor_hex": "f600",
+    "expected": "encoding"
+  },
+  {
+    "id": "indefinite-array",
+    "input": [
+      1
+    ],
+    "cbor_hex": "9f01ff",
+    "expected": "encoding"
+  }
+]
