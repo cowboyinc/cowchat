@@ -198,13 +198,25 @@ reconciliation. The publisher obtains range bounds from private signed proof,
 not the caller-mutable decoded records. Reads still require CBQS signature and
 digest verification; the discovery head does not replace it.
 
+`recover` walks backward from the authenticated head through receipt links,
+then verifies every segment forward from genesis using the existing CBQS
+signature/linkage/payload verifier. Discovery fields are explicitly unverified
+until that second pass. It checks the final verified checkpoint ID and sequence
+against the head, refuses a changed authoritative root, and returns no partial
+records on failure. One deadline and total segment/record/encoded-byte budgets
+bound the complete recovery. This first implementation fails closed when complete
+history exceeds those budgets; snapshot compaction and bounded serving memory
+are still future runtime work.
+
 The opt-in subprocess tests use three actual CBFS nodes (private volume, 2+1
 erasure coding), production QUIC/shard handlers and standalone Sled CAS metadata.
 SDK test support is used only to isolate journal directories. Tests cover exact
-republishing, SIGKILL/restart of every storage process followed by cold recovery
-after broker retention expiry, a lost reply after the metadata commit, a new
-batch after that reconciliation, stale writers and backward-head refusal.
-All 18 log tests pass; the next-batch regression fails when opener journal
+republishing, SIGKILL/restart of every storage process followed by three-batch
+cold recovery after broker retention expiry and live-suffix replay, a lost reply
+after the metadata commit, a new batch after that reconciliation, stale writers
+and backward-head refusal. Additional cases refuse a tampered/missing middle
+segment and enforce total byte/record/segment limits, including exact-limit success.
+All 21 log tests pass. The next-batch regression fails when opener journal
 reconciliation is disabled. The 276 default workspace tests, formatting and
 strict all-targets clippy with both test feature selections also pass locally.
 They do not prove simultaneous cross-host writer races, chain finality, long-term
@@ -221,6 +233,38 @@ COWCHAT_TEST_CBFS_NODE=/absolute/cbfs/target/debug/cbfs-node \
 cargo clippy --locked -p cowchat-server --features cbfs-archive-test --all-targets -- -D warnings
 ```
 
-Hosted routes remain disabled. Bounded discovery/replay of a multi-segment archive,
-durable append intents, cross-host ownership, actual handler wiring and measured
+Hosted routes remain disabled. Durable append intents, cross-host ownership,
+actual handler wiring and measured
 finalized-authority batch latency remain required work.
+
+### Ownership allocation boundary
+
+PR59's fence persists only a monotonic epoch floor; it does not bind that epoch
+to one holder. A real-broker test gives two different authorized holder keys the
+same epoch, fences both successfully, and observes both appends succeed. Unique
+epoch allocation is therefore an independent prerequisite, not supplied by the
+fence. Expanding fence wire/session semantics is outside this Cowchat slice.
+
+The proposed promotion operation compares an expected epoch, records a stable
+writer ID and retry claim ID, then advances the epoch once. A lost response must
+reconcile that same claim; a CAS loser must not automatically compete for the next
+epoch. Allocation alone permits no appends: a winner must receive the matching
+fence ACK before recovery and serving. Test a winner dying before that ACK, followed
+by higher-epoch takeover and rejection of the abandoned epoch.
+
+The selected implementation uses a separate private CBFS control volume for rare
+promotion CAS operations. A different object in the archive volume would still
+share its manifest-root CAS and would not isolate promotion from archive writes.
+Production CBFS publication uses chain-backed manifest stage/finalize, not a fast
+off-chain per-object CAS. Promotion and archive latency must be measured separately
+on actual authority before claiming acceptable failover or chat latency.
+
+Pre-append intents remain local, durable and batched. This replaces the earlier
+cross-host-intent proposal after the case analysis at room sequences 161/164:
+committed commands reconcile through verified broker/archive replay, while an
+uncommitted operation is retried by its caller with the same ID AND ciphertext.
+An unarchived operation was never acknowledged or visible to other participants.
+Cross-host intent storage adds a manifest commit without strengthening the agreed
+archive-before-success contract. This does not permit skipping an unarchived
+history gap. Actual frontend retry callers must retain their prepared payloads;
+assigning IDs inside the SDK alone is insufficient.

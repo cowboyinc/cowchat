@@ -38,6 +38,50 @@ pub(crate) struct ArchiveRange {
     pub checkpoint: [u8; 32],
 }
 
+impl Segment {
+    fn decode(bytes: &[u8], max_records: u64, max_bytes: usize) -> Result<Self, LogError> {
+        // Bound encoded data before JSON/base64 allocations.
+        if bytes.len() > max_bytes {
+            return Err(LogError::ReplayLimit);
+        }
+        let segment: Self = serde_json::from_slice(bytes).map_err(|_| LogError::Encoding)?;
+        if segment.version != 1 {
+            return Err(LogError::Encoding);
+        }
+        if segment.records.len() as u64 > max_records || segment.receipts.len() as u64 > max_records
+        {
+            return Err(LogError::ReplayLimit);
+        }
+        Ok(segment)
+    }
+}
+
+/// Discovery only: these fields have NOT passed signature or payload checks.
+/// A backward walk must be bounded and followed by forward `restore_archive`
+/// verification from genesis before any record/checkpoint is returned.
+#[cfg(feature = "cbfs-archive")]
+pub(crate) fn unverified_archive_range(
+    bytes: &[u8],
+    max_records: u64,
+    max_bytes: usize,
+) -> Result<ArchiveRange, LogError> {
+    let segment = Segment::decode(bytes, max_records, max_bytes)?;
+    let decode = |encoded: &String| {
+        let bytes = STANDARD.decode(encoded).map_err(|_| LogError::Encoding)?;
+        wire::CheckpointReceiptV2::decode(bytes.as_slice()).map_err(|_| LogError::Encoding)
+    };
+    let first = decode(segment.receipts.first().ok_or(LogError::Verification)?)?;
+    let last = decode(segment.receipts.last().ok_or(LogError::Verification)?)?;
+    Ok(ArchiveRange {
+        instance: first.chain_instance_id,
+        stream: first.stream_id,
+        first: first.first_sequence,
+        last: last.last_sequence,
+        previous: first.previous_checkpoint,
+        checkpoint: wire::checkpoint_id_v2(&last),
+    })
+}
+
 impl Replay {
     #[cfg(feature = "cbfs-archive")]
     pub(crate) fn archive_range(&self) -> Option<ArchiveRange> {
@@ -116,19 +160,7 @@ impl CbqsOwnerLog {
         max_records: u64,
         max_bytes: usize,
     ) -> Result<Replay, LogError> {
-        // Check encoded size before JSON/base64 allocations. Decoded payloads
-        // are bounded again in the shared network/archive verifier.
-        if bytes.len() > max_bytes {
-            return Err(LogError::ReplayLimit);
-        }
-        let segment: Segment = serde_json::from_slice(bytes).map_err(|_| LogError::Encoding)?;
-        if segment.version != 1 {
-            return Err(LogError::Encoding);
-        }
-        if segment.records.len() as u64 > max_records || segment.receipts.len() as u64 > max_records
-        {
-            return Err(LogError::ReplayLimit);
-        }
+        let segment = Segment::decode(bytes, max_records, max_bytes)?;
         let receipts = segment
             .receipts
             .iter()

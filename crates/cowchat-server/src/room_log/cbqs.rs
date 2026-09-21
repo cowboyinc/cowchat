@@ -2,6 +2,8 @@
 //! neither allocates ownership nor acknowledges Cowchat commands to clients.
 //! The caller must hold the unique stream epoch and provide archive durability.
 mod archive;
+#[cfg(feature = "cbfs-archive")]
+pub(crate) use archive::unverified_archive_range;
 
 use super::Command;
 use cbqs_client::{CheckpointTrustV2, HeldRecord, SessionConfig, SessionV2, Socket};
@@ -54,6 +56,10 @@ impl VerifiedCheckpoint {
     pub fn sequence(&self) -> u64 {
         self.receipt.last_sequence
     }
+
+    pub fn id(&self) -> [u8; 32] {
+        wire::checkpoint_id_v2(&self.receipt)
+    }
 }
 
 #[derive(Debug)]
@@ -95,6 +101,11 @@ impl Drop for RetireOnDrop {
 }
 
 impl CbqsOwnerLog {
+    #[cfg(feature = "cbfs-archive")]
+    pub(crate) fn archive_identity(&self) -> ([u8; 32], [u8; 32]) {
+        (self.instance, self.stream)
+    }
+
     /// Socket routing belongs to the caller (checked registry resolution or
     /// trusted operator pinning). The provider anchor must come from chain
     /// authority, never the socket peer. A successful fence is not an ownership

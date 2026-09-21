@@ -246,7 +246,9 @@ impl Fixture {
         }
     }
     async fn connect(&self, epoch: u64) -> Result<CbqsOwnerLog, LogError> {
-        let config = self.config(epoch);
+        self.connect_config(self.config(epoch)).await
+    }
+    async fn connect_config(&self, config: SessionConfig) -> Result<CbqsOwnerLog, LogError> {
         let fence = cbqs_client::connect_socket(&config.broker_url)
             .await
             .unwrap();
@@ -266,6 +268,37 @@ impl Fixture {
         )
         .await
     }
+}
+
+#[tokio::test]
+async fn fence_does_not_allocate_exclusive_ownership_between_same_epoch_holders() {
+    let fixture = Fixture::new().await;
+    let mut first = fixture.connect(1).await.unwrap();
+    let mut config = fixture.config(1);
+    config.holder = key(0xD4);
+    config.grant.holder_signing_key.key_bytes = config.holder.verifying_key().to_bytes();
+    config.grant.grant_nonce = [0x88; 32];
+    config.grant.signature = wire::CbqsSignatureV2(
+        key(0xA1)
+            .sign(&cowboy_protocol_codec::keccak256(
+                &wire::stream_grant_signing_bytes_v2(&config.grant),
+            ))
+            .to_bytes(),
+    );
+    // A different authorized holder fences the SAME epoch successfully.
+    let mut second = fixture.connect_config(config).await.unwrap();
+    let one = first.room_lane("owner-a", "one").await.unwrap();
+    let two = second.room_lane("owner-a", "two").await.unwrap();
+    let create_one = super::tests::create("one", one);
+    let create_two = super::tests::create("two", two);
+    let (left, right) = tokio::join!(first.append(0, &create_one), second.append(0, &create_two));
+    let mut sequences = [left.unwrap(), right.unwrap()];
+    sequences.sort();
+    assert_eq!(
+        sequences,
+        [1, 2],
+        "a separate unique-epoch allocation step is required"
+    );
 }
 
 #[tokio::test]

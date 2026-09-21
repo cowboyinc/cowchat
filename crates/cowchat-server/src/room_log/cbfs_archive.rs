@@ -1,7 +1,9 @@
 //! Checkpoint-batch publication through CBFS. One manifest commit publishes an
 //! immutable segment and its discovery head together. This is not an ownership
 //! allocator: callers must already hold the fenced owner-stream lease.
-use super::cbqs::Replay;
+use super::cbqs::{
+    unverified_archive_range, CbqsOwnerLog, LogError, LogRecord, Replay, VerifiedCheckpoint,
+};
 use cbfs_hooks::traits::{AuthoritativeStore, ManifestRegistry};
 use cbfs_sdk::Volume;
 use cbfs_types::{ManifestRoot, Visibility};
@@ -38,6 +40,26 @@ pub struct ArchiveHead {
 pub struct ArchiveCommit {
     pub head: ArchiveHead,
     pub manifest_root: ManifestRoot,
+}
+
+#[derive(Clone, Copy)]
+pub struct RecoveryLimits {
+    pub max_segments: usize,
+    pub max_records: u64,
+    /// Total encoded bytes across the complete archive, not per segment.
+    pub max_bytes: usize,
+}
+
+pub struct RecoveredArchive {
+    pub records: Vec<LogRecord>,
+    pub checkpoint: Option<VerifiedCheckpoint>,
+}
+
+fn verification_error(error: LogError) -> ArchiveError {
+    match error {
+        LogError::ReplayLimit => ArchiveError::Limit,
+        _ => ArchiveError::Verification,
+    }
 }
 
 pub struct CbfsArchive {
@@ -196,6 +218,115 @@ impl CbfsArchive {
         )
         .await
         .map_err(|_| ArchiveError::Unavailable)?
+    }
+
+    /// Cold recovery starts only at the authenticated CBFS head. Receipt links
+    /// guide bounded backward discovery; every segment is then verified FORWARD
+    /// from genesis. No partial records escape on a missing/forged segment or a
+    /// changed root. The complete recovery shares this writer's timeout.
+    pub async fn recover(
+        &mut self,
+        log: &mut CbqsOwnerLog,
+        limits: RecoveryLimits,
+    ) -> Result<RecoveredArchive, ArchiveError> {
+        self.ensure_usable()?;
+        self.usable = false;
+        let result = tokio::time::timeout(self.timeout, self.recover_inner(log, limits))
+            .await
+            .map_err(|_| ArchiveError::Unavailable)
+            .and_then(|result| result);
+        if result.is_ok() {
+            self.usable = true;
+        }
+        result
+    }
+
+    async fn recover_inner(
+        &self,
+        log: &mut CbqsOwnerLog,
+        limits: RecoveryLimits,
+    ) -> Result<RecoveredArchive, ArchiveError> {
+        if limits.max_segments == 0 || limits.max_records == 0 || limits.max_bytes == 0 {
+            return Err(ArchiveError::Configuration);
+        }
+        if log.archive_identity() != (self.instance, self.stream) {
+            return Err(ArchiveError::Verification);
+        }
+        self.current_root().await?;
+        let mut recovered = RecoveredArchive {
+            records: Vec::new(),
+            checkpoint: None,
+        };
+        let Some(head) = &self.head else {
+            return Ok(recovered);
+        };
+        if head.sequence > limits.max_records {
+            return Err(ArchiveError::Limit);
+        }
+        let genesis =
+            cowboy_protocol_codec::cbqs_v2::checkpoint_genesis_v2(&self.instance, &self.stream);
+        let (mut checkpoint, mut sequence) = (head.checkpoint, head.sequence);
+        let mut remaining_bytes = limits.max_bytes;
+        let mut segments = Vec::new();
+        while checkpoint != genesis {
+            if segments.len() == limits.max_segments {
+                return Err(ArchiveError::Limit);
+            }
+            let bytes = self
+                .read_object(
+                    &self.segment_path(&checkpoint),
+                    self.max_segment_bytes.min(remaining_bytes),
+                )
+                .await?;
+            remaining_bytes = remaining_bytes
+                .checked_sub(bytes.len())
+                .ok_or(ArchiveError::Limit)?;
+            let range = unverified_archive_range(&bytes, limits.max_records, bytes.len())
+                .map_err(verification_error)?;
+            if range.instance != self.instance
+                || range.stream != self.stream
+                || range.checkpoint != checkpoint
+                || range.last != sequence
+                || range.first == 0
+                || range.first > range.last
+            {
+                return Err(ArchiveError::Verification);
+            }
+            // Strictly decreasing sequence bounds also reject cycles, without
+            // another unbounded set of checkpoint IDs.
+            sequence = range.first - 1;
+            checkpoint = range.previous;
+            segments.push(bytes);
+        }
+        if sequence != 0 {
+            return Err(ArchiveError::HistoryGap);
+        }
+        for bytes in segments.into_iter().rev() {
+            let remaining_records = limits
+                .max_records
+                .checked_sub(recovered.records.len() as u64)
+                .ok_or(ArchiveError::Limit)?;
+            let replay = log
+                .restore_archive(
+                    &bytes,
+                    recovered.checkpoint.as_ref(),
+                    remaining_records,
+                    bytes.len(),
+                )
+                .map_err(verification_error)?;
+            recovered.records.extend(replay.records);
+            recovered.checkpoint = replay.checkpoint;
+        }
+        if recovered
+            .checkpoint
+            .as_ref()
+            .map(|c| (c.sequence(), c.id()))
+            != Some((head.sequence, head.checkpoint))
+        {
+            return Err(ArchiveError::Verification);
+        }
+        self.current_root().await?;
+        Ok(recovered)
     }
 
     /// Publish a complete verified range with one CBFS manifest commit. A

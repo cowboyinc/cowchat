@@ -1,7 +1,7 @@
 //! Production CBFS node processes + SDK, with the standalone Sled CAS authority.
 //! This proves local shard recovery, not chain finality or cross-host failover.
 use super::*;
-use crate::room_log::cbfs_archive::{ArchiveError, CbfsArchive};
+use crate::room_log::cbfs_archive::{ArchiveCommit, ArchiveError, CbfsArchive, RecoveryLimits};
 use cbfs_hooks::{
     standalone::{LocalAuthoritativeStore, LocalManifestRegistry, RoundRobinSelector},
     traits::{AuthoritativeStore, ManifestRegistry},
@@ -251,24 +251,53 @@ async fn batch(fixture: &Fixture) -> (CbqsOwnerLog, super::super::cbqs::Replay, 
     (log, replay, lane)
 }
 
-#[tokio::test]
-async fn real_nodes_archive_repeat_restart_and_restore_after_broker_expiry() {
-    let fixture = Fixture::new().await;
-    let (log, replay, _) = batch(&fixture).await;
-    let (mut storage, volume) = Storage::new().await;
+fn recovery_limits() -> RecoveryLimits {
+    RecoveryLimits {
+        max_segments: 10,
+        max_records: 10,
+        max_bytes: MAX_BYTES,
+    }
+}
+
+async fn three_batches(
+    fixture: &Fixture,
+    storage: &Storage,
+    volume: Volume,
+) -> (CbfsArchive, CbqsOwnerLog, Vec<ArchiveCommit>, u64) {
+    let (mut log, mut replay, lane) = batch(fixture).await;
     let mut archive = storage.archive(volume, storage.registry.clone()).await;
     let first = archive.publish(&replay).await.unwrap();
-    assert_eq!(first.head.sequence, 2);
     let repeat = archive.publish(&replay).await.unwrap();
     assert_eq!(repeat.head, first.head);
     assert_eq!(repeat.manifest_root, first.manifest_root);
+    let mut commits = vec![first];
+    for id in ["b", "c"] {
+        let sequence = log
+            .append(lane, &super::super::tests::message(id, "one"))
+            .await
+            .unwrap();
+        replay = log
+            .replay(replay.checkpoint.as_ref(), sequence, 10, MAX_BYTES)
+            .await
+            .unwrap();
+        commits.push(archive.publish(&replay).await.unwrap());
+    }
+    (archive, log, commits, lane)
+}
+
+#[tokio::test]
+async fn real_nodes_archive_repeat_restart_and_restore_after_broker_expiry() {
+    let fixture = Fixture::new().await;
+    let (mut storage, volume) = Storage::new().await;
+    let (archive, log, commits, lane) = three_batches(&fixture, &storage, volume).await;
+    let expected_head = commits.last().unwrap().head.clone();
     drop(archive);
     drop(log);
-    drop(replay);
+    drop(commits);
     fixture
         .core
         .store
-        .advance_retention_floor(&STREAM, 3)
+        .advance_retention_floor(&STREAM, 5)
         .unwrap();
     // SIGKILL every relay, then reuse only their disk directories. Drop the
     // complete writer/SDK state and use new QUIC connections for recovery.
@@ -278,17 +307,18 @@ async fn real_nodes_archive_repeat_restart_and_restore_after_broker_expiry() {
     for node in &mut storage.nodes {
         node.start().await;
     }
-    let recovered = storage
+    let mut recovered = storage
         .archive(storage.reopen().await, storage.registry.clone())
         .await;
-    let head = recovered.head().unwrap().unwrap();
-    assert_eq!(head, &first.head);
-    let bytes = recovered.read_segment(&head.checkpoint).await.unwrap();
+    assert_eq!(recovered.head().unwrap(), Some(&expected_head));
     let mut reader = fixture.connect(2).await.unwrap();
-    let restored = reader.restore_archive(&bytes, None, 10, MAX_BYTES).unwrap();
+    let restored = recovered
+        .recover(&mut reader, recovery_limits())
+        .await
+        .unwrap();
     assert_eq!(
         restored.checkpoint.as_ref().unwrap().sequence(),
-        head.sequence
+        expected_head.sequence
     );
     let mut state = OwnerState::new("owner-a".into());
     for record in restored.records {
@@ -296,7 +326,134 @@ async fn real_nodes_archive_repeat_restart_and_restore_after_broker_expiry() {
             .apply(record.sequence, record.lane_id, &record.command)
             .unwrap();
     }
-    assert_eq!(state.room("one").unwrap().messages.len(), 1);
+    assert_eq!(state.applied_through(), 4);
+    assert_eq!(state.room("one").unwrap().messages.len(), 3);
+    reader
+        .append(lane, &super::super::tests::message("live", "one"))
+        .await
+        .unwrap();
+    let tail = reader
+        .replay(restored.checkpoint.as_ref(), 5, 1, MAX_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(tail.records.len(), 1);
+    assert_eq!(tail.records[0].command.command_id, "live");
+}
+
+#[tokio::test]
+async fn real_nodes_cold_archive_recovery_enforces_total_budgets() {
+    let fixture = Fixture::new().await;
+    let (storage, volume) = Storage::new().await;
+    let (archive, _, commits, _) = three_batches(&fixture, &storage, volume).await;
+    let mut total_bytes = 0;
+    for commit in &commits {
+        total_bytes += archive
+            .read_segment(&commit.head.checkpoint)
+            .await
+            .unwrap()
+            .len();
+    }
+    drop(archive);
+    let limits = [
+        RecoveryLimits {
+            max_segments: 2,
+            ..recovery_limits()
+        },
+        RecoveryLimits {
+            max_records: 3,
+            ..recovery_limits()
+        },
+        RecoveryLimits {
+            max_bytes: total_bytes - 1,
+            ..recovery_limits()
+        },
+    ];
+    for (index, limit) in limits.into_iter().enumerate() {
+        let mut archive = storage
+            .archive(storage.reopen().await, storage.registry.clone())
+            .await;
+        let mut log = fixture.connect(index as u64 + 2).await.unwrap();
+        assert!(matches!(
+            archive.recover(&mut log, limit).await,
+            Err(ArchiveError::Limit)
+        ));
+        assert!(matches!(archive.head(), Err(ArchiveError::Unavailable)));
+    }
+    let mut archive = storage
+        .archive(storage.reopen().await, storage.registry.clone())
+        .await;
+    let mut log = fixture.connect(5).await.unwrap();
+    let exact = RecoveryLimits {
+        max_segments: 3,
+        max_records: 4,
+        max_bytes: total_bytes,
+    };
+    assert_eq!(
+        archive
+            .recover(&mut log, exact)
+            .await
+            .unwrap()
+            .records
+            .len(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn real_nodes_cold_recovery_refuses_tampered_and_missing_middle_segments() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let fixture = Fixture::new().await;
+    let (storage, volume) = Storage::new().await;
+    let (archive, _, commits, _) = three_batches(&fixture, &storage, volume).await;
+    let middle = &commits[1].head.checkpoint;
+    let bytes = archive.read_segment(middle).await.unwrap();
+    drop(archive);
+    let path = format!(
+        "cowchat/{}/{}/{}.json",
+        &hex0x(&INSTANCE)[2..],
+        &hex0x(&STREAM)[2..],
+        &hex0x(middle)[2..]
+    );
+    let mut altered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let payload = altered["records"][0]["payload"].as_str().unwrap();
+    let mut command: serde_json::Value =
+        serde_json::from_slice(&STANDARD.decode(payload).unwrap()).unwrap();
+    command["body"]["ciphertext"] = "cow1:tampered".into();
+    altered["records"][0]["payload"] = STANDARD
+        .encode(serde_json::to_vec(&command).unwrap())
+        .into();
+    let mut volume = storage.reopen().await;
+    volume
+        .put(&path, &serde_json::to_vec(&altered).unwrap())
+        .await
+        .unwrap();
+    volume
+        .commit(storage.authority.as_ref(), storage.registry.as_ref())
+        .await
+        .unwrap();
+    let mut archive = storage.archive(volume, storage.registry.clone()).await;
+    let mut log = fixture.connect(2).await.unwrap();
+    assert!(matches!(
+        archive.recover(&mut log, recovery_limits()).await,
+        Err(ArchiveError::Verification)
+    ));
+    assert!(matches!(archive.head(), Err(ArchiveError::Unavailable)));
+    drop(archive);
+    // Removing the middle object leaves a perfectly readable latest head and
+    // final segment. Recovery must not silently return just that suffix.
+    let mut volume = storage.reopen().await;
+    assert!(volume.remove_path(&path).unwrap().is_some());
+    volume
+        .commit(storage.authority.as_ref(), storage.registry.as_ref())
+        .await
+        .unwrap();
+    let mut archive = storage.archive(volume, storage.registry.clone()).await;
+    let mut log = fixture.connect(3).await.unwrap();
+    assert!(matches!(
+        archive.recover(&mut log, recovery_limits()).await,
+        Err(ArchiveError::HistoryGap)
+    ));
+    assert!(matches!(archive.head(), Err(ArchiveError::Unavailable)));
 }
 
 #[tokio::test]
