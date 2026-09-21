@@ -8,9 +8,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 const ROOM_KEY: &str = "fizzbuzz-room-secret";
 
 async fn start_seat(addr: &str, key: &str, room: &str, role: &str) -> tokio::process::Child {
-    let wake = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = wake.local_addr().unwrap().to_string();
-    drop(wake);
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/python/seat_actor.py");
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"))
@@ -26,7 +23,7 @@ async fn start_seat(addr: &str, key: &str, room: &str, role: &str) -> tokio::pro
             "actor-host",
             room,
             "--listen",
-            &port,
+            "127.0.0.1:0",
             "--",
             "python3",
         ])

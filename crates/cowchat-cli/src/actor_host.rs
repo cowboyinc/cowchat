@@ -178,12 +178,15 @@ pub(crate) async fn run(cli: &Cli, args: &ActorHostArgs) -> Result<(), Box<dyn s
     if resolve_agent_id(cli).is_none() {
         return Err("actor-host requires --agent-id".into());
     }
-    if !args.listen.ip().is_loopback() || args.listen.port() == 0 {
-        return Err("local actor-host requires a fixed loopback listen address".into());
+    if !args.listen.ip().is_loopback() {
+        return Err("local actor-host requires a loopback listen address".into());
     }
     let secret = env_non_empty("COWCHAT_WAKE_SECRET")
         .ok_or("set COWCHAT_WAKE_SECRET for signed wake requests")?;
+    // Port 0 asks the OS for a free port; the subscription below carries the
+    // actually bound address (re-enrollment updates the URL on restart).
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
+    let listen = listener.local_addr()?;
     let client = connect(cli).await?;
     let room = resolve_room_id(&client, &args.room).await?;
     client.join_room(&room).await?;
@@ -195,7 +198,7 @@ pub(crate) async fn run(cli: &Cli, args: &ActorHostArgs) -> Result<(), Box<dyn s
     let subscription = client
         .subscribe_actor(cowchat_core::SubscribeActorPayload {
             room_id: room.clone(),
-            webhook_url: format!("http://{}/wake", args.listen),
+            webhook_url: format!("http://{listen}/wake"),
             secret: secret.clone(),
             mode,
         })
@@ -215,7 +218,7 @@ pub(crate) async fn run(cli: &Cli, args: &ActorHostArgs) -> Result<(), Box<dyn s
     let mut http = tokio::spawn(async move { axum::serve(listener, app).await });
     println!(
         "{}",
-        serde_json::json!({"room_id":room, "subscription_id":subscription, "listen":args.listen.to_string(), "status":"ready"})
+        serde_json::json!({"room_id":room, "subscription_id":subscription, "listen":listen.to_string(), "status":"ready"})
     );
     notify.notify_one(); // recover queued work immediately after a receiver restart
     loop {

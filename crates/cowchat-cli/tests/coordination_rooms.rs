@@ -71,9 +71,6 @@ async fn start_seat(
     mode: &str,
     state: Option<&std::path::Path>,
 ) -> tokio::process::Child {
-    let wake = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = wake.local_addr().unwrap().to_string();
-    drop(wake);
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/python/coordination_actor.py");
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"));
@@ -90,7 +87,7 @@ async fn start_seat(
             "actor-host",
             room,
             "--listen",
-            &port,
+            "127.0.0.1:0",
             "--mode",
             mode,
             "--",
