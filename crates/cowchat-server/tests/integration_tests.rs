@@ -4212,3 +4212,57 @@ async fn actor_work_encrypted_tcp_room_wakes_without_content_and_completes() {
     http.abort();
     server.abort();
 }
+
+#[tokio::test]
+async fn dormant_actor_stays_addressable_in_its_room_roster() {
+    use cowchat_core::{SubscribeActorPayload, WakeMode};
+    let (server, addr, key, _dir) = start_test_server().await;
+    let human = connect_agent(&addr, &key, "Human").await;
+    let actor = connect_agent(&addr, &key, "Actor").await;
+    let room = human
+        .create_room("sleeping-actor", None, None)
+        .await
+        .unwrap();
+    actor.join_room(&room.room_id).await.unwrap();
+    actor
+        .subscribe_actor(SubscribeActorPayload {
+            room_id: room.room_id.clone(),
+            webhook_url: "https://example.com/wake".into(),
+            secret: "not-a-roster-field".into(),
+            mode: WakeMode::Addressed,
+        })
+        .await
+        .unwrap();
+    let actor_id = actor.agent_id.clone();
+    // While live, preserve the connected name and do not duplicate the actor.
+    let live = human.list_agents(Some(&room.room_id)).await.unwrap();
+    assert_eq!(live.iter().filter(|a| a.agent_id == actor_id).count(), 1);
+    drop(actor);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !human
+                .list_agents(None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|a| a.agent_id == actor_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let roster = human.list_agents(Some(&room.room_id)).await.unwrap();
+    let sleeping = roster.iter().find(|a| a.agent_id == actor_id).unwrap();
+    assert_eq!(sleeping.name, actor_id);
+    assert!(sleeping.connected_at.is_none());
+    assert!(!human
+        .list_agents(Some("lobby"))
+        .await
+        .unwrap()
+        .iter()
+        .any(|a| a.agent_id == actor_id));
+    server.abort();
+}

@@ -1365,6 +1365,23 @@ async fn handle_list_agents(
                     }
                 }
             }
+            if let Ok(actors) = store.room_actor_participants(room_id) {
+                for (agent_id, name) in actors {
+                    if list.iter().any(|agent| agent.agent_id == agent_id) {
+                        continue;
+                    }
+                    list.push(AgentInfo {
+                        agent_id,
+                        name,
+                        capabilities: Vec::new(),
+                        connected_at: None,
+                        last_active: None,
+                        status: None,
+                        status_detail: None,
+                        progress: None,
+                    });
+                }
+            }
             list
         }
         None => broker

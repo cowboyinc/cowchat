@@ -72,6 +72,24 @@ pub(super) fn validate_reply(
 }
 
 impl Store {
+    /// Durable participants remain addressable while their runtime is asleep.
+    /// This exposes identities only; callers must authorize access to the room.
+    pub fn room_actor_participants(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT a.agent_id, COALESCE(
+                (SELECT m.agent_name FROM messages m WHERE m.room_id = s.room_id
+                 AND m.agent_id = a.agent_id ORDER BY m.seq DESC LIMIT 1), a.agent_id)
+             FROM actor_subscriptions a JOIN subscriptions s USING(subscription_id)
+             WHERE s.room_id = ?1 ORDER BY a.agent_id",
+        )?;
+        let rows = stmt.query_map([room_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Starts at the current tip: old messages never retroactively cause inference.
     /// The actor identity comes from the authenticated connection, not the payload.
     pub fn create_actor_subscription(
