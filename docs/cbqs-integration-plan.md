@@ -6,8 +6,9 @@ at sequence 121 and confirmed by Chad in the implementation task:
 - CBQS is the launch room-log authority.
 - One stream per owner/tenant, rooms as lanes, one active writer per stream.
 - Broker-host HA follows launch. Single-broker restart recovery is required.
-- Connectors remain generic. Telegram is the first adapter; no second-provider
-  priority has yet been relayed.
+- Connectors remain generic. Claude relayed Chad's order at sequence 136:
+  Telegram, then Slack, then Linq. Linq waits for API credentials; it does not
+  block the other work.
 
 This branch starts from Cowchat `b00dab6`. The existing local server and its
 data remain in place while the hosted path is built. No merge or deployment
@@ -27,8 +28,9 @@ Expected modules:
   operations, finite-epoch grant sessions, signed fence before takeover replay.
 - A typed command/replay module: stable IDs, room-to-lane binding and
   deterministic application results from log order.
-- `store.rs`: projection application and replay position committed together;
-  retain existing local mode without treating it as automatic failure fallback.
+- Hosted owner runtime: serve from the reducer, publish state only after the
+  archive gate, and recover state and replay position together. The existing
+  `store.rs` remains the local-mode path, never automatic failure fallback.
 - `server.rs`, `main.rs`, `handler.rs`: explicit hosted configuration and the
   real create/send/history caller path.
 - Integration tests: real broker, actual Cowchat client calls, crash/rebuild,
@@ -87,12 +89,17 @@ the session. It does not fall back to SQLite or blindly resend. A caller that
 already holds a verified prefix can now request only the suffix after that
 checkpoint. Record/byte bounds apply to the suffix; lane enumeration has a
 separate 16,384-room-lane bound. A missing unarchived segment still refuses
-recovery. Checkpoint handles cannot be deserialized from untrusted JSON.
+recovery. Checkpoint handles cannot be deserialized from untrusted JSON. Archive
+segments now preserve raw CBQS headers, ciphertext payloads and signed receipts.
+`restore_archive` uses the same signature/linkage/digest verifier as broker
+replay before recreating a checkpoint. The bounded format is implemented;
+CBFS publication, durable archive-head discovery and rollback protection still
+need their storage integration.
 
 This is not connected to `CowchatServer` or its public handlers yet. The reducer
 is an in-memory projection; it does not persist snapshots or provide archive
-durability. No cross-host epoch allocator, CBFS archive, live-tail subscription,
-or recovery beyond CBQS retention is implemented. No live-chain claim is made:
+durability. No cross-host epoch allocator, CBFS archive publication or live-tail
+subscription is implemented. No live-chain claim is made:
 the broker tests use actual WebSockets/RocksDB with a fixture node snapshot.
 
 Verified commands:
@@ -104,14 +111,25 @@ cargo fmt --all -- --check
 cargo clippy --locked -p cowchat-server --all-targets --features cbqs-test -- -D warnings
 ```
 
-The focused suite has twelve tests: five reducer cases and seven actual-broker
+The focused suite has fifteen tests: five reducer cases and ten actual-broker
 cases covering interleaved room lanes/retries/fencing, total retention expiry,
 replay bounds/known-tip rollback, credit replenishment above 1 MiB, and ciphertext
 tampering between the broker and client. The two suffix tests expire a verified
 prefix and successfully resume with a one-record limit, then verify that a
-checkpoint cannot bridge a missing unarchived segment. This proves transport
-resume from an in-memory verified boundary, not a persisted CBFS restore.
-The default server suite has 194 tests; the default workspace has 275.
+checkpoint cannot bridge a missing unarchived segment. Two archive tests restore
+a prefix from serialized wire records after total broker retention, join it to
+the live suffix, and refuse tampering/truncation/reordering. This is verification
+of archive bytes, not proof of CBFS persistence. A deterministic cancellation
+test holds an actual committed Append ACK, drops the caller future, and requires
+immediate local refusal of another append before any network I/O. The regression
+fails with cancellation retirement disabled and passes with the drop guard.
+
+Ordinary Rust client sends now assign a message ID before sending, and
+`prepare_message` lets callers retain the ID and ciphertext for
+`append_prepared_message` retries. A real TCP test serializes the prepared
+payload, reconnects under the same authenticated identity, gets the original
+receipt and rejects reencrypting under the same ID. The default server suite
+has 195 tests; the default workspace has 276.
 The optional SDK graph requires Tokio 1.50. The repository currently has only a
 release workflow, so these are local checks, not CI results. Clean hosted builds
 also need access to the pinned Cowboy Git dependencies.
@@ -129,13 +147,23 @@ also need access to the pinned Cowboy Git dependencies.
 The existing room mutation guard is synchronous. Do not hold it across CBQS or
 archive network awaits; serialize commands at the owner-stream runtime instead.
 
-An implementation simplification proposed to Claude at room sequence 132 is to
-serve hosted reads directly from `OwnerState`, rebuilding it from verified logs
+Claude approved the foundation and the implementation simplification at room
+sequence 137: serve hosted reads directly from `OwnerState`, rebuilding it from verified logs
 and authenticated archive checkpoints. That avoids maintaining another SQLite
 projection beside the reducer. It does not remove the durable append-intent,
 archive or cross-host ownership requirements. It is not wired into handlers yet.
 
 ## Archive integration constraint under investigation
+
+The success/visibility gate remains durable archive capture of a checkpoint
+batch. Claude proposed moving it to CBQS commit at sequence 140, then withdrew
+the safety equivalence at 142 after the counterexamples at 141: stopping new
+appends does not stop time-based retention of already acknowledged records, and
+a single broker disk is not a second durable copy. A weaker committed/retained
+product contract would require Chad's explicit choice. First measure the actual
+CBFS batch commit path; do not add app-level replication to avoid an unmeasured
+latency concern. Pending commands must not enter served history or live events
+before the selected durable gate.
 
 The current CBFS SDK's `Volume::put` uploads object bytes and stages its manifest;
 `Volume::commit` publishes through `CowboyHttpManifestRegistry` and the relayer's
@@ -145,6 +173,9 @@ actual authority/finality and garbage-collection paths before selecting the
 archive ACK boundary. Calling a full volume commit for every message could
 reintroduce the per-message chain dependency excluded from this design. The
 batching, durable discovery and recovery boundary still needs implementation.
+Archive verification currently uses the SDK session's chain-anchored provider
+key history. Recovery of receipts older than that key history must fail closed
+until a verified historical-key lookup is supplied.
 
 `cbqs-archive-reassignment-spec.md` in the parent workspace is explicitly parked
 and unreviewed, and describes older v1 standard/fast streams. It is background,

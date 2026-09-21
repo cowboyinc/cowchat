@@ -1,6 +1,8 @@
 //! CBQS owner-stream transport. This layer returns verified log records; it
 //! neither allocates ownership nor acknowledges Cowchat commands to clients.
 //! The caller must hold the unique stream epoch and provide archive durability.
+mod archive;
+
 use super::Command;
 use cbqs_client::{CheckpointTrustV2, HeldRecord, SessionConfig, SessionV2, Socket};
 use commonware_codec::Encode;
@@ -9,6 +11,10 @@ use cowboy_protocol_codec::cbqs_v2::{
     CbqsServerFrameV2 as Frame,
 };
 use sha2::{Digest, Sha256};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
@@ -37,8 +43,8 @@ pub struct LogRecord {
 }
 
 /// A boundary produced only after this module verified both the checkpoint
-/// chain and its records. Deliberately not deserializable: an archive must
-/// authenticate its contents before a future restore API can recreate this.
+/// chain and its records. Deliberately not deserializable: archived records
+/// must pass `restore_archive` verification to recreate this boundary.
 #[derive(Clone, Debug)]
 pub struct VerifiedCheckpoint {
     receipt: wire::CheckpointReceiptV2,
@@ -54,6 +60,7 @@ impl VerifiedCheckpoint {
 pub struct Replay {
     pub records: Vec<LogRecord>,
     pub checkpoint: Option<VerifiedCheckpoint>,
+    archive: Option<archive::ArchiveData>,
 }
 
 pub struct CbqsOwnerLog {
@@ -61,8 +68,30 @@ pub struct CbqsOwnerLog {
     instance: [u8; 32],
     stream: [u8; 32],
     epoch: u64,
-    usable: bool,
+    usable: Arc<AtomicBool>,
     timeout: Duration,
+}
+
+// A caller may cancel a future, bypassing its normal error return. An
+// interrupted request/replay must still retire the session before reuse.
+struct RetireOnDrop {
+    usable: Arc<AtomicBool>,
+    completed: bool,
+}
+impl RetireOnDrop {
+    fn new(usable: &Arc<AtomicBool>) -> Self {
+        Self {
+            usable: Arc::clone(usable),
+            completed: false,
+        }
+    }
+}
+impl Drop for RetireOnDrop {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.usable.store(false, Ordering::Relaxed);
+        }
+    }
 }
 
 impl CbqsOwnerLog {
@@ -127,7 +156,7 @@ impl CbqsOwnerLog {
             instance,
             stream,
             epoch,
-            usable: true,
+            usable: Arc::new(AtomicBool::new(true)),
             timeout,
         })
     }
@@ -197,9 +226,10 @@ impl CbqsOwnerLog {
         max_records: u64,
         max_bytes: usize,
     ) -> Result<Replay, LogError> {
-        if !self.usable {
+        if !self.usable.load(Ordering::Relaxed) {
             return Err(LogError::Unavailable);
         }
+        let mut operation = RetireOnDrop::new(&self.usable);
         let result = tokio::time::timeout(
             self.timeout,
             self.replay_inner(after, minimum_sequence, max_records, max_bytes),
@@ -207,9 +237,7 @@ impl CbqsOwnerLog {
         .await
         .map_err(|_| LogError::Unavailable)
         .and_then(|result| result);
-        if result.is_err() {
-            self.usable = false;
-        }
+        operation.completed = result.is_ok();
         result
     }
 
@@ -238,6 +266,7 @@ impl CbqsOwnerLog {
             return Ok(Replay {
                 records: Vec::new(),
                 checkpoint: after.cloned(),
+                archive: None,
             });
         }
         let first = base.checked_add(1).ok_or(LogError::ReplayLimit)?;
@@ -283,14 +312,6 @@ impl CbqsOwnerLog {
             fetch = Some(previous);
         }
         chain.reverse();
-        self.session
-            .verify_chain(
-                &chain,
-                after.map_or(cbqs_client::Predecessor::Genesis, |checkpoint| {
-                    cbqs_client::Predecessor::Receipt(&checkpoint.receipt)
-                }),
-            )
-            .map_err(|_| LogError::Verification)?;
         let tail = chain.last().ok_or(LogError::Verification)?.last_sequence;
         if tail != observed_tail {
             return Err(LogError::Verification);
@@ -345,6 +366,57 @@ impl CbqsOwnerLog {
             .into_iter()
             .map(|(sequence, (header, payload))| (sequence, header, payload))
             .collect();
+        self.verified_replay(after, chain, delivered, max_records, max_bytes)
+    }
+
+    fn verified_replay(
+        &self,
+        after: Option<&VerifiedCheckpoint>,
+        chain: Vec<wire::CheckpointReceiptV2>,
+        delivered: Vec<(u64, wire::RecordHeaderV2, Vec<u8>)>,
+        max_records: u64,
+        max_bytes: usize,
+    ) -> Result<Replay, LogError> {
+        if after.is_some_and(|checkpoint| {
+            checkpoint.receipt.chain_instance_id != self.instance
+                || checkpoint.receipt.stream_id != self.stream
+        }) {
+            return Err(LogError::Verification);
+        }
+        self.session
+            .verify_chain(
+                &chain,
+                after.map_or(cbqs_client::Predecessor::Genesis, |checkpoint| {
+                    cbqs_client::Predecessor::Receipt(&checkpoint.receipt)
+                }),
+            )
+            .map_err(|_| LogError::Verification)?;
+        let base = after.map_or(0, VerifiedCheckpoint::sequence);
+        let tail = chain.last().ok_or(LogError::Verification)?.last_sequence;
+        let count = tail.checked_sub(base).ok_or(LogError::Verification)?;
+        if count > max_records || delivered.len() as u64 > max_records {
+            return Err(LogError::ReplayLimit);
+        }
+        if count == 0 || delivered.len() as u64 != count {
+            return Err(LogError::HistoryGap);
+        }
+        let mut bytes = 0usize;
+        for (offset, (sequence, header, payload)) in delivered.iter().enumerate() {
+            if base
+                .checked_add(offset as u64)
+                .and_then(|n| n.checked_add(1))
+                != Some(*sequence)
+                || header.stream_id != self.stream
+            {
+                return Err(LogError::Verification);
+            }
+            bytes = bytes
+                .checked_add(payload.len())
+                .ok_or(LogError::ReplayLimit)?;
+            if bytes > max_bytes {
+                return Err(LogError::ReplayLimit);
+            }
+        }
         let mut checked = 0usize;
         for receipt in &chain {
             let count = receipt
@@ -370,18 +442,25 @@ impl CbqsOwnerLog {
             return Err(LogError::Verification);
         }
         let records = delivered
-            .into_iter()
+            .iter()
             .map(|(sequence, header, payload)| {
                 Ok(LogRecord {
-                    sequence,
+                    sequence: *sequence,
                     lane_id: header.lane_id,
-                    command: serde_json::from_slice(&payload).map_err(|_| LogError::Encoding)?,
+                    command: serde_json::from_slice(payload).map_err(|_| LogError::Encoding)?,
                 })
             })
             .collect::<Result<Vec<_>, LogError>>()?;
         Ok(Replay {
             records,
-            checkpoint: chain.pop().map(|receipt| VerifiedCheckpoint { receipt }),
+            checkpoint: chain
+                .last()
+                .cloned()
+                .map(|receipt| VerifiedCheckpoint { receipt }),
+            archive: Some(archive::ArchiveData {
+                receipts: chain,
+                records: delivered,
+            }),
         })
     }
 
@@ -515,11 +594,15 @@ impl CbqsOwnerLog {
     }
 
     async fn request(&mut self, body: Request) -> Result<Response, LogError> {
-        if !self.usable {
+        if !self.usable.load(Ordering::Relaxed) {
             return Err(LogError::Unavailable);
         }
+        let mut operation = RetireOnDrop::new(&self.usable);
         match tokio::time::timeout(self.timeout, self.session.request(body)).await {
-            Ok(Ok(response)) => Ok(response),
+            Ok(Ok(response)) => {
+                operation.completed = true;
+                Ok(response)
+            }
             Ok(Err(cbqs_client::TransportError::Broker(error)))
                 if error.code == wire::CBQS_V2_ERR_CURSOR_TOO_OLD
                     || error.code == wire::CBQS_V2_ERR_CHECKPOINT_NOT_FOUND =>
@@ -535,7 +618,7 @@ impl CbqsOwnerLog {
         }
     }
     fn fail<T>(&mut self, error: LogError) -> Result<T, LogError> {
-        self.usable = false;
+        self.usable.store(false, Ordering::Relaxed);
         Err(error)
     }
 }

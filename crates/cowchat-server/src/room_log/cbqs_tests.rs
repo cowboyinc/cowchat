@@ -585,3 +585,186 @@ async fn checkpoint_cannot_bridge_a_missing_unarchived_suffix() {
         Err(LogError::Unavailable)
     ));
 }
+
+#[tokio::test]
+async fn archived_wire_records_restore_after_full_retention_then_join_live_suffix() {
+    let fixture = Fixture::new().await;
+    let mut first = fixture.connect(1).await.unwrap();
+    let lane = first.room_lane("owner-a", "one").await.unwrap();
+    first
+        .append(0, &super::tests::create("one", lane))
+        .await
+        .unwrap();
+    first
+        .append(lane, &super::tests::message("a", "one"))
+        .await
+        .unwrap();
+    let prefix = first.replay(None, 2, 10, 100_000).await.unwrap();
+    let archive = prefix.archive_bytes(100_000).unwrap().unwrap();
+    drop(prefix);
+    drop(first);
+    fixture
+        .core
+        .store
+        .advance_retention_floor(&STREAM, 3)
+        .unwrap();
+
+    // No prior in-memory checkpoint remains. Only archived wire bytes and the
+    // fresh session's trusted provider authority can rebuild the prefix.
+    let mut next = fixture.connect(2).await.unwrap();
+    let restored = next.restore_archive(&archive, None, 10, 100_000).unwrap();
+    let mut state = OwnerState::new("owner-a".into());
+    for record in restored.records {
+        state
+            .apply(record.sequence, record.lane_id, &record.command)
+            .unwrap();
+    }
+    assert_eq!(state.room("one").unwrap().messages.len(), 1);
+    let checkpoint = restored.checkpoint.unwrap();
+    assert_eq!(checkpoint.sequence(), 2);
+    next.append(lane, &super::tests::message("b", "one"))
+        .await
+        .unwrap();
+    let suffix = next.replay(Some(&checkpoint), 3, 1, 100_000).await.unwrap();
+    let suffix_archive = suffix.archive_bytes(100_000).unwrap().unwrap();
+    let recovered_suffix = next
+        .restore_archive(&suffix_archive, Some(&checkpoint), 1, 100_000)
+        .unwrap();
+    assert_eq!(recovered_suffix.records.len(), 1);
+    for record in recovered_suffix.records {
+        state
+            .apply(record.sequence, record.lane_id, &record.command)
+            .unwrap();
+    }
+    assert_eq!(state.applied_through(), 3);
+    assert_eq!(state.room("one").unwrap().messages.len(), 2);
+}
+
+#[tokio::test]
+async fn archived_bytes_cannot_forge_or_truncate_a_verified_boundary() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let fixture = Fixture::new().await;
+    let mut first = fixture.connect(1).await.unwrap();
+    let lane = first.room_lane("owner-a", "one").await.unwrap();
+    first
+        .append(0, &super::tests::create("one", lane))
+        .await
+        .unwrap();
+    first
+        .append(lane, &super::tests::message("a", "one"))
+        .await
+        .unwrap();
+    let replay = first.replay(None, 2, 10, 100_000).await.unwrap();
+    assert!(matches!(
+        replay.archive_bytes(1),
+        Err(LogError::ReplayLimit)
+    ));
+    let bytes = replay.archive_bytes(100_000).unwrap().unwrap();
+    let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let mut forged = original.clone();
+    forged["records"][1]["payload"] = serde_json::json!(STANDARD.encode(b"{}"));
+    let mut truncated = original.clone();
+    truncated["records"].as_array_mut().unwrap().pop();
+    let mut reordered = original.clone();
+    reordered["records"].as_array_mut().unwrap().swap(0, 1);
+    for (index, invalid) in [forged, truncated, reordered].into_iter().enumerate() {
+        let mut next = fixture.connect(index as u64 + 2).await.unwrap();
+        let result =
+            next.restore_archive(&serde_json::to_vec(&invalid).unwrap(), None, 10, 100_000);
+        assert!(
+            matches!(result, Err(LogError::Verification | LogError::HistoryGap)),
+            "{result:?}"
+        );
+        assert!(matches!(
+            next.append(lane, &super::tests::message("b", "one")).await,
+            Err(LogError::Unavailable)
+        ));
+    }
+    let mut next = fixture.connect(5).await.unwrap();
+    assert!(matches!(
+        next.restore_archive(&bytes, None, 10, 1),
+        Err(LogError::ReplayLimit)
+    ));
+}
+
+#[tokio::test]
+async fn cancelling_an_append_after_commit_retires_the_uncertain_session() {
+    use commonware_codec::DecodeExt;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let fixture = Fixture::new().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    let broker_url = format!("ws://{}/ws", fixture.broker);
+    let held = Arc::new(tokio::sync::Notify::new());
+    let observed = held.clone();
+    let proxy = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut downstream = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let (mut upstream, _) = tokio_tungstenite::connect_async(broker_url).await.unwrap();
+        loop {
+            tokio::select! {
+                frame = downstream.next() => {
+                    let Some(Ok(frame)) = frame else { break };
+                    if upstream.send(frame).await.is_err() { break }
+                }
+                frame = upstream.next() => {
+                    let Some(Ok(frame)) = frame else { break };
+                    if let Message::Binary(bytes) = &frame {
+                        if matches!(wire::CbqsServerFrameV2::decode(bytes.as_ref()),
+                            Ok(wire::CbqsServerFrameV2::Response { body: wire::CbqsResponseBodyV2::Appended { .. }, .. })) {
+                            observed.notify_one();
+                            std::future::pending::<()>().await;
+                        }
+                    }
+                    if downstream.send(frame).await.is_err() { break }
+                }
+            }
+        }
+    });
+    let config = fixture.config(1);
+    let fence = cbqs_client::connect_socket(&config.broker_url)
+        .await
+        .unwrap();
+    let session = cbqs_client::connect_socket(&format!("ws://{proxy_addr}/ws"))
+        .await
+        .unwrap();
+    let mut first = CbqsOwnerLog::attach(
+        fence,
+        session,
+        config,
+        |bytes| {
+            key(0xA1)
+                .sign(&cowboy_protocol_codec::keccak256(bytes))
+                .to_bytes()
+        },
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    let lane = first.room_lane("owner-a", "one").await.unwrap();
+    let command = super::tests::create("one", lane);
+    {
+        let append = first.append(0, &command);
+        tokio::pin!(append);
+        tokio::select! {
+            result = &mut append => panic!("proxy must hold the ACK: {result:?}"),
+            _ = held.notified() => {},
+            _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("broker did not commit"),
+        }
+        // Dropping the future bypasses all normal Result/error branches.
+    }
+    // It must refuse locally on the very first poll, before touching the still
+    // connected transport. A later socket failure would hide the regression.
+    assert!(matches!(
+        futures::poll!(Box::pin(first.append(0, &command))),
+        std::task::Poll::Ready(Err(LogError::Unavailable))
+    ));
+    proxy.abort();
+    let mut next = fixture.connect(2).await.unwrap();
+    let recovered = next.replay_from_start(1, 10, 100_000).await.unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].command.command_id, command.command_id);
+}
