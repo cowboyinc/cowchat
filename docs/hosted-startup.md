@@ -20,6 +20,17 @@ and registered storage relays. Use the same wallet as the stream's proved owner.
 Supply an independently trusted checkpoint file; do not treat an arbitrary RPC
 checkpoint candidate as a trust root.
 
+The node exports candidate bytes at `GET /cbqs/trusted-checkpoint-candidate`
+(`application/octet-stream`). During provisioning, obtain them from an
+independently pinned validator, check them against the deployment's genesis and
+committee, and pin the approved file's BLAKE3 digest. Install that file before
+starting Cowchat or CBQS. Do not fetch and trust a new candidate from the proof
+RPC at each restart. A second URL to the same node does not establish independence.
+The canonical checkpoint contains the chain-instance ID; its source is
+`keccak256("cbqs/chain-instance/v2" || genesis_beacon[32] || chain_id_u64_BE)`.
+It is distinct from the numeric chain ID and the network name. Keep the approved
+anchor within 65,536 blocks of the head for the CBFS client's v1 proof horizon.
+
 The node must serve finalized proof bundle v2 for the stream and provider under
 system actor `0x17`, and bundle v1 for the existing CBFS client. The broker must
 support the pinned v2 protocol, policy fencing and keyed lanes. Registration or
