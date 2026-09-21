@@ -1,7 +1,7 @@
 # CBQS as the Cowchat room log
 
-Read-only source assessment, September 21, 2026. This is a candidate for the
-multi-server launch requirement relayed in `dashboard-cowchat-v2`, not a claim
+Source assessment and local experiments, September 21, 2026. This is a candidate for the
+multi-server launch investigation authorized by Chad in `dashboard-cowchat-v2`, not a claim
 that the current Cowchat implementation already supports failover.
 
 **Recommendation:** CBQS is a plausible ordered transport for several Cowchat
@@ -30,7 +30,7 @@ WebSocket; use the pinned implementation for these conclusions.
 
 | Question | Current evidence | Implication |
 |---|---|---|
-| Append latency | `handle_request` parks an append until `commit_open_batch` completes a synchronous RocksDB write. The chain parameter defaults to a 20 ms batch window and 1,024 records. The periodic ticker checks batch age; at low traffic its timer component can be roughly 20–40 ms before disk, scheduling and network time. | Sub-100 ms warm appends are plausible, **unmeasured here**. The batch timer is tunable (minimum 1 ms), with a throughput/fsync tradeoff. Do not weaken durability to claim speed. |
+| Append latency | `handle_request` parks an append until `commit_open_batch` completes a synchronous RocksDB write. The chain parameter defaults to a 20 ms batch window and 1,024 records. The periodic ticker checks batch age; at low traffic its timer component can be roughly 20–40 ms before disk, scheduling and network time. | Sub-100 ms warm appends are plausible, now measured locally at roughly 40 ms ACK p99 under the default setting. The batch timer is tunable (minimum 1 ms), with a throughput/fsync tradeoff. Do not weaken durability to claim speed. |
 | Throughput and cost | Default admission ceilings are 1 MiB/s appended and 4 MiB/s delivered per stream, subject to stream/grant limits. Rent is elapsed blocks × locked account rate × active streams; default rate is 80,000 atomic units per stream/block. No append transaction or per-append escrow debit is in this path. | Limits are configurable, not measured capacity. Default rent is 0.00008 CBY/stream/block; stream creation separately burns 5 CBY, and a new account requires at least 1 CBY top-up. A literal stream per room adds chain state and cost even for idle rooms. Room lanes within an owner stream deserve comparison before fixing the mapping. No live tariff or USD price is asserted. |
 | Fanout latency | Commit broadcasts a stream wake to watching connections. The WebSocket loop immediately pumps on that wake and continues draining while there is work. The 500 ms tick is housekeeping/backstop. | There is no mandatory 500 ms polling floor. Give each Cowchat server an independent replay cursor; a shared consumer group would distribute messages instead of giving every server the full log. N tailers still multiply delivered bytes and must replenish credit. |
 | Concurrent ordering | Connections in one broker share one mutex-protected stream accumulator and sequence space. Durable commit assigns the sequence range before resolving append waiters. | Concurrent producers through that authority get an order. This is not consensus between independent brokers and is not compare-and-set for Cowchat turn tokens. Cowchat must validate competing commands in log order and return the accepted/rejected result after application. |
@@ -69,10 +69,88 @@ existing authorization/freshness rules.
    arbitrary outside APIs transactional.
 
 These are implementation requirements, not arguments against CBQS. They should
-be explicit in the launch definition and tested individually. No CBQS or Node
-code was changed by this assessment.
+be explicit in the launch definition and tested individually. The experiment
+changed no Node code. A separate CBQS policy-fence fix is described below.
 
-## Smallest useful experiment
+## Earlier availability plan
+
+The workspace's `cbqs-implementation-plan.md` (August 19, baseline `e23f9cd`,
+reviewed in `cbqs-update` at sequence 33) already identified this boundary:
+COW-3299a selects an availability contract; COW-3299b proves stale-writer
+rejection and monotonic signed history under takeover. Its simpler HA candidate
+is **fenced active/passive over supported replicated storage**. A new
+replicated-log consensus implementation is not the only possible solution.
+COW-3300 separately requires a consistent checkpoint and an isolated restore
+exercise. Those are planned acceptance requirements, not current HA evidence.
+The plan predates today's V2 transport, so its Standard/Fast and long-poll
+implementation details must not be copied into new work.
+
+For Cowchat, evaluate recovery at two distinct boundaries: (1) a Cowchat worker
+fails while the broker remains healthy; (2) the broker host or storage fails.
+The first experiment exercises a fixture of the first boundary and single-store
+broker restart.
+The second needs an explicit storage/fencing contract and a separate failure
+drill. Neither a second process on the same disk nor restored old backups prove
+that every acknowledged append survives broker-host failure.
+
+The more specific `dashboard-cowchat-spec.md` room-service section already
+proposed **one fenced writer per room plus standby**, a durable append intent
+before CBQS append, lost-ACK reconciliation by stable message ID, and success
+only after log commitment plus encrypted archive capture. That is the useful
+availability contract to retain. Its older chain-heavy membership/seat design
+is not being reintroduced by this experiment.
+
+## Local results and the fence fix
+
+[CBQS PR60](https://github.com/cowboyinc/cbqs/pull/60) preserves the devnet
+experiment and exact JSON readout. Two independent cursor tailers each received
+1,130 records across six 4 KiB profiles. ACK p99 was approximately 40 ms at the
+20 ms default batch setting and 6 ms with the setting changed to 1 ms. A
+synthetic 50 ms snapshot RPC delay yielded 74 ms ACK p99 and 95 ms tailer p99.
+These are local debug-build observations on Apple M5 Max, **not bounds** or
+production latency promises. The five-second RPC timeout remains relevant.
+Those measurements use devnet `2eb933c` and JSON snapshot fixtures; they do not
+measure PR55's finalized-authority production path.
+
+The test worker fixture recovered a committed message after losing its ACK,
+kept exact retries to one physical append, serialized competing expected-turn
+commands, blocked success while archive capture was unavailable, and rebuilt
+three committed messages after actual worker and broker SIGKILL. Broker restart
+used the same RocksDB disk. Allocation used a same-host OS file lock and durable
+epoch journal; the archive was local test storage. This is not production
+Cowchat, distributed allocation, CBFS archival, or broker-host/storage failover.
+
+A negative control held an old writer's Append frame in transit, promoted a
+new writer at the application level, then released the old frame. Both appends
+committed: an opaque application epoch alone does not fence the broker.
+
+Existing [CBQS PR55](https://github.com/cowboyinc/cbqs/pull/55), pinned at
+`fdd0a94ad7f570e6a2f28aafa8668e5383cd03d1`, provides finite policy-epoch grants
+and a signed broker fence with an under-lock admission recheck. We found one
+remaining ordering hole: its fence ACK could precede commitment of an old
+writer's already-admitted batch. [PR59](https://github.com/cowboyinc/cbqs/pull/59)
+at `7f0fb21` drains that batch under the existing barrier before signing the ACK.
+The regression failed on the base and passed with this fix; a real socket test
+also holds an old Append until after the new epoch ACK and verifies typed
+rejection with no extra record. No new wire field or consensus protocol.
+
+A subsequent process-fixture composition uses real finite-epoch grants and
+waits for the signed fence before replay. It passes both fault schedules:
+old worker killed after commit/before response, and old worker killed with
+Append bytes still in transit. In the latter, the standby retries the pending
+intent once and the delayed old frame is explicitly rejected. This strengthens
+local integration evidence; it does not change the allocation/archive/host-HA
+limits above. [PR61](https://github.com/cowboyinc/cbqs/pull/61), at `491699e`,
+preserves the composition tests and their separate report/JSON.
+
+The two necessary takeover guarantees remain distinct: the ownership service
+allocates one winner per epoch; CBQS rejects earlier grants and resolves their
+admitted appends before acknowledging the fence. Proof-derived native room
+sessions bypass this off-chain policy fence, so a room-service writer using
+this mechanism must use finite-epoch admin grants. Production ownership and
+archive recovery still need implementation and their own failure drills.
+
+## Experiment contract
 
 Use current V2 code, one broker and two Cowchat room workers with disposable
 local caches. Drive two concurrent producers and independent tailers. Measure
@@ -88,5 +166,7 @@ existing single-store restart recovers. Do not label that test host/storage
 failover. Before calling the cache disposable for production, test recovery past
 the retention boundary using the chosen archive/snapshot mechanism.
 
-No latency benchmark, live funding test, multi-server integration or broker-host
-failover test was run for this source assessment.
+Local latency and fixture integration tests are reported above. Live funding,
+production Cowchat failover, recovery past retention via CBFS, and broker-host
+failover remain untested. The generic connector/gateway scope is unchanged:
+Telegram is the first adapter, not the boundary of the product.
