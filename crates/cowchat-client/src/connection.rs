@@ -731,17 +731,38 @@ impl CowchatClient {
         public: bool,
         encrypted: bool,
     ) -> Result<Room, ClientError> {
+        let prepared = CreateRoomPayload {
+            room_id: Some(uuid::Uuid::new_v4().to_string()),
+            name: name.to_string(),
+            description: description.map(String::from),
+            parent_id: parent_id.map(String::from),
+            public,
+            encrypted,
+        };
+        self.create_prepared_room(&prepared).await
+    }
+
+    /// Prepare a private encrypted hosted room once and retain this value until
+    /// its result is known. Hosted retries reuse both room ID and creation body.
+    pub fn prepare_hosted_room(name: &str) -> CreateRoomPayload {
+        CreateRoomPayload {
+            room_id: Some(uuid::Uuid::new_v4().to_string()),
+            name: name.to_owned(),
+            description: None,
+            parent_id: None,
+            public: false,
+            encrypted: true,
+        }
+    }
+
+    pub async fn create_prepared_room(
+        &self,
+        prepared: &CreateRoomPayload,
+    ) -> Result<Room, ClientError> {
         let resp = self
             .request(
                 FrameType::CreateRoom,
-                serde_json::to_value(CreateRoomPayload {
-                    name: name.to_string(),
-                    description: description.map(String::from),
-                    parent_id: parent_id.map(String::from),
-                    public,
-                    encrypted,
-                })
-                .unwrap(),
+                serde_json::to_value(prepared).unwrap(),
             )
             .await?;
         Ok(serde_json::from_value(resp.payload).unwrap())

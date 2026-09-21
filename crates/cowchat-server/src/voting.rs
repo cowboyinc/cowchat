@@ -50,6 +50,9 @@ impl VoteManager {
             active_elections: Arc::new(DashMap::new()),
             room_leaders: Arc::new(DashMap::new()),
         };
+        if broker.is_hosted() {
+            return manager;
+        }
         if let Ok(votes) = store.list_open_votes() {
             for meta in votes {
                 let ballots = store.get_vote_ballots(&meta.vote_id).unwrap_or_default();

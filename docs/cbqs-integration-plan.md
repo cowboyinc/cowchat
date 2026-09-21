@@ -96,7 +96,8 @@ replay before recreating a checkpoint. The bounded format and optional CBFS
 batch publisher are implemented. The owner runtime now composes these pieces;
 public caller integration is still pending.
 
-This is not connected to `CowchatServer` or its public handlers yet. The reducer
+`CowchatServer::new_hosted` now explicitly connects a recovered runtime to the
+restricted authenticated handler surface described below. The reducer
 is an in-memory projection; it does not persist snapshots or provide archive
 durability. The owner runtime supplies the archive and allocation gates, but
 no live-tail subscription is implemented. No live-chain claim is made:
@@ -151,7 +152,8 @@ Claude approved the foundation and the implementation simplification at room
 sequence 137: serve hosted reads directly from `OwnerState`, rebuilding it from verified logs
 and authenticated archive checkpoints. That avoids maintaining another SQLite
 projection beside the reducer. It does not remove the durable append-intent,
-archive or cross-host ownership requirements. It is not wired into handlers yet.
+archive or cross-host ownership requirements. The initial authenticated handlers
+now use one shared committed view of that projection.
 
 ## Archive integration constraint under investigation
 
@@ -236,7 +238,8 @@ COWCHAT_TEST_CBFS_NODE=/absolute/cbfs/target/debug/cbfs-node \
 cargo clippy --locked -p cowchat-server --features cbfs-archive-test --all-targets -- -D warnings
 ```
 
-Hosted routes remain disabled. Public handler wiring, deployed cross-host
+The default CLI still starts local mode. Explicit `new_hosted` startup now exposes
+the restricted frame surface below; production provisioning, deployed cross-host
 ownership proof and measured finalized-authority batch latency remain required work.
 
 ### Ownership allocation boundary
@@ -337,7 +340,7 @@ values include only newly applied records for post-archive fanout. Failed or
 cancelled work retires the whole runtime, including reads, until fenced recovery.
 No API key or plaintext message body belongs in an intent or log command.
 
-The focused suite has 33 passing checks plus the separately invoked process-test
+The runtime slice initially passed 33 focused checks plus the separately invoked process-test
 entry point. New real-node runtime cases cover two-room batches and cold rebuild,
 held/cancelled archive publication, lost publication replies, partially appended
 batches, mismatched incarnations/holder keys, and journal locking/identity/bounds.
@@ -348,10 +351,67 @@ unique test addresses outside the usual client ephemeral range to avoid both
 QUIC client collisions and a sibling's not-yet-bound/restarting port.
 These are local runtime checks, not authenticated client or deployed-host proof.
 
-Next connect the actual create/encrypted-send/history handlers, reconnect access
-checks and HTTP bypass gates. Server configuration must bind authenticated keys
-to stable owner principals without putting credentials in commands. Unsupported
-mutations and local background workers must be refused in hosted mode. Actual
-frontend retries must retain their prepared IDs/ciphertext. Finalized promotion
-and archive ACK latency, provisioning, compaction, and actor/gateway integration
-remain unfinished. Nothing in this slice authorizes a merge or deployment.
+The initial authenticated handler and reconnect wiring is implemented below.
+Actual frontend retries must retain their prepared IDs/ciphertext. Finalized
+promotion and archive ACK latency, provisioning, compaction, and actor/gateway
+integration remain unfinished. Nothing in this slice authorizes a merge or deployment.
+
+
+### Authenticated hosted caller slice
+
+`CowchatServer::new_hosted(config, recovered_runtime)` selects the hosted backend
+before constructing any room workers. This is an explicit embedding API; the
+ordinary CLI continues to start local mode and does not provision/promote a
+hosted runtime. The initial slice binds the server's primary credential to one
+stable runtime owner ID. Other valid server credentials do not acquire access to
+that owner's rooms. Keyless access, no-auth and public signup are refused. Raw
+credentials stay in local authentication configuration and never enter commands.
+Durable multi-credential membership, invitation and actor grants are later work.
+
+`hosted.rs` handles private encrypted creation, transient connection join/leave,
+encrypted send, history, room info/tip/list and owner-scoped agent listing. Every
+other frame operation returns an explicit unsupported error. The hosted HTTP
+router refuses all `/api/` storage/administration routes, including invitation
+redemption and blobs, while `/ws` uses the authenticated frame handler. The local
+HTTP administration/board API is not a hosted frontend yet. Startup skips local
+webhook/retention/blob workers, and VoteManager does not restore SQLite timers.
+Hosted room/message rows are never written to the local Store.
+
+One `OwnerView` shares the actual in-memory projection under a short synchronous
+read/write lock. Existing reconnect and join authorization reads it without
+awaiting storage or the async writer queue. Readers can see the previous committed
+state during an in-flight batch. The runtime takes the projection write lock only
+after archive publication; it retires the view before releasing that lock if
+reduction fails. Cancellation/error retires both writer and shared readers.
+No synchronous room/lifecycle/projection lock is held across a network await.
+The async owner mutex remains held through post-commit fanout to preserve order.
+
+The Rust client can retain `prepare_hosted_room`/`create_prepared_room` payloads
+with a UUID room ID, in addition to the existing prepared message ID/ciphertext.
+Hosted creation retries bind that ID to the original authenticated creator and
+creation body. Local servers retain their existing server-assigned room IDs;
+prepared creation idempotency is a hosted capability. The first hosted slice
+explicitly rejects public/unencrypted rooms, descriptions and parent relationships.
+
+The focused suite now passes 37 checks, plus the promotion subprocess entry
+point. Three new tests exercise the actual authenticated TCP connection loop and
+HTTP/WebSocket router with production CBQS/CBFS storage fixtures. They hold
+archive publication and assert no send ACK, message event or history visibility;
+a second client reads prior history and reconnects its live stable identity
+without losing membership while the writer is busy. Release makes one message
+visible. Exact retries emit no duplicate event, changed ciphertext conflicts,
+and a fresh runtime/local-auth database recovers the original room/message receipt.
+A lost archive reply retires every authenticated read until recovery. Tests also
+cover a valid but unbound credential, unsupported mutation, HTTP bypass refusal,
+WebSocket append read through TCP, and absence of hosted room/message rows in SQLite.
+The listener fixture owns its connection tasks; it exercises production startup
+construction/handlers/router, not the long-running daemon shutdown lifecycle.
+
+The public history test fails when projection application is deliberately moved
+before archive publication. The cancellation test fails if shared-reader
+retirement is removed. Both pass with their guards restored. All 276 default
+workspace tests and strict feature-enabled all-targets server clippy pass locally.
+This remains fixture-backed authority, not a live finalized-chain or deployed
+multi-host result. CLI provisioning, the dashboard's prepared-request retry path,
+complete membership/actor/gateway behavior and measured durable ACK latency are
+still required before hosted launch.

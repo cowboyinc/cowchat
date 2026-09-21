@@ -11,6 +11,10 @@ use super::{
 use ed25519_dalek::SigningKey;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, RwLock, RwLockReadGuard,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -110,12 +114,60 @@ pub struct CommittedBatch {
     pub applied: Vec<LogRecord>,
 }
 
+/// The single committed projection shared by synchronous authorization reads.
+/// A pending write leaves previous committed state readable; uncertainty retires
+/// the view. Never hold its guard across an await or a broker mutation.
+pub struct OwnerView {
+    state: RwLock<OwnerState>,
+    usable: AtomicBool,
+}
+impl OwnerView {
+    pub fn read(&self) -> Result<RwLockReadGuard<'_, OwnerState>, RuntimeError> {
+        let state = self.state.read().map_err(|_| RuntimeError::Retired)?;
+        if !self.usable.load(Ordering::Acquire) {
+            return Err(RuntimeError::Retired);
+        }
+        Ok(state)
+    }
+    fn apply(&self, records: Vec<LogRecord>) -> Result<Vec<LogRecord>, RuntimeError> {
+        let mut state = self.state.write().map_err(|_| RuntimeError::Retired)?;
+        let result = (|| {
+            let mut applied = Vec::new();
+            for record in records {
+                let first = state.receipt(&record.command)?.is_none();
+                let outcome = state.apply(record.sequence, record.lane_id, &record.command)?;
+                if first && !matches!(outcome, Outcome::Rejected { .. }) {
+                    applied.push(record);
+                }
+            }
+            Ok(applied)
+        })();
+        // Mark failure BEFORE releasing the write guard, so another reader
+        // can never observe a partially applied batch from a failed reducer.
+        if result.is_err() {
+            self.usable.store(false, Ordering::Release);
+        }
+        result
+    }
+}
+struct RetireView {
+    view: Arc<OwnerView>,
+    completed: bool,
+}
+impl Drop for RetireView {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.view.usable.store(false, Ordering::Release);
+        }
+    }
+}
+
 pub struct OwnerRuntime {
     owner_id: String,
     log: CbqsOwnerLog,
     archive: CbfsArchive,
     journal: IntentJournal,
-    state: OwnerState,
+    view: Arc<OwnerView>,
     checkpoint: Option<VerifiedCheckpoint>,
     limits: RuntimeLimits,
     segments: usize,
@@ -153,7 +205,10 @@ impl OwnerRuntime {
             log,
             archive,
             journal,
-            state,
+            view: Arc::new(OwnerView {
+                state: RwLock::new(state),
+                usable: AtomicBool::new(false),
+            }),
             checkpoint: recovered.checkpoint,
             limits,
             segments: recovered.segments,
@@ -162,19 +217,28 @@ impl OwnerRuntime {
         };
         // Archive any surviving but previously unacknowledged broker suffix
         // before it becomes served state. Never bridge an expired/missing gap.
-        runtime
-            .capture_suffix(runtime.state.applied_through())
-            .await?;
+        let minimum = runtime.read_state()?.applied_through();
+        runtime.capture_suffix(minimum).await?;
         let pending = runtime.journal.pending().await?;
         runtime.finish_pending(&pending).await?;
         runtime.journal.clear().await?;
         runtime.usable = true;
+        runtime.view.usable.store(true, Ordering::Release);
         Ok(runtime)
     }
 
-    pub fn state(&self) -> Result<&OwnerState, RuntimeError> {
+    pub fn state(&self) -> Result<RwLockReadGuard<'_, OwnerState>, RuntimeError> {
         self.ensure_usable()?;
-        Ok(&self.state)
+        self.view.read()
+    }
+    pub fn view(&self) -> Arc<OwnerView> {
+        Arc::clone(&self.view)
+    }
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+    fn read_state(&self) -> Result<RwLockReadGuard<'_, OwnerState>, RuntimeError> {
+        self.view.state.read().map_err(|_| RuntimeError::Retired)
     }
 
     fn ensure_usable(&self) -> Result<(), RuntimeError> {
@@ -209,9 +273,14 @@ impl OwnerRuntime {
         // Set before the first await. Error or future cancellation leaves the
         // complete owner inaccessible, including history and subsequent sends.
         self.usable = false;
+        let mut retirement = RetireView {
+            view: self.view(),
+            completed: false,
+        };
         let result = self.submit_inner(&mut commands).await;
         if result.is_ok() {
             self.usable = true;
+            retirement.completed = true;
         }
         result
     }
@@ -249,10 +318,10 @@ impl OwnerRuntime {
         if intents.len() > self.limits.batch_records {
             return Err(RuntimeError::Limit);
         }
-        let mut minimum = self.state.applied_through();
+        let mut minimum = self.read_state()?.applied_through();
         let mut remaining = self.limits.archive.max_records.saturating_sub(minimum);
         for intent in intents {
-            if self.state.receipt(&intent.command)?.is_some() {
+            if self.read_state()?.receipt(&intent.command)?.is_some() {
                 continue;
             }
             if remaining == 0 {
@@ -261,7 +330,7 @@ impl OwnerRuntime {
             remaining -= 1;
             minimum = self.log.append(intent.lane_id, &intent.command).await?;
         }
-        let applied = if minimum > self.state.applied_through() {
+        let applied = if minimum > self.read_state()?.applied_through() {
             self.capture_suffix(minimum).await?
         } else {
             Vec::new()
@@ -269,7 +338,7 @@ impl OwnerRuntime {
         let outcomes = intents
             .iter()
             .map(|intent| {
-                self.state
+                self.read_state()?
                     .receipt(&intent.command)?
                     .ok_or(RuntimeError::Configuration)
             })
@@ -291,7 +360,7 @@ impl OwnerRuntime {
             return Ok(Vec::new());
         }
         if self
-            .state
+            .read_state()?
             .applied_through()
             .checked_add(replay.records.len() as u64)
             .is_none_or(|n| n > self.limits.archive.max_records)
@@ -314,17 +383,44 @@ impl OwnerRuntime {
         self.archive.publish(&replay).await?;
         self.segments += 1;
         self.encoded_bytes += bytes;
-        let mut applied = Vec::new();
-        for record in replay.records {
-            let first = self.state.receipt(&record.command)?.is_none();
-            let outcome = self
-                .state
-                .apply(record.sequence, record.lane_id, &record.command)?;
-            if first && !matches!(outcome, Outcome::Rejected { .. }) {
-                applied.push(record);
-            }
-        }
+        let applied = self.view.apply(replay.records)?;
         self.checkpoint = replay.checkpoint;
         Ok(applied)
+    }
+}
+
+impl Drop for OwnerRuntime {
+    fn drop(&mut self) {
+        self.view.usable.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_reducer_batch_retires_the_shared_projection() {
+        let view = OwnerView {
+            state: RwLock::new(OwnerState::new("owner-a".into())),
+            usable: AtomicBool::new(true),
+        };
+        let mut wrong_owner = super::super::tests::message("wrong", "one");
+        wrong_owner.owner_id = "owner-b".into();
+        assert!(view
+            .apply(vec![
+                LogRecord {
+                    sequence: 1,
+                    lane_id: 0,
+                    command: super::super::tests::create("one", 7)
+                },
+                LogRecord {
+                    sequence: 2,
+                    lane_id: 7,
+                    command: wrong_owner
+                },
+            ])
+            .is_err());
+        assert!(matches!(view.read(), Err(RuntimeError::Retired)));
     }
 }

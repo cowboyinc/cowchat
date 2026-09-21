@@ -1,5 +1,7 @@
 //! Actual broker + CBFS nodes. These are runtime boundary tests; authenticated
 //! public server handlers and finalized chain authority are separate gates.
+#[path = "hosted_tests.rs"]
+mod hosted_tests;
 use super::*;
 use crate::room_log::{
     intent::{Intent, IntentError, IntentJournal},
@@ -107,7 +109,7 @@ async fn durable_batch_retries_and_cold_projection_recovery() {
         }]
     );
     assert!(result.applied.is_empty());
-    let expected = serde_json::to_value(runtime.state().unwrap()).unwrap();
+    let expected = serde_json::to_value(&*runtime.state().unwrap()).unwrap();
     drop(runtime);
     // Fresh host has no intents or projection, only the shared archive/log.
     let another_directory = private_directory();
@@ -121,7 +123,7 @@ async fn durable_batch_retries_and_cold_projection_recovery() {
     )
     .await;
     assert_eq!(
-        serde_json::to_value(runtime.state().unwrap()).unwrap(),
+        serde_json::to_value(&*runtime.state().unwrap()).unwrap(),
         expected
     );
     assert_eq!(
@@ -177,6 +179,7 @@ async fn cancelled_archive_withholds_reply_and_retires_reads_then_recovers_exact
     let directory = private_directory();
     let path = directory.path().join("intents.sqlite");
     let mut runtime = recover(promote(&fixture, &mut writers).await, archive, &path).await;
+    let view = runtime.view();
     {
         let submit = runtime.submit(vec![create("one", 0), message("a", "one")]);
         tokio::pin!(submit);
@@ -185,9 +188,11 @@ async fn cancelled_archive_withholds_reply_and_retires_reads_then_recovers_exact
             result = &mut submit => panic!("reply before held archive commit: {}", result.is_ok()),
             _ = tokio::time::sleep(DEADLINE) => panic!("archive commit not reached"),
         }
+        assert!(view.read().unwrap().rooms().is_empty());
         // Dropping the future models a cancelled/disconnected request.
     }
     assert!(matches!(runtime.state(), Err(RuntimeError::Retired)));
+    assert!(matches!(view.read(), Err(RuntimeError::Retired)));
     assert!(matches!(
         runtime.submit(vec![message("b", "one")]).await,
         Err(RuntimeError::Retired)

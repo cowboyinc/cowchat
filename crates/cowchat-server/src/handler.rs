@@ -173,7 +173,7 @@ use crate::voting::VoteManager;
 ///
 /// `reason` is one of `"joined"`, `"left"`, `"disconnected"`, `"message_sent"`.
 /// Reads the current holder and member order from the broker.
-pub(crate) fn broadcast_turn_changed(broker: &Arc<Broker>, room_id: &str, reason: &str) {
+pub(crate) fn broadcast_turn_changed(broker: &Broker, room_id: &str, reason: &str) {
     let payload = TurnChangedPayload {
         room_id: room_id.to_string(),
         current_turn_holder: broker.turn_holder(room_id),
@@ -204,6 +204,22 @@ pub async fn handle_frame(
     reconnect_mgr: &Arc<ReconnectManager>,
 ) -> Frame {
     let req_id = frame.id.as_deref();
+
+    #[cfg(feature = "cbfs-archive")]
+    if let Some(hosted) = broker.hosted.get() {
+        return hosted
+            .handle(
+                frame,
+                agent_id,
+                agent_name,
+                agent_api_key,
+                broker,
+                store,
+                rate_limiter,
+                reconnect_mgr,
+            )
+            .await;
+    }
 
     match frame.frame_type {
         FrameType::Ping => Frame::pong(req_id),
