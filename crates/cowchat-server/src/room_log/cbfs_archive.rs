@@ -80,9 +80,9 @@ fn hex(bytes: &[u8; 32]) -> String {
 }
 
 impl CbfsArchive {
-    /// `volume` must have been opened against authenticated authority (or
-    /// explicitly provisioned with a registered zero root). Missing authority
-    /// is never interpreted as a new empty volume. Pending SDK journals are
+    /// `volume` must have been opened against authenticated authority and have
+    /// a provisioned discovery head. Neither missing authority nor a missing
+    /// head is interpreted as a new empty volume. Pending SDK journals are
     /// reconciled before loading the head or staging another batch.
     pub async fn open(
         volume: Volume,
@@ -92,6 +92,55 @@ impl CbfsArchive {
         stream: [u8; 32],
         max_segment_bytes: usize,
         timeout: Duration,
+    ) -> Result<Self, ArchiveError> {
+        Self::open_inner(
+            volume,
+            authority,
+            registry,
+            instance,
+            stream,
+            max_segment_bytes,
+            timeout,
+            false,
+        )
+        .await
+    }
+
+    /// INITIAL PROVISIONING only, after registering a genuinely new volume ID.
+    /// Never use this to repair a missing head: deleting every file also returns
+    /// CBFS to zero root. Normal startup/recovery must always call `open`.
+    pub async fn initialize_new_volume(
+        volume: Volume,
+        authority: Arc<dyn AuthoritativeStore>,
+        registry: Arc<dyn ManifestRegistry>,
+        instance: [u8; 32],
+        stream: [u8; 32],
+        max_segment_bytes: usize,
+        timeout: Duration,
+    ) -> Result<Self, ArchiveError> {
+        Self::open_inner(
+            volume,
+            authority,
+            registry,
+            instance,
+            stream,
+            max_segment_bytes,
+            timeout,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn open_inner(
+        volume: Volume,
+        authority: Arc<dyn AuthoritativeStore>,
+        registry: Arc<dyn ManifestRegistry>,
+        instance: [u8; 32],
+        stream: [u8; 32],
+        max_segment_bytes: usize,
+        timeout: Duration,
+        initialize: bool,
     ) -> Result<Self, ArchiveError> {
         if volume.visibility() != Visibility::Private
             || volume
@@ -114,7 +163,7 @@ impl CbfsArchive {
             timeout,
             usable: true,
         };
-        tokio::time::timeout(timeout, archive.load_head())
+        tokio::time::timeout(timeout, archive.load_head(initialize))
             .await
             .map_err(|_| ArchiveError::Unavailable)??;
         Ok(archive)
@@ -172,7 +221,7 @@ impl CbfsArchive {
         Ok(bytes)
     }
 
-    async fn load_head(&mut self) -> Result<(), ArchiveError> {
+    async fn load_head(&mut self, initialize: bool) -> Result<(), ArchiveError> {
         self.current_root().await?;
         // A previous commit may have landed without returning its receipt.
         // Resolve that journal before staging new bytes: recovery of an old
@@ -183,26 +232,58 @@ impl CbfsArchive {
             .map_err(|_| ArchiveError::Unavailable)?;
         self.current_root().await?;
         let path = self.head_path();
-        if self.volume.manifest().get(&path).is_none() {
-            if !self.volume.manifest().list_entries(&self.prefix).is_empty() {
-                return Err(ArchiveError::HistoryGap);
+        if initialize {
+            if self.volume.manifest_root() != ManifestRoot::default()
+                || !self.volume.manifest().list_entries("").is_empty()
+            {
+                return Err(ArchiveError::Configuration);
             }
-            return Ok(());
+            let initial = ArchiveHead {
+                version: 1,
+                instance: self.instance,
+                stream: self.stream,
+                sequence: 0,
+                checkpoint: cowboy_protocol_codec::cbqs_v2::checkpoint_genesis_v2(
+                    &self.instance,
+                    &self.stream,
+                ),
+            };
+            let bytes = serde_json::to_vec(&initial).map_err(|_| ArchiveError::Verification)?;
+            self.volume
+                .put(&path, &bytes)
+                .await
+                .map_err(|_| ArchiveError::Unavailable)?;
+            self.volume
+                .commit(self.authority.as_ref(), self.registry.as_ref())
+                .await
+                .map_err(|_| ArchiveError::Unavailable)?;
+            self.current_root().await?;
         }
         let bytes = self.read_object(&path, 4096).await?;
         let head: ArchiveHead =
             serde_json::from_slice(&bytes).map_err(|_| ArchiveError::Verification)?;
-        if head.version != 1
-            || head.instance != self.instance
-            || head.stream != self.stream
-            || head.sequence == 0
-            || self
-                .volume
-                .manifest()
-                .get(&self.segment_path(&head.checkpoint))
-                .is_none()
-        {
+        if head.version != 1 || head.instance != self.instance || head.stream != self.stream {
             return Err(ArchiveError::Verification);
+        }
+        if head.sequence == 0 {
+            if head.checkpoint
+                != cowboy_protocol_codec::cbqs_v2::checkpoint_genesis_v2(
+                    &self.instance,
+                    &self.stream,
+                )
+                || self.volume.manifest().list_entries(&self.prefix).len() != 1
+            {
+                return Err(ArchiveError::Verification);
+            }
+            return Ok(());
+        }
+        if self
+            .volume
+            .manifest()
+            .get(&self.segment_path(&head.checkpoint))
+            .is_none()
+        {
+            return Err(ArchiveError::HistoryGap);
         }
         self.head = Some(head);
         Ok(())

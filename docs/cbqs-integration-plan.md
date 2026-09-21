@@ -97,8 +97,8 @@ batch publisher are implemented; their owner-runtime/caller integration is not.
 
 This is not connected to `CowchatServer` or its public handlers yet. The reducer
 is an in-memory projection; it does not persist snapshots or provide archive
-durability. No cross-host epoch allocator or live-tail subscription is
-implemented. No live-chain claim is made:
+durability. The archive and allocation modules are not wired into an owner
+runtime, and no live-tail subscription is implemented. No live-chain claim is made:
 the broker tests use actual WebSockets/RocksDB with a fixture node snapshot.
 
 Verified commands:
@@ -184,9 +184,11 @@ not an approved dependency or evidence that broker archiving exists.
 
 The optional `cbfs-archive` feature pins the existing CBFS SDK to `d8ddaad0`.
 `CbfsArchive` requires a clean private volume opened against authenticated root
-authority. Missing authority is an error, including on an empty volume; initial
-provisioning must explicitly establish its zero root. The opener reconciles any
-pending SDK journal before it loads the archive head or stages another batch.
+authority and a durable discovery head. Explicit new-volume provisioning writes
+a genesis head once. Normal open always requires that head, even for empty
+history: CBFS returns to zero root after deleting its last file, so zero root
+alone does not prove freshness. The opener reconciles any pending SDK journal
+before it loads the archive head or stages another batch.
 
 Each complete verified range becomes an immutable object named by its final
 checkpoint ID. One manifest commit publishes that object together with a
@@ -216,7 +218,7 @@ cold recovery after broker retention expiry and live-suffix replay, a lost reply
 after the metadata commit, a new batch after that reconciliation, stale writers
 and backward-head refusal. Additional cases refuse a tampered/missing middle
 segment and enforce total byte/record/segment limits, including exact-limit success.
-All 21 log tests pass. The next-batch regression fails when opener journal
+The next-batch regression fails when opener journal
 reconciliation is disabled. The 276 default workspace tests, formatting and
 strict all-targets clippy with both test feature selections also pass locally.
 They do not prove simultaneous cross-host writer races, chain finality, long-term
@@ -268,3 +270,39 @@ Cross-host intent storage adds a manifest commit without strengthening the agree
 archive-before-success contract. This does not permit skipping an unarchived
 history gap. Actual frontend retry callers must retain their prepared payloads;
 assigning IDs inside the SDK alone is insufficient.
+
+`ownership.rs` now implements that promotion CAS using the existing CBFS SDK.
+`WriterRegistry` loads a versioned, bounded control record and compares the
+expected epoch before advancing once. Same-claim/same-writer retries return the
+same epoch/root; identity changes and stale expectations fail closed. Uncertain
+or cancelled claims retire the registry until reopen. The successful receipt is
+not deserializable and grants no CBQS session. A worker still needs a matching
+signed fence ACK before it can recover, append or serve.
+
+Control provisioning writes an explicit epoch-zero record once for a genuinely
+new registered volume ID. Normal startup requires that record; it never infers
+epoch zero from an empty root. The application provisioning workflow must keep
+`initialize_new_volume` separate from recovery. Runtime integration must also
+enforce different control/archive volume IDs and bind writer identity to a unique
+worker incarnation/grant holder key, rather than a reusable hostname. Replacement
+workers promote with new identities; only retries of the same claim reuse its ID.
+
+Real-node tests cover claim retry, a lost response after metadata CAS, a claimant
+disappearing before fencing followed by higher-epoch takeover, stale/wrong-identity
+claims, and refusal after control-record deletion. A separate test removes every
+archive object and confirms reopening fails even though the authority root is now
+zero; this regression failed before explicit genesis-head provisioning.
+
+The promotion race launches two actual worker subprocesses with isolated SDK
+journals against production CBFS node processes. A loopback metadata fixture
+holds both prepared commits at a barrier with the same predecessor, then runs
+the actual standalone Sled CAS. Exactly one succeeds; cold readback checks its
+epoch, identity and root. The ignored `claim_process` test is the subprocess
+entry point and is executed twice by this parent race test. This proves local
+cross-process competition; deployed host failure, chain-finalized authority,
+provisioning/caller wiring and measured latency remain outstanding.
+
+The complete focused suite now passes 26 checks with one ignored subprocess
+entry point exercised by the race. Formatting and strict all-targets clippy with
+`cbfs-archive-test` pass. The prior 276 default workspace tests also passed; these
+new allocation/archive changes are behind the optional feature.

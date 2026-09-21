@@ -1,7 +1,10 @@
 //! Production CBFS node processes + SDK, with the standalone Sled CAS authority.
 //! This proves local shard recovery, not chain finality or cross-host failover.
+#[path = "ownership_process_tests.rs"]
+mod ownership_process_tests;
 use super::*;
 use crate::room_log::cbfs_archive::{ArchiveCommit, ArchiveError, CbfsArchive, RecoveryLimits};
+use crate::room_log::ownership::{OwnershipError, WriterRegistry};
 use cbfs_hooks::{
     standalone::{LocalAuthoritativeStore, LocalManifestRegistry, RoundRobinSelector},
     traits::{AuthoritativeStore, ManifestRegistry},
@@ -207,6 +210,43 @@ impl Storage {
         .await
         .unwrap()
     }
+    async fn initialize_archive(&self, newly_created: Volume) -> CbfsArchive {
+        CbfsArchive::initialize_new_volume(
+            newly_created,
+            self.authority.clone(),
+            self.registry.clone(),
+            INSTANCE,
+            STREAM,
+            MAX_BYTES,
+            DEADLINE,
+        )
+        .await
+        .unwrap()
+    }
+    async fn writers(&self, volume: Volume, registry: Arc<dyn ManifestRegistry>) -> WriterRegistry {
+        WriterRegistry::open(
+            volume,
+            self.authority.clone(),
+            registry,
+            INSTANCE,
+            STREAM,
+            DEADLINE,
+        )
+        .await
+        .unwrap()
+    }
+    async fn initialize_writers(&self, newly_created: Volume) -> WriterRegistry {
+        WriterRegistry::initialize_new_volume(
+            newly_created,
+            self.authority.clone(),
+            self.registry.clone(),
+            INSTANCE,
+            STREAM,
+            DEADLINE,
+        )
+        .await
+        .unwrap()
+    }
 }
 
 struct LoseReply {
@@ -265,7 +305,7 @@ async fn three_batches(
     volume: Volume,
 ) -> (CbfsArchive, CbqsOwnerLog, Vec<ArchiveCommit>, u64) {
     let (mut log, mut replay, lane) = batch(fixture).await;
-    let mut archive = storage.archive(volume, storage.registry.clone()).await;
+    let mut archive = storage.initialize_archive(volume).await;
     let first = archive.publish(&replay).await.unwrap();
     let repeat = archive.publish(&replay).await.unwrap();
     assert_eq!(repeat.head, first.head);
@@ -465,7 +505,10 @@ async fn real_nodes_lost_commit_reply_reconciles_without_republishing() {
         inner: storage.registry.clone(),
         lost: AtomicBool::new(false),
     });
-    let mut archive = storage.archive(volume, faulty.clone()).await;
+    drop(storage.initialize_archive(volume).await);
+    let mut archive = storage
+        .archive(storage.reopen().await, faulty.clone())
+        .await;
     assert!(matches!(
         archive.publish(&replay).await,
         Err(ArchiveError::Unavailable)
@@ -520,7 +563,7 @@ async fn real_nodes_stale_writer_and_backward_head_are_refused() {
     let fixture = Fixture::new().await;
     let (mut log, replay, lane) = batch(&fixture).await;
     let (storage, volume) = Storage::new().await;
-    let mut current = storage.archive(volume, storage.registry.clone()).await;
+    let mut current = storage.initialize_archive(volume).await;
     current.publish(&replay).await.unwrap();
     let mut stale = storage
         .archive(storage.reopen().await, storage.registry.clone())
@@ -546,4 +589,167 @@ async fn real_nodes_stale_writer_and_backward_head_are_refused() {
         .await;
     assert_eq!(recovered.head().unwrap(), Some(&latest.head));
     assert_eq!(latest.head.sequence, 3);
+}
+
+#[tokio::test]
+async fn real_nodes_promotion_retry_and_abandoned_epoch_takeover() {
+    let fixture = Fixture::new().await;
+    let (storage, volume) = Storage::new().await;
+    let mut owners = storage.initialize_writers(volume).await;
+    assert_eq!(owners.epoch().unwrap(), 0);
+    let abandoned = owners.claim(0, "writer-a", "claim-a").await.unwrap();
+    assert_eq!(abandoned.epoch(), 1);
+    assert_eq!(abandoned.writer_id(), "writer-a");
+    assert_eq!(abandoned.claim_id(), "claim-a");
+    assert_eq!(abandoned.stream_identity(), (INSTANCE, STREAM));
+    assert_eq!(abandoned.control_volume(), storage.handle.volume_id);
+    let retry = owners.claim(0, "writer-a", "claim-a").await.unwrap();
+    assert_eq!(retry.root(), abandoned.root());
+    // The first claimant disappears BEFORE it ever attaches/fences CBQS.
+    drop(owners);
+    let mut stale = storage
+        .writers(storage.reopen().await, storage.registry.clone())
+        .await;
+    let mut next = storage
+        .writers(storage.reopen().await, storage.registry.clone())
+        .await;
+    let active = next.claim(1, "writer-b", "claim-b").await.unwrap();
+    assert_eq!(active.epoch(), 2);
+    assert!(matches!(
+        stale.claim(1, "writer-c", "claim-c").await,
+        Err(OwnershipError::Conflict)
+    ));
+    assert!(matches!(stale.epoch(), Err(OwnershipError::Unavailable)));
+    // Claim receipts cannot append; only a matching fenced session can.
+    let mut log = fixture.connect(active.epoch()).await.unwrap();
+    assert!(matches!(
+        fixture.connect(abandoned.epoch()).await,
+        Err(LogError::Fenced)
+    ));
+    let lane = log.room_lane("owner-a", "one").await.unwrap();
+    assert_eq!(
+        log.append(0, &super::super::tests::create("one", lane))
+            .await
+            .unwrap(),
+        1
+    );
+    let mut cold = storage
+        .writers(storage.reopen().await, storage.registry.clone())
+        .await;
+    assert_eq!(cold.epoch().unwrap(), 2);
+    assert!(matches!(
+        cold.claim(1, "writer-c", "claim-b").await,
+        Err(OwnershipError::Conflict)
+    ));
+}
+
+#[tokio::test]
+async fn real_nodes_lost_promotion_reply_reconciles_same_claim() {
+    let (storage, volume) = Storage::new().await;
+    let faulty = Arc::new(LoseReply {
+        inner: storage.registry.clone(),
+        lost: AtomicBool::new(false),
+    });
+    drop(storage.initialize_writers(volume).await);
+    let mut owners = storage
+        .writers(storage.reopen().await, faulty.clone())
+        .await;
+    assert!(matches!(
+        owners.claim(0, "writer-a", "claim-a").await,
+        Err(OwnershipError::Unavailable)
+    ));
+    assert!(faulty.lost.load(Ordering::SeqCst));
+    assert!(matches!(
+        owners.claim(0, "writer-a", "claim-a").await,
+        Err(OwnershipError::Unavailable)
+    ));
+    drop(owners);
+    let root = storage
+        .authority
+        .get_root(&storage.handle.volume_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut cold = storage
+        .writers(storage.reopen().await, storage.registry.clone())
+        .await;
+    let retry = cold.claim(0, "writer-a", "claim-a").await.unwrap();
+    assert_eq!(retry.epoch(), 1);
+    assert_eq!(retry.root(), root);
+    assert!(matches!(
+        cold.claim(0, "writer-b", "claim-b").await,
+        Err(OwnershipError::Conflict)
+    ));
+}
+
+#[tokio::test]
+async fn real_nodes_missing_used_control_record_cannot_recreate_epoch_one() {
+    let (storage, volume) = Storage::new().await;
+    let mut owners = storage.initialize_writers(volume).await;
+    owners.claim(0, "writer-a", "claim-a").await.unwrap();
+    drop(owners);
+    let mut volume = storage.reopen().await;
+    let path = format!(
+        "cowchat-owners/{}/{}.json",
+        &hex0x(&INSTANCE)[2..],
+        &hex0x(&STREAM)[2..]
+    );
+    assert!(volume.remove_path(&path).unwrap().is_some());
+    volume
+        .commit(storage.authority.as_ref(), storage.registry.as_ref())
+        .await
+        .unwrap();
+    let cold = storage.reopen().await;
+    assert!(matches!(
+        WriterRegistry::open(
+            cold,
+            storage.authority.clone(),
+            storage.registry.clone(),
+            INSTANCE,
+            STREAM,
+            DEADLINE,
+        )
+        .await,
+        Err(OwnershipError::InvalidRecord)
+    ));
+}
+
+#[tokio::test]
+async fn real_nodes_deleted_archive_cannot_reopen_as_empty_history() {
+    let fixture = Fixture::new().await;
+    let (_, replay, _) = batch(&fixture).await;
+    let (storage, volume) = Storage::new().await;
+    let mut archive = storage.initialize_archive(volume).await;
+    archive.publish(&replay).await.unwrap();
+    drop(archive);
+    let mut volume = storage.reopen().await;
+    for object in volume.list("") {
+        assert!(volume.remove_path(&object.path).unwrap().is_some());
+    }
+    volume
+        .commit(storage.authority.as_ref(), storage.registry.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .authority
+            .get_root(&storage.handle.volume_id)
+            .await
+            .unwrap(),
+        Some(ManifestRoot::default())
+    );
+    let cold = storage.reopen().await;
+    assert!(matches!(
+        CbfsArchive::open(
+            cold,
+            storage.authority.clone(),
+            storage.registry.clone(),
+            INSTANCE,
+            STREAM,
+            MAX_BYTES,
+            DEADLINE,
+        )
+        .await,
+        Err(ArchiveError::HistoryGap)
+    ));
 }
