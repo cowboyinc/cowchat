@@ -1,5 +1,8 @@
 //! Actual authenticated TCP connection_loop and HTTP router, backed by real
 //! broker/storage nodes. Listener/connection tasks are owned by this fixture.
+#[cfg(feature = "river-perf")]
+#[path = "river_perf.rs"]
+mod river_perf;
 use super::*;
 use crate::{CowchatServer, ServerConfig};
 use cowchat_client::{ClientError, CowchatClient};

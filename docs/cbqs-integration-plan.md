@@ -94,7 +94,8 @@ segments now preserve raw CBQS headers, ciphertext payloads and signed receipts.
 `restore_archive` uses the same signature/linkage/digest verifier as broker
 replay before recreating a checkpoint. The bounded format and optional CBFS
 batch publisher are implemented. The owner runtime now composes these pieces;
-public caller integration is still pending.
+authenticated caller integration is described below. Hosted CLI bootstrap is
+still pending.
 
 `CowchatServer::new_hosted` now explicitly connects a recovered runtime to the
 restricted authenticated handler surface described below. The reducer

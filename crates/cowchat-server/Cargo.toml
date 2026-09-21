@@ -15,6 +15,8 @@ cbqs-test = ["cbqs", "dep:cbqsd"]
 cbfs-archive = ["cbqs", "dep:cbfs-sdk", "dep:cbfs-hooks", "dep:cbfs-types"]
 # Opt-in subprocess tests require COWCHAT_TEST_CBFS_NODE built at the SDK pin.
 cbfs-archive-test = ["cbfs-archive", "cbqs-test", "cbfs-sdk/test-support", "dep:cbfs-transport", "dep:sled", "dep:async-trait"]
+# Explicit, ignored River probe; reuses production CBFS CLI auth/provisioning.
+river-perf = ["cbfs-archive-test", "dep:cbfs-cli", "dep:cbfs-registry-proto", "dep:anyhow"]
 
 [[bin]]
 name = "cowchat-server"
@@ -61,6 +63,9 @@ cbfs-types = { git = "https://github.com/cowboyinc/cbfs.git", rev = "d8ddaad0dee
 cbfs-transport = { git = "https://github.com/cowboyinc/cbfs.git", rev = "d8ddaad0dee6a0b8b57bd7308376208446ced012", optional = true }
 sled = { version = "0.34", optional = true }
 async-trait = { version = "0.1", optional = true }
+cbfs-cli = { git = "https://github.com/cowboyinc/cbfs.git", rev = "d8ddaad0dee6a0b8b57bd7308376208446ced012", optional = true }
+cbfs-registry-proto = { git = "https://github.com/cowboyinc/cbfs.git", rev = "d8ddaad0dee6a0b8b57bd7308376208446ced012", optional = true }
+anyhow = { version = "1", optional = true }
 
 [dev-dependencies]
 cowchat-client.workspace = true
