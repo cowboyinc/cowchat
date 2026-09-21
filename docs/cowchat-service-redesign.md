@@ -92,3 +92,41 @@ Runner review in the implementation room pinned `origin/devnet` at `c3555f3` and
 These are provider gates, not justification to revive per-message actor calls,
 CBQS transport, or the old room-session machinery. Real execution funding,
 controller authorization, egress, and secret delivery remain acceptance work.
+
+## Connectors (September 21, 2026)
+
+A connector is an owner-configured process that carries one outside conversation
+surface into exactly one room. It is an ordinary participant, not a privileged
+service: it joins with its own agent identity and, for an encrypted room, holds
+the room key. That is the trust boundary stated plainly — the connector and the
+outside platform both see relayed plaintext, so an encrypted room bridged
+outward is encrypted against our server only, and the room's messages travel no
+further than the chats the owner explicitly configured. The room service learns
+nothing new: connector traffic is normal authenticated appends and reads.
+
+The connector core is transport-neutral. It accepts normalized inbound events
+(a stable provider event id, sender label, text) and produces exactly-once room
+appends from them: the event id is folded into a deterministic message id, the
+sealed ciphertext for at most one pending append is kept in the connector's
+private atomic state file, and an append retry resends those exact bytes. On
+the outbound side it replays room messages after a durable cursor and delivers
+them at-least-once to the provider, advancing only after provider acceptance.
+Unreadable room messages (poison bytes or a key change — indistinguishable at
+the connector) block the cursor fail-closed; the block is reported into the
+connected chat, and the operator explicitly skips one sequence to resume.
+How events arrive — polling, webhook, socket — is the adapter's concern, not
+the core's; webhook signature verification and durable acceptance belong to
+the adapter that owns the ingress.
+
+User-facing flow, Telegram first: the owner creates a bot, sets
+`TELEGRAM_BOT_TOKEN` in the bridge environment, and runs the CLI bridge with a
+room, one numeric `chat_id`, a state file, and optionally the actor ids that
+inbound texts should mention. Messages from that one chat appear in the room as
+the bridge participant ("Telegram user N: …", sender identity inside the
+ciphertext); room messages appear in the chat with the author's name. No
+earlier room history is exported when a bridge first starts.
+
+Status: the Telegram polling adapter is the only implemented connector. Slack,
+Discord, SMS/Twilio, email, and any public webhook ingress (a hosted endpoint
+that accepts provider callbacks) are NOT implemented — the adapter seam exists
+for them, and each must bring its own authorization story before it is wired.
