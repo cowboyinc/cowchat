@@ -1,0 +1,485 @@
+//! Real CBQS WebSockets/RocksDB with fixture node authority; no live-chain claim.
+use super::cbqs::{CbqsOwnerLog, LogError};
+use super::*;
+use axum::{routing::get, Router};
+use cbqs_client::{CheckpointTrustV2, SessionConfig};
+use cbqsd::{
+    store_v2::StoreV2,
+    transport::{
+        self,
+        chain::ChainClient,
+        connection::{BrokerCore, ProviderIdentity},
+        TransportConfig,
+    },
+};
+use cowboy_protocol_codec::cbqs_v2 as wire;
+use ed25519_dalek::{Signer, SigningKey};
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
+
+const INSTANCE: [u8; 32] = [0x11; 32];
+const STREAM: [u8; 32] = [0x5A; 32];
+const PROVIDER: [u8; 20] = [0xB2; 20];
+const OWNER: [u8; 20] = [0xC1; 20];
+const H_SNAPSHOT: u64 = 1_000;
+fn key(seed: u8) -> SigningKey {
+    SigningKey::from_bytes(&[seed; 32])
+}
+fn key33(key: &SigningKey) -> [u8; 33] {
+    let mut bytes = [1u8; 33];
+    bytes[1..].copy_from_slice(key.verifying_key().as_bytes());
+    bytes
+}
+fn now_ms() -> u64 {
+    Utc::now().timestamp_millis() as u64
+}
+fn hex0x(bytes: &[u8]) -> String {
+    format!(
+        "0x{}",
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    )
+}
+
+/// The §15 Defaults, as the node serialises them: decimal strings, because
+/// several rows exceed what a JSON number carries exactly.
+fn params() -> BTreeMap<&'static str, &'static str> {
+    BTreeMap::from([
+        ("cbqs.snapshot_refresh_ms", "2000"),
+        ("cbqs.max_snapshot_age_blocks", "300"),
+        ("cbqs.max_clock_skew_ms", "60000"),
+        ("cbqs.max_grant_ttl_ms", "86400000"),
+        ("cbqs.session_handshake_timeout_ms", "10000"),
+        ("cbqs.max_sessions_per_connection", "64"),
+        ("cbqs.max_message_bytes", "262144"),
+        ("cbqs.max_groups_per_stream", "4096"),
+        ("cbqs.max_lanes_per_stream", "16384"),
+        ("cbqs.max_lane_creates_per_min", "256"),
+        ("cbqs.max_group_creates_per_min", "64"),
+        ("cbqs.max_lane_list_page", "256"),
+        ("cbqs.max_subscriptions_per_connection", "256"),
+        ("cbqs.max_subscription_credit_bytes", "67108864"),
+        ("cbqs.slow_consumer_timeout_ms", "60000"),
+        // Small enough that a lone append's batch closes promptly — the whole
+        // point of the per-stream commit ticker.
+        ("cbqs.commit_batch_max_ms", "20"),
+        ("cbqs.commit_batch_max_records", "1024"),
+        ("cbqs.visibility_ms", "30000"),
+        ("cbqs.max_attempts", "10"),
+        ("cbqs.max_in_flight_per_group", "1024"),
+        ("cbqs.retention_ms", "604800000"),
+        ("cbqs.max_retained_bytes_per_stream", "1073741824"),
+        ("cbqs.max_append_bytes_per_sec", "1048576"),
+        ("cbqs.max_delivered_bytes_per_sec", "2097152"),
+    ])
+}
+
+/// The node's `/cbqs/snapshot/{stream_id}` body, field for field.
+fn snapshot_json(admin_key: [u8; 33], provider_key: [u8; 33]) -> String {
+    let params: BTreeMap<&str, &str> = params();
+    serde_json::json!({
+        "h_snapshot": H_SNAPSHOT,
+        "chain_instance_id": hex0x(&INSTANCE),
+        "stream": {
+            "stream_id": hex0x(&STREAM),
+            "owner": hex0x(&OWNER),
+            "owner_nonce": 7,
+            "provider": hex0x(&PROVIDER),
+            "admin_key": hex0x(&admin_key),
+            "authorization_generation": 2,
+            "status": "Active",
+        },
+        "provider": {
+            "provider": hex0x(&PROVIDER),
+            "signing_key": hex0x(&provider_key),
+            "signing_key_since": 1,
+            "previous_signing_key": serde_json::Value::Null,
+            "previous_signing_key_since": 0,
+            "endpoints": ["wss://cbqs.example/ws"],
+            "accepts_new": true,
+            "max_streams": 64,
+            "assigned_streams": 1,
+            "metadata_hash": hex0x(&[0u8; 32]),
+        },
+        // §6.2: serviceable — 1000 blocks elapsed at rate 1 for one stream is
+        // 1000 due, and the balance covers it many times over.
+        "account": {
+            "owner": hex0x(&OWNER),
+            "provider": hex0x(&PROVIDER),
+            "balance": "1000000000000",
+            "active_streams": 1,
+            "rate_per_block": "1",
+            "last_settled_block": 0,
+            "suspended": false,
+        },
+        "params": params,
+    })
+    .to_string()
+}
+
+struct Fixture {
+    broker: SocketAddr,
+    core: BrokerCore,
+    serving: tokio::task::JoinHandle<()>,
+    node: tokio::task::JoinHandle<()>,
+    _directory: tempfile::TempDir,
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.core.shutdown_handle().shut_down();
+        self.serving.abort();
+        self.node.abort();
+    }
+}
+impl Fixture {
+    async fn new() -> Self {
+        let body = snapshot_json(key33(&key(0xA1)), key33(&key(0xB2)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let node = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/cbqs/snapshot/{stream_id}",
+                get(move || {
+                    let body = body.clone();
+                    async move { body }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(StoreV2::open(directory.path(), INSTANCE).unwrap());
+        let (wakeup, _) = tokio::sync::broadcast::channel(64);
+        let core = BrokerCore::new(
+            store,
+            ChainClient::new(format!("http://{address}"), INSTANCE),
+            Arc::new(ProviderIdentity {
+                address: cowboy_protocol_codec::Address::from_bytes(PROVIDER),
+                signing_key: key(0xB2),
+            }),
+            wakeup,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let broker = listener.local_addr().unwrap();
+        let mut stop = core.shutdown_signal();
+        let served = core.clone();
+        let serving = tokio::spawn(async move {
+            transport::serve(
+                listener,
+                served,
+                TransportConfig {
+                    handshake_idle_ms: 0,
+                    retention_sweep_ms: 0,
+                    ..TransportConfig::default()
+                },
+                async move {
+                    let _ = stop.changed().await;
+                },
+            )
+            .await
+            .unwrap();
+        });
+        Self {
+            broker,
+            core,
+            serving,
+            node,
+            _directory: directory,
+        }
+    }
+    fn config(&self, epoch: u64) -> SessionConfig {
+        let admin = key(0xA1);
+        let holder = key(0xC3);
+        let provider = wire::ProviderRecordV2 {
+            version: wire::CBQS_VERSION_V2,
+            chain_instance_id: INSTANCE,
+            provider: cowboy_protocol_codec::Address::from_bytes(PROVIDER),
+            signing_key: wire::SigningPublicKeyV2 {
+                algorithm: wire::SigningKeyAlgorithmV2::Ed25519,
+                key_bytes: key(0xB2).verifying_key().to_bytes(),
+            },
+            signing_key_since: 1,
+            previous_signing_key: None,
+            previous_signing_key_since: 0,
+            endpoints: Vec::new(),
+            accepts_new: true,
+            max_streams: 64,
+            assigned_streams: 1,
+            metadata_hash: [0; 32],
+        };
+        let mut grant = wire::StreamGrantV2 {
+            version: wire::CBQS_VERSION_V2,
+            chain_instance_id: INSTANCE,
+            stream_id: STREAM,
+            authorization_generation: 2,
+            policy_epoch: epoch,
+            grant_nonce: [0x77; 32],
+            holder_signing_key: wire::SigningPublicKeyV2 {
+                algorithm: wire::SigningKeyAlgorithmV2::Ed25519,
+                key_bytes: holder.verifying_key().to_bytes(),
+            },
+            verbs: wire::CBQS_V2_VERB_APPEND
+                | wire::CBQS_V2_VERB_REPLAY
+                | wire::CBQS_V2_VERB_CONSUME
+                | wire::CBQS_V2_VERB_LANE_ADMIN,
+            lane_scope: wire::LaneScopeV2::Any,
+            group_scope: wire::GroupScopeV2::Any,
+            not_before_ms: now_ms().saturating_sub(60_000),
+            expires_at_ms: now_ms() + 3_600_000,
+            max_message_bytes: 262_144,
+            max_append_bytes_per_sec: 1_048_576,
+            signature: wire::CbqsSignatureV2([0; 64]),
+        };
+        grant.signature = wire::CbqsSignatureV2(
+            admin
+                .sign(&cowboy_protocol_codec::keccak256(
+                    &wire::stream_grant_signing_bytes_v2(&grant),
+                ))
+                .to_bytes(),
+        );
+        SessionConfig {
+            broker_url: format!("ws://{}/ws", self.broker),
+            grant,
+            holder,
+            handshake_timeout: Duration::from_secs(15),
+            checkpoints: CheckpointTrustV2::ChainProvider(Box::new(provider)),
+        }
+    }
+    async fn connect(&self, epoch: u64) -> Result<CbqsOwnerLog, LogError> {
+        let config = self.config(epoch);
+        let fence = cbqs_client::connect_socket(&config.broker_url)
+            .await
+            .unwrap();
+        let session = cbqs_client::connect_socket(&config.broker_url)
+            .await
+            .unwrap();
+        CbqsOwnerLog::attach(
+            fence,
+            session,
+            config,
+            |bytes| {
+                key(0xA1)
+                    .sign(&cowboy_protocol_codec::keccak256(bytes))
+                    .to_bytes()
+            },
+            now_ms(),
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn actual_broker_replays_interleaved_room_lanes_and_fences_the_previous_owner() {
+    let fixture = Fixture::new().await;
+    let mut first = fixture.connect(1).await.unwrap();
+    assert!(first
+        .replay_from_start(0, 100, 100_000)
+        .await
+        .unwrap()
+        .is_empty());
+    let one = first.room_lane("owner-a", "one").await.unwrap();
+    assert_eq!(first.room_lane("owner-a", "one").await.unwrap(), one);
+    let two = first.room_lane("owner-a", "two").await.unwrap();
+    assert_ne!(one, two);
+    let entries = [
+        (0, super::tests::create("one", one)),
+        (0, super::tests::create("two", two)),
+        (one, super::tests::message("a", "one")),
+        (two, super::tests::message("b", "two")),
+        (one, super::tests::message("a", "one")),
+    ];
+    let mut live = OwnerState::new("owner-a".into());
+    for (lane, command) in &entries {
+        let sequence = first.append(*lane, command).await.unwrap();
+        live.apply(sequence, *lane, command).unwrap();
+    }
+    let mut next = fixture.connect(2).await.unwrap();
+    assert_eq!(next.epoch(), 2);
+    assert!(matches!(
+        first
+            .append(one, &super::tests::message("late", "one"))
+            .await,
+        Err(LogError::Fenced)
+    ));
+    let records = next.replay_from_start(5, 100, 100_000).await.unwrap();
+    assert_eq!(records.len(), 5);
+    let mut rebuilt = OwnerState::new("owner-a".into());
+    for record in records {
+        rebuilt
+            .apply(record.sequence, record.lane_id, &record.command)
+            .unwrap();
+    }
+    assert_eq!(
+        serde_json::to_value(live).unwrap(),
+        serde_json::to_value(&rebuilt).unwrap()
+    );
+    assert_eq!(rebuilt.room("one").unwrap().messages.len(), 1);
+    assert_eq!(fixture.core.store.tail(&STREAM).unwrap(), 5);
+    assert!(
+        matches!(fixture.connect(1).await, Err(LogError::Fenced)),
+        "an old allocated epoch cannot adopt a newer broker floor"
+    );
+}
+
+#[tokio::test]
+async fn expired_history_is_not_treated_as_a_fresh_stream() {
+    let fixture = Fixture::new().await;
+    let mut first = fixture.connect(1).await.unwrap();
+    let lane = first.room_lane("owner-a", "one").await.unwrap();
+    first
+        .append(0, &super::tests::create("one", lane))
+        .await
+        .unwrap();
+    fixture
+        .core
+        .store
+        .advance_retention_floor(&STREAM, 2)
+        .unwrap();
+    assert_eq!(fixture.core.store.tail(&STREAM).unwrap(), 1);
+    let mut next = fixture.connect(2).await.unwrap();
+    assert!(matches!(
+        next.replay_from_start(0, 100, 100_000).await,
+        Err(LogError::HistoryGap)
+    ));
+    assert!(
+        matches!(
+            next.append(0, &super::tests::create("two", 2)).await,
+            Err(LogError::Unavailable)
+        ),
+        "failed recovery cannot become a fresh writable room"
+    );
+}
+
+#[tokio::test]
+async fn replay_bounds_and_known_checkpoint_rollback_fail_closed() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.connect(1).await.unwrap();
+    assert!(matches!(
+        log.replay_from_start(1, 100, 100_000).await,
+        Err(LogError::HistoryGap)
+    ));
+    let mut log = fixture.connect(2).await.unwrap();
+    let lane = log.room_lane("owner-a", "one").await.unwrap();
+    log.append(0, &super::tests::create("one", lane))
+        .await
+        .unwrap();
+    assert!(matches!(
+        log.replay_from_start(1, 100, 1).await,
+        Err(LogError::ReplayLimit)
+    ));
+    assert!(matches!(
+        log.append(0, &super::tests::create("two", 2)).await,
+        Err(LogError::Unavailable)
+    ));
+}
+
+#[tokio::test]
+async fn replay_replenishes_credit_without_skipping_records() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.connect(1).await.unwrap();
+    let lane = log.room_lane("owner-a", "one").await.unwrap();
+    log.append(0, &super::tests::create("one", lane))
+        .await
+        .unwrap();
+    let mut expected = Vec::new();
+    for n in 0..10 {
+        let mut command = super::tests::message(&format!("large-{n}"), "one");
+        let CommandBody::AppendMessage { ciphertext, .. } = &mut command.body else {
+            unreachable!()
+        };
+        *ciphertext = format!("cow1:{}", "a".repeat(130_000));
+        log.append(lane, &command).await.unwrap();
+        expected.push(command);
+        // Stay below the real broker's 1 MiB/s append budget. Replay itself
+        // must cross the adapter's 1 MiB credit window without any test grants.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let mut next = fixture.connect(2).await.unwrap();
+    let records = next.replay_from_start(11, 100, 2_000_000).await.unwrap();
+    assert_eq!(records.len(), 11);
+    for (record, expected) in records[1..].iter().zip(expected) {
+        assert_eq!(
+            serde_json::to_value(&record.command).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn replay_rejects_payload_changed_after_broker_commit() {
+    use commonware_codec::{DecodeExt, Encode};
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let fixture = Fixture::new().await;
+    let mut first = fixture.connect(1).await.unwrap();
+    let lane = first.room_lane("owner-a", "one").await.unwrap();
+    first
+        .append(0, &super::tests::create("one", lane))
+        .await
+        .unwrap();
+    first
+        .append(lane, &super::tests::message("a", "one"))
+        .await
+        .unwrap();
+
+    // Relay a real session but change one payload byte on delivery. The JSON
+    // stays valid and the signed checkpoint is untouched: recovery must verify
+    // content, not just trust the authenticated session or checkpoint chain.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    let broker_url = format!("ws://{}/ws", fixture.broker);
+    let proxy = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut downstream = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let (mut upstream, _) = tokio_tungstenite::connect_async(broker_url).await.unwrap();
+        loop {
+            tokio::select! {
+                frame = downstream.next() => {
+                    let Some(Ok(frame)) = frame else { break };
+                    if upstream.send(frame).await.is_err() { break }
+                }
+                frame = upstream.next() => {
+                    let Some(Ok(mut frame)) = frame else { break };
+                    if let Message::Binary(bytes) = &frame {
+                        if let Ok(mut decoded) = wire::CbqsServerFrameV2::decode(bytes.as_ref()) {
+                            if let wire::CbqsServerFrameV2::Delivery { payload, .. } = &mut decoded {
+                                let mut command: Command = serde_json::from_slice(payload).unwrap();
+                                if let CommandBody::AppendMessage { ciphertext, .. } = &mut command.body {
+                                    *ciphertext = "cow1:tampered-ciphertext".into();
+                                    *payload = serde_json::to_vec(&command).unwrap();
+                                    frame = Message::Binary(decoded.encode());
+                                }
+                            }
+                        }
+                    }
+                    if downstream.send(frame).await.is_err() { break }
+                }
+            }
+        }
+    });
+    let config = fixture.config(2);
+    let fence = cbqs_client::connect_socket(&config.broker_url)
+        .await
+        .unwrap();
+    let session = cbqs_client::connect_socket(&format!("ws://{proxy_addr}/ws"))
+        .await
+        .unwrap();
+    let mut next = CbqsOwnerLog::attach(
+        fence,
+        session,
+        config,
+        |bytes| {
+            key(0xA1)
+                .sign(&cowboy_protocol_codec::keccak256(bytes))
+                .to_bytes()
+        },
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    let result = next.replay_from_start(2, 100, 100_000).await;
+    proxy.abort();
+    assert!(matches!(result, Err(LogError::Verification)), "{result:?}");
+    assert!(matches!(
+        next.append(lane, &super::tests::message("b", "one")).await,
+        Err(LogError::Unavailable)
+    ));
+}

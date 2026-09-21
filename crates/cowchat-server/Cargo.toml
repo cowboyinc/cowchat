@@ -6,6 +6,12 @@ license.workspace = true
 repository.workspace = true
 description = "Cowchat server daemon"
 
+[features]
+# Hosted owner-stream transport. Local clients do not need the chain SDK.
+cbqs = ["dep:cbqs-client", "dep:cowboy-protocol-codec", "dep:commonware-codec", "dep:ed25519-dalek"]
+# In-process real broker used only by the integration tests.
+cbqs-test = ["cbqs", "dep:cbqsd"]
+
 [[bin]]
 name = "cowchat-server"
 path = "src/main.rs"
@@ -40,6 +46,11 @@ sha2 = "0.10"
 base64 = "0.22"
 fs2 = "0.4"
 libc = "0.2"
+cbqs-client = { git = "https://github.com/cowboyinc/cbqs.git", rev = "7f0fb216bfa2dc53d618224aecf3c7cb628a3015", optional = true }
+cbqsd = { git = "https://github.com/cowboyinc/cbqs.git", rev = "7f0fb216bfa2dc53d618224aecf3c7cb628a3015", features = ["test-legacy-snapshots"], optional = true }
+cowboy-protocol-codec = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "1ea94534a84d743e90c7f067758063790ca1e75a", features = ["cbqs-signing", "serde", "signing"], optional = true }
+commonware-codec = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba", optional = true }
+ed25519-dalek = { version = "2.2", optional = true }
 
 [dev-dependencies]
 cowchat-client.workspace = true
