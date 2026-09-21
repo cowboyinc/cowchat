@@ -123,3 +123,34 @@ create an encrypted room, join from another authenticated client, send and read
 history, reconnect/retry the identical prepared ciphertext, then recover on a
 new worker directory and verify the acknowledged history. Client ACK and
 participant visibility must continue to follow durable CBFS publication.
+
+The opt-in acceptance client starts no server or storage fixture:
+
+```sh
+COWCHAT_HOSTED_E2E_MODE=create \
+COWCHAT_HOSTED_E2E_URL=ws://127.0.0.1:19440/ws \
+COWCHAT_HOSTED_E2E_KEY_FILE=/srv/cowchat/api.key \
+COWCHAT_HOSTED_E2E_STATE=/srv/cowchat/acceptance.json \
+cargo test --release --locked -p cowchat-server --features hosted-bootstrap \
+  --test hosted_live -- --ignored --nocapture
+```
+
+The `create` phase creates a new private state file containing the exact room,
+encrypted payload, sender identity and room secret before mutations. Preserve
+that file; it contains test credentials and must not be published. A locked
+second client checks ciphertext history, while the sender checks decrypted
+receipts, stable retries and reconnects. The normal 10-second client request
+timeout is unchanged; a slow archive fails this run rather than silently raising
+the threshold.
+
+After a successful `create` run, stop the first worker and start a separately
+configured worker with a **fresh worker directory**, the same owner/volume
+handles and an explicit observed control epoch. Rerun the command with
+`COWCHAT_HOSTED_E2E_MODE=recover`, preserving the state file and using the new
+endpoint. This phase reads the expected message before retrying any operation,
+then confirms the same receipt and one-message history. Retain successful logs
+from both phases and the server bootstrap logs with the concrete node/broker
+builds. A failed create run followed by a passing recovery run is not proof that
+an acknowledged message survived. These two phases prove a fresh-worker restart
+only for the topology actually run; use distinct hosts to claim cross-host
+failover. Neither phase establishes broker-host HA.
