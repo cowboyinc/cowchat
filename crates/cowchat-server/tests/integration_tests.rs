@@ -4173,7 +4173,7 @@ async fn actor_work_encrypted_tcp_room_wakes_without_content_and_completes() {
         .complete_actor_work(&sub, &work.work_id, ActorWorkOutcome::Replied)
         .await
         .is_err());
-    let prepared = actor.prepare_actor_reply(&work, "one two three");
+    let prepared = actor.prepare_actor_reply(&work, "one two three", vec![]);
     assert_ne!(prepared.content, "one two three");
     let first = actor.append_prepared_message(&prepared).await.unwrap();
     let retry = actor.append_prepared_message(&prepared).await.unwrap();

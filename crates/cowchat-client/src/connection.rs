@@ -284,6 +284,18 @@ pub struct Event {
     pub frame: Frame,
 }
 
+/// What one unit of actor work produced. `Skip` records an explicit skipped
+/// disposition (no message is appended); mentions in a reply route follow-on
+/// work to other actors, which is how actors coordinate in a room.
+#[derive(Debug, Clone)]
+pub enum ActorReply {
+    Reply {
+        content: String,
+        mentions: Vec<String>,
+    },
+    Skip,
+}
+
 pub struct CowchatClient {
     /// Channel to send frames to the writer task.
     write_tx: mpsc::Sender<Frame>,
@@ -1316,40 +1328,52 @@ impl CowchatClient {
     ) -> Result<bool, ClientError>
     where
         F: FnOnce(ActorWork) -> Fut,
-        Fut: std::future::Future<Output = Result<String, ClientError>>,
+        Fut: std::future::Future<Output = Result<ActorReply, ClientError>>,
     {
         let Some(work) = self.claim_actor_work(subscription_id).await? else {
             return Ok(false);
         };
-        if work.existing_reply.is_none() {
-            let reply = execute(work.clone()).await?;
-            let payload = self.prepare_actor_reply(&work, &reply);
-            match self.append_prepared_message(&payload).await {
-                Ok(_) => {}
-                // Another claimant may have committed its reply first. Completion
-                // checks the stored reply's actor, room, and input before accepting.
-                Err(ClientError::Server {
-                    code: ErrorCode::MessageConflict,
-                    ..
-                }) => {}
-                Err(e) => return Err(e),
+        let outcome = if work.existing_reply.is_some() {
+            ActorWorkOutcome::Replied
+        } else {
+            match execute(work.clone()).await? {
+                ActorReply::Skip => ActorWorkOutcome::Skipped,
+                ActorReply::Reply { content, mentions } => {
+                    let payload = self.prepare_actor_reply(&work, &content, mentions);
+                    match self.append_prepared_message(&payload).await {
+                        Ok(_) => {}
+                        // Another claimant may have committed its reply first. Completion
+                        // checks the stored reply's actor, room, and input before accepting.
+                        Err(ClientError::Server {
+                            code: ErrorCode::MessageConflict,
+                            ..
+                        }) => {}
+                        Err(e) => return Err(e),
+                    }
+                    ActorWorkOutcome::Replied
+                }
             }
-        }
-        self.complete_actor_work(subscription_id, &work.work_id, ActorWorkOutcome::Replied)
+        };
+        self.complete_actor_work(subscription_id, &work.work_id, outcome)
             .await?;
         Ok(true)
     }
 
     /// Prepare once for an exact-byte append retry. After process restart, use
     /// process_actor_work: a persisted reply wins without rerunning inference.
-    pub fn prepare_actor_reply(&self, work: &ActorWork, content: &str) -> SendMessagePayload {
+    pub fn prepare_actor_reply(
+        &self,
+        work: &ActorWork,
+        content: &str,
+        mentions: Vec<String>,
+    ) -> SendMessagePayload {
         SendMessagePayload {
             message_id: Some(work.reply_message_id.clone()),
             room_id: work.room_id.clone(),
             content: self.encrypt_content(&work.room_id, content),
             reply_to: Some(work.message_id.clone()),
             metadata: serde_json::json!({}),
-            mentions: vec![],
+            mentions,
         }
     }
 

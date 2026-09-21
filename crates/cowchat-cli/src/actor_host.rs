@@ -97,6 +97,35 @@ async fn wake(
     StatusCode::ACCEPTED
 }
 
+/// Empty stdout is an explicit skip. A JSON object `{"reply": "...",
+/// "mentions": ["agent-id", ...]}` routes follow-on work to other actors;
+/// any other output is a plain reply.
+fn parse_reply(raw: &str) -> cowchat_client::ActorReply {
+    use cowchat_client::ActorReply;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return ActorReply::Skip;
+    }
+    #[derive(serde::Deserialize)]
+    struct Structured {
+        reply: String,
+        #[serde(default)]
+        mentions: Vec<String>,
+    }
+    if trimmed.starts_with('{') {
+        if let Ok(parsed) = serde_json::from_str::<Structured>(trimmed) {
+            return ActorReply::Reply {
+                content: parsed.reply,
+                mentions: parsed.mentions,
+            };
+        }
+    }
+    ActorReply::Reply {
+        content: trimmed.to_owned(),
+        mentions: vec![],
+    }
+}
+
 async fn execute(command: &[String], work: cowchat_core::ActorWork) -> Result<String, ClientError> {
     let mut child = tokio::process::Command::new(&command[0])
         .args(&command[1..])
@@ -204,7 +233,7 @@ pub(crate) async fn run(cli: &Cli, args: &ActorHostArgs) -> Result<(), Box<dyn s
                 let outcome = client.process_actor_work(&subscription, |work| async move {
                     for attempt in 1..=3 {
                         match execute(&args.command, work.clone()).await {
-                            Ok(reply) => return Ok(reply),
+                            Ok(reply) => return Ok(parse_reply(&reply)),
                             Err(error) => {
                                 eprintln!("actor work {} execution attempt {attempt}/3 failed: {error}", work.work_id);
                                 if attempt == 3 { *failed = Some(work.work_id.clone()); return Err(error); }
