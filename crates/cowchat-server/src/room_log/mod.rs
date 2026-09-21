@@ -4,6 +4,8 @@
 //! The ingress authenticates the caller before constructing a command. The
 //! reducer checks log order and business invariants again at application time.
 //! Hosted routes remain disabled until ownership and archive gates are wired.
+#[cfg(feature = "cbfs-archive")]
+pub mod cbfs_archive;
 #[cfg(feature = "cbqs")]
 pub mod cbqs;
 

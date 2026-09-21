@@ -11,6 +11,10 @@ description = "Cowchat server daemon"
 cbqs = ["dep:cbqs-client", "dep:cowboy-protocol-codec", "dep:commonware-codec", "dep:ed25519-dalek"]
 # In-process real broker used only by the integration tests.
 cbqs-test = ["cbqs", "dep:cbqsd"]
+# Durable checkpoint-batch publication through the existing CBFS SDK.
+cbfs-archive = ["cbqs", "dep:cbfs-sdk", "dep:cbfs-hooks", "dep:cbfs-types"]
+# Opt-in subprocess tests require COWCHAT_TEST_CBFS_NODE built at the SDK pin.
+cbfs-archive-test = ["cbfs-archive", "cbqs-test", "cbfs-sdk/test-support", "dep:cbfs-transport", "dep:sled", "dep:async-trait"]
 
 [[bin]]
 name = "cowchat-server"
@@ -51,6 +55,12 @@ cbqsd = { git = "https://github.com/cowboyinc/cbqs.git", rev = "7f0fb216bfa2dc53
 cowboy-protocol-codec = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "1ea94534a84d743e90c7f067758063790ca1e75a", features = ["cbqs-signing", "serde", "signing"], optional = true }
 commonware-codec = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba", optional = true }
 ed25519-dalek = { version = "2.2", optional = true }
+cbfs-sdk = { git = "https://github.com/cowboyinc/cbfs.git", rev = "d8ddaad0dee6a0b8b57bd7308376208446ced012", optional = true }
+cbfs-hooks = { git = "https://github.com/cowboyinc/cbfs.git", rev = "d8ddaad0dee6a0b8b57bd7308376208446ced012", optional = true }
+cbfs-types = { git = "https://github.com/cowboyinc/cbfs.git", rev = "d8ddaad0dee6a0b8b57bd7308376208446ced012", optional = true }
+cbfs-transport = { git = "https://github.com/cowboyinc/cbfs.git", rev = "d8ddaad0dee6a0b8b57bd7308376208446ced012", optional = true }
+sled = { version = "0.34", optional = true }
+async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
 cowchat-client.workspace = true

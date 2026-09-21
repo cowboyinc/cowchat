@@ -28,7 +28,32 @@ struct Record {
     payload: String,
 }
 
+#[cfg(feature = "cbfs-archive")]
+pub(crate) struct ArchiveRange {
+    pub instance: [u8; 32],
+    pub stream: [u8; 32],
+    pub first: u64,
+    pub last: u64,
+    pub previous: [u8; 32],
+    pub checkpoint: [u8; 32],
+}
+
 impl Replay {
+    #[cfg(feature = "cbfs-archive")]
+    pub(crate) fn archive_range(&self) -> Option<ArchiveRange> {
+        let archive = self.archive.as_ref()?;
+        let first = archive.receipts.first()?;
+        let last = archive.receipts.last()?;
+        Some(ArchiveRange {
+            instance: first.chain_instance_id,
+            stream: first.stream_id,
+            first: first.first_sequence,
+            last: last.last_sequence,
+            previous: first.previous_checkpoint,
+            checkpoint: wire::checkpoint_id_v2(last),
+        })
+    }
+
     /// Preserve the exact signed wire bytes, not reserialized commands or a
     /// trusted-looking snapshot. Empty replay produces no new archive segment.
     /// Publishing these bytes and recording a durable head is a separate gate.

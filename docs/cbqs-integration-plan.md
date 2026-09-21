@@ -41,8 +41,8 @@ mutate grants, invitations, subscriptions, votes, elections and work claims.
 Inventory these before enabling the new mode. A first slice must explicitly
 refuse unsupported writes instead of silently keeping their authoritative
 state only in SQLite. Each supported mutation must enter the replay contract
-before the hosted replacement is complete. SQLite can remain a local projection
-inside the Cowchat service; no room content goes through Labs Postgres.
+before the hosted replacement is complete. Hosted reads use the in-memory
+projection described below; no room content goes through Labs Postgres.
 
 ## Keep the boundary small
 
@@ -92,14 +92,13 @@ separate 16,384-room-lane bound. A missing unarchived segment still refuses
 recovery. Checkpoint handles cannot be deserialized from untrusted JSON. Archive
 segments now preserve raw CBQS headers, ciphertext payloads and signed receipts.
 `restore_archive` uses the same signature/linkage/digest verifier as broker
-replay before recreating a checkpoint. The bounded format is implemented;
-CBFS publication, durable archive-head discovery and rollback protection still
-need their storage integration.
+replay before recreating a checkpoint. The bounded format and optional CBFS
+batch publisher are implemented; their owner-runtime/caller integration is not.
 
 This is not connected to `CowchatServer` or its public handlers yet. The reducer
 is an in-memory projection; it does not persist snapshots or provide archive
-durability. No cross-host epoch allocator, CBFS archive publication or live-tail
-subscription is implemented. No live-chain claim is made:
+durability. No cross-host epoch allocator or live-tail subscription is
+implemented. No live-chain claim is made:
 the broker tests use actual WebSockets/RocksDB with a fixture node snapshot.
 
 Verified commands:
@@ -172,7 +171,7 @@ test registry acknowledgement with a durable, discoverable archive. Check the
 actual authority/finality and garbage-collection paths before selecting the
 archive ACK boundary. Calling a full volume commit for every message could
 reintroduce the per-message chain dependency excluded from this design. The
-batching, durable discovery and recovery boundary still needs implementation.
+runtime batching cadence and caller recovery integration still need implementation.
 Archive verification currently uses the SDK session's chain-anchored provider
 key history. Recovery of receipts older than that key history must fail closed
 until a verified historical-key lookup is supplied.
@@ -180,3 +179,48 @@ until a verified historical-key lookup is supplied.
 `cbqs-archive-reassignment-spec.md` in the parent workspace is explicitly parked
 and unreviewed, and describes older v1 standard/fast streams. It is background,
 not an approved dependency or evidence that broker archiving exists.
+
+## CBFS checkpoint publisher
+
+The optional `cbfs-archive` feature pins the existing CBFS SDK to `d8ddaad0`.
+`CbfsArchive` requires a clean private volume opened against authenticated root
+authority. Missing authority is an error, including on an empty volume; initial
+provisioning must explicitly establish its zero root. The opener reconciles any
+pending SDK journal before it loads the archive head or stages another batch.
+
+Each complete verified range becomes an immutable object named by its final
+checkpoint ID. One manifest commit publishes that object together with a
+`head.json` containing the archived sequence and checkpoint. Publication only
+extends the current head without a gap. Exact republishing is a byte-identical
+no-op; a different encoding under the same checkpoint ID is refused. Stale roots,
+failed or cancelled publications retire the writer until authoritative reopen and
+reconciliation. The publisher obtains range bounds from private signed proof,
+not the caller-mutable decoded records. Reads still require CBQS signature and
+digest verification; the discovery head does not replace it.
+
+The opt-in subprocess tests use three actual CBFS nodes (private volume, 2+1
+erasure coding), production QUIC/shard handlers and standalone Sled CAS metadata.
+SDK test support is used only to isolate journal directories. Tests cover exact
+republishing, SIGKILL/restart of every storage process followed by cold recovery
+after broker retention expiry, a lost reply after the metadata commit, a new
+batch after that reconciliation, stale writers and backward-head refusal.
+All 18 log tests pass; the next-batch regression fails when opener journal
+reconciliation is disabled. The 276 default workspace tests, formatting and
+strict all-targets clippy with both test feature selections also pass locally.
+They do not prove simultaneous cross-host writer races, chain finality, long-term
+GC behavior or production archive latency. Loopback node auth is explicitly
+test-only. The node binary must be built from the same pin; tests fail when its
+path is not provided.
+
+```sh
+# In a CBFS checkout at d8ddaad0dee6a0b8b57bd7308376208446ced012:
+cargo build --locked -p cbfs-node
+# In this Cowchat checkout, use that binary's absolute path:
+COWCHAT_TEST_CBFS_NODE=/absolute/cbfs/target/debug/cbfs-node \
+  cargo test --locked -p cowchat-server --features cbfs-archive-test room_log --lib
+cargo clippy --locked -p cowchat-server --features cbfs-archive-test --all-targets -- -D warnings
+```
+
+Hosted routes remain disabled. Bounded discovery/replay of a multi-segment archive,
+durable append intents, cross-host ownership, actual handler wiring and measured
+finalized-authority batch latency remain required work.

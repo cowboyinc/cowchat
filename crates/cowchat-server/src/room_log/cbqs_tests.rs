@@ -1,4 +1,7 @@
 //! Real CBQS WebSockets/RocksDB with fixture node authority; no live-chain claim.
+#[cfg(feature = "cbfs-archive-test")]
+#[path = "cbfs_archive_tests.rs"]
+mod cbfs_archive_tests;
 use super::cbqs::{CbqsOwnerLog, LogError};
 use super::*;
 use axum::{routing::get, Router};
