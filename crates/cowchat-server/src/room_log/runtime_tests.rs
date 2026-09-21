@@ -138,6 +138,50 @@ struct HoldCommit {
     inner: Arc<LocalManifestRegistry>,
     entered: tokio::sync::Notify,
 }
+
+#[tokio::test]
+async fn credential_deadline_retires_reads_and_prevents_new_broker_writes() {
+    let fixture = Fixture::new().await;
+    let (control, volume) = Storage::new().await;
+    let mut writers = control.initialize_writers(volume).await;
+    let (storage, volume) = Storage::new().await;
+    let directory = private_directory();
+    let path = directory.path().join("intents.sqlite");
+    let mut runtime = recover(
+        promote(&fixture, &mut writers).await,
+        storage.initialize_archive(volume).await,
+        &path,
+    )
+    .await;
+    runtime.submit(vec![create("one", 0)]).await.unwrap();
+    let view = runtime.view();
+    assert!(runtime.expire_at(std::time::Instant::now()).is_err());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    runtime.expire_at(deadline).unwrap();
+    assert!(runtime
+        .expire_at(deadline + std::time::Duration::from_secs(1))
+        .is_err());
+    tokio::time::sleep_until(deadline.into()).await;
+    assert!(matches!(view.read(), Err(RuntimeError::Retired)));
+    assert!(matches!(runtime.state(), Err(RuntimeError::Retired)));
+    assert!(matches!(
+        runtime.submit(vec![message("a", "one")]).await,
+        Err(RuntimeError::Retired)
+    ));
+    drop(runtime);
+    let archive = storage
+        .archive(storage.reopen().await, storage.registry.clone())
+        .await;
+    let runtime = recover(promote(&fixture, &mut writers).await, archive, &path).await;
+    assert_eq!(runtime.state().unwrap().applied_through(), 1);
+    assert!(runtime
+        .state()
+        .unwrap()
+        .room("one")
+        .unwrap()
+        .messages
+        .is_empty());
+}
 #[async_trait::async_trait]
 impl ManifestRegistry for HoldCommit {
     async fn is_shard_live(&self, id: &ShardId, index: u8) -> Result<bool, HookError> {

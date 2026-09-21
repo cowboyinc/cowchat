@@ -1800,6 +1800,7 @@ dependencies = [
  "env_logger",
  "fs2",
  "futures",
+ "hex",
  "hmac",
  "libc",
  "log",
@@ -1818,6 +1819,7 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tower-http",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

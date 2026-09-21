@@ -1,0 +1,125 @@
+# Hosted owner-stream startup
+
+Build the production entrypoint with:
+
+```sh
+cargo build --release --locked -p cowchat-server --features hosted-bootstrap
+```
+
+`hosted-init` and `hosted-serve` use real chain proofs, a registered CBQS
+provider/stream and private CBFS volumes. This feature includes no test broker
+or standalone storage fixture. Ordinary `serve` remains local mode.
+
+## Prerequisites
+
+The operator provisions a funded owner, a CBQS account and active stream with
+its Ed25519 admin public key, and a registered provider advertising a TLS
+WebSocket endpoint. The owner must also have existing Cowboy CBFS CLI credentials,
+DKG access, an owner delegation permitting mount-capable ReadWrite attachments,
+and registered storage relays. Use the same wallet as the stream's proved owner.
+Supply an independently trusted checkpoint file; do not treat an arbitrary RPC
+checkpoint candidate as a trust root.
+
+The node must serve finalized proof bundle v2 for the stream and provider under
+system actor `0x17`, and bundle v1 for the existing CBFS client. The broker must
+support the pinned v2 protocol, policy fencing and keyed lanes. Registration or
+a green health check alone does not establish this compatibility.
+
+Create an existing private API-key file and a private file containing the
+64-character hex Ed25519 admin seed. Neither key goes in command-line arguments
+or configuration JSON. Keep these files owned by the worker user, mode `0600`,
+with no symbolic or hard links. Hosted startup does not print either key.
+
+Example configuration (replace every placeholder with actual provisioned data):
+
+```json
+{
+  "worker_dir": "/srv/cowchat/worker-a",
+  "cbfs_state_dir": "/srv/cowchat/cbfs-credentials",
+  "rpc_url": "https://node.example",
+  "trusted_checkpoint_file": "/srv/cowchat/checkpoint.bin",
+  "owner_address": "0x<20-byte owner hex>",
+  "chain_instance_id": "0x<32-byte instance hex>",
+  "stream_id": "0x<32-byte stream hex>",
+  "provider_address": "0x<20-byte provider hex>",
+  "admin_key_file": "/srv/cowchat/admin.seed",
+  "broker_url": "wss://broker.example/ws",
+  "broker_pin": null,
+  "archive_volume": "cowchat-archive",
+  "control_volume": "cowchat-control",
+  "api_key_file": "/srv/cowchat/api.key",
+  "http_addr": "127.0.0.1:19440",
+  "http_origins": ["https://dashboard.example"],
+  "session_seconds": 600
+}
+```
+
+All filesystem paths must be absolute. The worker directory is created `0700`
+under an existing parent, or checked for private ownership if it exists. One
+process holds its lock throughout initialization/recovery/serving. Each worker
+needs its own directory, intent journal and CBFS pending-commit/path-tag state;
+the executable sets the SDK environment before starting any runtime threads.
+Keep the worker path short enough for its Unix socket (less than 100 bytes with
+`/server.sock`). Configuration rejects unknown fields.
+
+By default the broker uses checked DNS/public IP routing. For a private River
+route, set `broker_pin` to an object containing `address` (numeric `IP:port`) and
+`certificate_der_file` (absolute path to its TLS root certificate). The SDK
+retains TLS certificate/SNI validation for the exact advertised `broker_url`.
+There is no plaintext or unchecked WebSocket option.
+
+## First initialization
+
+```sh
+cowchat-server hosted-init --config /srv/cowchat/hosted.json \
+  --reserve-wei <positive-reserve-per-volume> --erasure-k 2 --erasure-m 1
+```
+
+The explicit reserve is funded for **each** of two new private owner-key volumes.
+Choose an erasure layout supported by the available relays. Both volume names
+must be unused in the configured CBFS state. Only freshly created volumes are
+initialized; a zero root on an existing volume is never accepted as genesis.
+A partial initialization preserves created volumes and fails; inspect them and
+choose new names for another attempt. Initialization does not acquire a writer
+epoch or open a listener.
+
+## Serve and promote
+
+```sh
+cowchat-server hosted-serve --config /srv/cowchat/hosted.json --expected-epoch 0
+```
+
+`0` is the expected control epoch only immediately after first initialization.
+Startup verifies finalized stream/provider authority and the local admin key,
+opens the private control volume, and attempts exactly one expected-epoch CAS
+with a fresh worker identity and stable claim ID. It obtains a matching signed
+broker fence acknowledgement, then opens the archive and recovers history and
+local pending intents before constructing the server. Losing or ambiguous
+promotion fails closed; it does not automatically compete at a newer epoch.
+On a later start the operator must supply the observed current control epoch.
+Do not blindly increment the argument after an error: a previous attempt may
+have committed its claim even if its reply was lost.
+
+The authenticated primary API key is bound to this one owner. HTTP/WebSocket
+and the private Unix socket require authentication. There is no TCP listener,
+public key signup, open-auth mode or SQLite room-history fallback. The SQLite
+files hold local identity bookkeeping and pending intents, not hosted history.
+The chat-first surface supports private encrypted room creation, send, history,
+list, join and leave; unsupported coordination/REST paths fail closed.
+
+## Bounded lifetime and remaining live gate
+
+This entrypoint runs a bounded session, **not an automatically renewing daemon**.
+`session_seconds` must be 120 through 3600. It stops 30 seconds before the
+earliest configured session, CBQS grant, CBFS attachment or delegation expiry.
+Recovery consumes that budget. The runtime independently retires reads and
+writes at the deadline even if the listener shutdown task is delayed. A restart
+requires explicit promotion and recovery; a service manager must not guess the
+next epoch. Automatic credential renewal is follow-up work.
+
+Local boundary tests do not establish River E2E. The live acceptance run must
+use this executable against finalized chain authority, real CBQS and CBFS:
+create an encrypted room, join from another authenticated client, send and read
+history, reconnect/retry the identical prepared ciphertext, then recover on a
+new worker directory and verify the acknowledged history. Client ACK and
+participant visibility must continue to follow durable CBFS publication.

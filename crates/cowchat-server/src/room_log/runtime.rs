@@ -13,7 +13,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, RwLock, RwLockReadGuard,
+    Arc, OnceLock, RwLock, RwLockReadGuard,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -120,17 +120,36 @@ pub struct CommittedBatch {
 pub struct OwnerView {
     state: RwLock<OwnerState>,
     usable: AtomicBool,
+    deadline: OnceLock<std::time::Instant>,
 }
 impl OwnerView {
+    fn active(&self) -> bool {
+        if self
+            .deadline
+            .get()
+            .is_some_and(|deadline| std::time::Instant::now() >= *deadline)
+        {
+            self.usable.store(false, Ordering::Release);
+        }
+        self.usable.load(Ordering::Acquire)
+    }
     pub fn read(&self) -> Result<RwLockReadGuard<'_, OwnerState>, RuntimeError> {
         let state = self.state.read().map_err(|_| RuntimeError::Retired)?;
-        if !self.usable.load(Ordering::Acquire) {
+        if !self.active() {
             return Err(RuntimeError::Retired);
         }
         Ok(state)
     }
     fn apply(&self, records: Vec<LogRecord>) -> Result<Vec<LogRecord>, RuntimeError> {
         let mut state = self.state.write().map_err(|_| RuntimeError::Retired)?;
+        if self
+            .deadline
+            .get()
+            .is_some_and(|deadline| std::time::Instant::now() >= *deadline)
+        {
+            self.usable.store(false, Ordering::Release);
+            return Err(RuntimeError::Retired);
+        }
         let result = (|| {
             let mut applied = Vec::new();
             for record in records {
@@ -208,6 +227,7 @@ impl OwnerRuntime {
             view: Arc::new(OwnerView {
                 state: RwLock::new(state),
                 usable: AtomicBool::new(false),
+                deadline: OnceLock::new(),
             }),
             checkpoint: recovered.checkpoint,
             limits,
@@ -237,12 +257,20 @@ impl OwnerRuntime {
     pub fn owner_id(&self) -> &str {
         &self.owner_id
     }
+    /// A bounded hosted process must retire reads as well as writes before its
+    /// grant/attachment credentials expire. Set once, before serving clients.
+    pub fn expire_at(&mut self, deadline: std::time::Instant) -> Result<(), RuntimeError> {
+        if deadline <= std::time::Instant::now() || self.view.deadline.set(deadline).is_err() {
+            return Err(RuntimeError::Configuration);
+        }
+        Ok(())
+    }
     fn read_state(&self) -> Result<RwLockReadGuard<'_, OwnerState>, RuntimeError> {
         self.view.state.read().map_err(|_| RuntimeError::Retired)
     }
 
     fn ensure_usable(&self) -> Result<(), RuntimeError> {
-        if self.usable {
+        if self.usable && self.view.active() {
             Ok(())
         } else {
             Err(RuntimeError::Retired)
@@ -278,9 +306,11 @@ impl OwnerRuntime {
             completed: false,
         };
         let result = self.submit_inner(&mut commands).await;
-        if result.is_ok() {
+        if result.is_ok() && self.view.active() {
             self.usable = true;
             retirement.completed = true;
+        } else if result.is_ok() {
+            return Err(RuntimeError::Retired);
         }
         result
     }
@@ -400,10 +430,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn expired_projection_refuses_publication_without_waiting_for_shutdown() {
+        let deadline = OnceLock::new();
+        deadline.set(std::time::Instant::now()).unwrap();
+        let view = OwnerView {
+            state: RwLock::new(OwnerState::new("owner-a".into())),
+            usable: AtomicBool::new(true),
+            deadline,
+        };
+        assert!(matches!(
+            view.apply(vec![LogRecord {
+                sequence: 1,
+                lane_id: 0,
+                command: super::super::tests::create("one", 7)
+            }]),
+            Err(RuntimeError::Retired)
+        ));
+        assert_eq!(view.state.read().unwrap().applied_through(), 0);
+        assert!(matches!(view.read(), Err(RuntimeError::Retired)));
+    }
+
+    #[test]
     fn failed_reducer_batch_retires_the_shared_projection() {
         let view = OwnerView {
             state: RwLock::new(OwnerState::new("owner-a".into())),
             usable: AtomicBool::new(true),
+            deadline: OnceLock::new(),
         };
         let mut wrong_owner = super::super::tests::message("wrong", "one");
         wrong_owner.owner_id = "owner-b".into();
