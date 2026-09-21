@@ -36,6 +36,15 @@ system actor `0x17`, and bundle v1 for the existing CBFS client. The broker must
 support the pinned v2 protocol, policy fencing and keyed lanes. Registration or
 a green health check alone does not establish this compatibility.
 
+The CBQS broker also requires `COWBOY_EXPECTED_RUNTIME_FINGERPRINT`, containing
+the independently reviewed release manifest's activation fingerprint (`sha256:`
+plus 64 lowercase hex characters). Provision it before starting the broker;
+do not adopt the first node response as the expectation. The node must publish
+matching typed `/chain-info.activation` metadata. Missing, mismatched or expired
+agreement denies new sessions and mutations, including keyed lane allocation,
+while already-admitted obligations can still settle. This is separate from the
+trusted checkpoint and does not prove codec compatibility.
+
 Create an existing private API-key file and a private file containing the
 64-character hex Ed25519 admin seed. Neither key goes in command-line arguments
 or configuration JSON. Keep these files owned by the worker user, mode `0600`,

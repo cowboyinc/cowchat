@@ -7,6 +7,7 @@ use super::*;
 use axum::{routing::get, Router};
 use cbqs_client::{CheckpointTrustV2, SessionConfig};
 use cbqsd::{
+    activation::RuntimeCompatibility,
     store_v2::StoreV2,
     transport::{
         self,
@@ -15,6 +16,7 @@ use cbqsd::{
         TransportConfig,
     },
 };
+use cowboy_protocol_activation::{ActivationMetadata, Height, RuntimeSections};
 use cowboy_protocol_codec::cbqs_v2 as wire;
 use ed25519_dalek::{Signer, SigningKey};
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
@@ -135,18 +137,41 @@ impl Drop for Fixture {
 impl Fixture {
     async fn new() -> Self {
         let body = snapshot_json(key33(&key(0xA1)), key33(&key(0xB2)));
+        // Fixture authority only: pin the expectation before serving metadata.
+        let metadata = ActivationMetadata::new(
+            1,
+            RuntimeSections {
+                heights: BTreeMap::from([("TEST_ACTIVATION_HEIGHT".into(), Height(0))]),
+                policy: Default::default(),
+                governance: Default::default(),
+            },
+        )
+        .unwrap();
+        let activation = RuntimeCompatibility::new(Some(metadata.runtime_fingerprint.clone()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let node = tokio::spawn(async move {
-            let app = Router::new().route(
-                "/cbqs/snapshot/{stream_id}",
-                get(move || {
-                    let body = body.clone();
-                    async move { body }
-                }),
-            );
+            let app = Router::new()
+                .route(
+                    "/cbqs/snapshot/{stream_id}",
+                    get(move || {
+                        let body = body.clone();
+                        async move { body }
+                    }),
+                )
+                .route(
+                    "/chain-info",
+                    get(move || {
+                        let metadata = metadata.clone();
+                        async move { axum::Json(serde_json::json!({ "activation": metadata })) }
+                    }),
+                );
             axum::serve(listener, app).await.unwrap();
         });
+        let node_url = format!("http://{address}");
+        activation.probe(&node_url).await;
+        activation.check().unwrap();
+        activation.spawn(node_url);
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(StoreV2::open(directory.path(), INSTANCE).unwrap());
         let (wakeup, _) = tokio::sync::broadcast::channel(64);
@@ -158,7 +183,8 @@ impl Fixture {
                 signing_key: key(0xB2),
             }),
             wakeup,
-        );
+        )
+        .with_activation(activation);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let broker = listener.local_addr().unwrap();
         let mut stop = core.shutdown_signal();

@@ -45,22 +45,24 @@ impl Node {
         let binary = std::env::var_os("COWCHAT_TEST_CBFS_NODE")
             .map(PathBuf::from)
             .expect("build pinned cbfs-node and set COWCHAT_TEST_CBFS_NODE; no mock fallback");
-        let directory = tempfile::tempdir().unwrap();
-        // Distinct ports outside the usual client ephemeral range: otherwise
-        // a concurrent SDK QUIC client can take a discovered free ephemeral
-        // port before the child binds it. Never reuse a sibling's restart port.
-        static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(20_000);
-        let addr = loop {
-            let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
-            assert!(port < 30_000, "test port range exhausted");
-            match std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port)) {
-                Ok(reservation) => break reservation.local_addr().unwrap(),
-                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
-                Err(error) => panic!("test port discovery: {error}"),
-            }
-        };
-        let config = directory.path().join("node.toml");
-        std::fs::write(
+        for attempt in 0..16 {
+            let directory = tempfile::tempdir().unwrap();
+            // Distinct ports outside the usual client ephemeral range: otherwise
+            // a concurrent SDK QUIC client can take a discovered free ephemeral
+            // port before the child binds it. Never reuse a sibling's restart port.
+            static NEXT_PORT: std::sync::atomic::AtomicU16 =
+                std::sync::atomic::AtomicU16::new(20_000);
+            let addr = loop {
+                let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+                assert!(port < 30_000, "test port range exhausted");
+                match std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port)) {
+                    Ok(reservation) => break reservation.local_addr().unwrap(),
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                    Err(error) => panic!("test port discovery: {error}"),
+                }
+            };
+            let config = directory.path().join("node.toml");
+            std::fs::write(
             &config,
             format!(
                 "listen_addr = \"{addr}\"\ndata_dir = {}\ngc_interval_secs = 3600\nrepair_interval_secs = 3600\n",
@@ -68,15 +70,26 @@ impl Node {
             ),
         )
         .unwrap();
-        let mut node = Self {
-            child: None,
-            binary,
-            config,
-            directory,
-            addr,
-        };
-        node.start().await;
-        node
+            let mut node = Self {
+                child: None,
+                binary: binary.clone(),
+                config,
+                directory,
+                addr,
+            };
+            match node.try_start().await {
+                Ok(()) => return node,
+                Err(error)
+                    if error.contains("bind failed: Address already in use") && attempt < 15 =>
+                {
+                    // Other test PROCESSES have their own port counters. A free
+                    // discovery port is not reserved once the child starts.
+                    continue;
+                }
+                Err(error) => panic!("cbfs-node startup: {error}"),
+            }
+        }
+        unreachable!("bounded startup attempts return or fail")
     }
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -85,9 +98,15 @@ impl Node {
         }
     }
     async fn start(&mut self) {
+        // Restart must retain the registered endpoint, so never choose a new
+        // port here. Only initial construction retries discovery collisions.
+        self.try_start().await.expect("cbfs-node restart");
+    }
+    async fn try_start(&mut self) -> Result<(), String> {
         let output = std::fs::OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(true)
             .open(self.directory.path().join("node.log"))
             .unwrap();
         self.child = Some(
@@ -97,7 +116,7 @@ impl Node {
                 .env_clear()
                 // Explicit dev auth, accepted by the binary only on loopback.
                 .env("CBFS_ACCEPT_ALL_AUTH", "1")
-                .env("RUST_LOG", "warn")
+                .env("RUST_LOG", "cbfs_node=info")
                 .stdin(Stdio::null())
                 .stdout(output.try_clone().unwrap())
                 .stderr(output)
@@ -108,19 +127,22 @@ impl Node {
             QuicClient::with_timeouts(Duration::from_secs(5), Duration::from_millis(200)).unwrap();
         tokio::time::timeout(DEADLINE, async {
             loop {
-                assert!(
-                    self.child.as_mut().unwrap().try_wait().unwrap().is_none(),
-                    "cbfs-node exited: {}",
-                    std::fs::read_to_string(self.directory.path().join("node.log")).unwrap()
-                );
-                if client.peer_cert_sha256(self.addr).await.is_ok() {
-                    break;
+                let log = std::fs::read_to_string(self.directory.path().join("node.log")).unwrap();
+                if self.child.as_mut().unwrap().try_wait().unwrap().is_some() {
+                    return Err(log);
+                }
+                // Require THIS child to have bound successfully. Probing the
+                // port alone could accidentally accept the competing process.
+                if log.contains("cbfs-node started")
+                    && client.peer_cert_sha256(self.addr).await.is_ok()
+                {
+                    return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("cbfs-node readiness deadline");
+        .expect("cbfs-node readiness deadline")
     }
     fn info(&self) -> NodeInfo {
         NodeInfo {

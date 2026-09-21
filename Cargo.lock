@@ -868,12 +868,12 @@ dependencies = [
 [[package]]
 name = "cbqs-client"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cbqs.git?rev=7f0fb216bfa2dc53d618224aecf3c7cb628a3015#7f0fb216bfa2dc53d618224aecf3c7cb628a3015"
+source = "git+https://github.com/cowboyinc/cbqs.git?rev=386dd2fbd96dd9fb001bc4ad2ba72ef730647910#386dd2fbd96dd9fb001bc4ad2ba72ef730647910"
 dependencies = [
  "chacha20poly1305",
  "commonware-codec",
- "cowboy-protocol-codec 0.3.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a)",
- "cowboy-protocol-light-client 0.1.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a)",
+ "cowboy-protocol-codec 0.3.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7)",
+ "cowboy-protocol-light-client 0.1.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7)",
  "ed25519-dalek",
  "futures-util",
  "getrandom 0.2.17",
@@ -889,13 +889,14 @@ dependencies = [
 [[package]]
 name = "cbqsd"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cbqs.git?rev=7f0fb216bfa2dc53d618224aecf3c7cb628a3015#7f0fb216bfa2dc53d618224aecf3c7cb628a3015"
+source = "git+https://github.com/cowboyinc/cbqs.git?rev=386dd2fbd96dd9fb001bc4ad2ba72ef730647910#386dd2fbd96dd9fb001bc4ad2ba72ef730647910"
 dependencies = [
  "axum",
  "commonware-codec",
- "cowboy-protocol-codec 0.3.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a)",
- "cowboy-protocol-light-client 0.1.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a)",
- "cowboy-protocol-types 0.1.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a)",
+ "cowboy-protocol-activation",
+ "cowboy-protocol-codec 0.3.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7)",
+ "cowboy-protocol-light-client 0.1.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7)",
+ "cowboy-protocol-types 0.1.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7)",
  "ed25519-dalek",
  "futures-util",
  "hex",
@@ -1539,6 +1540,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
+name = "cowboy-protocol-activation"
+version = "0.1.0"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e893859785200a0ce487fc745ee34faaf3a21a36#e893859785200a0ce487fc745ee34faaf3a21a36"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cowboy-protocol-cbss-crypto"
 version = "0.1.0"
 source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=dc04ade20922238c2f2e2e45dffb763f339dfbf5#dc04ade20922238c2f2e2e45dffb763f339dfbf5"
@@ -1577,27 +1589,6 @@ dependencies = [
 [[package]]
 name = "cowboy-protocol-codec"
 version = "0.3.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a#1ea94534a84d743e90c7f067758063790ca1e75a"
-dependencies = [
- "blake3",
- "bytes",
- "commonware-codec",
- "cowboy-protocol-types 0.1.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a)",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "hex",
- "k256",
- "serde",
- "serde_json",
- "sha2",
- "sha3",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
-name = "cowboy-protocol-codec"
-version = "0.3.0"
 source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=dc04ade20922238c2f2e2e45dffb763f339dfbf5#dc04ade20922238c2f2e2e45dffb763f339dfbf5"
 dependencies = [
  "blake3",
@@ -1615,19 +1606,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "cowboy-protocol-light-client"
-version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a#1ea94534a84d743e90c7f067758063790ca1e75a"
+name = "cowboy-protocol-codec"
+version = "0.3.0"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7#e681d14b5080172002fd71a7ff583c7ac97dc5b7"
 dependencies = [
  "blake3",
+ "bytes",
  "commonware-codec",
- "commonware-consensus",
- "commonware-cryptography",
- "commonware-parallel",
- "cowboy-protocol-codec 0.3.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a)",
+ "cowboy-protocol-types 0.1.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7)",
+ "ed25519-dalek",
  "getrandom 0.2.17",
- "rand_core 0.6.4",
+ "hex",
+ "k256",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sha3",
  "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
@@ -1647,9 +1643,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cowboy-protocol-light-client"
+version = "0.1.0"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7#e681d14b5080172002fd71a7ff583c7ac97dc5b7"
+dependencies = [
+ "blake3",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-parallel",
+ "cowboy-protocol-codec 0.3.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7)",
+ "getrandom 0.2.17",
+ "rand_core 0.6.4",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cowboy-protocol-types"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a#1ea94534a84d743e90c7f067758063790ca1e75a"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=dc04ade20922238c2f2e2e45dffb763f339dfbf5#dc04ade20922238c2f2e2e45dffb763f339dfbf5"
 dependencies = [
  "ethereum-types",
  "hex",
@@ -1665,7 +1677,7 @@ dependencies = [
 [[package]]
 name = "cowboy-protocol-types"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=dc04ade20922238c2f2e2e45dffb763f339dfbf5#dc04ade20922238c2f2e2e45dffb763f339dfbf5"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7#e681d14b5080172002fd71a7ff583c7ac97dc5b7"
 dependencies = [
  "ethereum-types",
  "hex",
@@ -1791,7 +1803,8 @@ dependencies = [
  "chrono",
  "clap",
  "commonware-codec",
- "cowboy-protocol-codec 0.3.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=1ea94534a84d743e90c7f067758063790ca1e75a)",
+ "cowboy-protocol-activation",
+ "cowboy-protocol-codec 0.3.0 (git+https://github.com/cowboyinc/cowboy-protocol.git?rev=e681d14b5080172002fd71a7ff583c7ac97dc5b7)",
  "cowchat-client",
  "cowchat-core",
  "dashmap",
