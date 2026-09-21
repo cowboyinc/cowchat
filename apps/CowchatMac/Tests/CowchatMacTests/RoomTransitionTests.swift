@@ -2682,6 +2682,54 @@ final class RoomTransitionTests: XCTestCase {
         XCTAssertTrue(store.rooms.isEmpty)
     }
 
+    @MainActor
+    func testEncryptedRoomSendsOnlyCiphertextAndForgetLocksDisplay() async throws {
+        let room = try JSONDecoder().decode(Room.self, from: Data(#"{"room_id":"encrypted-test","name":"Private","encrypted":true}"#.utf8))
+        let wire = try RoomCrypto.encrypt("private history", secret: "room-secret", roomID: room.id)
+        let message = try decodeMessage(id: "encrypted-message", roomID: room.id, content: wire, timestamp: "2026-09-21T00:00:00Z", sequence: 1)
+        let connection = MockRoomConnection()
+        connection.historiesByRoom[room.id] = [message]
+        let credentials = RoomTransitionCredentialStore()
+        let suite = "RoomCryptoTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ChatStore(connection: connection, defaults: defaults, roomCredentialStore: credentials)
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+        XCTAssertFalse(store.unlockedRoomIDs.contains(room.id))
+        store.draft = "never send plaintext"
+        store.sendDraft()
+        XCTAssertFalse(connection.operations.contains(where: { $0.hasPrefix("send:") }))
+        XCTAssertThrowsError(try store.saveRoomSecret("wrong", for: room))
+        XCTAssertNil(credentials.credential)
+        try store.saveRoomSecret("room-secret", for: room)
+        XCTAssertEqual(store.displayMessage(message).content, "private history")
+        XCTAssertEqual(store.messages.first?.content, wire) // history remains ciphertext
+        XCTAssertEqual(store.displayMessage(message).content, "private history")
+        var changed = message
+        changed.content = try RoomCrypto.encrypt("updated history", secret: "room-secret", roomID: room.id)
+        XCTAssertEqual(store.displayMessage(changed).content, "updated history")
+        store.sendDraft()
+        for _ in 0..<100 where !connection.operations.contains(where: { $0.hasPrefix("send:") }) { await Task.yield() }
+        let operation = try XCTUnwrap(connection.operations.first(where: { $0.hasPrefix("send:") }))
+        let sent = String(operation.dropFirst("send:\(room.id):".count))
+        XCTAssertTrue(sent.hasPrefix("cow1:"))
+        XCTAssertEqual(try RoomCrypto.decrypt(sent, secret: "room-secret", roomID: room.id), "never send plaintext")
+        try store.forgetRoomSecret(for: room)
+        XCTAssertNil(credentials.credential)
+        XCTAssertFalse(store.unlockedRoomIDs.contains(room.id))
+        XCTAssertNotEqual(store.displayMessage(message).content, "private history")
+        try store.saveRoomSecret("room-secret", for: room)
+        XCTAssertEqual(store.displayMessage(message).content, "private history")
+        do {
+            _ = try await store.downloadAttachment(FileAttachment(blobID: "unused", name: "private.txt", size: 1))
+            XCTFail("Encrypted attachments must be disabled")
+        } catch ChatStore.AttachmentError.encryptedRoom {} catch {
+            XCTFail("Unexpected attachment error: \(error)")
+        }
+    }
+
     private func decodeRoom(
         id: String,
         name: String,

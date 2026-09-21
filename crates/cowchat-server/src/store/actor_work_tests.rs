@@ -159,3 +159,121 @@ fn actor_work_routing_retention_and_no_cursor_jump() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn actor_reenrollment_keeps_pending_work_and_rejects_another_owner() {
+    let store = Store::open_in_memory().unwrap();
+    let sub = subscribe(&store, "actor", WakeMode::Addressed);
+    send(&store, "pending", "human", &["actor".into()]);
+    let work = store.claim_actor_work(&sub, "actor", 0).unwrap().unwrap();
+    assert!(store
+        .create_actor_subscription(
+            "lobby",
+            "intruder",
+            "actor",
+            "https://elsewhere.example/wake",
+            "stolen",
+            WakeMode::Always
+        )
+        .is_err());
+    let (unchanged, owner, secret) = store.get_subscription(&sub).unwrap().unwrap();
+    assert_eq!(owner, "owner");
+    assert_eq!(secret, "secret");
+    assert_eq!(unchanged.webhook_url, "https://example.com/wake");
+    let same = store
+        .create_actor_subscription(
+            "lobby",
+            "owner",
+            "actor",
+            "https://example.com/new",
+            "rotated",
+            WakeMode::Listen,
+        )
+        .unwrap();
+    assert_eq!(same, sub);
+    let (updated, _, secret) = store.get_subscription(&sub).unwrap().unwrap();
+    assert_eq!(updated.webhook_url, "https://example.com/new");
+    assert_eq!(secret, "rotated");
+    assert!(store
+        .claim_actor_work(&sub, "actor", 299)
+        .unwrap()
+        .is_none());
+    let recovered = store.claim_actor_work(&sub, "actor", 300).unwrap().unwrap();
+    assert_eq!(recovered.work_id, work.work_id);
+    store
+        .complete_actor_work(&sub, &work.work_id, "actor", ActorWorkOutcome::Skipped)
+        .unwrap();
+    send(&store, "after-mode-change", "human", &["actor".into()]);
+    assert!(store
+        .claim_actor_work(&sub, "actor", 601)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn actor_reply_mentions_create_one_durable_next_step_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mentions.db");
+    let metadata = json!({});
+    let mentions = vec!["target".into(), "source".into()];
+    let (source, target, input, reply_id) = {
+        let store = Store::open(&path).unwrap();
+        let source = subscribe(&store, "source", WakeMode::Addressed);
+        let target = subscribe(&store, "target", WakeMode::Addressed);
+        send(&store, "start", "human", &["source".into()]);
+        let input = store
+            .claim_actor_work(&source, "source", 0)
+            .unwrap()
+            .unwrap();
+        let reply_id = input.reply_message_id.clone();
+        store
+            .append_message(&MessageAppend {
+                message_id: &reply_id,
+                room_id: "lobby",
+                agent_id: "source",
+                agent_name: "source",
+                content: "cow1:next",
+                reply_to: Some(&input.message_id),
+                metadata: &metadata,
+                mentions: &mentions,
+            })
+            .unwrap();
+        (source, target, input, reply_id)
+    };
+    let store = Store::open(&path).unwrap();
+    assert!(
+        !store
+            .append_message(&MessageAppend {
+                message_id: &reply_id,
+                room_id: "lobby",
+                agent_id: "source",
+                agent_name: "source",
+                content: "cow1:next",
+                reply_to: Some(&input.message_id),
+                metadata: &metadata,
+                mentions: &mentions
+            })
+            .unwrap()
+            .inserted
+    );
+    store
+        .complete_actor_work(&source, &input.work_id, "source", ActorWorkOutcome::Replied)
+        .unwrap();
+    assert!(store
+        .claim_actor_work(&source, "source", 301)
+        .unwrap()
+        .is_none()); // self mention never wakes
+    let next = store
+        .claim_actor_work(&target, "target", 301)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.message_id, reply_id);
+    store
+        .complete_actor_work(&target, &next.work_id, "target", ActorWorkOutcome::Skipped)
+        .unwrap();
+    assert!(store
+        .claim_actor_work(&target, "target", 602)
+        .unwrap()
+        .is_none());
+    assert_eq!(store.room_tip("lobby").unwrap(), 2);
+}

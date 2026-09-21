@@ -51,3 +51,44 @@ Preserved old work lives on the original branches/PRs and in `.backups/cowchat-v
 5. **End-to-end acceptance.** Exercise a mixed human/local-agent/Cowboy-actor room, browser closed, warm and cold response, service/runtime kill-and-restart, encrypted history, key changes, exhausted funds, duplicate delivery, and real client surfaces. Record measured message and cold-start latency. Tests of local code are not evidence of hosted deployment or real billing.
 
 First checkpoint: local encrypted room with three participants; send/replay; a sleeping actor starts and replies; pending work survives process termination and restart. Stop adding machinery to that checkpoint once these behaviors pass. Continue the remaining product work above before declaring the replacement ready.
+
+
+## Verified client and provider boundary (September 21, 2026)
+
+The Mac client now reads and sends the existing `cow1:` shared-key ciphertext.
+Room secrets live in the Mac Keychain, scoped by endpoint, participant identity,
+and room. Decrypted display copies live only in a bounded memory cache, cleared
+when a key changes, is forgotten, or the connection profile changes. Authoritative
+history stays ciphertext and room previews say “Encrypted message”. Encrypted
+attachments are disabled; encrypted full-text search and hosted member rekeying
+are not implemented by this slice.
+
+Verification: 288 Swift tests ran, with five opt-in tests skipped and no failures.
+A separate native test app joined a disposable encrypted room on the local server,
+unlocked history, sent a reply, and forgot the key to relock both messages and the
+composer. An independent client fetched both stored messages, confirmed both were
+ciphertext, and decrypted the native reply. Rust and Swift share an authenticated
+wire-format fixture. This is local client evidence, not hosted deployment proof.
+
+The candidate Cowboy provider shape is one actor-funded container job per active
+chat burst. The worker connects directly to Cowchat, drains work while warm, and
+exits when idle. A message does not submit a new chain transaction. Claude's fresh
+Runner review in the implementation room pinned `origin/devnet` at `c3555f3` and
+`origin/main` at `6f7ad42` and found these unresolved dependencies:
+
+- `runner-container/src/executor.rs` sets `network_enabled: false`; its OCI setup
+  creates an interface-less network namespace. There is no supported switch for
+  the container to connect to Cowchat. A generic, scoped egress facility is needed.
+- Secret environment delivery is on `cbd/cip10-secret-env` at `997b605`, Runner
+  PR #240, still unmerged in the reviewed devnet. Room and participant credentials
+  must use a supported secret path, not public job arguments or chain state.
+- Job duration is bounded by the selected tier and requested limit: Small 120
+  seconds, Medium 600 seconds in that review. Warm burst handling must respect
+  the actual bound and recover unfinished work after process exit.
+- Actor RPC has no universal controller field. An owner value in actor storage is
+  an application convention. Hosted enrollment needs an explicit supported
+  controller binding; arbitrary actor addresses cannot yet be called verified.
+
+These are provider gates, not justification to revive per-message actor calls,
+CBQS transport, or the old room-session machinery. Real execution funding,
+controller authorization, egress, and secret delivery remain acceptance work.

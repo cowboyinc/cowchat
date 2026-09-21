@@ -16,11 +16,11 @@ cowchat --tcp 127.0.0.1:9229 --name FizzBuzz --agent-id fizzbuzz-actor \
   python3 examples/python/fizzbuzz_actor.py
 ```
 
-The receiver prints one JSON ready record containing the room and subscription IDs. The program gets one `ActorWork` JSON value on stdin, including decrypted `input.content`, and writes its reply as UTF-8 text on stdout. The example replies to an integer with FizzBuzz. A real adapter can invoke the harness or another configured inference provider. The executable and arguments come exclusively from local configuration; wakes and messages cannot choose a command.
+The receiver prints one JSON ready record containing the room and subscription IDs. The program gets one `ActorWork` JSON value on stdin, including decrypted `input.content`, and writes its reply as UTF-8 text on stdout. Empty output explicitly skips the input. A JSON object with `reply` and `mentions` fields sends a reply addressed to other actor IDs. The example replies to an integer with FizzBuzz. A real adapter can invoke the harness or another configured inference provider. The executable and arguments come exclusively from local configuration; wakes and messages cannot choose a command.
 
-With `addressed`, send a structural mention containing `fizzbuzz-actor`. The Rust client accepts that as the fourth argument of `send_message`. `always` handles all non-self chat messages; `listen` never starts the program. Thinking and system events do not start inference.
+With `addressed`, send a structural mention containing `fizzbuzz-actor`. Use `cowchat send your-room 15 --mention fizzbuzz-actor`, or pass the IDs as the fourth argument of the Rust client’s `send_message`. `always` handles all non-self chat messages; `listen` never starts the program. Thinking and system events do not start inference.
 
-Restart with the same actor ID, room, listen address, mode, and wake secret. Enrollment is idempotent for that exact configuration. Changing it requires deleting the old subscription and enrolling again. The receiver checks queued work on startup, so a missed wake cannot strand an unclaimed message.
+Restart with the same authenticated actor ID and room. The same owner can update the wake address, secret, and mode without losing pending work or its cursor. Mode changes affect new messages; already queued work remains queued. Another owner cannot change the subscription. `--listen 127.0.0.1:0` asks the OS for an available port and registers the actual bound address. The receiver checks queued work on startup, so a missed wake cannot strand an unclaimed message.
 
 ## Recovery behavior
 
@@ -31,7 +31,7 @@ Restart with the same actor ID, room, listen address, mode, and wake secret. Enr
 - `process_actor_work` accepts a caller-owned async execution callback. It prepares one encrypted reply and checks server-validated completion after an append conflict.
 - The local host retries program execution up to three times, then records `failed` and logs the work ID before continuing. The count is in memory; a host restart may repeat attempts. Transport/decryption errors leave work pending. An operator can also explicitly complete claimed work as `skipped` or `failed` through the client API. Such completion is ordered and recorded, not a silent cursor jump.
 
-The local receiver binds only a fixed loopback address. A child runs for at most 240 seconds and may return at most 1 MiB. No child remains running between inputs. The receiver itself remains available for HTTP wakes; this is not evidence of hosted free dormancy or compute billing. It supplies only the current input to the program; conversation context and actor state belong to the chosen adapter/runtime.
+The local receiver binds only a loopback address. A child runs for at most 240 seconds and may return at most 1 MiB. No child remains running between inputs. The receiver itself remains available for HTTP wakes; this is not evidence of hosted free dormancy or compute billing. It supplies only the current input to the program; conversation context and actor state belong to the chosen adapter/runtime.
 
 ## Verification
 
@@ -41,3 +41,5 @@ cargo test --locked -p cowchat-server actor_work
 ```
 
 The process test requires Python 3. It starts the real CLI receiver, uses three participants in an encrypted room, kills the receiver with SIGKILL, queues another input while it is absent, and verifies one reply after restarting it. Server tests separately cover database reopen, claim expiry, wrong identity, oldest-first completion, persistent history, and recovery between reply append and acknowledgment.
+
+The multi-actor fixtures are local transport and coordination simulations. They do not prove chain settlement, financial correctness, verified signer authority, or exactly-once application state changes. Actor-to-actor mentions can create loops; the actor implementation must terminate intentional workflows, and hosted execution must enforce its existing spending limits.

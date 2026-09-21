@@ -154,4 +154,8 @@ mod tests {
             derive_room_key(SECRET, "room-b")
         );
     }
+    #[test]
+    fn mac_interop_fixture() {
+        assert_eq!(decrypt(b"fixture-secret", "room-test", "cow1:AAECAwQFBgcICQoLslE85HeKJnKelFHeUqQa6pf4bJGu5ieHEkdN+PvuzvDrLKZke2UY2bHHmkLIy0w").unwrap(), "Hello from Rust-compatible cow1");
+    }
 }

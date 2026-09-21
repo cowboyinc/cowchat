@@ -17,7 +17,7 @@ sleep 1
 KEY=$(cat "$DIR/auth.key")
 CC="$BIN/cowchat --tcp 127.0.0.1:19229 --key $KEY"
 
-$CC rooms create fizzbuzz --description "3-seat FizzBuzz demo" >/dev/null
+$CC rooms create fizzbuzz --encrypted --description "3-seat FizzBuzz demo" >/dev/null
 ROOM=fizzbuzz # the CLI resolves room names
 
 port=19230
