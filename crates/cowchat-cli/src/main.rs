@@ -1,4 +1,6 @@
 mod actor_host;
+mod bridge;
+mod telegram;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use cowchat_client::{ClientError, CowchatClient};
@@ -206,6 +208,8 @@ struct Cli {
 enum Commands {
     /// Run a local signed wake receiver and start the actor program only for work.
     ActorHost(actor_host::ActorHostArgs),
+    /// Bridge one explicitly configured Telegram chat to an encrypted room.
+    TelegramBridge(telegram::TelegramArgs),
     /// Send a message to a room
     Send {
         /// Room ID or name
@@ -895,6 +899,7 @@ fn command_represents_agent_session(command: &Commands) -> bool {
     matches!(
         command,
         Commands::ActorHost(_)
+            | Commands::TelegramBridge(_)
             | Commands::Send { .. }
             | Commands::SendFile { .. }
             | Commands::Thinking { .. }
@@ -1601,6 +1606,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match &cli.command {
         Commands::ActorHost(args) => actor_host::run(&cli, args).await?,
+        Commands::TelegramBridge(args) => telegram::run(&cli, args).await?,
         Commands::Send {
             room,
             message,

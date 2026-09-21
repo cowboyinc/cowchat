@@ -105,8 +105,8 @@ further than the chats the owner explicitly configured. The room service learns
 nothing new: connector traffic is normal authenticated appends and reads.
 
 The connector core is transport-neutral. It accepts normalized inbound events
-(a stable provider event id, sender label, text) and produces exactly-once room
-appends from them: the event id is folded into a deterministic message id, the
+(a stable provider event id, sender label, text) and retries each pending room
+append safely: the event id is folded into a deterministic message id, the
 sealed ciphertext for at most one pending append is kept in the connector's
 private atomic state file, and an append retry resends those exact bytes. On
 the outbound side it replays room messages after a durable cursor and delivers
@@ -116,7 +116,11 @@ the connector) block the cursor fail-closed; the block is reported into the
 connected chat, and the operator explicitly skips one sequence to resume.
 How events arrive — polling, webhook, socket — is the adapter's concern, not
 the core's; webhook signature verification and durable acceptance belong to
-the adapter that owns the ingress.
+the adapter that owns the ingress. A webhook adapter must also durably deduplicate
+completed provider events: a deterministic message id alone cannot safely replay
+a newly encrypted copy after the pending ciphertext has been cleared. Telegram
+uses its persisted update offset for this; a webhook deduplication ledger is not
+implemented by the current core.
 
 User-facing flow, Telegram first: the owner creates a bot, sets
 `TELEGRAM_BOT_TOKEN` in the bridge environment, and runs the CLI bridge with a
