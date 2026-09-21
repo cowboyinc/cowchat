@@ -36,6 +36,26 @@ pub struct LogRecord {
     pub command: Command,
 }
 
+/// A boundary produced only after this module verified both the checkpoint
+/// chain and its records. Deliberately not deserializable: an archive must
+/// authenticate its contents before a future restore API can recreate this.
+#[derive(Clone, Debug)]
+pub struct VerifiedCheckpoint {
+    receipt: wire::CheckpointReceiptV2,
+}
+
+impl VerifiedCheckpoint {
+    pub fn sequence(&self) -> u64 {
+        self.receipt.last_sequence
+    }
+}
+
+#[derive(Debug)]
+pub struct Replay {
+    pub records: Vec<LogRecord>,
+    pub checkpoint: Option<VerifiedCheckpoint>,
+}
+
 pub struct CbqsOwnerLog {
     session: SessionV2,
     instance: [u8; 32],
@@ -150,8 +170,8 @@ impl CbqsOwnerLog {
     }
 
     /// Bounded initial recovery from genesis. Retention gaps refuse recovery;
-    /// they never become an empty/new room. An archived checkpoint resume path
-    /// must be added before this can serve logs older than the retained prefix.
+    /// they never become an empty/new room. Use `replay` with a verified
+    /// checkpoint when the caller already holds the prefix.
     /// `minimum_sequence` comes from durable ownership/archive recovery state;
     /// use zero only when no prior committed checkpoint is known.
     pub async fn replay_from_start(
@@ -160,12 +180,29 @@ impl CbqsOwnerLog {
         max_records: u64,
         max_bytes: usize,
     ) -> Result<Vec<LogRecord>, LogError> {
+        Ok(self
+            .replay(None, minimum_sequence, max_records, max_bytes)
+            .await?
+            .records)
+    }
+
+    /// Read a complete bounded suffix after a previously verified boundary.
+    /// The caller must retain the corresponding prefix/projection. This is not
+    /// archive restoration: arbitrary serialized checkpoints cannot enter here.
+    /// Bounds apply to the suffix, independent of the stream's total age.
+    pub async fn replay(
+        &mut self,
+        after: Option<&VerifiedCheckpoint>,
+        minimum_sequence: u64,
+        max_records: u64,
+        max_bytes: usize,
+    ) -> Result<Replay, LogError> {
         if !self.usable {
             return Err(LogError::Unavailable);
         }
         let result = tokio::time::timeout(
             self.timeout,
-            self.replay_inner(minimum_sequence, max_records, max_bytes),
+            self.replay_inner(after, minimum_sequence, max_records, max_bytes),
         )
         .await
         .map_err(|_| LogError::Unavailable)
@@ -178,21 +215,36 @@ impl CbqsOwnerLog {
 
     async fn replay_inner(
         &mut self,
+        after: Option<&VerifiedCheckpoint>,
         minimum_sequence: u64,
         max_records: u64,
         max_bytes: usize,
-    ) -> Result<Vec<LogRecord>, LogError> {
+    ) -> Result<Replay, LogError> {
+        if after.is_some_and(|checkpoint| {
+            checkpoint.receipt.chain_instance_id != self.instance
+                || checkpoint.receipt.stream_id != self.stream
+        }) {
+            return Err(LogError::Verification);
+        }
+        let base = after.map_or(0, VerifiedCheckpoint::sequence);
         // Head binds the cursor to the durable stream tail, which survives
         // retention even when every checkpoint has expired. A missing latest
         // checkpoint by itself is never evidence of a new stream.
         let observed_tail = self.durable_tip().await?;
-        if observed_tail < minimum_sequence {
+        if observed_tail < minimum_sequence.max(base) {
             return Err(LogError::HistoryGap);
         }
-        if observed_tail == 0 {
-            return Ok(Vec::new());
+        if observed_tail == base {
+            return Ok(Replay {
+                records: Vec::new(),
+                checkpoint: after.cloned(),
+            });
         }
-        let genesis = wire::checkpoint_genesis_v2(&self.instance, &self.stream);
+        let first = base.checked_add(1).ok_or(LogError::ReplayLimit)?;
+        let boundary = after.map_or_else(
+            || wire::checkpoint_genesis_v2(&self.instance, &self.stream),
+            |checkpoint| wire::checkpoint_id_v2(&checkpoint.receipt),
+        );
         let mut chain = Vec::new();
         let mut fetch = None;
         loop {
@@ -215,19 +267,29 @@ impl CbqsOwnerLog {
                 }
                 _ => return Err(LogError::Unavailable),
             };
-            if receipt.last_sequence > max_records || chain.len() as u64 >= max_records {
+            if receipt.first_sequence <= base {
+                return Err(LogError::Verification);
+            }
+            if receipt.last_sequence.saturating_sub(base) > max_records
+                || chain.len() as u64 >= max_records
+            {
                 return Err(LogError::ReplayLimit);
             }
             let previous = receipt.previous_checkpoint;
             chain.push(receipt);
-            if previous == genesis {
+            if previous == boundary {
                 break;
             }
             fetch = Some(previous);
         }
         chain.reverse();
         self.session
-            .verify_chain(&chain, cbqs_client::Predecessor::Genesis)
+            .verify_chain(
+                &chain,
+                after.map_or(cbqs_client::Predecessor::Genesis, |checkpoint| {
+                    cbqs_client::Predecessor::Receipt(&checkpoint.receipt)
+                }),
+            )
             .map_err(|_| LogError::Verification)?;
         let tail = chain.last().ok_or(LogError::Verification)?.last_sequence;
         if tail != observed_tail {
@@ -264,17 +326,19 @@ impl CbqsOwnerLog {
                 return Err(LogError::Verification);
             }
             after_lane_id = next_after_lane_id;
-            if lanes.len() as u64 > max_records.saturating_add(1) {
+            // Lane count is independent of suffix record count: old rooms may
+            // have no messages in this suffix. Bound enumeration separately.
+            if lanes.len() > 16_385 {
                 return Err(LogError::ReplayLimit);
             }
         }
         let mut all = std::collections::BTreeMap::new();
         let mut bytes = 0usize;
         for lane in lanes {
-            self.read_lane(lane, tail, max_bytes, &mut bytes, &mut all)
+            self.read_lane(lane, first, tail, max_bytes, &mut bytes, &mut all)
                 .await?;
         }
-        if all.len() as u64 != tail || all.keys().copied().ne(1..=tail) {
+        if all.len() as u64 != tail - base || all.keys().copied().ne(first..=tail) {
             return Err(LogError::HistoryGap);
         }
         let delivered: Vec<_> = all
@@ -305,7 +369,7 @@ impl CbqsOwnerLog {
         if checked != delivered.len() {
             return Err(LogError::Verification);
         }
-        delivered
+        let records = delivered
             .into_iter()
             .map(|(sequence, header, payload)| {
                 Ok(LogRecord {
@@ -314,7 +378,11 @@ impl CbqsOwnerLog {
                     command: serde_json::from_slice(&payload).map_err(|_| LogError::Encoding)?,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, LogError>>()?;
+        Ok(Replay {
+            records,
+            checkpoint: chain.pop().map(|receipt| VerifiedCheckpoint { receipt }),
+        })
     }
 
     async fn durable_tip(&mut self) -> Result<u64, LogError> {
@@ -346,6 +414,7 @@ impl CbqsOwnerLog {
     async fn read_lane(
         &mut self,
         lane_id: u64,
+        first: u64,
         tail: u64,
         max_bytes: usize,
         bytes: &mut usize,
@@ -357,7 +426,7 @@ impl CbqsOwnerLog {
             subscription_id,
             source: wire::SubscriptionSourceV2::Cursor {
                 lane_scope: wire::LaneScopeV2::Exact(lane_id),
-                start: wire::StartV2::At(1),
+                start: wire::StartV2::At(first),
             },
         })
         .await?;
@@ -367,7 +436,7 @@ impl CbqsOwnerLog {
             bytes: CREDIT,
         })
         .await?;
-        let mut previous = 0;
+        let mut previous = first - 1;
         loop {
             let Response::CursorProgress {
                 subscription_id: progress_id,

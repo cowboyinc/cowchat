@@ -483,3 +483,105 @@ async fn replay_rejects_payload_changed_after_broker_commit() {
         Err(LogError::Unavailable)
     ));
 }
+
+#[tokio::test]
+async fn verified_boundary_resumes_after_retention_with_suffix_sized_limits() {
+    let fixture = Fixture::new().await;
+    let mut first = fixture.connect(1).await.unwrap();
+    let one = first.room_lane("owner-a", "one").await.unwrap();
+    let two = first.room_lane("owner-a", "two").await.unwrap();
+    first
+        .append(0, &super::tests::create("one", one))
+        .await
+        .unwrap();
+    first
+        .append(0, &super::tests::create("two", two))
+        .await
+        .unwrap();
+    first
+        .append(one, &super::tests::message("a", "one"))
+        .await
+        .unwrap();
+    let prefix = first.replay(None, 3, 100, 100_000).await.unwrap();
+    let checkpoint = prefix.checkpoint.unwrap();
+    assert_eq!(checkpoint.sequence(), 3);
+    let mut rebuilt = OwnerState::new("owner-a".into());
+    for record in prefix.records {
+        rebuilt
+            .apply(record.sequence, record.lane_id, &record.command)
+            .unwrap();
+    }
+    first
+        .append(two, &super::tests::message("b", "two"))
+        .await
+        .unwrap();
+    fixture
+        .core
+        .store
+        .advance_retention_floor(&STREAM, 4)
+        .unwrap();
+    let mut next = fixture.connect(2).await.unwrap();
+    // Only one new record, even though the stream has four and three lanes.
+    let suffix = next.replay(Some(&checkpoint), 4, 1, 100_000).await.unwrap();
+    assert_eq!(suffix.records.len(), 1);
+    assert_eq!(suffix.records[0].sequence, 4);
+    for record in suffix.records {
+        rebuilt
+            .apply(record.sequence, record.lane_id, &record.command)
+            .unwrap();
+    }
+    assert_eq!(rebuilt.applied_through(), 4);
+    assert_eq!(rebuilt.room("one").unwrap().messages.len(), 1);
+    assert_eq!(rebuilt.room("two").unwrap().messages.len(), 1);
+    let checkpoint = suffix.checkpoint.unwrap();
+    assert_eq!(checkpoint.sequence(), 4);
+    // An already held and verified complete prefix stays usable when CBQS
+    // expires all records. This never manufactures an empty owner state.
+    fixture
+        .core
+        .store
+        .advance_retention_floor(&STREAM, 5)
+        .unwrap();
+    let empty = next.replay(Some(&checkpoint), 4, 1, 100_000).await.unwrap();
+    assert!(empty.records.is_empty());
+    assert_eq!(empty.checkpoint.unwrap().sequence(), 4);
+}
+
+#[tokio::test]
+async fn checkpoint_cannot_bridge_a_missing_unarchived_suffix() {
+    let fixture = Fixture::new().await;
+    let mut first = fixture.connect(1).await.unwrap();
+    let lane = first.room_lane("owner-a", "one").await.unwrap();
+    first
+        .append(0, &super::tests::create("one", lane))
+        .await
+        .unwrap();
+    let checkpoint = first
+        .replay(None, 1, 10, 100_000)
+        .await
+        .unwrap()
+        .checkpoint
+        .unwrap();
+    first
+        .append(lane, &super::tests::message("a", "one"))
+        .await
+        .unwrap();
+    first
+        .append(lane, &super::tests::message("b", "one"))
+        .await
+        .unwrap();
+    fixture
+        .core
+        .store
+        .advance_retention_floor(&STREAM, 3)
+        .unwrap();
+    let mut next = fixture.connect(2).await.unwrap();
+    assert!(matches!(
+        next.replay(Some(&checkpoint), 3, 10, 100_000).await,
+        Err(LogError::HistoryGap)
+    ));
+    assert!(matches!(
+        next.append(lane, &super::tests::message("c", "one")).await,
+        Err(LogError::Unavailable)
+    ));
+}

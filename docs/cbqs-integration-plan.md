@@ -83,7 +83,11 @@ checkpoint chain and every payload digest before decoding commands. CBQS only
 supports one lane per cursor, so recovery enumerates lanes, reads each with
 bounded credit, and merges by global stream sequence. A missing prefix, expired
 history, stale writer, verification failure or uncertain transport result retires
-the session. It does not fall back to SQLite or blindly resend.
+the session. It does not fall back to SQLite or blindly resend. A caller that
+already holds a verified prefix can now request only the suffix after that
+checkpoint. Record/byte bounds apply to the suffix; lane enumeration has a
+separate 16,384-room-lane bound. A missing unarchived segment still refuses
+recovery. Checkpoint handles cannot be deserialized from untrusted JSON.
 
 This is not connected to `CowchatServer` or its public handlers yet. The reducer
 is an in-memory projection; it does not persist snapshots or provide archive
@@ -100,10 +104,14 @@ cargo fmt --all -- --check
 cargo clippy --locked -p cowchat-server --all-targets --features cbqs-test -- -D warnings
 ```
 
-The focused suite has ten tests: five reducer cases and five actual-broker
+The focused suite has twelve tests: five reducer cases and seven actual-broker
 cases covering interleaved room lanes/retries/fencing, total retention expiry,
 replay bounds/known-tip rollback, credit replenishment above 1 MiB, and ciphertext
-tampering between the broker and client. The default server suite has 194 tests.
+tampering between the broker and client. The two suffix tests expire a verified
+prefix and successfully resume with a one-record limit, then verify that a
+checkpoint cannot bridge a missing unarchived segment. This proves transport
+resume from an in-memory verified boundary, not a persisted CBFS restore.
+The default server suite has 194 tests; the default workspace has 275.
 The optional SDK graph requires Tokio 1.50. The repository currently has only a
 release workflow, so these are local checks, not CI results. Clean hosted builds
 also need access to the pinned Cowboy Git dependencies.
@@ -120,3 +128,24 @@ also need access to the pinned Cowboy Git dependencies.
 
 The existing room mutation guard is synchronous. Do not hold it across CBQS or
 archive network awaits; serialize commands at the owner-stream runtime instead.
+
+An implementation simplification proposed to Claude at room sequence 132 is to
+serve hosted reads directly from `OwnerState`, rebuilding it from verified logs
+and authenticated archive checkpoints. That avoids maintaining another SQLite
+projection beside the reducer. It does not remove the durable append-intent,
+archive or cross-host ownership requirements. It is not wired into handlers yet.
+
+## Archive integration constraint under investigation
+
+The current CBFS SDK's `Volume::put` uploads object bytes and stages its manifest;
+`Volume::commit` publishes through `CowboyHttpManifestRegistry` and the relayer's
+`/cbfs/v1/manifests/commit-v2` path. Do not equate a staged object, local spool or
+test registry acknowledgement with a durable, discoverable archive. Check the
+actual authority/finality and garbage-collection paths before selecting the
+archive ACK boundary. Calling a full volume commit for every message could
+reintroduce the per-message chain dependency excluded from this design. The
+batching, durable discovery and recovery boundary still needs implementation.
+
+`cbqs-archive-reassignment-spec.md` in the parent workspace is explicitly parked
+and unreviewed, and describes older v1 standard/fast streams. It is background,
+not an approved dependency or evidence that broker archiving exists.
