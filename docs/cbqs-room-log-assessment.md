@@ -150,6 +150,16 @@ sessions bypass this off-chain policy fence, so a room-service writer using
 this mechanism must use finite-epoch admin grants. Production ownership and
 archive recovery still need implementation and their own failure drills.
 
+**Align ownership with the fence's scope.** Package R epochs are per stream,
+not per lane or room. Sharing one owner stream across many room lanes reduces
+chain state and per-stream cost, but independent room owners cannot advance
+their epochs independently: a room takeover would revoke grants for the other
+rooms on that stream. The simple choices are one active writer per stream
+covering all its room lanes, or one stream per independently failed-over room.
+Prefer the former for the next prototype given the minimal-chain-state goal;
+validate that shared failure/ownership boundary before making it a production
+decision. A new per-lane fencing protocol is not needed for this prototype.
+
 ## Experiment contract
 
 Use current V2 code, one broker and two Cowchat room workers with disposable
