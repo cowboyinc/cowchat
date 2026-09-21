@@ -95,10 +95,25 @@ impl Store {
             WakeMode::Listen => "listen",
         };
         if let Some((id, owner, url, key, previous_mode)) = existing {
-            if owner == owner_key && url == webhook_url && key == secret && previous_mode == mode {
-                return Ok(id);
+            // Same owner re-enrolling is a restart: the wake endpoint and secret
+            // are transport config and may change (new port, moved host). The
+            // subscription identity, cursor, and pending work are preserved.
+            if owner != owner_key {
+                return Err(StoreError::InvalidActorWork);
             }
-            return Err(StoreError::InvalidActorWork);
+            if url != webhook_url || key != secret || previous_mode != mode {
+                tx.execute(
+                    "UPDATE subscriptions SET webhook_url = ?2, secret = ?3, status = 'active', failure_count = 0
+                     WHERE subscription_id = ?1",
+                    params![id, webhook_url, secret],
+                )?;
+                tx.execute(
+                    "UPDATE actor_subscriptions SET mode = ?2 WHERE subscription_id = ?1",
+                    params![id, mode],
+                )?;
+                tx.commit()?;
+            }
+            return Ok(id);
         }
         let id = uuid::Uuid::new_v4().to_string();
         let tip: i64 = tx.query_row(

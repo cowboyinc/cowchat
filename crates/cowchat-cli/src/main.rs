@@ -225,6 +225,10 @@ enum Commands {
         /// loop terminates cleanly instead of blocking for another turn.
         #[arg(long, conflicts_with = "kind")]
         end: bool,
+        /// Mention an agent by agent-id (repeatable). Mentions route the message
+        /// to `addressed`-mode actor subscriptions.
+        #[arg(long = "mention")]
+        mentions: Vec<String>,
     },
 
     /// Post a "thinking out loud" pulse to a room (persisted to history,
@@ -1603,6 +1607,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             reply_to,
             kind,
             end,
+            mentions,
         } => {
             let client = connect(&cli).await?;
             let room_id = resolve_room_id(&client, room).await?;
@@ -1621,14 +1626,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &room_id,
                             message,
                             reply_to.as_deref(),
-                            vec![],
+                            mentions.clone(),
                             serde_json::json!({ "kind": k }),
                         )
                         .await?
                 }
                 None => {
                     client
-                        .send_message(&room_id, message, reply_to.as_deref(), vec![])
+                        .send_message(&room_id, message, reply_to.as_deref(), mentions.clone())
                         .await?
                 }
             };

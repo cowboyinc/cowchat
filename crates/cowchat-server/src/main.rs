@@ -80,6 +80,12 @@ enum Commands {
         #[arg(long)]
         require_local_auth: bool,
 
+        /// Allow webhook/wake destinations on private and loopback addresses.
+        /// Required for local `cowchat actor-host` receivers; leave off for
+        /// Internet-facing servers (SSRF protection).
+        #[arg(long)]
+        allow_private_webhooks: bool,
+
         /// SQLite database path
         #[arg(long, default_value = default_db_path())]
         db: PathBuf,
@@ -241,6 +247,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             trusted_proxy_ips,
             no_auth,
             require_local_auth,
+            allow_private_webhooks,
             db,
             key_file,
             app_control_stdin,
@@ -253,7 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 auth_key_path: key_file,
                 no_auth,
                 allow_keyless_local: !require_local_auth,
-                allow_private_webhooks: false,
+                allow_private_webhooks,
                 http_signup_enabled: enable_http_signup,
                 http_admin_secret,
                 http_allowed_origins: http_origins,
