@@ -1,3 +1,5 @@
+mod actor_work;
+
 use cowchat_core::*;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -378,6 +380,19 @@ pub async fn handle_frame(
             .await
         }
 
+        FrameType::SubscribeActor | FrameType::ClaimActorWork | FrameType::CompleteActorWork => {
+            actor_work::handle(
+                &frame,
+                agent_id,
+                agent_api_key,
+                no_auth,
+                store,
+                broker,
+                webhook_mgr,
+            )
+            .await
+        }
+
         // Webhook subscriptions
         FrameType::Subscribe => {
             handle_subscribe(
@@ -392,14 +407,32 @@ pub async fn handle_frame(
             .await
         }
         FrameType::Unsubscribe => {
-            handle_unsubscribe(req_id, frame.payload, store, agent_api_key).await
+            handle_unsubscribe(
+                req_id,
+                frame.payload,
+                store,
+                if no_auth { "no-auth" } else { agent_api_key },
+            )
+            .await
         }
         FrameType::ListSubscriptions => {
-            handle_list_subscriptions(req_id, frame.payload, store, agent_api_key).await
+            handle_list_subscriptions(
+                req_id,
+                frame.payload,
+                store,
+                if no_auth { "no-auth" } else { agent_api_key },
+            )
+            .await
         }
         FrameType::EnableSubscription => {
-            handle_enable_subscription(req_id, frame.payload, store, agent_api_key, webhook_mgr)
-                .await
+            handle_enable_subscription(
+                req_id,
+                frame.payload,
+                store,
+                if no_auth { "no-auth" } else { agent_api_key },
+                webhook_mgr,
+            )
+            .await
         }
 
         // Room invites
@@ -2550,6 +2583,25 @@ async fn handle_enable_subscription(
             req_id,
             ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
         );
+    }
+
+    // Actor eligibility is fixed at append. Retained work resumes as-is; generic
+    // webhook backfill would incorrectly turn unaddressed history into work.
+    match store.is_actor_subscription(&sub.subscription_id) {
+        Ok(true) => {
+            webhook_mgr.wake();
+            return Frame::ok(
+                req_id,
+                serde_json::json!({"subscription_id": sub.subscription_id, "status": "active"}),
+            );
+        }
+        Ok(false) => {}
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+            )
+        }
     }
 
     // Re-enqueue the backlog of messages past last_delivered_seq so the user

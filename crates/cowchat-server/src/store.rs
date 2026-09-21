@@ -1,3 +1,7 @@
+mod actor_work;
+#[cfg(test)]
+mod actor_work_tests;
+
 use chrono::{DateTime, Utc};
 use cowchat_core::{ChatMessage, Room};
 use dashmap::DashMap;
@@ -481,6 +485,7 @@ impl Store {
             }
         }
 
+        actor_work::initialize(&conn)?;
         Ok(())
     }
 
@@ -741,6 +746,7 @@ impl Store {
                 JOIN rooms r ON m.room_id = r.room_id
                 LEFT JOIN api_keys k ON r.owner_key = k.api_key
                 WHERE COALESCE(k.tier, 'free') = ?1
+                  AND NOT EXISTS (SELECT 1 FROM persistent_rooms p WHERE p.room_id = r.room_id)
                   AND m.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
                   AND NOT EXISTS (SELECT 1 FROM subscription_deliveries d
                                   WHERE d.message_id = m.message_id AND d.status = 'pending')
@@ -755,6 +761,7 @@ impl Store {
                 JOIN rooms r ON a.room_id = r.room_id
                 LEFT JOIN api_keys k ON r.owner_key = k.api_key
                 WHERE COALESCE(k.tier, 'free') = ?1
+                  AND NOT EXISTS (SELECT 1 FROM persistent_rooms p WHERE p.room_id = r.room_id)
                   AND a.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2, '-7 days')
                   AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.message_id = a.message_id)
             )",
@@ -811,6 +818,7 @@ impl Store {
                 inserted: false,
             });
         }
+        actor_work::validate_reply(&tx, append)?;
         // Pre-upgrade messages have no receipt or durable mentions. Never guess
         // their equality or let their IDs be reused while the row is retained.
         let exists: bool = tx.query_row(
@@ -862,12 +870,14 @@ impl Store {
                 "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                         only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
                         status, failure_count, created_at
-                 FROM subscriptions WHERE room_id = ?1 AND status = 'active'",
+                 FROM subscriptions WHERE room_id = ?1 AND (status = 'active' OR subscription_id IN (SELECT subscription_id FROM actor_subscriptions))",
             )?;
             let subscriptions = stmt.query_map([append.room_id], map_subscription_row)?;
             for subscription in subscriptions {
                 let (sub, _, _) = subscription?;
-                if crate::webhooks::matches_filter(&sub, &message) {
+                if crate::webhooks::matches_filter(&sub, &message)
+                    && actor_work::matches_actor(&tx, &sub.subscription_id, append)?
+                {
                     enqueue_delivery_on(
                         &tx,
                         &uuid::Uuid::new_v4().to_string(),
@@ -1962,7 +1972,7 @@ impl Store {
 
     pub fn abandon_delivery(&self, delivery_id: &str, reason: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("UPDATE subscription_deliveries SET status = 'abandoned', last_error = ?2 WHERE delivery_id = ?1",
+        conn.execute("UPDATE subscription_deliveries SET status = 'abandoned', last_error = ?2 WHERE delivery_id = ?1 AND status = 'pending'",
             params![delivery_id, reason])?;
         Ok(())
     }
@@ -1980,6 +1990,7 @@ impl Store {
             "SELECT delivery_id, subscription_id, message_seq, message_id, attempts
              FROM subscription_deliveries AS candidate
              WHERE next_attempt_at <= ?1 AND candidate.status = 'pending'
+               AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.subscription_id = candidate.subscription_id AND s.status = 'active')
                AND NOT EXISTS (
                    SELECT 1 FROM subscription_deliveries AS earlier
                    WHERE earlier.subscription_id = candidate.subscription_id
@@ -2013,7 +2024,8 @@ impl Store {
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT next_attempt_at FROM subscription_deliveries WHERE status = 'pending'
+            "SELECT next_attempt_at FROM subscription_deliveries d WHERE status = 'pending'
+             AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.subscription_id = d.subscription_id AND s.status = 'active')
              ORDER BY next_attempt_at ASC LIMIT 1",
         )?;
         let mut rows = stmt.query([])?;
@@ -2180,7 +2192,7 @@ fn enqueue_delivery_on(
 fn expire_deliveries(conn: &Connection, now: DateTime<Utc>) -> Result<(), StoreError> {
     let ts = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
     conn.execute("UPDATE subscription_deliveries SET status = 'abandoned', last_error = 'delivery deadline elapsed'
-                  WHERE status = 'pending' AND deadline_at <= ?1", [&ts])?;
+                  WHERE status = 'pending' AND deadline_at <= ?1 AND subscription_id NOT IN (SELECT subscription_id FROM actor_subscriptions)", [&ts])?;
     // Terminal rows carry no message body. Keep diagnostics for seven days.
     conn.execute(
         "DELETE FROM subscription_deliveries WHERE status = 'abandoned'
@@ -2448,6 +2460,9 @@ pub enum StoreError {
 
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("invalid actor work, duplicate subscription, or missing persisted reply")]
+    InvalidActorWork,
 
     #[error("message ID conflicts with an existing append")]
     MessageConflict,

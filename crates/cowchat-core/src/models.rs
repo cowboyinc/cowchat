@@ -576,3 +576,49 @@ pub struct TurnChangedPayload {
     pub turn_order: Vec<String>,
     pub reason: String,
 }
+
+/// Durable actor wake policy. LISTEN records history without starting inference.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeMode {
+    Always,
+    Addressed,
+    Listen,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeActorPayload {
+    pub room_id: String,
+    pub webhook_url: String,
+    pub secret: String,
+    pub mode: WakeMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorWork {
+    pub work_id: String,
+    pub room_id: String,
+    pub message_id: String,
+    pub message_seq: i64,
+    pub reply_message_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimActorWorkPayload {
+    pub subscription_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteActorWorkPayload {
+    pub subscription_id: String,
+    pub work_id: String,
+    pub outcome: ActorWorkOutcome,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorWorkOutcome {
+    Replied,
+    Skipped,
+    Failed,
+}

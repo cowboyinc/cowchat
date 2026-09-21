@@ -1247,6 +1247,74 @@ impl CowchatClient {
         }
     }
 
+    /// Create a durable processing subscription for this connection's identity.
+    pub async fn subscribe_actor(
+        &self,
+        payload: SubscribeActorPayload,
+    ) -> Result<String, ClientError> {
+        let response = self
+            .request(FrameType::SubscribeActor, serde_json::to_value(payload)?)
+            .await?;
+        serde_json::from_value(response.payload["subscription_id"].clone())
+            .map_err(ClientError::Json)
+    }
+
+    pub async fn claim_actor_work(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Option<ActorWork>, ClientError> {
+        let response = self
+            .request(
+                FrameType::ClaimActorWork,
+                serde_json::json!({"subscription_id": subscription_id}),
+            )
+            .await?;
+        serde_json::from_value(response.payload["work"].clone()).map_err(ClientError::Json)
+    }
+
+    pub async fn complete_actor_work(
+        &self,
+        subscription_id: &str,
+        work_id: &str,
+        outcome: ActorWorkOutcome,
+    ) -> Result<(), ClientError> {
+        self.request(
+            FrameType::CompleteActorWork,
+            serde_json::to_value(CompleteActorWorkPayload {
+                subscription_id: subscription_id.into(),
+                work_id: work_id.into(),
+                outcome,
+            })?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Encrypt once, persist this payload in the worker's outbox, then use
+    /// append_prepared_message for every retry. Re-encrypting changes the nonce.
+    pub fn prepare_actor_reply(&self, work: &ActorWork, content: &str) -> SendMessagePayload {
+        SendMessagePayload {
+            message_id: Some(work.reply_message_id.clone()),
+            room_id: work.room_id.clone(),
+            content: self.encrypt_content(&work.room_id, content),
+            reply_to: Some(work.message_id.clone()),
+            metadata: serde_json::json!({}),
+            mentions: vec![],
+        }
+    }
+
+    pub async fn append_prepared_message(
+        &self,
+        payload: &SendMessagePayload,
+    ) -> Result<ChatMessage, ClientError> {
+        let response = self
+            .request(FrameType::SendMessage, serde_json::to_value(payload)?)
+            .await?;
+        let mut message: ChatMessage = serde_json::from_value(response.payload)?;
+        self.decrypt_message(&mut message);
+        Ok(message)
+    }
+
     // --- Webhook subscriptions ---
 
     /// Register a webhook subscription. Returns the created `Subscription`

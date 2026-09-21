@@ -128,6 +128,9 @@ pub enum FrameType {
 
     // Webhook subscriptions (client -> server)
     Subscribe,
+    SubscribeActor,
+    ClaimActorWork,
+    CompleteActorWork,
     Unsubscribe,
     ListSubscriptions,
     EnableSubscription,

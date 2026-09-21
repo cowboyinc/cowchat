@@ -301,39 +301,57 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
         }
     };
     let (sub, _owner, secret) = sub_lookup;
+    let actor_wake = match inner.store.is_actor_subscription(&d.subscription_id) {
+        Ok(value) => value,
+        Err(e) => {
+            log::warn!("webhook actor lookup: {e}");
+            return;
+        }
+    };
     if sub.status != "active" {
+        if actor_wake {
+            return;
+        }
         let _ = inner
             .store
             .abandon_delivery(&d.delivery_id, "subscription inactive");
         return;
     }
 
-    let msg = match inner.store.get_message(&d.message_id) {
-        Ok(Some(m)) => m,
-        Ok(None) => {
-            log::warn!(
-                "webhook delivery: message {} not found, dropping",
-                d.message_id
-            );
-            let _ = inner
-                .store
-                .abandon_delivery(&d.delivery_id, "message missing");
-            return;
-        }
-        Err(e) => {
-            log::warn!("webhook delivery: get_message {}: {}", d.message_id, e);
-            return;
-        }
+    let msg = if actor_wake {
+        None
+    } else {
+        Some(match inner.store.get_message(&d.message_id) {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                log::warn!(
+                    "webhook delivery: message {} not found, dropping",
+                    d.message_id
+                );
+                let _ = inner
+                    .store
+                    .abandon_delivery(&d.delivery_id, "message missing");
+                return;
+            }
+            Err(e) => {
+                log::warn!("webhook delivery: get_message {}: {}", d.message_id, e);
+                return;
+            }
+        })
     };
 
     let webhook_id = Uuid::new_v4().to_string();
     let timestamp = chrono::Utc::now().timestamp();
-    let envelope = serde_json::json!({
-        "type": "cowchat.message.created",
-        "subscription_id": sub.subscription_id,
-        "room_id": sub.room_id,
-        "message": msg,
-    });
+    let envelope = if actor_wake {
+        serde_json::json!({"type": "cowchat.actor.wake", "subscription_id": sub.subscription_id, "room_id": sub.room_id})
+    } else {
+        serde_json::json!({
+            "type": "cowchat.message.created",
+            "subscription_id": sub.subscription_id,
+            "room_id": sub.room_id,
+            "message": msg,
+        })
+    };
     let body = serde_json::to_string(&envelope).unwrap_or_default();
     let signature = sign_request(&secret, &webhook_id, timestamp, &body);
 
@@ -350,9 +368,11 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
                 "failed",
                 Some(d.attempts + 1),
             );
-            let _ = inner
-                .store
-                .abandon_delivery(&d.delivery_id, "webhook address rejected");
+            if !actor_wake {
+                let _ = inner
+                    .store
+                    .abandon_delivery(&d.delivery_id, "webhook address rejected");
+            }
             return;
         }
     };
@@ -377,6 +397,16 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
     };
 
     match outcome {
+        Ok(()) if actor_wake => {
+            // A wake receipt is not processing completion. Keep reminding a
+            // crashed/failed receiver until its durable reply is acknowledged.
+            let _ = inner.store.reschedule_delivery(
+                &d.delivery_id,
+                chrono::Utc::now() + chrono::Duration::seconds(30),
+                0,
+                "awaiting actor completion",
+            );
+        }
         Ok(()) => {
             let _ = inner.store.delete_delivery(&d.delivery_id);
             let _ = inner
@@ -391,7 +421,15 @@ async fn process_delivery(inner: Arc<Inner>, d: crate::store::PendingDelivery) {
         Err(err) => {
             let new_attempts = d.attempts + 1;
             let idx = (new_attempts as usize).saturating_sub(1);
-            if idx >= RETRY_SCHEDULE_SECS.len() {
+            if actor_wake {
+                let delay = RETRY_SCHEDULE_SECS[idx.min(RETRY_SCHEDULE_SECS.len() - 1)];
+                let _ = inner.store.reschedule_delivery(
+                    &d.delivery_id,
+                    chrono::Utc::now() + chrono::Duration::seconds(delay as i64),
+                    new_attempts.min(5),
+                    &err,
+                );
+            } else if idx >= RETRY_SCHEDULE_SECS.len() {
                 // Give up on this delivery and mark the sub failed.
                 let _ = inner
                     .store
