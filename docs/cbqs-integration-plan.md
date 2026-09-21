@@ -93,12 +93,13 @@ recovery. Checkpoint handles cannot be deserialized from untrusted JSON. Archive
 segments now preserve raw CBQS headers, ciphertext payloads and signed receipts.
 `restore_archive` uses the same signature/linkage/digest verifier as broker
 replay before recreating a checkpoint. The bounded format and optional CBFS
-batch publisher are implemented; their owner-runtime/caller integration is not.
+batch publisher are implemented. The owner runtime now composes these pieces;
+public caller integration is still pending.
 
 This is not connected to `CowchatServer` or its public handlers yet. The reducer
 is an in-memory projection; it does not persist snapshots or provide archive
-durability. The archive and allocation modules are not wired into an owner
-runtime, and no live-tail subscription is implemented. No live-chain claim is made:
+durability. The owner runtime supplies the archive and allocation gates, but
+no live-tail subscription is implemented. No live-chain claim is made:
 the broker tests use actual WebSockets/RocksDB with a fixture node snapshot.
 
 Verified commands:
@@ -207,8 +208,8 @@ until that second pass. It checks the final verified checkpoint ID and sequence
 against the head, refuses a changed authoritative root, and returns no partial
 records on failure. One deadline and total segment/record/encoded-byte budgets
 bound the complete recovery. This first implementation fails closed when complete
-history exceeds those budgets; snapshot compaction and bounded serving memory
-are still future runtime work.
+history exceeds those budgets. Runtime writes also enforce those total budgets;
+snapshot compaction and serving a bounded tail of a larger history remain future work.
 
 The opt-in subprocess tests use three actual CBFS nodes (private volume, 2+1
 erasure coding), production QUIC/shard handlers and standalone Sled CAS metadata.
@@ -235,9 +236,8 @@ COWCHAT_TEST_CBFS_NODE=/absolute/cbfs/target/debug/cbfs-node \
 cargo clippy --locked -p cowchat-server --features cbfs-archive-test --all-targets -- -D warnings
 ```
 
-Hosted routes remain disabled. Durable append intents, cross-host ownership,
-actual handler wiring and measured
-finalized-authority batch latency remain required work.
+Hosted routes remain disabled. Public handler wiring, deployed cross-host
+ownership proof and measured finalized-authority batch latency remain required work.
 
 ### Ownership allocation boundary
 
@@ -282,8 +282,8 @@ signed fence ACK before it can recover, append or serve.
 Control provisioning writes an explicit epoch-zero record once for a genuinely
 new registered volume ID. Normal startup requires that record; it never infers
 epoch zero from an empty root. The application provisioning workflow must keep
-`initialize_new_volume` separate from recovery. Runtime integration must also
-enforce different control/archive volume IDs and bind writer identity to a unique
+`initialize_new_volume` separate from recovery. The runtime now
+enforces different control/archive volume IDs and binds writer identity to a unique
 worker incarnation/grant holder key, rather than a reusable hostname. Replacement
 workers promote with new identities; only retries of the same claim reuse its ID.
 
@@ -306,3 +306,52 @@ The complete focused suite now passes 26 checks with one ignored subprocess
 entry point exercised by the race. Formatting and strict all-targets clippy with
 `cbfs-archive-test` pass. The prior 276 default workspace tests also passed; these
 new allocation/archive changes are behind the optional feature.
+
+
+### Owner runtime and local pending batches
+
+`runtime.rs` now composes promotion, the fenced CBQS session, CBFS archive and
+an in-memory `OwnerState`. `WorkerIncarnation::fresh` generates a new holder key,
+writer identity and stable claim ID. Its consuming `bind` checks the allocated
+writer/claim/epoch/stream against the actual fenced session and its holder key.
+Runtime startup also requires distinct control/archive volume IDs and a journal
+bound to the same owner/stream. It verifies archived history, captures any
+surviving broker suffix durably, reconciles pending command receipts, and only
+then makes the projection available. A missing log segment still stops recovery.
+
+`intent.rs` reuses SQLite transactions for one worker-local pending batch. This
+is not a hosted room projection. The private journal stores exact prepared
+command IDs, ciphertext and lanes before appending, with finite record/byte
+limits, a stream identity binding and an exclusive process lock. Blocking disk
+operations run outside Tokio's executor threads. DELETE journal mode with
+synchronous EXTRA/fullfsync provides atomic durable transactions. The batch is
+cleared only after verified replay, archive publication and reducer application.
+A replacement on another host needs no copy of this journal; uncommitted sends
+remain the caller's responsibility to retry with their prepared ciphertext.
+
+The runtime serializes batches through its mutable API (the handler must use
+an async queue/mutex). Room lanes are allocated by stable owner/room key. Exact
+retries return the original receipt without another append or fanout event;
+changed ciphertext under an existing ID conflicts. Successful `CommittedBatch`
+values include only newly applied records for post-archive fanout. Failed or
+cancelled work retires the whole runtime, including reads, until fenced recovery.
+No API key or plaintext message body belongs in an intent or log command.
+
+The focused suite has 33 passing checks plus the separately invoked process-test
+entry point. New real-node runtime cases cover two-room batches and cold rebuild,
+held/cancelled archive publication, lost publication replies, partially appended
+batches, mismatched incarnations/holder keys, and journal locking/identity/bounds.
+A duplicated file-description test covers fork-to-exec lock inheritance: explicit
+unlock is required when dropping a journal. Removing that unlock or the runtime's
+cancellation retirement makes the corresponding regression test fail. The parallel node fixtures assign
+unique test addresses outside the usual client ephemeral range to avoid both
+QUIC client collisions and a sibling's not-yet-bound/restarting port.
+These are local runtime checks, not authenticated client or deployed-host proof.
+
+Next connect the actual create/encrypted-send/history handlers, reconnect access
+checks and HTTP bypass gates. Server configuration must bind authenticated keys
+to stable owner principals without putting credentials in commands. Unsupported
+mutations and local background workers must be refused in hosted mode. Actual
+frontend retries must retain their prepared IDs/ciphertext. Finalized promotion
+and archive ACK latency, provisioning, compaction, and actor/gateway integration
+remain unfinished. Nothing in this slice authorizes a merge or deployment.

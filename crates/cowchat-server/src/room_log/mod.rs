@@ -9,7 +9,11 @@ pub mod cbfs_archive;
 #[cfg(feature = "cbqs")]
 pub mod cbqs;
 #[cfg(feature = "cbfs-archive")]
+pub mod intent;
+#[cfg(feature = "cbfs-archive")]
 pub mod ownership;
+#[cfg(feature = "cbfs-archive")]
+pub mod runtime;
 
 use chrono::{DateTime, Utc};
 use cowchat_core::ChatMessage;
@@ -124,6 +128,26 @@ fn valid_identity(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
 }
 
+fn command_digest(command: &Command) -> Result<[u8; 32], ReplayError> {
+    let canonical = match &command.body {
+        CommandBody::CreateRoom { .. } => serde_json::to_vec(&command.body),
+        CommandBody::AppendMessage {
+            room_id,
+            agent_id,
+            ciphertext,
+            reply_to,
+            metadata,
+            mentions,
+            ..
+        } => serde_json::to_vec(&(room_id, agent_id, ciphertext, reply_to, metadata, mentions)),
+    }
+    .map_err(|_| ReplayError::Encoding)?;
+    let mut hash = Sha256::new();
+    hash.update(b"cowchat/owner-command/1\0");
+    hash.update(&canonical);
+    Ok(hash.finalize().into())
+}
+
 impl OwnerState {
     pub fn new(owner_id: String) -> Self {
         Self {
@@ -142,6 +166,24 @@ impl OwnerState {
     }
     pub fn room(&self, id: &str) -> Option<&RoomState> {
         self.rooms.get(id)
+    }
+
+    /// Look up an already applied command without adding another log record.
+    /// A changed body under an existing ID returns a conflict, never success.
+    pub fn receipt(&self, command: &Command) -> Result<Option<Outcome>, ReplayError> {
+        if command.owner_id != self.owner_id {
+            return Err(ReplayError::Owner);
+        }
+        let digest = command_digest(command)?;
+        Ok(self.receipts.get(&command.command_id).map(|receipt| {
+            if receipt.digest == digest {
+                receipt.outcome.clone()
+            } else {
+                Outcome::Rejected {
+                    reason: Rejection::CommandConflict,
+                }
+            }
+        }))
     }
 
     /// Apply one verified CBQS record. A business rejection consumes log order
@@ -176,23 +218,7 @@ impl OwnerState {
         // A resend may have a different attempted timestamp or display name;
         // only the first accepted presentation/time are retained, like local
         // append receipts. Identity, encrypted bytes and routing stay bound.
-        let canonical = match &command.body {
-            CommandBody::CreateRoom { .. } => serde_json::to_vec(&command.body),
-            CommandBody::AppendMessage {
-                room_id,
-                agent_id,
-                ciphertext,
-                reply_to,
-                metadata,
-                mentions,
-                ..
-            } => serde_json::to_vec(&(room_id, agent_id, ciphertext, reply_to, metadata, mentions)),
-        }
-        .map_err(|_| ReplayError::Encoding)?;
-        let mut hash = Sha256::new();
-        hash.update(b"cowchat/owner-command/1\0");
-        hash.update(&canonical);
-        let digest: [u8; 32] = hash.finalize().into();
+        let digest = command_digest(command)?;
         let outcome = if let Some(receipt) = self.receipts.get(&command.command_id) {
             if receipt.digest == digest {
                 receipt.outcome.clone()

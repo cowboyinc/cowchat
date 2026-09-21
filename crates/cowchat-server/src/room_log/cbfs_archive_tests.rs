@@ -2,6 +2,8 @@
 //! This proves local shard recovery, not chain finality or cross-host failover.
 #[path = "ownership_process_tests.rs"]
 mod ownership_process_tests;
+#[path = "runtime_tests.rs"]
+mod runtime_tests;
 use super::*;
 use crate::room_log::cbfs_archive::{ArchiveCommit, ArchiveError, CbfsArchive, RecoveryLimits};
 use crate::room_log::ownership::{OwnershipError, WriterRegistry};
@@ -44,10 +46,19 @@ impl Node {
             .map(PathBuf::from)
             .expect("build pinned cbfs-node and set COWCHAT_TEST_CBFS_NODE; no mock fallback");
         let directory = tempfile::tempdir().unwrap();
-        let addr = std::net::UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
+        // Distinct ports outside the usual client ephemeral range: otherwise
+        // a concurrent SDK QUIC client can take a discovered free ephemeral
+        // port before the child binds it. Never reuse a sibling's restart port.
+        static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(20_000);
+        let addr = loop {
+            let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+            assert!(port < 30_000, "test port range exhausted");
+            match std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port)) {
+                Ok(reservation) => break reservation.local_addr().unwrap(),
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(error) => panic!("test port discovery: {error}"),
+            }
+        };
         let config = directory.path().join("node.toml");
         std::fs::write(
             &config,

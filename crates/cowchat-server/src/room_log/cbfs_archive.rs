@@ -53,6 +53,8 @@ pub struct RecoveryLimits {
 pub struct RecoveredArchive {
     pub records: Vec<LogRecord>,
     pub checkpoint: Option<VerifiedCheckpoint>,
+    pub segments: usize,
+    pub encoded_bytes: usize,
 }
 
 fn verification_error(error: LogError) -> ArchiveError {
@@ -80,6 +82,10 @@ fn hex(bytes: &[u8; 32]) -> String {
 }
 
 impl CbfsArchive {
+    pub fn volume_id(&self) -> cbfs_types::VolumeId {
+        *self.volume.volume_id()
+    }
+
     /// `volume` must have been opened against authenticated authority and have
     /// a provisioned discovery head. Neither missing authority nor a missing
     /// head is interpreted as a new empty volume. Pending SDK journals are
@@ -337,6 +343,8 @@ impl CbfsArchive {
         let mut recovered = RecoveredArchive {
             records: Vec::new(),
             checkpoint: None,
+            segments: 0,
+            encoded_bytes: 0,
         };
         let Some(head) = &self.head else {
             return Ok(recovered);
@@ -382,6 +390,8 @@ impl CbfsArchive {
         if sequence != 0 {
             return Err(ArchiveError::HistoryGap);
         }
+        recovered.segments = segments.len();
+        recovered.encoded_bytes = limits.max_bytes - remaining_bytes;
         for bytes in segments.into_iter().rev() {
             let remaining_records = limits
                 .max_records

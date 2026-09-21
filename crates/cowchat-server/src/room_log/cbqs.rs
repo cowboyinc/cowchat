@@ -74,6 +74,7 @@ pub struct CbqsOwnerLog {
     instance: [u8; 32],
     stream: [u8; 32],
     epoch: u64,
+    holder: [u8; 32],
     usable: Arc<AtomicBool>,
     timeout: Duration,
 }
@@ -121,6 +122,10 @@ impl CbqsOwnerLog {
             return Err(LogError::Configuration);
         };
         let epoch = config.grant.policy_epoch;
+        let holder = config.holder.verifying_key().to_bytes();
+        if config.grant.holder_signing_key.key_bytes != holder {
+            return Err(LogError::Configuration);
+        }
         // REPLAY admits historic cursors; their progress/credit/close operations
         // and signed checkpoint reads additionally require CONSUME.
         let required = wire::CBQS_V2_VERB_APPEND
@@ -167,6 +172,7 @@ impl CbqsOwnerLog {
             instance,
             stream,
             epoch,
+            holder,
             usable: Arc::new(AtomicBool::new(true)),
             timeout,
         })
@@ -174,6 +180,10 @@ impl CbqsOwnerLog {
 
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    pub fn holder_key(&self) -> [u8; 32] {
+        self.holder
     }
 
     /// Keyed allocation is idempotent even if its response is lost. Room
