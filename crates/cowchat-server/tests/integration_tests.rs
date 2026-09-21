@@ -4179,10 +4179,14 @@ async fn actor_work_encrypted_tcp_room_wakes_without_content_and_completes() {
     let retry = actor.append_prepared_message(&prepared).await.unwrap();
     assert_eq!(first.message_id, retry.message_id);
     assert!(peer.append_prepared_message(&prepared).await.is_err());
-    actor
-        .complete_actor_work(&sub, &work.work_id, ActorWorkOutcome::Replied)
+    // Simulate restarting after append but before acknowledgment: an existing
+    // reply is immediately claimable and the executor must not run again.
+    assert!(actor
+        .process_actor_work(&sub, |_| async {
+            panic!("persisted reply must skip inference")
+        })
         .await
-        .unwrap();
+        .unwrap());
     assert!(actor.claim_actor_work(&sub).await.unwrap().is_none());
     let replay = peer.get_history(&room.room_id, 100, None).await.unwrap();
     assert_eq!(

@@ -601,6 +601,9 @@ pub struct ActorWork {
     pub message_id: String,
     pub message_seq: i64,
     pub reply_message_id: String,
+    /// Encrypted at rest and on the wire; the client decrypts after claiming.
+    pub input: ChatMessage,
+    pub existing_reply: Option<ChatMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

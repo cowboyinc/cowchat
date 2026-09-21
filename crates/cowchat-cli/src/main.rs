@@ -1,3 +1,5 @@
+mod actor_host;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use cowchat_client::{ClientError, CowchatClient};
 use cowchat_core::{ChatMessage, ErrorCode, FrameType};
@@ -202,6 +204,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run a local signed wake receiver and start the actor program only for work.
+    ActorHost(actor_host::ActorHostArgs),
     /// Send a message to a room
     Send {
         /// Room ID or name
@@ -886,7 +890,8 @@ fn resolve_agent_id(cli: &Cli) -> Option<String> {
 fn command_represents_agent_session(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::Send { .. }
+        Commands::ActorHost(_)
+            | Commands::Send { .. }
             | Commands::SendFile { .. }
             | Commands::Thinking { .. }
             | Commands::Wait { .. }
@@ -1591,6 +1596,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     require_stable_named_agent(&cli)?;
 
     match &cli.command {
+        Commands::ActorHost(args) => actor_host::run(&cli, args).await?,
         Commands::Send {
             room,
             message,

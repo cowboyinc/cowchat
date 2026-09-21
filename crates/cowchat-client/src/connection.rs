@@ -260,6 +260,8 @@ mod tests {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    #[error("room encryption: {0}")]
+    Encryption(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -1269,7 +1271,21 @@ impl CowchatClient {
                 serde_json::json!({"subscription_id": subscription_id}),
             )
             .await?;
-        serde_json::from_value(response.payload["work"].clone()).map_err(ClientError::Json)
+        let mut work: Option<ActorWork> = serde_json::from_value(response.payload["work"].clone())?;
+        if let Some(work) = &mut work {
+            for message in std::iter::once(&mut work.input).chain(work.existing_reply.iter_mut()) {
+                if cowchat_core::crypto::is_ciphertext(&message.content) {
+                    let secret = self
+                        .room_secret
+                        .as_deref()
+                        .ok_or_else(|| ClientError::Encryption("room secret is required".into()))?;
+                    message.content =
+                        cowchat_core::crypto::decrypt(secret, &message.room_id, &message.content)
+                            .map_err(|e| ClientError::Encryption(e.to_string()))?;
+                }
+            }
+        }
+        Ok(work)
     }
 
     pub async fn complete_actor_work(
@@ -1290,8 +1306,42 @@ impl CowchatClient {
         Ok(())
     }
 
-    /// Encrypt once, persist this payload in the worker's outbox, then use
-    /// append_prepared_message for every retry. Re-encrypting changes the nonce.
+    /// Process one claimed input. A worker may be invoked by a wake or kept warm.
+    /// A crash before append can repeat inference; external effects need their
+    /// own idempotency. Recovery after append skips inference entirely.
+    pub async fn process_actor_work<F, Fut>(
+        &self,
+        subscription_id: &str,
+        execute: F,
+    ) -> Result<bool, ClientError>
+    where
+        F: FnOnce(ActorWork) -> Fut,
+        Fut: std::future::Future<Output = Result<String, ClientError>>,
+    {
+        let Some(work) = self.claim_actor_work(subscription_id).await? else {
+            return Ok(false);
+        };
+        if work.existing_reply.is_none() {
+            let reply = execute(work.clone()).await?;
+            let payload = self.prepare_actor_reply(&work, &reply);
+            match self.append_prepared_message(&payload).await {
+                Ok(_) => {}
+                // Another claimant may have committed its reply first. Completion
+                // checks the stored reply's actor, room, and input before accepting.
+                Err(ClientError::Server {
+                    code: ErrorCode::MessageConflict,
+                    ..
+                }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.complete_actor_work(subscription_id, &work.work_id, ActorWorkOutcome::Replied)
+            .await?;
+        Ok(true)
+    }
+
+    /// Prepare once for an exact-byte append retry. After process restart, use
+    /// process_actor_work: a persisted reply wins without rerunning inference.
     pub fn prepare_actor_reply(&self, work: &ActorWork, content: &str) -> SendMessagePayload {
         SendMessagePayload {
             message_id: Some(work.reply_message_id.clone()),

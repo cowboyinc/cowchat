@@ -85,11 +85,19 @@ impl Store {
     ) -> Result<String, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM actor_subscriptions a JOIN subscriptions s USING(subscription_id)
-             WHERE s.room_id = ?1 AND a.agent_id = ?2)", params![room_id, agent_id], |r| r.get(0),
-        )?;
-        if exists {
+        let existing: Option<(String, String, String, String, String)> = tx.query_row(
+            "SELECT s.subscription_id, s.owner_key, s.webhook_url, s.secret, a.mode FROM actor_subscriptions a JOIN subscriptions s USING(subscription_id)
+             WHERE s.room_id = ?1 AND a.agent_id = ?2", params![room_id, agent_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).optional()?;
+        let mode = match mode {
+            WakeMode::Always => "always",
+            WakeMode::Addressed => "addressed",
+            WakeMode::Listen => "listen",
+        };
+        if let Some((id, owner, url, key, previous_mode)) = existing {
+            if owner == owner_key && url == webhook_url && key == secret && previous_mode == mode {
+                return Ok(id);
+            }
             return Err(StoreError::InvalidActorWork);
         }
         let id = uuid::Uuid::new_v4().to_string();
@@ -104,11 +112,6 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6, 'active', 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
             params![id, room_id, owner_key, webhook_url, secret, tip],
         )?;
-        let mode = match mode {
-            WakeMode::Always => "always",
-            WakeMode::Addressed => "addressed",
-            WakeMode::Listen => "listen",
-        };
         tx.execute("INSERT INTO actor_subscriptions(subscription_id, agent_id, mode, processed_seq) VALUES (?1, ?2, ?3, ?4)", params![id, agent_id, mode, tip])?;
         tx.execute(
             "INSERT OR IGNORE INTO persistent_rooms(room_id) VALUES (?1)",
@@ -148,7 +151,14 @@ impl Store {
         let Some((work_id, room_id, message_id, message_seq, until)) = work else {
             return Ok(None);
         };
-        if until.is_some_and(|t| t > now) {
+        let message = |id: &str| -> Result<Option<ChatMessage>, StoreError> {
+            Ok(tx.query_row("SELECT message_id, room_id, agent_id, agent_name, content, reply_to_message, metadata, created_at, seq FROM messages WHERE message_id = ?1", [id], map_message_row).optional()?)
+        };
+        let input = message(&message_id)?.ok_or(StoreError::InvalidActorWork)?;
+        let existing_reply = message(&format!("actor-reply:{work_id}"))?;
+        // A persisted reply needs only acknowledgment; do not wait out a dead
+        // worker's claim or run inference again in this recovery window.
+        if existing_reply.is_none() && until.is_some_and(|t| t > now) {
             return Ok(None);
         }
         tx.execute(
@@ -162,6 +172,8 @@ impl Store {
             room_id,
             message_id,
             message_seq,
+            input,
+            existing_reply,
         }))
     }
 

@@ -76,6 +76,11 @@ fn actor_work_restart_serializes_claims_and_reply_completion() {
     assert!(reply(&store, &first, "actor").unwrap().inserted);
     drop(store); // crash after reply, before ack
     let store = Store::open(&path).unwrap();
+    let recovered_reply = store.claim_actor_work(&sub, "actor", 401).unwrap().unwrap();
+    assert_eq!(
+        recovered_reply.existing_reply.unwrap().message_id,
+        first.reply_message_id
+    );
     assert!(!reply(&store, &first, "actor").unwrap().inserted);
     store
         .complete_actor_work(&sub, &first.work_id, "actor", ActorWorkOutcome::Replied)
