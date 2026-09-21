@@ -818,23 +818,32 @@ impl CowchatClient {
         mentions: Vec<String>,
         metadata: serde_json::Value,
     ) -> Result<ChatMessage, ClientError> {
-        let resp = self
-            .request(
-                FrameType::SendMessage,
-                serde_json::to_value(SendMessagePayload {
-                    message_id: None,
-                    room_id: room_id.to_string(),
-                    content: self.encrypt_content(room_id, content),
-                    reply_to: reply_to.map(String::from),
-                    metadata,
-                    mentions,
-                })
-                .unwrap(),
-            )
-            .await?;
-        let mut msg: ChatMessage = serde_json::from_value(resp.payload).unwrap();
-        self.decrypt_message(&mut msg);
-        Ok(msg)
+        let prepared = self.prepare_message(room_id, content, reply_to, mentions, metadata);
+        self.append_prepared_message(&prepared).await
+    }
+
+    /// Prepare one logical message, assigning its retry ID and encrypting only
+    /// once. Retain (or persist) this payload before the first append when a
+    /// caller needs to recover from an uncertain result or process restart.
+    /// Retry with `append_prepared_message` under the same authenticated agent
+    /// identity. Preparing again creates a new message and a fresh nonce.
+    /// Without a room secret this retains the normal local plaintext behavior.
+    pub fn prepare_message(
+        &self,
+        room_id: &str,
+        content: &str,
+        reply_to: Option<&str>,
+        mentions: Vec<String>,
+        metadata: serde_json::Value,
+    ) -> SendMessagePayload {
+        SendMessagePayload {
+            message_id: Some(uuid::Uuid::new_v4().to_string()),
+            room_id: room_id.to_string(),
+            content: self.encrypt_content(room_id, content),
+            reply_to: reply_to.map(String::from),
+            metadata,
+            mentions,
+        }
     }
 
     /// Broadcast a "thinking out loud" pulse to the room. Persisted to history
