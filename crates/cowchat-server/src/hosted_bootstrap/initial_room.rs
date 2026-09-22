@@ -36,6 +36,26 @@ pub struct InitialRoomProbe {
     key_epoch: u64,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserInitialRoom {
+    pub room_id: String,
+    pub name: String,
+    pub created_by: String,
+    pub preparation: RoomKeyPreparation,
+}
+
+struct PreparedInitialRoom {
+    room_id: String,
+    created_by: String,
+    preparation: RoomKeyPreparation,
+    deployment: CompiledRoomDeployment,
+    policy: SignedRoomKeyPolicyV1,
+    grants: Vec<SignedRoomKeyGrantV1>,
+    custody: Vec<u8>,
+    control_root: [u8; 32],
+}
+
 impl InitialRoomDemo {
     pub fn load(path: &Path) -> Result<Self> {
         ensure!(
@@ -69,11 +89,11 @@ fn member_key(path: &Path) -> Result<SigningKey> {
 /// Execute one initial room setup before the hosted listener starts. This is
 /// intentionally not a general retry/rotation API: the room must not exist and
 /// its preparation must describe epoch zero with no predecessor.
-pub async fn activate_initial_room(
+async fn prepare_initial_room(
     config: &Config,
     runtime: &mut OwnerRuntime,
-    input: InitialRoomDemo,
-) -> Result<InitialRoomProbe> {
+    input: BrowserInitialRoom,
+) -> Result<PreparedInitialRoom> {
     ensure!(
         uuid::Uuid::parse_str(&input.room_id).is_ok(),
         "initial room id must be a UUID"
@@ -83,10 +103,6 @@ pub async fn activate_initial_room(
     ensure!(
         !input.created_by.is_empty() && input.created_by.len() <= 128,
         "invalid initial room creator"
-    );
-    ensure!(
-        !input.probe_text.is_empty() && input.probe_text.len() <= 4 * 1024,
-        "invalid room demo probe text"
     );
     ensure!(
         runtime.state()?.room(&input.room_id).is_none(),
@@ -128,12 +144,6 @@ pub async fn activate_initial_room(
             && policy.policy.signing_hash() == preparation.policy_hash,
         "prepared room metadata does not match its signed publication"
     );
-    let member = member_key(&input.member_key_file)?;
-    ensure!(
-        Address::from_verifying_key(member.verifying_key()) == grants[0].grant.member,
-        "member key does not match the prepared room grant"
-    );
-
     let deployment = CompiledRoomDeployment::compiled()?;
     let expected_identity = deployment.identity(intent.identity.owner, input.room_id.clone());
     let publication = RoomPublication::new(
@@ -243,40 +253,102 @@ pub async fn activate_initial_room(
         "confirmed room root differs from publication receipt"
     );
     deployment.fence(&policy, confirmed.manifest_root()).await?;
-    // Prove the freshly admitted member can actually recover this custody
-    // object before the writer records the epoch as active.
-    let key = deployment
-        .open_room_key(&policy, grants[0].clone(), &custody, &member)
-        .await?;
-
-    let state = RoomKeyState {
-        transition_id: preparation.transition_id,
-        policy_epoch: preparation.policy_epoch,
-        key_epoch: preparation.key_epoch,
-        policy_hash: preparation.policy_hash,
+    Ok(PreparedInitialRoom {
+        room_id: input.room_id,
+        created_by: input.created_by,
+        preparation,
+        deployment,
+        policy,
+        grants,
+        custody,
         control_root: confirmed.manifest_root(),
+    })
+}
+
+async fn commit_initial_room(
+    runtime: &mut OwnerRuntime,
+    prepared: &PreparedInitialRoom,
+) -> Result<()> {
+    let state = RoomKeyState {
+        transition_id: prepared.preparation.transition_id,
+        policy_epoch: prepared.preparation.policy_epoch,
+        key_epoch: prepared.preparation.key_epoch,
+        policy_hash: prepared.preparation.policy_hash,
+        control_root: prepared.control_root,
     };
     let commit = Command {
-        owner_id,
-        command_id: hex::encode(preparation.transition_id),
+        owner_id: runtime.owner_id().to_owned(),
+        command_id: hex::encode(prepared.preparation.transition_id),
         timestamp: chrono::Utc::now(),
         body: CommandBody::CommitKeyEpoch {
-            room_id: input.room_id.clone(),
-            expected_policy_hash: preparation.expected_policy_hash,
+            room_id: prepared.room_id.clone(),
+            expected_policy_hash: prepared.preparation.expected_policy_hash,
             state,
         },
     };
     let committed = runtime.submit(vec![commit]).await?;
     accepted(&committed.outcomes[0], |outcome| {
         matches!(outcome, Outcome::KeyEpochCommitted { room_id, key_epoch }
-            if room_id == &input.room_id && *key_epoch == preparation.key_epoch)
-    })?;
+            if room_id == &prepared.room_id && *key_epoch == prepared.preparation.key_epoch)
+    })
+}
+
+/// Browser creation publishes and activates only owner-signed public objects
+/// and encrypted custody. The browser proves usability by opening through CBSS
+/// immediately after this response; no plaintext key reaches this process.
+pub async fn activate_browser_room(
+    config: &Config,
+    runtime: &mut OwnerRuntime,
+    input: BrowserInitialRoom,
+) -> Result<()> {
+    let prepared = prepare_initial_room(config, runtime, input).await?;
+    commit_initial_room(runtime, &prepared).await
+}
+
+/// Native executable proof keeps its stronger pre-commit recovery check while
+/// sharing the same setup, publication and fence path as the browser.
+pub async fn activate_initial_room(
+    config: &Config,
+    runtime: &mut OwnerRuntime,
+    input: InitialRoomDemo,
+) -> Result<InitialRoomProbe> {
+    ensure!(
+        !input.probe_text.is_empty() && input.probe_text.len() <= 4 * 1024,
+        "invalid room demo probe text"
+    );
+    let member = member_key(&input.member_key_file)?;
+    let probe_text = input.probe_text;
+    let prepared = prepare_initial_room(
+        config,
+        runtime,
+        BrowserInitialRoom {
+            room_id: input.room_id,
+            name: input.name,
+            created_by: input.created_by,
+            preparation: input.preparation,
+        },
+    )
+    .await?;
+    ensure!(
+        Address::from_verifying_key(member.verifying_key()) == prepared.grants[0].grant.member,
+        "member key does not match the prepared room grant"
+    );
+    let key = prepared
+        .deployment
+        .open_room_key(
+            &prepared.policy,
+            prepared.grants[0].clone(),
+            &prepared.custody,
+            &member,
+        )
+        .await?;
+    commit_initial_room(runtime, &prepared).await?;
     Ok(InitialRoomProbe {
-        room_id: input.room_id,
-        agent_id: input.created_by,
-        probe_text: input.probe_text,
+        room_id: prepared.room_id,
+        agent_id: prepared.created_by,
+        probe_text,
         key,
-        key_epoch: preparation.key_epoch,
+        key_epoch: prepared.preparation.key_epoch,
     })
 }
 

@@ -42,9 +42,12 @@ const SAFETY_MS: u64 = 30_000;
 #[cfg(feature = "room-key-demo")]
 mod initial_room;
 #[cfg(feature = "room-key-demo")]
-pub use initial_room::{activate_initial_room, probe_initial_room, InitialRoomDemo};
+pub use initial_room::{
+    activate_browser_room, activate_initial_room, probe_initial_room, BrowserInitialRoom,
+    InitialRoomDemo,
+};
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub worker_dir: PathBuf,
@@ -67,7 +70,80 @@ pub struct Config {
     session_seconds: u64,
 }
 
-#[derive(Deserialize)]
+/// Browser room-key coordinator. It owns only hosted service configuration;
+/// generated room keys and member signing keys remain in the browser.
+#[cfg(feature = "room-key-demo")]
+#[derive(Clone)]
+pub struct HostedRoomKeys {
+    config: Config,
+}
+
+#[cfg(feature = "room-key-demo")]
+impl HostedRoomKeys {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            config: config.clone(),
+        }
+    }
+
+    pub async fn initial_context(
+        &self,
+        owner: Address,
+        room_id: String,
+    ) -> Result<serde_json::Value> {
+        let auth = authority(&self.config).await?;
+        let ctx = volume_with_access(
+            &self.config,
+            &auth,
+            &self.config.control_volume,
+            AccessMode::ReadOnly,
+            false,
+        )
+        .await?;
+        let root = ctx.volume.manifest_root().0;
+        ctx.close().await;
+        cbssd::room_deployment::CompiledRoomDeployment::compiled()?
+            .initial_browser_context(owner, room_id, root)
+    }
+
+    pub async fn attest_setup(&self, signed_setup: &[u8]) -> Result<Vec<String>> {
+        Ok(cbssd::room_deployment::CompiledRoomDeployment::compiled()?
+            .attest_browser_setup(signed_setup)
+            .await?
+            .into_iter()
+            .map(hex::encode)
+            .collect())
+    }
+
+    pub async fn activate(
+        &self,
+        runtime: &mut OwnerRuntime,
+        input: BrowserInitialRoom,
+    ) -> Result<()> {
+        activate_browser_room(&self.config, runtime, input).await
+    }
+
+    pub fn open_context(
+        &self,
+        policy: &cowboy_protocol_codec::room_policy::SignedRoomKeyPolicyV1,
+        grant: &cowboy_protocol_codec::room_release::SignedRoomKeyGrantV1,
+        custody: &[u8],
+    ) -> Result<serde_json::Value> {
+        cbssd::room_deployment::CompiledRoomDeployment::compiled()?
+            .browser_open_context(policy, grant, custody)
+    }
+
+    pub async fn relay_open(&self, request: &[u8]) -> Result<Vec<String>> {
+        Ok(cbssd::room_deployment::CompiledRoomDeployment::compiled()?
+            .relay_browser_open(request)
+            .await?
+            .into_iter()
+            .map(hex::encode)
+            .collect())
+    }
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrokerPin {
     address: SocketAddr,

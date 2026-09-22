@@ -191,6 +191,17 @@ fn key_cutover_requires_monotone_exact_predecessor_and_stable_transition_id() {
         apply(&mut state, 0, &initial),
         Outcome::KeyEpochCommitted { key_epoch: 0, .. }
     ));
+    assert!(state.room("one").unwrap().key_preparation.is_none());
+    assert_eq!(
+        state
+            .room("one")
+            .unwrap()
+            .key_publication
+            .as_ref()
+            .unwrap()
+            .key_epoch,
+        0
+    );
     let wrong = key_cutover("one", 1, Some([99; 32]));
     assert_eq!(
         apply(&mut state, 0, &wrong),

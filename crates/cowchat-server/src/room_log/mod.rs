@@ -123,6 +123,11 @@ pub struct RoomState {
     pub key_state: Option<RoomKeyState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_preparation: Option<Box<RoomKeyPreparation>>,
+    /// Last committed public policy, grants and encrypted custody. Browsers
+    /// need these authenticated bytes to recover the active key from CBSS.
+    /// This never contains the plaintext room key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_publication: Option<Box<RoomKeyPreparation>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -343,6 +348,7 @@ impl OwnerState {
                         messages: Vec::new(),
                         key_state: None,
                         key_preparation: None,
+                        key_publication: None,
                     },
                 );
                 Outcome::RoomCreated {
@@ -445,7 +451,7 @@ impl OwnerState {
                     return rejected(Rejection::InvalidKeyTransition);
                 }
                 room.key_state = Some(state.clone());
-                room.key_preparation = None;
+                room.key_publication = room.key_preparation.take();
                 Outcome::KeyEpochCommitted {
                     room_id: room_id.clone(),
                     key_epoch: state.key_epoch,

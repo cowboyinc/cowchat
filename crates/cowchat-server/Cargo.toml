@@ -74,7 +74,7 @@ cbfs-registry-proto = { git = "https://github.com/cowboyinc/cbfs.git", rev = "21
 anyhow = { version = "1", optional = true }
 hex = { version = "0.4", optional = true }
 zeroize = { version = "1", optional = true }
-cbssd = { git = "https://github.com/cowboyinc/cbss.git", rev = "cf7ec685a80f3ca49de84c47530556ba0c05b1d9", features = ["cowchat-room-release"], optional = true }
+cbssd = { git = "https://github.com/cowboyinc/cbss.git", rev = "92e2527669374e8b2d9bdb5ab16bbd0498e37dd2", features = ["cowchat-room-release"], optional = true }
 cowchat-client = { workspace = true, optional = true }
 k256 = { version = "0.13", optional = true }
 

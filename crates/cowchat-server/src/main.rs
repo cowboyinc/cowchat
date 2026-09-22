@@ -324,6 +324,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let (config, _guard) = prepared.as_ref().expect("hosted preflight");
                     let (runtime, deadline) =
                         cowchat_server::hosted_bootstrap::recover(config, expected_epoch).await?;
+                    #[cfg(feature = "room-key-demo")]
+                    let server = CowchatServer::new_hosted_with_room_keys(
+                        config.server_config(),
+                        runtime,
+                        cowchat_server::hosted_bootstrap::HostedRoomKeys::new(config),
+                    )?;
+                    #[cfg(not(feature = "room-key-demo"))]
                     let server = CowchatServer::new_hosted(config.server_config(), runtime)?;
                     log::info!("Hosted recovery complete; starting bounded authenticated session");
                     tokio::select! {
@@ -349,7 +356,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         input,
                     )
                     .await?;
-                    let server = CowchatServer::new_hosted(config.server_config(), runtime)?;
+                    let server = CowchatServer::new_hosted_with_room_keys(
+                        config.server_config(),
+                        runtime,
+                        cowchat_server::hosted_bootstrap::HostedRoomKeys::new(config),
+                    )?;
                     let server_task = server.run();
                     tokio::pin!(server_task);
                     let (message_id, seq) = tokio::select! {

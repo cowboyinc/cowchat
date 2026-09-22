@@ -7,7 +7,7 @@ use crate::{
     reconnect::ReconnectManager,
     room_log::{
         runtime::{OwnerRuntime, OwnerView, RuntimeError},
-        Command, CommandBody, Outcome, Rejection, RoomState,
+        Command, CommandBody, Outcome, Rejection, RoomKeyPreparation, RoomState,
     },
     store::Store,
 };
@@ -15,11 +15,71 @@ use cowchat_core::*;
 use serde::de::DeserializeOwned;
 use std::{collections::HashSet, sync::Arc};
 
+#[cfg(feature = "room-key-demo")]
+use commonware_codec::Decode;
+#[cfg(feature = "room-key-demo")]
+use cowboy_protocol_codec::{
+    room_policy::SignedRoomKeyPolicyV1, room_release::SignedRoomKeyGrantV1, Address,
+};
+
+#[cfg(feature = "room-key-demo")]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrepareRoomKeyPayload {
+    room_id: String,
+    name: String,
+    owner: String,
+}
+
+#[cfg(feature = "room-key-demo")]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomKeyBytesPayload {
+    request: String,
+}
+
+#[cfg(feature = "room-key-demo")]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomKeyContextPayload {
+    room_id: String,
+    member: String,
+}
+
+#[cfg(feature = "room-key-demo")]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivateRoomKeyPayload {
+    room_id: String,
+    name: String,
+    preparation: RoomKeyPreparation,
+}
+
+#[cfg(feature = "room-key-demo")]
+fn bounded_hex(value: &str, max_bytes: usize) -> Option<Vec<u8>> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.is_empty() || value.len() > max_bytes * 2 || !value.len().is_multiple_of(2) {
+        return None;
+    }
+    hex::decode(value).ok()
+}
+
+#[cfg(feature = "room-key-demo")]
+fn parse_address(value: &str) -> Option<Address> {
+    bounded_hex(value, 20)?
+        .try_into()
+        .ok()
+        .map(Address::from_bytes)
+        .filter(|address| *address != Address::ZERO)
+}
+
 pub struct HostedOwner {
     owner_id: String,
     api_key: String,
     writer: tokio::sync::Mutex<OwnerRuntime>,
     view: Arc<OwnerView>,
+    #[cfg(feature = "room-key-demo")]
+    room_keys: Option<crate::hosted_bootstrap::HostedRoomKeys>,
 }
 
 fn error(id: Option<&str>, code: ErrorCode, message: &str) -> Frame {
@@ -94,7 +154,18 @@ impl HostedOwner {
             api_key,
             view: runtime.view(),
             writer: tokio::sync::Mutex::new(runtime),
+            #[cfg(feature = "room-key-demo")]
+            room_keys: None,
         })
+    }
+
+    #[cfg(feature = "room-key-demo")]
+    pub(crate) fn with_room_keys(
+        mut self,
+        room_keys: crate::hosted_bootstrap::HostedRoomKeys,
+    ) -> Self {
+        self.room_keys = Some(room_keys);
+        self
     }
 
     /// Called under existing synchronous lifecycle guards. Reads only committed
@@ -148,6 +219,19 @@ impl HostedOwner {
         match frame.frame_type {
             FrameType::Ping => Ok(Frame::pong(id)),
             FrameType::CreateRoom => self.create(frame, agent_id, broker, store, reconnect).await,
+            #[cfg(feature = "room-key-demo")]
+            FrameType::PrepareRoomKey => self.prepare_room_key(frame).await,
+            #[cfg(feature = "room-key-demo")]
+            FrameType::AttestRoomKeySetup => self.attest_room_key_setup(frame).await,
+            #[cfg(feature = "room-key-demo")]
+            FrameType::ActivateRoomKey => {
+                self.activate_room_key(frame, agent_id, broker, store, reconnect)
+                    .await
+            }
+            #[cfg(feature = "room-key-demo")]
+            FrameType::GetRoomKeyContext => self.room_key_context(frame),
+            #[cfg(feature = "room-key-demo")]
+            FrameType::RelayRoomKeyOpen => self.relay_room_key_open(frame).await,
             FrameType::SendMessage => {
                 self.send(frame, agent_id, agent_name, broker, store, rates)
                     .await
@@ -315,6 +399,191 @@ impl HostedOwner {
             .room(room)
             .map(room_summary)
             .ok_or_else(|| error(id, ErrorCode::RoomNotFound, "Room not found"))
+    }
+
+    #[cfg(feature = "room-key-demo")]
+    fn room_keys(
+        &self,
+        id: Option<&str>,
+    ) -> Result<&crate::hosted_bootstrap::HostedRoomKeys, Frame> {
+        self.room_keys.as_ref().ok_or_else(|| {
+            error(
+                id,
+                ErrorCode::UnsupportedProtocol,
+                "Automatic room keys are unavailable",
+            )
+        })
+    }
+
+    #[cfg(feature = "room-key-demo")]
+    async fn prepare_room_key(&self, frame: &Frame) -> Result<Frame, Frame> {
+        let id = frame.id.as_deref();
+        let payload: PrepareRoomKeyPayload = parse(frame)?;
+        if uuid::Uuid::parse_str(&payload.room_id).is_err()
+            || crate::store::normalize_room_name(&payload.name).is_err()
+            || self
+                .view
+                .read()
+                .map_err(|_| unavailable(id))?
+                .room(&payload.room_id)
+                .is_some()
+        {
+            return Err(error(
+                id,
+                ErrorCode::InvalidPayload,
+                "Invalid new room key request",
+            ));
+        }
+        let owner = parse_address(&payload.owner)
+            .ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Invalid room owner"))?;
+        let context = self
+            .room_keys(id)?
+            .initial_context(owner, payload.room_id)
+            .await
+            .map_err(|_| unavailable(id))?;
+        Ok(Frame::ok(id, context))
+    }
+
+    #[cfg(feature = "room-key-demo")]
+    async fn attest_room_key_setup(&self, frame: &Frame) -> Result<Frame, Frame> {
+        let id = frame.id.as_deref();
+        let payload: RoomKeyBytesPayload = parse(frame)?;
+        let bytes = bounded_hex(&payload.request, 32 * 1024)
+            .ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Invalid signed room setup"))?;
+        let responses = self
+            .room_keys(id)?
+            .attest_setup(&bytes)
+            .await
+            .map_err(|_| unavailable(id))?;
+        Ok(Frame::ok(id, serde_json::json!({"responses": responses})))
+    }
+
+    #[cfg(feature = "room-key-demo")]
+    async fn activate_room_key(
+        &self,
+        frame: &Frame,
+        agent_id: &str,
+        broker: &Broker,
+        store: &Store,
+        reconnect: &ReconnectManager,
+    ) -> Result<Frame, Frame> {
+        let id = frame.id.as_deref();
+        let payload: ActivateRoomKeyPayload = parse(frame)?;
+        let normalized_name = crate::store::normalize_room_name(&payload.name)
+            .map_err(|_| error(id, ErrorCode::InvalidPayload, "Invalid room activation"))?;
+        if uuid::Uuid::parse_str(&payload.room_id).is_err() {
+            return Err(error(
+                id,
+                ErrorCode::InvalidPayload,
+                "Invalid room activation",
+            ));
+        }
+        let limits = TierLimits::for_tier(
+            &store
+                .get_key_tier(&self.api_key)
+                .unwrap_or_else(|_| "free".into()),
+        );
+        let mut writer = self.writer.lock().await;
+        if let Some(existing) = writer
+            .state()
+            .map_err(|_| unavailable(id))?
+            .room(&payload.room_id)
+        {
+            if existing.name == normalized_name
+                && existing.key_publication.as_deref() == Some(&payload.preparation)
+                && existing.key_state.is_some()
+            {
+                let room = room_summary(existing);
+                return Ok(Frame::ok(id, serde_json::to_value(room).unwrap()));
+            }
+            return Err(error(
+                id,
+                ErrorCode::MessageConflict,
+                "Room activation conflicts with committed state",
+            ));
+        }
+        if writer.state().map_err(|_| unavailable(id))?.rooms().len() as u64 >= limits.max_rooms {
+            return Err(error(id, ErrorCode::RateLimitRooms, "Room limit exceeded"));
+        }
+        self.room_keys(id)?
+            .activate(
+                &mut writer,
+                crate::hosted_bootstrap::BrowserInitialRoom {
+                    room_id: payload.room_id.clone(),
+                    name: payload.name,
+                    created_by: agent_id.into(),
+                    preparation: payload.preparation,
+                },
+            )
+            .await
+            .map_err(|_| unavailable(id))?;
+        drop(writer);
+        let room = self.require_room(id, &payload.room_id)?;
+        let event = Frame::event(FrameType::RoomCreated, serde_json::to_value(&room).unwrap());
+        let buffered = reconnect.buffer_visible_room_event(
+            "private",
+            Some(&self.api_key),
+            &HashSet::new(),
+            false,
+            &event,
+        );
+        let recipients = broker
+            .agents
+            .iter()
+            .filter(|agent| agent.api_key == self.api_key && !buffered.contains(agent.key()))
+            .map(|agent| agent.key().clone())
+            .collect::<Vec<_>>();
+        for agent in recipients {
+            broker.send_to_agent(&agent, event.clone());
+        }
+        Ok(Frame::ok(id, serde_json::to_value(room).unwrap()))
+    }
+
+    #[cfg(feature = "room-key-demo")]
+    fn room_key_context(&self, frame: &Frame) -> Result<Frame, Frame> {
+        let id = frame.id.as_deref();
+        let payload: RoomKeyContextPayload = parse(frame)?;
+        let member = parse_address(&payload.member)
+            .ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Invalid room member"))?;
+        let state = self.view.read().map_err(|_| unavailable(id))?;
+        let room = state
+            .room(&payload.room_id)
+            .ok_or_else(|| error(id, ErrorCode::RoomNotFound, "Room not found"))?;
+        let publication = room
+            .key_publication
+            .as_ref()
+            .ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Room key is not active"))?;
+        let policy = SignedRoomKeyPolicyV1::decode_canonical(
+            &bounded_hex(&publication.signed_policy, 96 * 1024).ok_or_else(|| unavailable(id))?,
+        )
+        .map_err(|_| unavailable(id))?;
+        let grant = publication
+            .grants
+            .iter()
+            .filter_map(|value| bounded_hex(value, 178))
+            .filter_map(|bytes| SignedRoomKeyGrantV1::decode_cfg(bytes.as_slice(), &()).ok())
+            .find(|grant| grant.grant.member == member)
+            .ok_or_else(|| error(id, ErrorCode::AccessDenied, "Wallet is not a room member"))?;
+        let custody = bounded_hex(&publication.custody, 157).ok_or_else(|| unavailable(id))?;
+        let context = self
+            .room_keys(id)?
+            .open_context(&policy, &grant, &custody)
+            .map_err(|_| unavailable(id))?;
+        Ok(Frame::ok(id, context))
+    }
+
+    #[cfg(feature = "room-key-demo")]
+    async fn relay_room_key_open(&self, frame: &Frame) -> Result<Frame, Frame> {
+        let id = frame.id.as_deref();
+        let payload: RoomKeyBytesPayload = parse(frame)?;
+        let bytes = bounded_hex(&payload.request, 64 * 1024)
+            .ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Invalid room-key request"))?;
+        let responses = self
+            .room_keys(id)?
+            .relay_open(&bytes)
+            .await
+            .map_err(|_| unavailable(id))?;
+        Ok(Frame::ok(id, serde_json::json!({"responses": responses})))
     }
 
     async fn create(
