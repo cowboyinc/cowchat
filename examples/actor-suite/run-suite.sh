@@ -25,7 +25,7 @@ for seat in "${!ACTOR[@]}"; do
     actor-host "$ROOM" --listen 127.0.0.1:$port -- python3 ${ACTOR[$seat]} >"$DIR/$seat.log" 2>&1 &
 done
 sleep 1.5
-send() { $CC --name Chad --agent-id chad send "$ROOM" "$1" --mention "$2" >/dev/null; }
+send() { $CC --name bob --agent-id bob send "$ROOM" "$1" --mention "$2" >/dev/null; }
 # magic8 expected computed from the actor's own hash so it stays reproducible
 M8Q="will the suite pass"
 M8EXP=$(python3 -c "import hashlib;A=['It is certain','Reply hazy, try again','Don\\'t count on it','Yes definitely','My sources say no','Signs point to yes','Outlook not so good','Without a doubt'];print(A[int(hashlib.sha256('$M8Q'.encode()).hexdigest(),16)%8])")
@@ -39,7 +39,7 @@ CASES=(
 CASES+=("$(printf 'magic8\t%s\t%s' "$M8Q" "$M8EXP")")
 for c in "${CASES[@]}"; do IFS=$'\t' read -r seat inp exp <<<"$c"; send "$inp" "$seat"; sleep 0.15; done
 sleep 5
-$CC --name Chad --agent-id chad history "$ROOM" --limit 300 > "$DIR/hist.txt" 2>&1
+$CC --name bob --agent-id bob history "$ROOM" --limit 300 > "$DIR/hist.txt" 2>&1
 pass=0; fail=0; fails=()
 for c in "${CASES[@]}"; do
   IFS=$'\t' read -r seat inp exp <<<"$c"

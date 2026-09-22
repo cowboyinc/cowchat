@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Actor-to-actor messaging: actors mention each OTHER (not just reply to Chad).
+# Actor-to-actor messaging: actors mention each OTHER.
 # ping-pong bounces a decrementing counter between two actors until it stops;
 # relay forwards a growing path A->B->C. Fully local.
 set -uo pipefail
@@ -27,11 +27,11 @@ spawn coord   python3 "$A/fanout_actor.py" worker-up worker-rev
 spawn worker-up  python3 "$A/upper_actor.py"
 spawn worker-rev python3 "$A/reverse_actor.py"
 sleep 1.5
-$CC --name Chad --agent-id chad send "$ROOM" "3"     --mention pinger  >/dev/null
-$CC --name Chad --agent-id chad send "$ROOM" "start" --mention relay-a >/dev/null
-$CC --name Chad --agent-id chad send "$ROOM" "hello" --mention coord   >/dev/null
+$CC --name bob --agent-id bob send "$ROOM" "3"     --mention pinger  >/dev/null
+$CC --name bob --agent-id bob send "$ROOM" "start" --mention relay-a >/dev/null
+$CC --name bob --agent-id bob send "$ROOM" "hello" --mention coord   >/dev/null
 sleep 6
-$CC --name Chad --agent-id chad history "$ROOM" --limit 200 > "$DIR/hist.txt" 2>&1
+$CC --name bob --agent-id bob history "$ROOM" --limit 200 > "$DIR/hist.txt" 2>&1
 pass=0; fail=0; fails=()
 check() { if grep -qF "$1" "$DIR/hist.txt"; then pass=$((pass+1)); else fail=$((fail+1)); fails+=("$2 (looked for '$1')"); fi; }
 check "pinger: pinger 0"    "ping-pong decremented to 0"
