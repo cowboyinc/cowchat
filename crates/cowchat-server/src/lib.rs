@@ -8,8 +8,13 @@ pub mod auth;
 pub mod broker;
 pub mod connection;
 pub mod handler;
+#[cfg(feature = "cbfs-archive")]
+pub mod hosted;
+#[cfg(feature = "hosted-bootstrap")]
+pub mod hosted_bootstrap;
 pub mod rate_limit;
 pub mod reconnect;
+pub mod room_log;
 pub mod server;
 pub mod store;
 pub mod tasks;

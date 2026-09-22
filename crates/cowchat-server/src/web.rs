@@ -83,6 +83,7 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     let allowed_origins = state.allowed_origins.clone();
+    let hosted = state.broker.is_hosted();
     let router = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/keys", post(create_api_key))
@@ -99,7 +100,22 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/blobs/{blob_id}", get(download_blob))
         .fallback(static_handler)
-        .with_state(state);
+        .with_state(state)
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                // Initial hosted slice exposes the authenticated frame protocol.
+                // Refuse all REST storage/administration routes, including invite
+                // redemption and blobs that bypass the frame dispatcher.
+                if hosted && request.uri().path().starts_with("/api/") {
+                    return (
+                        StatusCode::NOT_IMPLEMENTED,
+                        "This HTTP operation is not enabled in hosted mode",
+                    )
+                        .into_response();
+                }
+                next.run(request).await
+            },
+        ));
     let origins = allowed_origins
         .iter()
         .filter_map(|origin| HeaderValue::from_str(origin).ok())

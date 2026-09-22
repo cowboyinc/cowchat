@@ -102,6 +102,10 @@ pub struct RegisterPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRoomPayload {
+    /// Stable creation identity for hosted owner logs. Retain the prepared
+    /// payload across retries; local servers still assign their own room ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<String>,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,

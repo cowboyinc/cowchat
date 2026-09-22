@@ -36,6 +36,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Provision new private hosted control/archive volumes (no listener).
+    #[cfg(feature = "hosted-bootstrap")]
+    HostedInit {
+        #[arg(long)]
+        config: PathBuf,
+        /// Explicit reserve for EACH of the two volumes.
+        #[arg(long)]
+        reserve_wei: u128,
+        #[arg(long, default_value_t = 2)]
+        erasure_k: u8,
+        #[arg(long, default_value_t = 1)]
+        erasure_m: u8,
+    },
+    /// Claim one expected writer epoch, recover, then serve hosted rooms.
+    #[cfg(feature = "hosted-bootstrap")]
+    HostedServe {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        expected_epoch: u64,
+    },
     /// Start the Cowchat server
     Serve {
         /// Unix socket path
@@ -229,96 +250,149 @@ fn start_app_control_stdin(
         })
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-
-    match cli.command {
-        Commands::Serve {
-            socket,
-            tcp,
-            no_tcp,
-            http,
-            enable_http_signup,
-            http_admin_secret,
-            http_origins,
-            trusted_proxy_ips,
-            no_auth,
-            require_local_auth,
-            allow_private_webhooks,
-            db,
-            key_file,
-            app_control_stdin,
-        } => {
-            let config = ServerConfig {
-                socket_path: socket,
-                tcp_addr: if no_tcp { None } else { Some(tcp) },
-                http_addr: http.clone(),
-                db_path: db,
-                auth_key_path: key_file,
-                no_auth,
-                allow_keyless_local: !require_local_auth,
-                allow_private_webhooks,
-                http_signup_enabled: enable_http_signup,
-                http_admin_secret,
-                http_allowed_origins: http_origins,
-                trusted_proxy_ips,
-                blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
-            };
-
-            let server = CowchatServer::new(config)?;
-            if no_auth {
-                log::info!("Running in NO-AUTH mode (open access)");
-            } else {
-                if require_local_auth {
-                    log::info!("Local API-key authentication is required");
-                } else {
-                    log::info!("Local UDS and loopback TCP connections are keyless");
+    #[cfg(feature = "hosted-bootstrap")]
+    let prepared = match &cli.command {
+        Commands::HostedInit { config, .. } | Commands::HostedServe { config, .. } => {
+            let config = cowchat_server::hosted_bootstrap::Config::load(config)?;
+            let guard = config.prepare_state()?;
+            // This is the single-threaded process entrypoint, before logger or
+            // Tokio initialization. These SDK directories are worker-local.
+            std::env::set_var(
+                "CBFS_PENDING_DIFF_DIR",
+                config.worker_dir.join("cbfs-pending"),
+            );
+            std::env::set_var(
+                "CBFS_PATH_TAG_KEY_DIR",
+                config.worker_dir.join("cbfs-path-tags"),
+            );
+            Some((config, guard))
+        }
+        _ => None,
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            match cli.command {
+                #[cfg(feature = "hosted-bootstrap")]
+                Commands::HostedInit {
+                    reserve_wei,
+                    erasure_k,
+                    erasure_m,
+                    ..
+                } => {
+                    let (config, _guard) = prepared.as_ref().expect("hosted preflight");
+                    cowchat_server::hosted_bootstrap::initialize(
+                        config,
+                        reserve_wei,
+                        erasure_k,
+                        erasure_m,
+                    )
+                    .await?;
+                    log::info!("Hosted volumes initialized at writer epoch 0; no listener started");
                 }
-                if http.is_some() {
-                    log::info!(
-                        "API key for remote HTTP/WebSocket clients: {}",
-                        server.api_key()
-                    );
-                }
-            }
-            if app_control_stdin {
-                let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel();
-                let _app_control_thread = start_app_control_stdin(shutdown_tx)?;
-                tokio::select! {
-                    result = server.run() => result?,
-                    command = shutdown_rx.recv() => {
-                        match command {
-                            Some(command) => log::info!(
-                                "Shutting down from Cowchat app control command: {:?}",
-                                command
-                            ),
-                            None => log::warn!(
-                                "Cowchat app control channel ended; shutting down helper"
-                            ),
+                #[cfg(feature = "hosted-bootstrap")]
+                Commands::HostedServe { expected_epoch, .. } => {
+                    let (config, _guard) = prepared.as_ref().expect("hosted preflight");
+                    let (runtime, deadline) =
+                        cowchat_server::hosted_bootstrap::recover(config, expected_epoch).await?;
+                    let server = CowchatServer::new_hosted(config.server_config(), runtime)?;
+                    log::info!("Hosted recovery complete; starting bounded authenticated session");
+                    tokio::select! {
+                        result = server.run() => result?,
+                        _ = tokio::time::sleep_until(deadline.into()) => {
+                            log::info!("Hosted credential deadline reached; stopping worker");
                         }
                     }
                 }
-            } else {
-                server.run().await?;
-            }
-        }
-        Commands::Auth { action } => match action {
-            AuthAction::ShowKey { key_file } => {
-                let key = auth::load_or_create_key(&key_file)?;
-                println!("{}", key);
-            }
-            AuthAction::RotateKey { key_file } => {
-                let key = auth::rotate_key(&key_file)?;
-                println!("New API key: {}", key);
-                println!("All connected agents will need to reconnect with the new key.");
-            }
-        },
-    }
+                Commands::Serve {
+                    socket,
+                    tcp,
+                    no_tcp,
+                    http,
+                    enable_http_signup,
+                    http_admin_secret,
+                    http_origins,
+                    trusted_proxy_ips,
+                    no_auth,
+                    require_local_auth,
+                    allow_private_webhooks,
+                    db,
+                    key_file,
+                    app_control_stdin,
+                } => {
+                    let config = ServerConfig {
+                        socket_path: socket,
+                        tcp_addr: if no_tcp { None } else { Some(tcp) },
+                        http_addr: http.clone(),
+                        db_path: db,
+                        auth_key_path: key_file,
+                        no_auth,
+                        allow_keyless_local: !require_local_auth,
+                        allow_private_webhooks,
+                        http_signup_enabled: enable_http_signup,
+                        http_admin_secret,
+                        http_allowed_origins: http_origins,
+                        trusted_proxy_ips,
+                        blob_idle_expiry_seconds:
+                            cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
+                    };
 
-    Ok(())
+                    let server = CowchatServer::new(config)?;
+                    if no_auth {
+                        log::info!("Running in NO-AUTH mode (open access)");
+                    } else {
+                        if require_local_auth {
+                            log::info!("Local API-key authentication is required");
+                        } else {
+                            log::info!("Local UDS and loopback TCP connections are keyless");
+                        }
+                        if http.is_some() {
+                            log::info!(
+                                "API key for remote HTTP/WebSocket clients: {}",
+                                server.api_key()
+                            );
+                        }
+                    }
+                    if app_control_stdin {
+                        let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let _app_control_thread = start_app_control_stdin(shutdown_tx)?;
+                        tokio::select! {
+                            result = server.run() => result?,
+                            command = shutdown_rx.recv() => {
+                                match command {
+                                    Some(command) => log::info!(
+                                        "Shutting down from Cowchat app control command: {:?}",
+                                        command
+                                    ),
+                                    None => log::warn!(
+                                        "Cowchat app control channel ended; shutting down helper"
+                                    ),
+                                }
+                            }
+                        }
+                    } else {
+                        server.run().await?;
+                    }
+                }
+                Commands::Auth { action } => match action {
+                    AuthAction::ShowKey { key_file } => {
+                        let key = auth::load_or_create_key(&key_file)?;
+                        println!("{}", key);
+                    }
+                    AuthAction::RotateKey { key_file } => {
+                        let key = auth::rotate_key(&key_file)?;
+                        println!("New API key: {}", key);
+                        println!("All connected agents will need to reconnect with the new key.");
+                    }
+                },
+            }
+
+            Ok(())
+        })
 }
 
 #[cfg(test)]
@@ -333,6 +407,34 @@ mod tests {
         Wait(Duration),
     }
 
+    #[cfg(feature = "hosted-bootstrap")]
+    #[test]
+    fn hosted_commands_require_explicit_epoch_or_provisioning_reserve() {
+        assert!(Cli::try_parse_from([
+            "cowchat-server",
+            "hosted-serve",
+            "--config",
+            "/tmp/config.json"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "cowchat-server",
+            "hosted-serve",
+            "--config",
+            "/tmp/config.json",
+            "--expected-epoch",
+            "0"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "cowchat-server",
+            "hosted-init",
+            "--config",
+            "/tmp/config.json"
+        ])
+        .is_err());
+    }
+
     #[test]
     fn hidden_app_control_flag_is_parsed_for_serve() {
         let cli = Cli::try_parse_from(["cowchat-server", "serve", "--app-control-stdin"])
@@ -342,7 +444,7 @@ mod tests {
             Commands::Serve {
                 app_control_stdin, ..
             } => assert!(app_control_stdin),
-            Commands::Auth { .. } => panic!("expected serve command"),
+            _ => panic!("expected serve command"),
         }
     }
 

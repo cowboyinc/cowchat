@@ -2842,6 +2842,73 @@ async fn test_e2e_encrypted_room() {
 }
 
 #[tokio::test]
+async fn prepared_encrypted_message_retries_after_reconnect_without_reencrypting() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let secret = b"retry-room-secret";
+    let mut alice = CowchatClient::connect_tcp(&addr, &key, "Alice", Some("retry-alice"), vec![])
+        .await
+        .unwrap();
+    alice.set_room_secret(secret);
+    let room = alice
+        .create_room_with_options("prepared-retry", None, None, false, true)
+        .await
+        .unwrap();
+    alice.join_room(&room.room_id).await.unwrap();
+    let prepared = alice.prepare_message(
+        &room.room_id,
+        "retained across reconnect",
+        None,
+        vec![],
+        serde_json::json!({"kind":"decision"}),
+    );
+    let serialized = serde_json::to_string(&prepared).unwrap();
+    assert!(!serialized.contains("retained across reconnect"));
+    let first = alice.append_prepared_message(&prepared).await.unwrap();
+    drop(alice);
+
+    let mut resumed =
+        CowchatClient::connect_tcp(&addr, &key, "Renamed Alice", Some("retry-alice"), vec![])
+            .await
+            .unwrap();
+    resumed.set_room_secret(secret);
+    resumed.join_room(&room.room_id).await.unwrap();
+    let recovered: cowchat_core::SendMessagePayload = serde_json::from_str(&serialized).unwrap();
+    let retry = resumed.append_prepared_message(&recovered).await.unwrap();
+    assert_eq!(retry.message_id, first.message_id);
+    assert_eq!(retry.seq, first.seq);
+    assert_eq!(retry.timestamp, first.timestamp);
+    assert_eq!(retry.agent_name, "Alice");
+    assert_eq!(retry.content, "retained across reconnect");
+    assert_eq!(
+        resumed
+            .get_history(&room.room_id, 100, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Retaining only the ID and reencrypting the same plaintext is not a retry.
+    let mut changed = resumed.prepare_message(
+        &room.room_id,
+        "retained across reconnect",
+        None,
+        vec![],
+        serde_json::json!({"kind":"decision"}),
+    );
+    assert_ne!(changed.content, recovered.content);
+    changed.message_id = recovered.message_id;
+    assert!(matches!(
+        resumed.append_prepared_message(&changed).await,
+        Err(cowchat_client::ClientError::Server {
+            code: cowchat_core::ErrorCode::MessageConflict,
+            ..
+        })
+    ));
+    server.abort();
+}
+
+#[tokio::test]
 async fn test_agent_id_takeover() {
     let (_handle, addr, key, _tmp) = start_test_server().await;
 

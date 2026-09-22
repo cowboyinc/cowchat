@@ -82,7 +82,19 @@ fn frame_room_id(frame: &Frame) -> Option<&str> {
         })
 }
 
-fn accessible_room(room_id: &str, api_key: &str, no_auth: bool, store: &Store) -> Option<Room> {
+fn accessible_room(
+    room_id: &str,
+    api_key: &str,
+    no_auth: bool,
+    store: &Store,
+    broker: &Broker,
+) -> Option<Room> {
+    #[cfg(feature = "cbfs-archive")]
+    if let Some(hosted) = broker.hosted.get() {
+        return hosted.accessible_room(room_id, api_key);
+    }
+    #[cfg(not(feature = "cbfs-archive"))]
+    let _ = broker;
     store
         .get_room(room_id)
         .ok()
@@ -334,8 +346,40 @@ fn bind_tcp_listener(addr: &str) -> io::Result<std::net::TcpListener> {
     Ok(listener)
 }
 
+enum RoomMode {
+    Local,
+    #[cfg(feature = "cbfs-archive")]
+    Hosted(Box<crate::room_log::runtime::OwnerRuntime>),
+}
+
 impl CowchatServer {
-    pub fn new(mut config: ServerConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(config: ServerConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_inner(config, RoomMode::Local)
+    }
+
+    /// Explicit hosted startup after provisioning, promotion, fence and recovery.
+    /// This initial slice binds the server's authenticated primary credential to
+    /// the recovered owner; it has no automatic fallback or public signup.
+    #[cfg(feature = "cbfs-archive")]
+    pub fn new_hosted(
+        config: ServerConfig,
+        runtime: crate::room_log::runtime::OwnerRuntime,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_inner(config, RoomMode::Hosted(Box::new(runtime)))
+    }
+
+    fn new_inner(
+        mut config: ServerConfig,
+        mode: RoomMode,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        if !matches!(mode, RoomMode::Local)
+            && (config.no_auth || config.allow_keyless_local || config.http_signup_enabled)
+        {
+            return Err(io::Error::other(
+                "hosted mode requires authenticated access with signup disabled",
+            )
+            .into());
+        }
         // Lock the canonical database identity before touching SQLite, auth,
         // webhooks, or any listener path. A losing launch cannot migrate the
         // incumbent database or unlink its Unix socket.
@@ -365,6 +409,15 @@ impl CowchatServer {
         let agents: Arc<DashMap<String, AgentConnection>> = Arc::new(DashMap::new());
         let room_members: Arc<DashMap<String, Vec<String>>> = Arc::new(DashMap::new());
         let broker = Arc::new(Broker::new(agents, room_members));
+        let api_key = auth::load_or_create_key(&config.auth_key_path)?;
+        #[cfg(feature = "cbfs-archive")]
+        if let RoomMode::Hosted(runtime) = mode {
+            let hosted = Arc::new(crate::hosted::HostedOwner::new(*runtime, api_key.clone())?);
+            broker
+                .hosted
+                .set(hosted)
+                .map_err(|_| io::Error::other("hosted owner already configured"))?;
+        }
         let vote_mgr = Arc::new(VoteManager::new(store.clone(), broker.clone()));
         let rate_limiter = Arc::new(RateLimiter::new());
         let reconnect_mgr = Arc::new(ReconnectManager::new());
@@ -373,8 +426,6 @@ impl CowchatServer {
             store.clone(),
             config.allow_private_webhooks,
         ));
-        let api_key = auth::load_or_create_key(&config.auth_key_path)?;
-
         log::info!("API key loaded from {:?}", config.auth_key_path);
         log::info!("Database at {:?}", config.db_path);
 
@@ -415,7 +466,7 @@ impl CowchatServer {
         // Spawn the webhook delivery worker. Held implicitly by the running task;
         // we don't await it here — when `run` returns the task is dropped along
         // with the server.
-        let _webhook_worker = self.webhook_mgr.start();
+        let _webhook_worker = (!self.broker.is_hosted()).then(|| self.webhook_mgr.start());
 
         log::info!("Listening on UDS: {:?}", self.config.socket_path);
 
@@ -570,48 +621,51 @@ impl CowchatServer {
         // tier's retention window so the DB doesn't grow without bound. Tiers
         // with no window (None = enterprise) are never queried, so their data is
         // kept. Runs once on start, then every PURGE_INTERVAL.
-        let purge_store = self.store.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(PURGE_INTERVAL);
-            loop {
-                tick.tick().await;
-                let mut total = 0usize;
-                for (tier, limits) in [("free", TierLimits::free()), ("pro", TierLimits::pro())] {
-                    if let Some(days) = limits.history_retention_days {
-                        let modifier = format!("-{days} days");
-                        match purge_store.purge_messages_by_tier(tier, &modifier) {
-                            Ok(n) => total += n,
-                            Err(e) => log::warn!("retention purge ({tier}) failed: {e}"),
+        if !self.broker.is_hosted() {
+            let purge_store = self.store.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(PURGE_INTERVAL);
+                loop {
+                    tick.tick().await;
+                    let mut total = 0usize;
+                    for (tier, limits) in [("free", TierLimits::free()), ("pro", TierLimits::pro())]
+                    {
+                        if let Some(days) = limits.history_retention_days {
+                            let modifier = format!("-{days} days");
+                            match purge_store.purge_messages_by_tier(tier, &modifier) {
+                                Ok(n) => total += n,
+                                Err(e) => log::warn!("retention purge ({tier}) failed: {e}"),
+                            }
                         }
                     }
+                    // No VACUUM: SQLite reuses the freed pages, so a fixed retention
+                    // window bounds file growth on its own. A full VACUUM would hold
+                    // the single store mutex through a whole-DB rebuild — a server-
+                    // wide stall we don't want on an interval.
+                    if total > 0 {
+                        log::info!("retention purge: deleted {total} expired message(s)");
+                    }
                 }
-                // No VACUUM: SQLite reuses the freed pages, so a fixed retention
-                // window bounds file growth on its own. A full VACUUM would hold
-                // the single store mutex through a whole-DB rebuild — a server-
-                // wide stall we don't want on an interval.
-                if total > 0 {
-                    log::info!("retention purge: deleted {total} expired message(s)");
-                }
-            }
-        });
+            });
 
-        // Background blob sweep: delete attachments whose room has gone idle
-        // past the configured window (rows + disk files), plus rows for
-        // destroyed rooms and orphaned files. Runs once on start, then every
-        // BLOB_SWEEP_INTERVAL.
-        let blob_store = self.store.clone();
-        let blob_idle_expiry_seconds = self.config.blob_idle_expiry_seconds;
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(BLOB_SWEEP_INTERVAL);
-            loop {
-                tick.tick().await;
-                match blob_store.sweep_blobs(blob_idle_expiry_seconds, BLOB_ORPHAN_GRACE) {
-                    Ok(n) if n > 0 => log::info!("blob sweep: removed {n} expired blob(s)"),
-                    Ok(_) => {}
-                    Err(e) => log::warn!("blob sweep failed: {e}"),
+            // Background blob sweep: delete attachments whose room has gone idle
+            // past the configured window (rows + disk files), plus rows for
+            // destroyed rooms and orphaned files. Runs once on start, then every
+            // BLOB_SWEEP_INTERVAL.
+            let blob_store = self.store.clone();
+            let blob_idle_expiry_seconds = self.config.blob_idle_expiry_seconds;
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(BLOB_SWEEP_INTERVAL);
+                loop {
+                    tick.tick().await;
+                    match blob_store.sweep_blobs(blob_idle_expiry_seconds, BLOB_ORPHAN_GRACE) {
+                        Ok(n) if n > 0 => log::info!("blob sweep: removed {n} expired blob(s)"),
+                        Ok(_) => {}
+                        Err(e) => log::warn!("blob sweep failed: {e}"),
+                    }
                 }
-            }
-        });
+            });
+        }
 
         // Wait for shutdown signal
         tokio::select! {
@@ -881,15 +935,22 @@ where
                         .expect("a newly acquired reconnect lease has a stash");
                     let mut rooms = stashed.rooms;
                     rooms.retain(|room_id| {
-                        accessible_room(room_id, &authenticated_key, no_auth, &store).is_some()
+                        accessible_room(room_id, &authenticated_key, no_auth, &store, &broker)
+                            .is_some()
                     });
                     reconnected_rooms = Some(rooms);
                     missed_messages = stashed.missed_messages;
                     missed_messages.retain(|frame| {
                         frame_room_id(frame)
                             .map(|room_id| {
-                                accessible_room(room_id, &authenticated_key, no_auth, &store)
-                                    .is_some()
+                                accessible_room(
+                                    room_id,
+                                    &authenticated_key,
+                                    no_auth,
+                                    &store,
+                                    &broker,
+                                )
+                                .is_some()
                             })
                             .unwrap_or(true)
                     });
@@ -951,8 +1012,14 @@ where
                             .rooms_for_agent(&agent_id)
                             .into_iter()
                             .filter(|room_id| {
-                                accessible_room(room_id, &authenticated_key, no_auth, &store)
-                                    .is_some()
+                                accessible_room(
+                                    room_id,
+                                    &authenticated_key,
+                                    no_auth,
+                                    &store,
+                                    &broker,
+                                )
+                                .is_some()
                             })
                             .collect(),
                     );
@@ -1083,7 +1150,7 @@ where
     if let Some(rooms) = takeover_rooms {
         for room_id in &rooms {
             let _ = broker.join_room(&agent_id, room_id, || {
-                accessible_room(room_id, &agent_api_key, no_auth, &store).is_some()
+                accessible_room(room_id, &agent_api_key, no_auth, &store, &broker).is_some()
             });
         }
     }
@@ -1093,7 +1160,7 @@ where
         for room_id in &rooms {
             if broker
                 .join_room(&agent_id, room_id, || {
-                    accessible_room(room_id, &agent_api_key, no_auth, &store).is_some()
+                    accessible_room(room_id, &agent_api_key, no_auth, &store, &broker).is_some()
                 })
                 .is_err()
             {
@@ -1129,12 +1196,14 @@ where
     }
     missed_messages.retain(|frame| {
         frame_room_id(frame)
-            .map(|room_id| accessible_room(room_id, &agent_api_key, no_auth, &store).is_some())
+            .map(|room_id| {
+                accessible_room(room_id, &agent_api_key, no_auth, &store, &broker).is_some()
+            })
             .unwrap_or(true)
     });
     restored_rooms.retain(|room_id| {
         broker.is_agent_in_room(&agent_id, room_id)
-            && accessible_room(room_id, &agent_api_key, no_auth, &store).is_some()
+            && accessible_room(room_id, &agent_api_key, no_auth, &store, &broker).is_some()
     });
 
     let mut ok_payload = serde_json::json!({
@@ -1199,7 +1268,7 @@ where
                     continue;
                 }
                 if frame_room_id(&frame).is_some_and(|room_id| {
-                    accessible_room(room_id, &agent_api_key, no_auth, &store).is_none()
+                    accessible_room(room_id, &agent_api_key, no_auth, &store, &broker).is_none()
                 }) {
                     continue;
                 }
@@ -1790,7 +1859,7 @@ mod local_auth_tests {
         );
 
         let would_report_restored = broker.is_agent_in_room("stable", "pending-room")
-            && accessible_room("pending-room", "owner-key", false, &store).is_some();
+            && accessible_room("pending-room", "owner-key", false, &store, &broker).is_some();
         assert!(!would_report_restored);
         let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await
