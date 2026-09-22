@@ -45,7 +45,7 @@ pub struct BrowserInitialRoom {
     pub preparation: RoomKeyPreparation,
 }
 
-struct PreparedInitialRoom {
+pub(crate) struct PreparedInitialRoom {
     room_id: String,
     created_by: String,
     preparation: RoomKeyPreparation,
@@ -86,14 +86,22 @@ fn member_key(path: &Path) -> Result<SigningKey> {
     SigningKey::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid member signing key"))
 }
 
-/// Execute one initial room setup before the hosted listener starts. This is
-/// intentionally not a general retry/rotation API: the room must not exist and
-/// its preparation must describe epoch zero with no predecessor.
-async fn prepare_initial_room(
-    config: &Config,
+/// Validate a preparation and (only when `submit` is true) reserve the room in
+/// the owner log with its `create`+`PrepareKeyEpoch` records. This is the sole
+/// activation phase that touches `OwnerRuntime`, so the caller holds the
+/// owner-write lock across just this call — never across the CBSS publication
+/// ceremony in `finalize_initial_room`, which is what previously serialized
+/// every send behind a multi-second activation.
+///
+/// `submit` is false when resuming a room whose records are already durable —
+/// the publication ceremony failed after preparation and is being retried; the
+/// room must already exist in the pending (`key_preparation` set, no
+/// `key_state`) state, so no records are appended.
+pub(crate) async fn stage_initial_room(
     runtime: &mut OwnerRuntime,
-    input: BrowserInitialRoom,
-) -> Result<PreparedInitialRoom> {
+    input: &BrowserInitialRoom,
+    submit: bool,
+) -> Result<()> {
     ensure!(
         uuid::Uuid::parse_str(&input.room_id).is_ok(),
         "initial room id must be a UUID"
@@ -104,12 +112,7 @@ async fn prepare_initial_room(
         !input.created_by.is_empty() && input.created_by.len() <= 128,
         "invalid initial room creator"
     );
-    ensure!(
-        runtime.state()?.room(&input.room_id).is_none(),
-        "initial room already exists; automatic retry is not supported"
-    );
-
-    let preparation = input.preparation;
+    let preparation = &input.preparation;
     ensure!(
         preparation.expected_policy_hash.is_none()
             && preparation.previous_policy.is_none()
@@ -117,6 +120,62 @@ async fn prepare_initial_room(
             && preparation.key_epoch == 0,
         "first demo supports only initial room provisioning"
     );
+    // Reject a malformed or self-inconsistent preparation before any log write.
+    validate_signed_preparation(preparation)?;
+    if !submit {
+        return Ok(());
+    }
+    ensure!(
+        runtime.state()?.room(&input.room_id).is_none(),
+        "initial room already exists; automatic retry is not supported"
+    );
+    let owner_id = runtime.owner_id().to_owned();
+    let create = Command {
+        owner_id: owner_id.clone(),
+        command_id: format!("create:{}", input.room_id),
+        timestamp: chrono::Utc::now(),
+        body: CommandBody::CreateRoom {
+            room_id: input.room_id.clone(),
+            lane_id: 0,
+            name,
+            created_by: input.created_by.clone(),
+        },
+    };
+    let prepare = Command {
+        owner_id,
+        command_id: preparation.command_id(),
+        timestamp: chrono::Utc::now(),
+        body: CommandBody::PrepareKeyEpoch {
+            room_id: input.room_id.clone(),
+            preparation: Box::new(preparation.clone()),
+        },
+    };
+    let prepared = runtime.submit(vec![create, prepare]).await?;
+    ensure!(
+        prepared.outcomes.len() == 2,
+        "incomplete initial room receipt"
+    );
+    accepted(
+        &prepared.outcomes[0],
+        |outcome| matches!(outcome, Outcome::RoomCreated { room_id, .. } if room_id == &input.room_id),
+    )?;
+    accepted(&prepared.outcomes[1], |outcome| {
+        matches!(outcome, Outcome::KeyEpochPrepared { room_id, transition_id }
+            if room_id == &input.room_id && transition_id == &preparation.transition_id)
+    })
+}
+
+/// Decode and cross-check the signed setup/policy/grants a preparation carries.
+/// Pure and cheap, so it runs both before the log write in `stage_initial_room`
+/// and again while rebuilding the publication in `finalize_initial_room`.
+fn validate_signed_preparation(
+    preparation: &RoomKeyPreparation,
+) -> Result<(
+    SignedRoomSetupV1,
+    SignedRoomKeyPolicyV1,
+    Vec<SignedRoomKeyGrantV1>,
+    Vec<u8>,
+)> {
     let setup = SignedRoomSetupV1::decode_canonical(&decode_hex(&preparation.signed_setup)?)
         .map_err(|_| anyhow::anyhow!("invalid signed room setup"))?;
     let policy = SignedRoomKeyPolicyV1::decode_canonical(&decode_hex(&preparation.signed_policy)?)
@@ -144,6 +203,21 @@ async fn prepare_initial_room(
             && policy.policy.signing_hash() == preparation.policy_hash,
         "prepared room metadata does not match its signed publication"
     );
+    Ok((setup, policy, grants, custody))
+}
+
+/// Publish and finalize the prepared key epoch against CBSS. Touches no
+/// `OwnerRuntime`, so the caller runs it with the owner-write lock released —
+/// its up-to-`IO_TIMEOUT` finality wait no longer blocks concurrent sends. A
+/// timeout or verification error leaves the durable preparation pending, so the
+/// activation can be retried through `stage_initial_room(.., submit = false)`.
+pub(crate) async fn finalize_initial_room(
+    config: &Config,
+    input: BrowserInitialRoom,
+) -> Result<PreparedInitialRoom> {
+    let preparation = input.preparation;
+    let (setup, policy, grants, custody) = validate_signed_preparation(&preparation)?;
+    let intent = &setup.request.intent;
     let deployment = CompiledRoomDeployment::compiled()?;
     let expected_identity = deployment.identity(intent.identity.owner, input.room_id.clone());
     let publication = RoomPublication::new(
@@ -158,49 +232,15 @@ async fn prepare_initial_room(
         },
     )?;
 
-    // Acquire the exact owner-write root before archiving the preparation. No
-    // storage write occurs if the client signed a stale/wrong predecessor.
+    // Acquire the exact owner-write root before publishing. The publication CAS
+    // and confirm/fence re-bind the finalized root, so a stale/wrong root here
+    // fails closed with no key exposure.
     let auth = authority(config).await?;
     let mut writer_ctx = volume(config, &auth, &config.control_volume).await?;
     ensure!(
         writer_ctx.volume.manifest_root().0 == preparation.expected_control_root,
         "initial room setup does not bind the current control root"
     );
-
-    let owner_id = runtime.owner_id().to_owned();
-    let create = Command {
-        owner_id: owner_id.clone(),
-        command_id: format!("create:{}", input.room_id),
-        timestamp: chrono::Utc::now(),
-        body: CommandBody::CreateRoom {
-            room_id: input.room_id.clone(),
-            lane_id: 0,
-            name,
-            created_by: input.created_by.clone(),
-        },
-    };
-    let prepare = Command {
-        owner_id: owner_id.clone(),
-        command_id: preparation.command_id(),
-        timestamp: chrono::Utc::now(),
-        body: CommandBody::PrepareKeyEpoch {
-            room_id: input.room_id.clone(),
-            preparation: Box::new(preparation.clone()),
-        },
-    };
-    let prepared = runtime.submit(vec![create, prepare]).await?;
-    ensure!(
-        prepared.outcomes.len() == 2,
-        "incomplete initial room receipt"
-    );
-    accepted(
-        &prepared.outcomes[0],
-        |outcome| matches!(outcome, Outcome::RoomCreated { room_id, .. } if room_id == &input.room_id),
-    )?;
-    accepted(&prepared.outcomes[1], |outcome| {
-        matches!(outcome, Outcome::KeyEpochPrepared { room_id, transition_id }
-            if room_id == &input.room_id && transition_id == &preparation.transition_id)
-    })?;
 
     let acknowledgements = deployment.attest(&publication, &setup).await?;
     let source = deployment.source(&config.worker_dir.join("room-control-finality"))?;
@@ -265,7 +305,7 @@ async fn prepare_initial_room(
     })
 }
 
-async fn commit_initial_room(
+pub(crate) async fn commit_initial_room(
     runtime: &mut OwnerRuntime,
     prepared: &PreparedInitialRoom,
 ) -> Result<()> {
@@ -293,20 +333,9 @@ async fn commit_initial_room(
     })
 }
 
-/// Browser creation publishes and activates only owner-signed public objects
-/// and encrypted custody. The browser proves usability by opening through CBSS
-/// immediately after this response; no plaintext key reaches this process.
-pub async fn activate_browser_room(
-    config: &Config,
-    runtime: &mut OwnerRuntime,
-    input: BrowserInitialRoom,
-) -> Result<()> {
-    let prepared = prepare_initial_room(config, runtime, input).await?;
-    commit_initial_room(runtime, &prepared).await
-}
-
-/// Native executable proof keeps its stronger pre-commit recovery check while
-/// sharing the same setup, publication and fence path as the browser.
+/// Native executable proof: stage the room, finalize its publication, open the
+/// real CBSS key, then commit. Shares the same setup/publication/fence path as
+/// the browser activation, adding the member-key open before commit.
 pub async fn activate_initial_room(
     config: &Config,
     runtime: &mut OwnerRuntime,
@@ -318,17 +347,14 @@ pub async fn activate_initial_room(
     );
     let member = member_key(&input.member_key_file)?;
     let probe_text = input.probe_text;
-    let prepared = prepare_initial_room(
-        config,
-        runtime,
-        BrowserInitialRoom {
-            room_id: input.room_id,
-            name: input.name,
-            created_by: input.created_by,
-            preparation: input.preparation,
-        },
-    )
-    .await?;
+    let browser = BrowserInitialRoom {
+        room_id: input.room_id,
+        name: input.name,
+        created_by: input.created_by,
+        preparation: input.preparation,
+    };
+    stage_initial_room(runtime, &browser, true).await?;
+    let prepared = finalize_initial_room(config, browser).await?;
     ensure!(
         Address::from_verifying_key(member.verifying_key()) == prepared.grants[0].grant.member,
         "member key does not match the prepared room grant"

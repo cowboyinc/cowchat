@@ -483,41 +483,76 @@ impl HostedOwner {
                 .get_key_tier(&self.api_key)
                 .unwrap_or_else(|_| "free".into()),
         );
-        let mut writer = self.writer.lock().await;
-        if let Some(existing) = writer
-            .state()
-            .map_err(|_| unavailable(id))?
-            .room(&payload.room_id)
+        let input = crate::hosted_bootstrap::BrowserInitialRoom {
+            room_id: payload.room_id.clone(),
+            name: payload.name,
+            created_by: agent_id.into(),
+            preparation: payload.preparation,
+        };
+        // Classify and (for a fresh room) reserve it under the owner-write lock,
+        // then release the lock. The CBSS publication ceremony below must not be
+        // run under this lock: its up-to-120s finality wait would otherwise
+        // serialize every concurrent send for this owner.
         {
-            if existing.name == normalized_name
-                && existing.key_publication.as_deref() == Some(&payload.preparation)
-                && existing.key_state.is_some()
-            {
-                let room = room_summary(existing);
-                return Ok(Frame::ok(id, serde_json::to_value(room).unwrap()));
+            let mut writer = self.writer.lock().await;
+            let is_fresh = {
+                let state = writer.state().map_err(|_| unavailable(id))?;
+                match state.room(&input.room_id) {
+                    Some(existing)
+                        if existing.name == normalized_name
+                            && existing.key_publication.as_deref() == Some(&input.preparation)
+                            && existing.key_state.is_some() =>
+                    {
+                        // Already committed: idempotent success.
+                        return Ok(Frame::ok(
+                            id,
+                            serde_json::to_value(room_summary(existing)).unwrap(),
+                        ));
+                    }
+                    Some(existing)
+                        if existing.name == normalized_name
+                            && existing.key_preparation.as_deref() == Some(&input.preparation)
+                            && existing.key_state.is_none() =>
+                    {
+                        // Prepared but never committed — a prior finalize failed
+                        // or timed out. Resume the ceremony rather than leaving
+                        // the room permanently wedged.
+                        false
+                    }
+                    Some(_) => {
+                        return Err(error(
+                            id,
+                            ErrorCode::MessageConflict,
+                            "Room activation conflicts with committed state",
+                        ));
+                    }
+                    None if state.rooms().len() as u64 >= limits.max_rooms => {
+                        return Err(error(id, ErrorCode::RateLimitRooms, "Room limit exceeded"));
+                    }
+                    None => true,
+                }
+            };
+            if is_fresh {
+                self.room_keys(id)?
+                    .stage(&mut writer, &input, true)
+                    .await
+                    .map_err(|_| unavailable(id))?;
             }
-            return Err(error(
-                id,
-                ErrorCode::MessageConflict,
-                "Room activation conflicts with committed state",
-            ));
         }
-        if writer.state().map_err(|_| unavailable(id))?.rooms().len() as u64 >= limits.max_rooms {
-            return Err(error(id, ErrorCode::RateLimitRooms, "Room limit exceeded"));
-        }
-        self.room_keys(id)?
-            .activate(
-                &mut writer,
-                crate::hosted_bootstrap::BrowserInitialRoom {
-                    room_id: payload.room_id.clone(),
-                    name: payload.name,
-                    created_by: agent_id.into(),
-                    preparation: payload.preparation,
-                },
-            )
+        // Publish + finalize with the owner-write lock released.
+        let prepared = self
+            .room_keys(id)?
+            .finalize(input)
             .await
             .map_err(|_| unavailable(id))?;
-        drop(writer);
+        // Commit the finalized epoch back under the lock.
+        {
+            let mut writer = self.writer.lock().await;
+            self.room_keys(id)?
+                .commit(&mut writer, &prepared)
+                .await
+                .map_err(|_| unavailable(id))?;
+        }
         let room = self.require_room(id, &payload.room_id)?;
         let event = Frame::event(FrameType::RoomCreated, serde_json::to_value(&room).unwrap());
         let buffered = reconnect.buffer_visible_room_event(
