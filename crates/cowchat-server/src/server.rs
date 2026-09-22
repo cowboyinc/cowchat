@@ -353,7 +353,7 @@ enum RoomMode {
     #[cfg(feature = "room-key-demo")]
     HostedRoomKeys(
         Box<crate::room_log::runtime::OwnerRuntime>,
-        crate::hosted_bootstrap::HostedRoomKeys,
+        Box<crate::hosted_bootstrap::HostedRoomKeys>,
     ),
 }
 
@@ -381,7 +381,7 @@ impl CowchatServer {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_inner(
             config,
-            RoomMode::HostedRoomKeys(Box::new(runtime), room_keys),
+            RoomMode::HostedRoomKeys(Box::new(runtime), Box::new(room_keys)),
         )
     }
 
@@ -448,7 +448,7 @@ impl CowchatServer {
             RoomMode::HostedRoomKeys(runtime, room_keys) => {
                 let hosted = Arc::new(
                     crate::hosted::HostedOwner::new(*runtime, api_key.clone())?
-                        .with_room_keys(room_keys),
+                        .with_room_keys(*room_keys),
                 );
                 broker
                     .hosted

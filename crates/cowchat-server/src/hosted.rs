@@ -80,6 +80,11 @@ pub struct HostedOwner {
     view: Arc<OwnerView>,
     #[cfg(feature = "room-key-demo")]
     room_keys: Option<crate::hosted_bootstrap::HostedRoomKeys>,
+    /// Serializes control-volume publication for this owner without holding
+    /// the owner-log writer across CBSS finality. Two room activations built
+    /// from the same control root must not race their compare-and-swap writes.
+    #[cfg(feature = "room-key-demo")]
+    room_key_activation: tokio::sync::Mutex<()>,
 }
 
 fn error(id: Option<&str>, code: ErrorCode, message: &str) -> Frame {
@@ -156,6 +161,8 @@ impl HostedOwner {
             writer: tokio::sync::Mutex::new(runtime),
             #[cfg(feature = "room-key-demo")]
             room_keys: None,
+            #[cfg(feature = "room-key-demo")]
+            room_key_activation: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -489,6 +496,10 @@ impl HostedOwner {
             created_by: agent_id.into(),
             preparation: payload.preparation,
         };
+        // The control volume has one mutable root per owner. Keep complete
+        // room-key ceremonies ordered while leaving the general owner writer
+        // available to existing rooms' message appends.
+        let _activation = self.room_key_activation.lock().await;
         // Classify and (for a fresh room) reserve it under the owner-write lock,
         // then release the lock. The CBSS publication ceremony below must not be
         // run under this lock: its up-to-120s finality wait would otherwise
