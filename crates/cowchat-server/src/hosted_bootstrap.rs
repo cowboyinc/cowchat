@@ -43,8 +43,7 @@ const SAFETY_MS: u64 = 30_000;
 mod initial_room;
 #[cfg(feature = "room-key-demo")]
 pub use initial_room::{
-    activate_browser_room, activate_initial_room, probe_initial_room, BrowserInitialRoom,
-    InitialRoomDemo,
+    activate_initial_room, probe_initial_room, BrowserInitialRoom, InitialRoomDemo,
 };
 
 #[derive(Clone, Deserialize)]
@@ -115,12 +114,35 @@ impl HostedRoomKeys {
             .collect())
     }
 
-    pub async fn activate(
+    /// Reserve the room in the owner log. Holds the owner-write lock only for
+    /// this local append; pass `submit = false` to resume a room whose records
+    /// are already durable. Kept separate from [`Self::finalize`] so the caller
+    /// releases the lock across the CBSS ceremony.
+    pub(crate) async fn stage(
         &self,
         runtime: &mut OwnerRuntime,
-        input: BrowserInitialRoom,
+        input: &BrowserInitialRoom,
+        submit: bool,
     ) -> Result<()> {
-        activate_browser_room(&self.config, runtime, input).await
+        initial_room::stage_initial_room(runtime, input, submit).await
+    }
+
+    /// Publish and finalize the prepared epoch against CBSS. Touches no owner
+    /// runtime, so the caller runs it with the owner-write lock released.
+    pub(crate) async fn finalize(
+        &self,
+        input: BrowserInitialRoom,
+    ) -> Result<initial_room::PreparedInitialRoom> {
+        initial_room::finalize_initial_room(&self.config, input).await
+    }
+
+    /// Commit the finalized epoch into the owner log under the owner-write lock.
+    pub(crate) async fn commit(
+        &self,
+        runtime: &mut OwnerRuntime,
+        prepared: &initial_room::PreparedInitialRoom,
+    ) -> Result<()> {
+        initial_room::commit_initial_room(runtime, prepared).await
     }
 
     pub fn open_context(
