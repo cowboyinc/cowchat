@@ -39,6 +39,11 @@ const IO_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const SAFETY_MS: u64 = 30_000;
 
+#[cfg(feature = "room-key-demo")]
+mod initial_room;
+#[cfg(feature = "room-key-demo")]
+pub use initial_room::{activate_initial_room, probe_initial_room, InitialRoomDemo};
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -360,7 +365,13 @@ async fn authority(config: &Config) -> Result<Authority> {
     })
 }
 
-async fn volume(config: &Config, auth: &Authority, name: &str) -> Result<VolumeContext> {
+async fn volume_with_access(
+    config: &Config,
+    auth: &Authority,
+    name: &str,
+    access: AccessMode,
+    mount: bool,
+) -> Result<VolumeContext> {
     // A hosted writer is a long-lived owner session, using the existing mount
     // token lifetime with the same ReadWrite grant. No renewal or widening.
     let ctx = open_volume(
@@ -368,8 +379,8 @@ async fn volume(config: &Config, auth: &Authority, name: &str) -> Result<VolumeC
         name,
         CliMode::Cowboy,
         Some(&config.rpc_url),
-        AccessMode::ReadWrite,
-        true,
+        access,
+        mount,
         5,
         Some(&auth.checkpoint),
     )
@@ -390,6 +401,10 @@ async fn volume(config: &Config, auth: &Authority, name: &str) -> Result<VolumeC
         "CBFS attachment is near expiry"
     );
     Ok(ctx)
+}
+
+async fn volume(config: &Config, auth: &Authority, name: &str) -> Result<VolumeContext> {
+    volume_with_access(config, auth, name, AccessMode::ReadWrite, true).await
 }
 
 /// Provisioning never adopts an existing empty volume. A partial failure keeps

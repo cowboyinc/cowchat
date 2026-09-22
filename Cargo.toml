@@ -31,3 +31,15 @@ chacha20poly1305 = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
+
+# Git dependency patches do not propagate from CBSS. Keep its complete
+# protocol-compatible commonware family unified in this executable workspace.
+[patch.crates-io]
+commonware-codec = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba" }
+commonware-cryptography = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba" }
+commonware-formatting = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba" }
+commonware-macros = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba" }
+commonware-macros-impl = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba" }
+commonware-math = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba" }
+commonware-parallel = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba" }
+commonware-utils = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba" }
