@@ -73,7 +73,8 @@ base or pending mutation and never rebases onto an unrelated root. Use it for
 publication: general `Volume::commit` still supports automatic rebase. The
 registry must enforce actual predecessor CAS, and the coordinator must retain
 pending evidence and independently confirm the published policy/root before
-the proxy barrier. The SDK method is available; no publisher calls it yet.
+the proxy barrier. The CBSS publication library now calls it; Cowchat does not yet invoke that
+library through a complete coordinator.
 
 A worker takeover itself changes the control volume through writer allocation.
 An old setup request/root therefore cannot automatically authorize a fresh
@@ -86,7 +87,7 @@ renewal/reconciliation is wired, the prepared room remains paused.
 
 ## Validation
 
-At protocol `1e25ac7`, CBFS SDK `a16a322`, and the isolated CBQS child `eb2ba17`:
+At protocol `1e25ac7`, CBFS SDK `416d3c1`, and the isolated CBQS child `eb2ba17`:
 
 - Reducer tests exercise ordered rotation, old receipts versus fresh old sends,
   epoch relabelling, predecessor mismatch, stable IDs, lane checks and replay.
@@ -100,9 +101,27 @@ At protocol `1e25ac7`, CBFS SDK `a16a322`, and the isolated CBQS child `eb2ba17`
 - An authenticated TCP caller test rejects omitted/noncanonical/stale epochs,
   preserves labels through receipts/history, and sends/decrypts a real raw-key
   contextual message. It also proves the local password decoder is not used.
-- The feature-enabled daemon library passes 162 tests (one existing ignored
+- The feature-enabled daemon library passes 164 tests (one existing ignored
   process helper); default workspace tests and strict all-target workspace
   Clippy pass. These are local author-run tests, not the consolidated live gate.
+
+Root-authorized SDK journals now live in a separate namespace per approved
+predecessor. Ordinary `WriterRegistry::open` recovery cannot submit them through
+its generic registry and bypass fresh setup authorization. A real subprocess-node
+regression leaves a room publication pending, opens/promotes the actual writer,
+and verifies that the room objects remain unpublished and journal bytes remain
+unchanged. Takeover can advance the control root; a new publication still needs
+fresh owner setup for that root and preserves the older pending evidence.
+
+## Next demo scope
+
+The next milestone is one room creation, actual CBSS room-key retrieval, and
+encrypted send/read through the existing services. Compose the existing pieces;
+do not build more general recovery infrastructure first. Setup failures leave
+the room pending. Rotation, takeover, Google/WebAuthn identity recovery and
+broader connectors remain follow-up milestones, not prerequisites for this first
+demo. This narrower demonstration does not waive the consolidated release gates
+or claim product readiness.
 
 The preserved transport PR branches are unchanged. Final Homestead C1
 height-based workload-authority reconciliation remains outstanding; see
