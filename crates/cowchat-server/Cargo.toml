@@ -57,8 +57,8 @@ sha2 = "0.10"
 base64 = "0.22"
 fs2 = "0.4"
 libc = "0.2"
-cbqs-client = { git = "https://github.com/cowboyinc/cbqs.git", rev = "eb2ba17ca9b6b52392e222c49fd37287c6ae9348", optional = true }
-cbqsd = { git = "https://github.com/cowboyinc/cbqs.git", rev = "eb2ba17ca9b6b52392e222c49fd37287c6ae9348", features = ["test-legacy-snapshots"], optional = true }
+cbqs-client = { git = "https://github.com/cowboyinc/cbqs.git", rev = "f593296f1d19d9d07b0be8eb296f6e87b1984ee8", optional = true }
+cbqsd = { git = "https://github.com/cowboyinc/cbqs.git", rev = "f593296f1d19d9d07b0be8eb296f6e87b1984ee8", features = ["test-legacy-snapshots"], optional = true }
 cowboy-protocol-codec = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "1e25ac7ad74efa5d71a9118132d8a367b34d652e", features = ["cbqs-signing", "serde", "signing"], optional = true }
 cowboy-protocol-activation = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "e893859785200a0ce487fc745ee34faaf3a21a36", optional = true }
 commonware-codec = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba", optional = true }
