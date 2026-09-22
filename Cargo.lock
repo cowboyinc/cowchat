@@ -898,7 +898,7 @@ dependencies = [
 [[package]]
 name = "cbqs-client"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cbqs.git?rev=f593296f1d19d9d07b0be8eb296f6e87b1984ee8#f593296f1d19d9d07b0be8eb296f6e87b1984ee8"
+source = "git+https://github.com/cowboyinc/cbqs.git?rev=9cb46e83cadee2b47345c8fee09d9298fb682864#9cb46e83cadee2b47345c8fee09d9298fb682864"
 dependencies = [
  "chacha20poly1305",
  "commonware-codec",
@@ -919,7 +919,7 @@ dependencies = [
 [[package]]
 name = "cbqsd"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cbqs.git?rev=f593296f1d19d9d07b0be8eb296f6e87b1984ee8#f593296f1d19d9d07b0be8eb296f6e87b1984ee8"
+source = "git+https://github.com/cowboyinc/cbqs.git?rev=9cb46e83cadee2b47345c8fee09d9298fb682864#9cb46e83cadee2b47345c8fee09d9298fb682864"
 dependencies = [
  "axum",
  "commonware-codec",
@@ -3190,7 +3190,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "system-configuration 0.7.0",
  "tokio",
  "tower-service",
@@ -4575,7 +4575,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls 0.23.45",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4614,7 +4614,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -6805,7 +6805,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
