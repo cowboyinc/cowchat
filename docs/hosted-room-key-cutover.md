@@ -42,6 +42,21 @@ old accepted intents first. That coordinator is not implemented yet; these
 changes do not claim an end-to-end safe room rotation or permission to activate
 the product.
 
+The next integration must also record preparation in shared durable state before
+publishing a new control policy. A marker only in the worker's local journal is
+insufficient: another host can take over without that file. Reuse the owner
+stream/archive for a prepared transition, retain the exact signed policy,
+wrapped custody and grants, and block fresh room sends while it is pending.
+Recovery must reconcile that same preparation before completing the cutover.
+This preparation command and coordinator are planned, not implemented here.
+
+The pinned SDK's general `Volume::commit` can rebase a pending mutation after a
+conflict. The publication integration must explicitly enforce the attested
+expected root at the actual commit boundary; it must not silently publish the
+prepared policy onto a newer root. An initial root comparison alone is not
+enough. Preserve pending evidence on an indeterminate commit and independently
+confirm the published policy/root before the proxy barrier.
+
 ## Validation
 
 At protocol `1e25ac7`, CBFS SDK `e6e8233`, and the isolated CBQS child `eb2ba17`:
