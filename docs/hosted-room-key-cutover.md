@@ -60,16 +60,25 @@ CBQS envelope. Large membership/history sets that exceed that bound must be
 rejected before publication; records are never truncated. This is not a claim
 that every protocol-maximum roster fits the current hosted transport.
 
-The pinned SDK's general `Volume::commit` can rebase a pending mutation after a
-conflict. The publication integration must explicitly enforce the attested
-expected root at the actual commit boundary; it must not silently publish the
-prepared policy onto a newer root. An initial root comparison alone is not
-enough. Preserve pending evidence on an indeterminate commit and independently
-confirm the published policy/root before the proxy barrier.
+The pinned SDK now offers `Volume::commit_at_root`, which rejects a different
+base or pending mutation and never rebases onto an unrelated root. Use it for
+publication: general `Volume::commit` still supports automatic rebase. The
+registry must enforce actual predecessor CAS, and the coordinator must retain
+pending evidence and independently confirm the published policy/root before
+the proxy barrier. The SDK method is available; no publisher calls it yet.
+
+A worker takeover itself changes the control volume through writer allocation.
+An old setup request/root therefore cannot automatically authorize a fresh
+publication after takeover. If the exact prepared policy has already landed,
+recovery must authenticate it before fencing; otherwise it needs a fresh
+owner-signed setup request and ALL-holder attestations for the current root,
+while retaining the original transition/policy/custody/grants. This is explicit
+renewed authorization, not an SDK rebase or a stored-ACK bypass. Until that
+renewal/reconciliation is wired, the prepared room remains paused.
 
 ## Validation
 
-At protocol `1e25ac7`, CBFS SDK `e6e8233`, and the isolated CBQS child `eb2ba17`:
+At protocol `1e25ac7`, CBFS SDK `a16a322`, and the isolated CBQS child `eb2ba17`:
 
 - Reducer tests exercise ordered rotation, old receipts versus fresh old sends,
   epoch relabelling, predecessor mismatch, stable IDs, lane checks and replay.
