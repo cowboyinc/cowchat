@@ -18,6 +18,14 @@ recovery reconciles and completes the same durable intent before accepting work.
 No control-volume activation flag is written, which avoids changing the root
 that the completed proxy fence attested.
 
+Preparation now also retains the predecessor's signed policy for successors.
+This is necessary to reconstruct and validate the pending publication after its
+new policy has replaced the mutable control record. Older experimental records
+that omit these bytes remain paused on replay; the publication verifier must
+recover the predecessor or fail closed. Omitting this optional field preserves
+the earlier record encoding and receipt digest; it does not grant permission to
+skip predecessor verification.
+
 Each hosted send and returned message has an optional `key_epoch`, encoded as
 canonical decimal u64 text for clients. Rooms without an activated key retain
 the existing unlabelled behavior. Once activated, new messages must name the

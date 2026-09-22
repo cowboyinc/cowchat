@@ -25,6 +25,12 @@ pub struct RoomKeyPreparation {
     pub expected_control_root: [u8; 32],
     /// Original owner-signed setup request, lowercase canonical hex.
     pub signed_setup: String,
+    /// Needed to reconstruct and verify a pending successor after its new
+    /// policy has replaced the old mutable control record. Older experimental
+    /// preparations may omit it; the publication verifier still requires it
+    /// for successors and must fail closed if it cannot be recovered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_policy: Option<String>,
     pub signed_policy: String,
     pub custody: String,
     pub grants: Vec<String>,
@@ -57,6 +63,7 @@ impl RoomKeyPreparation {
             && self.policy_hash != [0; 32]
             && self.expected_control_root != [0; 32]
             && hex_bytes(&self.signed_setup, 32 * 1024)
+            && self.previous_policy.as_ref().is_none_or(|p| hex_bytes(p, 96 * 1024))
             && hex_bytes(&self.signed_policy, 96 * 1024)
             && self.custody.len() == 157 * 2 && hex_bytes(&self.custody, 157)
             && self.grants.len() <= 1024

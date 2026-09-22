@@ -66,6 +66,7 @@ pub(super) fn key_prepare(room: &str, epoch: u64, previous: Option<[u8; 32]>) ->
         policy_hash: [epoch as u8 + 10; 32],
         expected_control_root: [epoch as u8 + 19; 32],
         signed_setup: "01".repeat(200),
+        previous_policy: previous.map(|_| "06".repeat(400)),
         signed_policy: "02".repeat(400),
         custody: "03".repeat(157),
         grants: vec!["04".repeat(178)],
@@ -273,6 +274,40 @@ fn preparation_blocks_only_fresh_sends_and_cannot_be_replaced() {
         apply(&mut state, 7, &keyed_message("after-setup", "one", 0)),
         Outcome::MessageAppended { sequence: 2, .. }
     ));
+}
+
+#[test]
+fn older_preparation_without_predecessor_bytes_still_pauses_on_replay() {
+    let mut state = OwnerState::new("owner-a".into());
+    apply(&mut state, 0, &create("one", 7));
+    apply(&mut state, 0, &key_prepare("one", 0, None));
+    apply(&mut state, 0, &key_cutover("one", 0, None));
+    let mut encoded = serde_json::to_value(key_prepare("one", 1, Some([10; 32]))).unwrap();
+    encoded["body"]["preparation"]
+        .as_object_mut()
+        .unwrap()
+        .remove("previous_policy");
+    let old: Command = serde_json::from_value(encoded).unwrap();
+    assert!(matches!(
+        apply(&mut state, 0, &old),
+        Outcome::KeyEpochPrepared { .. }
+    ));
+    assert_eq!(
+        apply(&mut state, 7, &keyed_message("during", "one", 0)),
+        Outcome::Rejected {
+            reason: Rejection::KeyTransitionPending
+        }
+    );
+    assert_eq!(
+        state
+            .room("one")
+            .unwrap()
+            .key_state
+            .as_ref()
+            .unwrap()
+            .key_epoch,
+        0
+    );
 }
 
 #[test]
