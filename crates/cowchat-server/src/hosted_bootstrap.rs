@@ -39,7 +39,14 @@ const IO_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const SAFETY_MS: u64 = 30_000;
 
-#[derive(Deserialize)]
+#[cfg(feature = "room-key-demo")]
+mod initial_room;
+#[cfg(feature = "room-key-demo")]
+pub use initial_room::{
+    activate_initial_room, probe_initial_room, BrowserInitialRoom, InitialRoomDemo,
+};
+
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub worker_dir: PathBuf,
@@ -62,7 +69,103 @@ pub struct Config {
     session_seconds: u64,
 }
 
-#[derive(Deserialize)]
+/// Browser room-key coordinator. It owns only hosted service configuration;
+/// generated room keys and member signing keys remain in the browser.
+#[cfg(feature = "room-key-demo")]
+#[derive(Clone)]
+pub struct HostedRoomKeys {
+    config: Config,
+}
+
+#[cfg(feature = "room-key-demo")]
+impl HostedRoomKeys {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            config: config.clone(),
+        }
+    }
+
+    pub async fn initial_context(
+        &self,
+        owner: Address,
+        room_id: String,
+    ) -> Result<serde_json::Value> {
+        let auth = authority(&self.config).await?;
+        let ctx = volume_with_access(
+            &self.config,
+            &auth,
+            &self.config.control_volume,
+            AccessMode::ReadOnly,
+            false,
+        )
+        .await?;
+        let root = ctx.volume.manifest_root().0;
+        ctx.close().await;
+        cbssd::room_deployment::CompiledRoomDeployment::compiled()?
+            .initial_browser_context(owner, room_id, root)
+    }
+
+    pub async fn attest_setup(&self, signed_setup: &[u8]) -> Result<Vec<String>> {
+        Ok(cbssd::room_deployment::CompiledRoomDeployment::compiled()?
+            .attest_browser_setup(signed_setup)
+            .await?
+            .into_iter()
+            .map(hex::encode)
+            .collect())
+    }
+
+    /// Reserve the room in the owner log. Holds the owner-write lock only for
+    /// this local append; pass `submit = false` to resume a room whose records
+    /// are already durable. Kept separate from [`Self::finalize`] so the caller
+    /// releases the lock across the CBSS ceremony.
+    pub(crate) async fn stage(
+        &self,
+        runtime: &mut OwnerRuntime,
+        input: &BrowserInitialRoom,
+        submit: bool,
+    ) -> Result<()> {
+        initial_room::stage_initial_room(runtime, input, submit).await
+    }
+
+    /// Publish and finalize the prepared epoch against CBSS. Touches no owner
+    /// runtime, so the caller runs it with the owner-write lock released.
+    pub(crate) async fn finalize(
+        &self,
+        input: BrowserInitialRoom,
+    ) -> Result<initial_room::PreparedInitialRoom> {
+        initial_room::finalize_initial_room(&self.config, input).await
+    }
+
+    /// Commit the finalized epoch into the owner log under the owner-write lock.
+    pub(crate) async fn commit(
+        &self,
+        runtime: &mut OwnerRuntime,
+        prepared: &initial_room::PreparedInitialRoom,
+    ) -> Result<()> {
+        initial_room::commit_initial_room(runtime, prepared).await
+    }
+
+    pub fn open_context(
+        &self,
+        policy: &cowboy_protocol_codec::room_policy::SignedRoomKeyPolicyV1,
+        grant: &cowboy_protocol_codec::room_release::SignedRoomKeyGrantV1,
+        custody: &[u8],
+    ) -> Result<serde_json::Value> {
+        cbssd::room_deployment::CompiledRoomDeployment::compiled()?
+            .browser_open_context(policy, grant, custody)
+    }
+
+    pub async fn relay_open(&self, request: &[u8]) -> Result<Vec<String>> {
+        Ok(cbssd::room_deployment::CompiledRoomDeployment::compiled()?
+            .relay_browser_open(request)
+            .await?
+            .into_iter()
+            .map(hex::encode)
+            .collect())
+    }
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrokerPin {
     address: SocketAddr,
@@ -360,7 +463,13 @@ async fn authority(config: &Config) -> Result<Authority> {
     })
 }
 
-async fn volume(config: &Config, auth: &Authority, name: &str) -> Result<VolumeContext> {
+async fn volume_with_access(
+    config: &Config,
+    auth: &Authority,
+    name: &str,
+    access: AccessMode,
+    mount: bool,
+) -> Result<VolumeContext> {
     // A hosted writer is a long-lived owner session, using the existing mount
     // token lifetime with the same ReadWrite grant. No renewal or widening.
     let ctx = open_volume(
@@ -368,8 +477,8 @@ async fn volume(config: &Config, auth: &Authority, name: &str) -> Result<VolumeC
         name,
         CliMode::Cowboy,
         Some(&config.rpc_url),
-        AccessMode::ReadWrite,
-        true,
+        access,
+        mount,
         5,
         Some(&auth.checkpoint),
     )
@@ -390,6 +499,10 @@ async fn volume(config: &Config, auth: &Authority, name: &str) -> Result<VolumeC
         "CBFS attachment is near expiry"
     );
     Ok(ctx)
+}
+
+async fn volume(config: &Config, auth: &Authority, name: &str) -> Result<VolumeContext> {
+    volume_with_access(config, auth, name, AccessMode::ReadWrite, true).await
 }
 
 /// Provisioning never adopts an existing empty volume. A partial failure keeps

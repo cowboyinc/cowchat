@@ -191,6 +191,81 @@ async fn next_message(
 }
 
 #[tokio::test]
+async fn hosted_ingress_binds_key_epoch_and_never_uses_local_password_decryption() {
+    let fixture = Fixture::new().await;
+    let (control, volume) = Storage::new().await;
+    let mut writers = control.initialize_writers(volume).await;
+    let (storage, volume) = Storage::new().await;
+    let directory = private_directory();
+    let mut runtime = recover(
+        promote(&fixture, &mut writers).await,
+        storage.initialize_archive(volume).await,
+        &directory.path().join("intents.sqlite"),
+    )
+    .await;
+    runtime
+        .submit(vec![
+            create("one", 0),
+            key_prepare("one", 0, None),
+            key_cutover("one", 0, None),
+        ])
+        .await
+        .unwrap();
+    let network = Network::new(runtime).await;
+    let alice = network.client("alice").await;
+    alice.join_room("one").await.unwrap();
+    // prepare_message intentionally uses the local profile; labelling this
+    // ciphertext tests that a keyed response is never implicitly decrypted by
+    // that profile. Real senders use the separate contextual raw-key codec.
+    let mut payload = alice.prepare_message("one", "private", None, vec![], serde_json::json!({}));
+    for epoch in [
+        None,
+        Some("00"),
+        Some("+0"),
+        Some("18446744073709551616"),
+        Some("1"),
+    ] {
+        payload.message_id = Some(uuid::Uuid::new_v4().to_string());
+        payload.key_epoch = epoch.map(str::to_owned);
+        assert!(alice.append_prepared_message(&payload).await.is_err());
+    }
+    payload.message_id = Some(uuid::Uuid::new_v4().to_string());
+    payload.key_epoch = Some("0".into());
+    let message = alice.append_prepared_message(&payload).await.unwrap();
+    assert_eq!(message.key_epoch.as_deref(), Some("0"));
+    assert_eq!(message.content, payload.content);
+    let retry = alice.append_prepared_message(&payload).await.unwrap();
+    assert_eq!(retry.message_id, message.message_id);
+    let history = alice.get_history("one", 50, None).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].content, payload.content);
+    assert_eq!(history[0].key_epoch.as_deref(), Some("0"));
+    payload.key_epoch = Some("1".into());
+    assert!(alice.append_prepared_message(&payload).await.is_err());
+    let context = cowchat_core::room_crypto::Context {
+        room_id: "one",
+        key_epoch: 0,
+        message_id: "raw-key-message",
+    };
+    let prepared = CowchatClient::prepare_room_key_message(
+        &[42; 32],
+        &context,
+        "actual contextual message",
+        None,
+        vec![],
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let received = alice.append_prepared_message(&prepared).await.unwrap();
+    assert_eq!(received.content, prepared.content);
+    assert_eq!(received.key_epoch.as_deref(), Some("0"));
+    assert_eq!(
+        cowchat_core::room_crypto::decrypt(&[42; 32], &context, &received.content).unwrap(),
+        "actual contextual message"
+    );
+}
+
+#[tokio::test]
 async fn authenticated_clients_wait_for_archive_while_history_and_reconnect_read_committed_state() {
     let fixture = Fixture::new().await;
     let (control, volume) = Storage::new().await;

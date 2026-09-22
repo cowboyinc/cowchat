@@ -1,0 +1,70 @@
+{
+  "profile": "cowchat-room-message-v1",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "nonce_hex": "000102030405060708090a0b",
+  "vectors": [
+    {
+      "room_id": "room-test",
+      "key_epoch": "0",
+      "message_id": "message-1",
+      "text": "Hello 🐎 / \"room\"\nsecond line",
+      "wire": "cow1:AAECAwQFBgcICQoL0tlrb150zSHDrk2c93AjDqwDwYY2EYDP17UD5wevyVHB9EmAkjydugcQWvoI8fxQH+PMWcwKlLla3bVr/29uSen2nOLFSA6bq3kg4DogsoK/vShcC0qcV2Ay0lPcJzbT8zvghk1TE6vBkp1h"
+    },
+    {
+      "room_id": "room-test",
+      "key_epoch": "18446744073709551615",
+      "message_id": "message-max",
+      "text": "",
+      "wire": "cow1:AAECAwQFBgcICQoL0tlrb150zSHDrk2c93AjDqwDwYY2EYDP17UD5wevyVHB9EmAkjydugYKQuxTo7sXTrOaQ80Rja4jjugysmO8uxwLz6yCcQGEpW5vkDpegR28aqk+1xoZEZHhPLcMCI0"
+    },
+    {
+      "room_id": "room-é",
+      "key_epoch": "1",
+      "message_id": "message-é",
+      "text": "Exact UTF-8 scope",
+      "wire": "cow1:AAECAwQFBgcICQoL0tlrb150zSHDrk2c93AjDqwDwYY2EYDP17UD5wevyVHBQ4XRyjyAuhsQG70W5+5EG6lq3d8Emt5q2bpzsBrKkFRAnL6Ge1yM5ksen+hyaICE7RM7YFsYmWta"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "wrong domain",
+      "wire": "cow1:AAECAwQFBgcICQoL0tl/ckZ5wm3T7FKS8XMsT+sC3Yg8WdncleMN6VfwhBDO7UmAlX/W/RoDVPRH4OpbCqb0SR/ZcH5rlWiGEu1xGEhBsg"
+    },
+    {
+      "name": "numeric epoch",
+      "wire": "cow1:AAECAwQFBgcICQoL0tlrb150zSHDrk2c93AjDqwDwYY2EYDP17UD5wevyVHB9EmAkjydqBsQG70W5+5EG6mYVtEKzP5qzPtaD8Le6NNgC60gQrRkocPZMg"
+    },
+    {
+      "name": "noncanonical epoch",
+      "wire": "cow1:AAECAwQFBgcICQoL0tlrb150zSHDrk2c93AjDqwDwYY2EYDP17UD5wevyVHB9EmAkjydugcCVPRH+epQDeXOEdAZmrcwzLx/5G3Dpdc0j6UIpvWJBUAeBmLgGg"
+    },
+    {
+      "name": "missing text",
+      "wire": "cow1:AAECAwQFBgcICQoL0tlrb150zSHDrk2c93AjDqwDwYY2EYDP17UD5wevyVHB9EmAkjydugcQWvoI8fxQH+PMWcwK5UXcHhtargsW9rMYtJ1VAiA"
+    },
+    {
+      "name": "extra field",
+      "wire": "cow1:AAECAwQFBgcICQoL0tlrb150zSHDrk2c93AjDqwDwYY2EYDP17UD5wevyVHB9EmAkjydugcQWvoI8fxQH+PMWcwKlLlm3aFzsmO8swEMzqzHSXnhccjFht5YgbVVcf3Kixs"
+    },
+    {
+      "name": "object payload",
+      "wire": "cow1:AAECAwQFBgcICQoL8tl6b0Z6+inToQXR6nJhDuQE15QlVoGbjfJWmhCwyV+EohbR1jydulpXBasE8+p8F+CLTt9F3ehh2b5ivX68+lsM2bWRNhbLsHM1yDoBmhVLRK7zWpVy0j0iVbQ2eQ"
+    },
+    {
+      "name": "invalid UTF-8",
+      "wire": "cow1:AAECAwQFBgcICQoLdnzjsl+DKCl+nMaNpQwjWHc"
+    },
+    {
+      "name": "UTF-16 JSON",
+      "wire": "cow1:AAECAwQFBgcICQoL0vsqAEoXykDAg1zz8B1vY71wn+cjdMK5iZdCxVjAyzyJgF/zlR7QmFAyE9hIlPkjT4SLdNEomptguLYH/0/z1lR4yM2AFF/psBZvvDR8/vHq3mUyQ2rSPmNXlQ6rfXG/LN4L85LZCvSAW9G3jpGVgJ1vMzjxXTT4bW1p31osqg7FbxVsNTY/4uC5CMo"
+    },
+    {
+      "name": "lone surrogate",
+      "wire": "cow1:AAECAwQFBgcICQoL0tlrb150zSHDrk2c93AjDqwDwYY2EYDP17UD5wevyVHB9EmAkjydugcQWvoI8fxQH+PMWcwKlLlOzb0/oH+8i6pmwbPk+CddSTNjDu3cC3Q"
+    },
+    {
+      "name": "UTF-8 BOM",
+      "wire": "cow1:AAECAwQFBgcICQoLZkC3Wwt0yjfU616HtW9hDKRd34IiB8zeg7pZ9FfshE6D70HeknvC7BUeVOhHuK1OG/faFZpNlaowlPtz9Tfq9CTF5OknmhB9f8Q2XpKrYy5F"
+    }
+  ]
+}

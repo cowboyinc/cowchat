@@ -677,6 +677,63 @@ async fn real_nodes_promotion_retry_and_abandoned_epoch_takeover() {
 }
 
 #[tokio::test]
+async fn real_nodes_writer_startup_never_replays_pending_room_publication() {
+    let (storage, volume) = Storage::new().await;
+    let mut owners = storage.initialize_writers(volume).await;
+    owners.claim(0, "writer-a", "claim-a").await.unwrap();
+    drop(owners);
+    let mut publication = storage.reopen().await;
+    let approved_root = publication.manifest_root();
+    publication
+        .put("cowchat-room-policy/test", b"pending owner publication")
+        .await
+        .unwrap();
+    let rejecting = cbfs_sdk::test_support::RecordingManifestRegistry {
+        state: Default::default(),
+        fail: true,
+    };
+    assert!(publication
+        .commit_at_root(approved_root, storage.authority.as_ref(), &rejecting)
+        .await
+        .is_err());
+    let journal = cbfs_sdk::test_state_root_for_tests()
+        .unwrap()
+        .join("pending-diffs")
+        .join("root-bound")
+        .join(&hex0x(&approved_root.0)[2..])
+        .join(format!("{}.json", &hex0x(&storage.handle.volume_id.0)[2..]));
+    let evidence = std::fs::read(&journal).unwrap();
+    drop(publication);
+    // This is the real startup/promotion caller, which uses generic SDK
+    // reconciliation. It must never replay a room write with that registry.
+    let mut restarted = storage
+        .writers(storage.reopen().await, storage.registry.clone())
+        .await;
+    assert_eq!(restarted.epoch().unwrap(), 1);
+    assert_eq!(
+        storage
+            .authority
+            .get_root(&storage.handle.volume_id)
+            .await
+            .unwrap(),
+        Some(approved_root)
+    );
+    restarted.claim(1, "writer-b", "claim-b").await.unwrap();
+    let mut control = storage.reopen().await;
+    assert!(control.manifest().get("cowchat-room-policy/test").is_none());
+    let new_root = control.manifest_root();
+    assert_ne!(new_root, approved_root);
+    assert_eq!(
+        control
+            .restore_pending_at_root(new_root, storage.authority.as_ref())
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(std::fs::read(&journal).unwrap(), evidence);
+}
+
+#[tokio::test]
 async fn real_nodes_lost_promotion_reply_reconciles_same_claim() {
     let (storage, volume) = Storage::new().await;
     let faulty = Arc::new(LoseReply {

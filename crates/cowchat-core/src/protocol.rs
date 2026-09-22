@@ -102,6 +102,11 @@ pub enum FrameType {
     ListAgents,
     RoomInfo,
     RoomTip,
+    PrepareRoomKey,
+    AttestRoomKeySetup,
+    ActivateRoomKey,
+    GetRoomKeyContext,
+    RelayRoomKeyOpen,
 
     // Voting commands (client -> server)
     CreateVote,

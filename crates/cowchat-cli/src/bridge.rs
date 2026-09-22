@@ -40,6 +40,7 @@ impl RoomBridge {
         Pending {
             next_cursor,
             message: SendMessagePayload {
+                key_epoch: None,
                 message_id: Some(event.message_id),
                 room_id: self.room.clone(),
                 content: cowchat_core::crypto::encrypt(

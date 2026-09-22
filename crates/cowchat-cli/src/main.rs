@@ -3661,6 +3661,7 @@ mod room_key_tests {
         assert_eq!(human_size(26 * 1024 * 1024), "26.0 MiB");
 
         let msg = cowchat_core::ChatMessage {
+            key_epoch: None,
             message_id: "m1".into(),
             room_id: "r1".into(),
             agent_id: "a1".into(),

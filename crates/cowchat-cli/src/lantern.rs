@@ -486,6 +486,7 @@ mod tests {
 
     fn msg(seq: i64, from: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            key_epoch: None,
             message_id: format!("m{seq}"),
             room_id: "r".into(),
             agent_id: format!("id-{from}"),
