@@ -987,6 +987,16 @@ async fn handle_send_message(
         }
     };
 
+    if p.key_epoch.is_some() {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(
+                ErrorCode::InvalidPayload,
+                "Room key epochs require the hosted room writer",
+            ),
+        );
+    }
+
     if !broker.is_agent_in_room(agent_id, &p.room_id) {
         return Frame::error(
             req_id,

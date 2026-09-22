@@ -850,6 +850,7 @@ impl Store {
             |row| row.get(0),
         )?;
         let message = ChatMessage {
+            key_epoch: None,
             message_id: append.message_id.into(),
             room_id: append.room_id.into(),
             agent_id: append.agent_id.into(),
@@ -2154,6 +2155,7 @@ fn replay_append_on(
         return Err(StoreError::MessageConflict);
     }
     Ok(Some(ChatMessage {
+        key_epoch: None,
         message_id: append.message_id.into(),
         room_id: room,
         agent_id: agent,
@@ -2368,6 +2370,7 @@ fn map_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
     let seq: i64 = row.get(8).unwrap_or(0);
 
     Ok(ChatMessage {
+        key_epoch: None,
         message_id: row.get(0)?,
         room_id: row.get(1)?,
         agent_id: row.get(2)?,

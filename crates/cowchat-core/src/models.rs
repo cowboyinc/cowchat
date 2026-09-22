@@ -69,6 +69,9 @@ pub struct ChatMessage {
     pub agent_id: String,
     pub agent_name: String,
     pub content: String,
+    /// Hosted room-key epoch, as canonical decimal u64 text for JS clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_epoch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message: Option<String>,
     #[serde(default)]
@@ -149,6 +152,10 @@ pub struct SendMessagePayload {
     pub message_id: Option<String>,
     pub room_id: String,
     pub content: String,
+    /// Required after hosted room-key activation. Retain with exact ciphertext
+    /// on retry; never relabel an old ciphertext for a newer epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_epoch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
     #[serde(default)]

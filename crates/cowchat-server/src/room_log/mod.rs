@@ -41,6 +41,8 @@ pub enum CommandBody {
     },
     AppendMessage {
         room_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_epoch: Option<u64>,
         agent_id: String,
         agent_name: String,
         ciphertext: String,
@@ -48,6 +50,24 @@ pub enum CommandBody {
         metadata: serde_json::Value,
         mentions: Vec<String>,
     },
+    /// Internal control command. The publication coordinator must authenticate
+    /// the policy/current root and complete the all-holder barrier before
+    /// submitting this. It is not exposed as a client command.
+    CommitKeyEpoch {
+        room_id: String,
+        expected_policy_hash: Option<[u8; 32]>,
+        state: RoomKeyState,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RoomKeyState {
+    pub transition_id: [u8; 32],
+    pub policy_epoch: u64,
+    pub key_epoch: u64,
+    pub policy_hash: [u8; 32],
+    pub control_root: [u8; 32],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +81,10 @@ pub enum Outcome {
         room_id: String,
         message_id: String,
         sequence: i64,
+    },
+    KeyEpochCommitted {
+        room_id: String,
+        key_epoch: u64,
     },
     Rejected {
         reason: Rejection,
@@ -80,6 +104,8 @@ pub enum Rejection {
     UnknownReply,
     CommandConflict,
     SequenceExhausted,
+    KeyEpochMismatch,
+    InvalidKeyTransition,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -90,6 +116,8 @@ pub struct RoomState {
     pub created_by: String,
     pub created_at: DateTime<Utc>,
     pub messages: Vec<StoredMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_state: Option<RoomKeyState>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,16 +158,34 @@ fn valid_identity(value: &str) -> bool {
 
 fn command_digest(command: &Command) -> Result<[u8; 32], ReplayError> {
     let canonical = match &command.body {
-        CommandBody::CreateRoom { .. } => serde_json::to_vec(&command.body),
+        CommandBody::CreateRoom { .. } | CommandBody::CommitKeyEpoch { .. } => {
+            serde_json::to_vec(&command.body)
+        }
         CommandBody::AppendMessage {
             room_id,
+            key_epoch,
             agent_id,
             ciphertext,
             reply_to,
             metadata,
             mentions,
             ..
-        } => serde_json::to_vec(&(room_id, agent_id, ciphertext, reply_to, metadata, mentions)),
+        } => match key_epoch {
+            // Preserve legacy archive receipt digests exactly.
+            None => {
+                serde_json::to_vec(&(room_id, agent_id, ciphertext, reply_to, metadata, mentions))
+            }
+            Some(epoch) => serde_json::to_vec(&(
+                "cowchat-keyed-message-v1",
+                room_id,
+                epoch,
+                agent_id,
+                ciphertext,
+                reply_to,
+                metadata,
+                mentions,
+            )),
+        },
     }
     .map_err(|_| ReplayError::Encoding)?;
     let mut hash = Sha256::new();
@@ -203,7 +249,9 @@ impl OwnerState {
             return Err(ReplayError::Owner);
         }
         match &command.body {
-            CommandBody::CreateRoom { .. } if lane_id != 0 => return Err(ReplayError::Lane),
+            CommandBody::CreateRoom { .. } | CommandBody::CommitKeyEpoch { .. } if lane_id != 0 => {
+                return Err(ReplayError::Lane)
+            }
             CommandBody::AppendMessage { room_id, .. }
                 if lane_id == 0
                     || self
@@ -284,6 +332,7 @@ impl OwnerState {
                         created_by: created_by.clone(),
                         created_at: command.timestamp,
                         messages: Vec::new(),
+                        key_state: None,
                     },
                 );
                 Outcome::RoomCreated {
@@ -293,6 +342,7 @@ impl OwnerState {
             }
             CommandBody::AppendMessage {
                 room_id,
+                key_epoch,
                 agent_id,
                 agent_name,
                 ciphertext,
@@ -306,6 +356,9 @@ impl OwnerState {
                 let Some(room) = self.rooms.get_mut(room_id) else {
                     return rejected(Rejection::UnknownRoom);
                 };
+                if *key_epoch != room.key_state.as_ref().map(|state| state.key_epoch) {
+                    return rejected(Rejection::KeyEpochMismatch);
+                }
                 if !cowchat_core::crypto::is_ciphertext(ciphertext) {
                     return rejected(Rejection::Plaintext);
                 }
@@ -328,6 +381,7 @@ impl OwnerState {
                         agent_id: agent_id.clone(),
                         agent_name: agent_name.clone(),
                         content: ciphertext.clone(),
+                        key_epoch: key_epoch.map(|epoch| epoch.to_string()),
                         reply_to_message: reply_to.clone(),
                         metadata: metadata.clone(),
                         timestamp: command.timestamp,
@@ -339,6 +393,45 @@ impl OwnerState {
                     room_id: room_id.clone(),
                     message_id: command.command_id.clone(),
                     sequence,
+                }
+            }
+            CommandBody::CommitKeyEpoch {
+                room_id,
+                expected_policy_hash,
+                state,
+            } => {
+                let Some(room) = self.rooms.get_mut(room_id) else {
+                    return rejected(Rejection::UnknownRoom);
+                };
+                let transition_id: String = state
+                    .transition_id
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                let extends = match &room.key_state {
+                    None => {
+                        expected_policy_hash.is_none()
+                            && state.policy_epoch == 0
+                            && state.key_epoch == 0
+                    }
+                    Some(previous) => {
+                        *expected_policy_hash == Some(previous.policy_hash)
+                            && state.policy_epoch > previous.policy_epoch
+                            && state.key_epoch > previous.key_epoch
+                    }
+                };
+                if !extends
+                    || state.transition_id == [0; 32]
+                    || state.policy_hash == [0; 32]
+                    || state.control_root == [0; 32]
+                    || command.command_id != transition_id
+                {
+                    return rejected(Rejection::InvalidKeyTransition);
+                }
+                room.key_state = Some(state.clone());
+                Outcome::KeyEpochCommitted {
+                    room_id: room_id.clone(),
+                    key_epoch: state.key_epoch,
                 }
             }
         }

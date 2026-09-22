@@ -619,6 +619,11 @@ impl CowchatClient {
     /// is a Cowchat ciphertext blob. Leaves content untouched on decrypt
     /// failure or when no key is configured (callers then see the `cow1:` blob).
     fn decrypt_message(&self, msg: &mut ChatMessage) {
+        // Hosted epochs use the contextual raw-key codec. Never try the local
+        // password/HKDF profile on those messages, even if a secret is set.
+        if msg.key_epoch.is_some() {
+            return;
+        }
         if let Some(secret) = &self.room_secret {
             if cowchat_core::crypto::is_ciphertext(&msg.content) {
                 if let Ok(plain) = cowchat_core::crypto::decrypt(secret, &msg.room_id, &msg.content)
@@ -858,6 +863,7 @@ impl CowchatClient {
         metadata: serde_json::Value,
     ) -> SendMessagePayload {
         SendMessagePayload {
+            key_epoch: None,
             message_id: Some(uuid::Uuid::new_v4().to_string()),
             room_id: room_id.to_string(),
             content: self.encrypt_content(room_id, content),
@@ -865,6 +871,30 @@ impl CowchatClient {
             metadata,
             mentions,
         }
+    }
+
+    /// Prepare a hosted message using an explicit raw room key and context.
+    /// Persist this payload before sending and reuse it unchanged on retry.
+    /// This does not set or retain the client's local shared-secret profile.
+    pub fn prepare_room_key_message(
+        key: &[u8; 32],
+        context: &cowchat_core::room_crypto::Context<'_>,
+        content: &str,
+        reply_to: Option<&str>,
+        mentions: Vec<String>,
+        metadata: serde_json::Value,
+    ) -> Result<SendMessagePayload, ClientError> {
+        let content = cowchat_core::room_crypto::encrypt(key, context, content)
+            .map_err(|e| ClientError::Encryption(e.to_string()))?;
+        Ok(SendMessagePayload {
+            message_id: Some(context.message_id.into()),
+            room_id: context.room_id.into(),
+            key_epoch: Some(context.key_epoch.to_string()),
+            content,
+            reply_to: reply_to.map(String::from),
+            mentions,
+            metadata,
+        })
     }
 
     /// Broadcast a "thinking out loud" pulse to the room. Persisted to history
@@ -1316,6 +1346,11 @@ impl CowchatClient {
         let mut work: Option<ActorWork> = serde_json::from_value(response.payload["work"].clone())?;
         if let Some(work) = &mut work {
             for message in std::iter::once(&mut work.input).chain(work.existing_reply.iter_mut()) {
+                if message.key_epoch.is_some() {
+                    return Err(ClientError::Encryption(
+                        "actor requires the hosted room key codec".into(),
+                    ));
+                }
                 if cowchat_core::crypto::is_ciphertext(&message.content) {
                     let secret = self
                         .room_secret
@@ -1398,6 +1433,7 @@ impl CowchatClient {
         mentions: Vec<String>,
     ) -> SendMessagePayload {
         SendMessagePayload {
+            key_epoch: None,
             message_id: Some(work.reply_message_id.clone()),
             room_id: work.room_id.clone(),
             content: self.encrypt_content(&work.room_id, content),

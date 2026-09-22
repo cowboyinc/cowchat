@@ -515,6 +515,7 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         let msg = ChatMessage {
+            key_epoch: None,
             message_id: "m".into(),
             room_id: "r".into(),
             agent_id: "a-id".into(),

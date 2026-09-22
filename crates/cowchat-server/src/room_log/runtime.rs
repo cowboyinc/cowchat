@@ -331,6 +331,7 @@ impl OwnerRuntime {
                 CommandBody::AppendMessage { room_id, .. } => {
                     self.log.room_lane(&self.owner_id, room_id).await?
                 }
+                CommandBody::CommitKeyEpoch { .. } => 0,
             };
             intents.push(Intent {
                 lane_id,

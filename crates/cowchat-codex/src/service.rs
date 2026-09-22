@@ -335,6 +335,7 @@ impl WakeService {
         })?;
         let message = if let Some(seq) = reservation.room_seq {
             Some(ChatMessage {
+                key_epoch: None,
                 message_id: String::new(),
                 room_id: target.room.clone(),
                 agent_id: String::new(),
@@ -619,6 +620,7 @@ mod tests {
         ) -> Result<ChatMessage, ServiceError> {
             let mut messages = self.messages.lock().unwrap();
             let message = ChatMessage {
+                key_epoch: None,
                 message_id: format!("msg-{}", messages.len() + 1),
                 room_id: room.into(),
                 agent_id: "sender-id".into(),

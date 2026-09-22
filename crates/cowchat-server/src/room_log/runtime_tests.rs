@@ -6,7 +6,7 @@ use super::*;
 use crate::room_log::{
     intent::{Intent, IntentError, IntentJournal},
     runtime::{FencedWriter, OwnerRuntime, RuntimeError, RuntimeLimits, WorkerIncarnation},
-    tests::{create, message},
+    tests::{create, key_cutover, keyed_message, message},
 };
 use std::path::Path;
 
@@ -137,6 +137,105 @@ async fn durable_batch_retries_and_cold_projection_recovery() {
 struct HoldCommit {
     inner: Arc<LocalManifestRegistry>,
     entered: tokio::sync::Notify,
+}
+
+#[tokio::test]
+async fn key_cutover_waits_for_archive_and_recovers_same_transition_after_cancellation() {
+    let fixture = Fixture::new().await;
+    let (control, volume) = Storage::new().await;
+    let mut writers = control.initialize_writers(volume).await;
+    let (storage, volume) = Storage::new().await;
+    let directory = private_directory();
+    let path = directory.path().join("intents.sqlite");
+    let mut runtime = recover(
+        promote(&fixture, &mut writers).await,
+        storage.initialize_archive(volume).await,
+        &path,
+    )
+    .await;
+    let old = keyed_message("before", "one", 0);
+    runtime
+        .submit(vec![
+            create("one", 0),
+            key_cutover("one", 0, None),
+            old.clone(),
+        ])
+        .await
+        .unwrap();
+    drop(runtime);
+    let held = Arc::new(HoldCommit {
+        inner: storage.registry.clone(),
+        entered: tokio::sync::Notify::new(),
+    });
+    let archive = storage.archive(storage.reopen().await, held.clone()).await;
+    let mut runtime = recover(promote(&fixture, &mut writers).await, archive, &path).await;
+    let view = runtime.view();
+    let cutover = key_cutover("one", 1, Some([10; 32]));
+    {
+        let submit = runtime.submit(vec![cutover.clone()]);
+        tokio::pin!(submit);
+        tokio::select! {
+            result = &mut submit => panic!("cutover returned before archive commit: {}", result.is_ok()),
+            _ = held.entered.notified() => {}
+        }
+        assert_eq!(
+            view.read()
+                .unwrap()
+                .room("one")
+                .unwrap()
+                .key_state
+                .as_ref()
+                .unwrap()
+                .key_epoch,
+            0
+        );
+        // Dropping the uncertain write retires the complete projection.
+    }
+    assert!(matches!(view.read(), Err(RuntimeError::Retired)));
+    drop(runtime);
+    let archive = storage
+        .archive(storage.reopen().await, storage.registry.clone())
+        .await;
+    let mut runtime = recover(promote(&fixture, &mut writers).await, archive, &path).await;
+    assert_eq!(
+        runtime
+            .state()
+            .unwrap()
+            .room("one")
+            .unwrap()
+            .key_state
+            .as_ref()
+            .unwrap()
+            .key_epoch,
+        1
+    );
+    let retried = runtime.submit(vec![cutover, old]).await.unwrap();
+    assert!(retried.applied.is_empty());
+    assert!(matches!(
+        retried.outcomes[0],
+        Outcome::KeyEpochCommitted { key_epoch: 1, .. }
+    ));
+    assert!(matches!(
+        retried.outcomes[1],
+        Outcome::MessageAppended { sequence: 1, .. }
+    ));
+    let batch = runtime
+        .submit(vec![
+            keyed_message("fresh-old", "one", 0),
+            keyed_message("after", "one", 1),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        batch.outcomes[0],
+        Outcome::Rejected {
+            reason: Rejection::KeyEpochMismatch
+        }
+    );
+    assert!(matches!(
+        batch.outcomes[1],
+        Outcome::MessageAppended { sequence: 2, .. }
+    ));
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@ pub(super) fn message(id: &str, room: &str) -> Command {
         timestamp: "2026-09-21T14:01:00Z".parse().unwrap(),
         body: CommandBody::AppendMessage {
             room_id: room.into(),
+            key_epoch: None,
             agent_id: "alice".into(),
             agent_name: "Alice".into(),
             ciphertext: "cow1:opaque-ciphertext".into(),
@@ -33,6 +34,158 @@ fn apply(state: &mut OwnerState, lane: u64, command: &Command) -> Outcome {
     state
         .apply(state.applied_through() + 1, lane, command)
         .unwrap()
+}
+
+pub(super) fn key_cutover(room: &str, epoch: u64, previous: Option<[u8; 32]>) -> Command {
+    let transition_id = [epoch as u8 + 1; 32];
+    Command {
+        owner_id: "owner-a".into(),
+        command_id: transition_id.iter().map(|b| format!("{b:02x}")).collect(),
+        timestamp: "2026-09-21T14:02:00Z".parse().unwrap(),
+        body: CommandBody::CommitKeyEpoch {
+            room_id: room.into(),
+            expected_policy_hash: previous,
+            state: RoomKeyState {
+                transition_id,
+                policy_epoch: epoch,
+                key_epoch: epoch,
+                policy_hash: [epoch as u8 + 10; 32],
+                control_root: [epoch as u8 + 20; 32],
+            },
+        },
+    }
+}
+
+pub(super) fn keyed_message(id: &str, room: &str, epoch: u64) -> Command {
+    let mut command = message(id, room);
+    if let CommandBody::AppendMessage { key_epoch, .. } = &mut command.body {
+        *key_epoch = Some(epoch);
+    }
+    command
+}
+
+#[test]
+fn key_cutover_orders_old_receipts_fresh_sends_and_replay() {
+    let entries = vec![
+        (0, create("one", 7)),
+        (0, key_cutover("one", 0, None)),
+        (7, keyed_message("before", "one", 0)),
+        (0, key_cutover("one", 1, Some([10; 32]))),
+    ];
+    let mut state = OwnerState::new("owner-a".into());
+    for (lane, command) in &entries {
+        apply(&mut state, *lane, command);
+    }
+    assert_eq!(
+        state
+            .room("one")
+            .unwrap()
+            .key_state
+            .as_ref()
+            .unwrap()
+            .key_epoch,
+        1
+    );
+    // A previously accepted message keeps its receipt after removal/rotation.
+    assert!(matches!(
+        apply(&mut state, 7, &entries[2].1),
+        Outcome::MessageAppended { sequence: 1, .. }
+    ));
+    for command in [
+        keyed_message("fresh-old", "one", 0),
+        message("missing-epoch", "one"),
+        keyed_message("future", "one", 2),
+    ] {
+        assert_eq!(
+            apply(&mut state, 7, &command),
+            Outcome::Rejected {
+                reason: Rejection::KeyEpochMismatch
+            }
+        );
+    }
+    assert!(matches!(
+        apply(&mut state, 7, &keyed_message("after", "one", 1)),
+        Outcome::MessageAppended { sequence: 2, .. }
+    ));
+    assert_eq!(
+        state.room("one").unwrap().messages[0]
+            .message
+            .key_epoch
+            .as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        state.room("one").unwrap().messages[1]
+            .message
+            .key_epoch
+            .as_deref(),
+        Some("1")
+    );
+    // Relabelling the same ciphertext/id is a conflict, not a retry.
+    assert_eq!(
+        apply(&mut state, 7, &keyed_message("before", "one", 1)),
+        Outcome::Rejected {
+            reason: Rejection::CommandConflict
+        }
+    );
+    let mut rebuilt = OwnerState::new("owner-a".into());
+    for (lane, command) in entries {
+        let command: Command =
+            serde_json::from_slice(&serde_json::to_vec(&command).unwrap()).unwrap();
+        apply(&mut rebuilt, lane, &command);
+    }
+    assert_eq!(
+        rebuilt.room("one").unwrap().key_state,
+        state.room("one").unwrap().key_state
+    );
+    assert!(matches!(
+        apply(&mut rebuilt, 7, &keyed_message("before", "one", 0)),
+        Outcome::MessageAppended { sequence: 1, .. }
+    ));
+}
+
+#[test]
+fn key_cutover_requires_monotone_exact_predecessor_and_stable_transition_id() {
+    let mut state = OwnerState::new("owner-a".into());
+    apply(&mut state, 0, &create("one", 7));
+    let initial = key_cutover("one", 0, None);
+    assert_eq!(state.apply(2, 7, &initial), Err(ReplayError::Lane));
+    let mut bad = initial.clone();
+    bad.command_id = "different-transition".into();
+    assert_eq!(
+        apply(&mut state, 0, &bad),
+        Outcome::Rejected {
+            reason: Rejection::InvalidKeyTransition
+        }
+    );
+    assert!(matches!(
+        apply(&mut state, 0, &initial),
+        Outcome::KeyEpochCommitted { key_epoch: 0, .. }
+    ));
+    let wrong = key_cutover("one", 1, Some([99; 32]));
+    assert_eq!(
+        apply(&mut state, 0, &wrong),
+        Outcome::Rejected {
+            reason: Rejection::InvalidKeyTransition
+        }
+    );
+    // A rejected stable command ID cannot be recycled with a different body.
+    assert_eq!(
+        apply(&mut state, 0, &key_cutover("one", 1, Some([10; 32]))),
+        Outcome::Rejected {
+            reason: Rejection::CommandConflict
+        }
+    );
+    assert_eq!(
+        state
+            .room("one")
+            .unwrap()
+            .key_state
+            .as_ref()
+            .unwrap()
+            .key_epoch,
+        0
+    );
 }
 
 #[test]

@@ -404,6 +404,17 @@ impl HostedOwner {
     ) -> Result<Frame, Frame> {
         let id = frame.id.as_deref();
         let p: SendMessagePayload = parse(frame)?;
+        let key_epoch = p
+            .key_epoch
+            .as_deref()
+            .map(|text| {
+                let epoch = text
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|epoch| epoch.to_string() == text);
+                epoch.ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Invalid room key epoch"))
+            })
+            .transpose()?;
         self.require_room(id, &p.room_id)?;
         if !broker.is_agent_in_room(agent_id, &p.room_id) {
             return Err(error(id, ErrorCode::NotInRoom, "Not in this room"));
@@ -431,6 +442,7 @@ impl HostedOwner {
             timestamp: chrono::Utc::now(),
             body: CommandBody::AppendMessage {
                 room_id: p.room_id.clone(),
+                key_epoch,
                 agent_id: agent_id.into(),
                 agent_name: agent_name.into(),
                 ciphertext: p.content,
