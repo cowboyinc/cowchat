@@ -947,7 +947,7 @@ dependencies = [
 [[package]]
 name = "cbss-client"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=92e2527669374e8b2d9bdb5ab16bbd0498e37dd2#92e2527669374e8b2d9bdb5ab16bbd0498e37dd2"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=f48dad0c440ef55ae5826f7e4758fb06f548488f#f48dad0c440ef55ae5826f7e4758fb06f548488f"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -984,7 +984,7 @@ dependencies = [
 [[package]]
 name = "cbss-crypto"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=92e2527669374e8b2d9bdb5ab16bbd0498e37dd2#92e2527669374e8b2d9bdb5ab16bbd0498e37dd2"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=f48dad0c440ef55ae5826f7e4758fb06f548488f#f48dad0c440ef55ae5826f7e4758fb06f548488f"
 dependencies = [
  "aes-gcm",
  "blstrs",
@@ -1012,12 +1012,12 @@ dependencies = [
 [[package]]
 name = "cbss-types"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=92e2527669374e8b2d9bdb5ab16bbd0498e37dd2#92e2527669374e8b2d9bdb5ab16bbd0498e37dd2"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=f48dad0c440ef55ae5826f7e4758fb06f548488f#f48dad0c440ef55ae5826f7e4758fb06f548488f"
 
 [[package]]
 name = "cbssd"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=92e2527669374e8b2d9bdb5ab16bbd0498e37dd2#92e2527669374e8b2d9bdb5ab16bbd0498e37dd2"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=f48dad0c440ef55ae5826f7e4758fb06f548488f#f48dad0c440ef55ae5826f7e4758fb06f548488f"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1034,6 +1034,7 @@ dependencies = [
  "cbss-types",
  "ciborium",
  "commonware-codec",
+ "cowboy-protocol-activation",
  "cowboy-protocol-cbss-crypto",
  "cowboy-protocol-client-crypto",
  "cowboy-protocol-codec",
@@ -4534,7 +4535,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
