@@ -204,7 +204,11 @@ async fn hosted_ingress_binds_key_epoch_and_never_uses_local_password_decryption
     )
     .await;
     runtime
-        .submit(vec![create("one", 0), key_cutover("one", 0, None)])
+        .submit(vec![
+            create("one", 0),
+            key_prepare("one", 0, None),
+            key_cutover("one", 0, None),
+        ])
         .await
         .unwrap();
     let network = Network::new(runtime).await;

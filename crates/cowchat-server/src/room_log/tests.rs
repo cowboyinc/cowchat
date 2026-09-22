@@ -56,6 +56,31 @@ pub(super) fn key_cutover(room: &str, epoch: u64, previous: Option<[u8; 32]>) ->
     }
 }
 
+// Deliberately structural bytes: reducer tests do not claim signature verification.
+pub(super) fn key_prepare(room: &str, epoch: u64, previous: Option<[u8; 32]>) -> Command {
+    let preparation = Box::new(RoomKeyPreparation {
+        transition_id: [epoch as u8 + 1; 32],
+        expected_policy_hash: previous,
+        policy_epoch: epoch,
+        key_epoch: epoch,
+        policy_hash: [epoch as u8 + 10; 32],
+        expected_control_root: [epoch as u8 + 19; 32],
+        signed_setup: "01".repeat(200),
+        signed_policy: "02".repeat(400),
+        custody: "03".repeat(157),
+        grants: vec!["04".repeat(178)],
+    });
+    Command {
+        owner_id: "owner-a".into(),
+        command_id: preparation.command_id(),
+        timestamp: "2026-09-21T14:02:00Z".parse().unwrap(),
+        body: CommandBody::PrepareKeyEpoch {
+            room_id: room.into(),
+            preparation,
+        },
+    }
+}
+
 pub(super) fn keyed_message(id: &str, room: &str, epoch: u64) -> Command {
     let mut command = message(id, room);
     if let CommandBody::AppendMessage { key_epoch, .. } = &mut command.body {
@@ -68,8 +93,10 @@ pub(super) fn keyed_message(id: &str, room: &str, epoch: u64) -> Command {
 fn key_cutover_orders_old_receipts_fresh_sends_and_replay() {
     let entries = vec![
         (0, create("one", 7)),
+        (0, key_prepare("one", 0, None)),
         (0, key_cutover("one", 0, None)),
         (7, keyed_message("before", "one", 0)),
+        (0, key_prepare("one", 1, Some([10; 32]))),
         (0, key_cutover("one", 1, Some([10; 32]))),
     ];
     let mut state = OwnerState::new("owner-a".into());
@@ -88,7 +115,7 @@ fn key_cutover_orders_old_receipts_fresh_sends_and_replay() {
     );
     // A previously accepted message keeps its receipt after removal/rotation.
     assert!(matches!(
-        apply(&mut state, 7, &entries[2].1),
+        apply(&mut state, 7, &entries[3].1),
         Outcome::MessageAppended { sequence: 1, .. }
     ));
     for command in [
@@ -158,6 +185,7 @@ fn key_cutover_requires_monotone_exact_predecessor_and_stable_transition_id() {
             reason: Rejection::InvalidKeyTransition
         }
     );
+    apply(&mut state, 0, &key_prepare("one", 0, None));
     assert!(matches!(
         apply(&mut state, 0, &initial),
         Outcome::KeyEpochCommitted { key_epoch: 0, .. }
@@ -186,6 +214,139 @@ fn key_cutover_requires_monotone_exact_predecessor_and_stable_transition_id() {
             .key_epoch,
         0
     );
+}
+
+#[test]
+fn preparation_blocks_only_fresh_sends_and_cannot_be_replaced() {
+    let mut state = OwnerState::new("owner-a".into());
+    apply(&mut state, 0, &create("one", 7));
+    apply(&mut state, 0, &create("two", 8));
+    let accepted = message("before-setup", "one");
+    apply(&mut state, 7, &accepted);
+    let preparation = key_prepare("one", 0, None);
+    assert_eq!(state.apply(4, 7, &preparation), Err(ReplayError::Lane));
+    assert!(matches!(
+        apply(&mut state, 0, &preparation),
+        Outcome::KeyEpochPrepared { .. }
+    ));
+    assert!(state.room("one").unwrap().key_state.is_none());
+    assert!(matches!(
+        apply(&mut state, 7, &accepted),
+        Outcome::MessageAppended { sequence: 1, .. }
+    ));
+    assert_eq!(
+        apply(&mut state, 7, &message("during-setup", "one")),
+        Outcome::Rejected {
+            reason: Rejection::KeyTransitionPending
+        }
+    );
+    assert!(matches!(
+        apply(&mut state, 8, &message("other-room", "two")),
+        Outcome::MessageAppended { .. }
+    ));
+    assert!(matches!(
+        apply(&mut state, 0, &preparation),
+        Outcome::KeyEpochPrepared { .. }
+    ));
+    let mut changed = preparation.clone();
+    if let CommandBody::PrepareKeyEpoch { preparation, .. } = &mut changed.body {
+        preparation.custody = "05".repeat(157);
+    }
+    assert_eq!(
+        apply(&mut state, 0, &changed),
+        Outcome::Rejected {
+            reason: Rejection::CommandConflict
+        }
+    );
+    assert_eq!(
+        apply(&mut state, 0, &key_prepare("one", 1, Some([10; 32]))),
+        Outcome::Rejected {
+            reason: Rejection::KeyTransitionPending
+        }
+    );
+    assert!(matches!(
+        apply(&mut state, 0, &key_cutover("one", 0, None)),
+        Outcome::KeyEpochCommitted { .. }
+    ));
+    assert!(state.room("one").unwrap().key_preparation.is_none());
+    assert!(matches!(
+        apply(&mut state, 7, &keyed_message("after-setup", "one", 0)),
+        Outcome::MessageAppended { sequence: 2, .. }
+    ));
+}
+
+#[test]
+fn preparation_rejects_invalid_predecessors_bytes_and_oversized_records() {
+    for case in 0..10 {
+        let mut state = OwnerState::new("owner-a".into());
+        apply(&mut state, 0, &create("one", 7));
+        let mut command = key_prepare("one", 0, None);
+        if let CommandBody::PrepareKeyEpoch { preparation, .. } = &mut command.body {
+            match case {
+                0 => preparation.expected_policy_hash = Some([1; 32]),
+                1 => preparation.key_epoch = 1,
+                2 => preparation.transition_id = [0; 32],
+                3 => preparation.expected_control_root = [0; 32],
+                4 => preparation.signed_setup = "0A".into(),
+                5 => preparation.signed_policy = "0".into(),
+                6 => preparation.custody.pop().map(|_| ()).unwrap(),
+                7 => preparation.grants.push("ff".into()),
+                8 => preparation.grants = vec!["04".repeat(178); 1024],
+                9 => preparation.signed_setup = "01".repeat(32 * 1024 + 1),
+                _ => unreachable!(),
+            }
+            command.command_id = preparation.command_id();
+        }
+        assert_eq!(
+            apply(&mut state, 0, &command),
+            Outcome::Rejected {
+                reason: Rejection::InvalidKeyTransition
+            },
+            "case {case}"
+        );
+        assert!(state.room("one").unwrap().key_preparation.is_none());
+    }
+}
+
+#[test]
+fn cutover_requires_preparation_and_exact_prepared_fields() {
+    for case in 0..7 {
+        let mut state = OwnerState::new("owner-a".into());
+        apply(&mut state, 0, &create("one", 7));
+        if case != 0 {
+            apply(&mut state, 0, &key_prepare("one", 0, None));
+        }
+        let mut command = key_cutover("one", 0, None);
+        if let CommandBody::CommitKeyEpoch {
+            expected_policy_hash,
+            state,
+            ..
+        } = &mut command.body
+        {
+            match case {
+                0 => {}
+                1 => *expected_policy_hash = Some([1; 32]),
+                2 => state.policy_hash = [99; 32],
+                3 => state.policy_epoch = 1,
+                4 => state.key_epoch = 1,
+                5 => state.control_root = [19; 32],
+                6 => state.control_root = [0; 32],
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(
+            apply(&mut state, 0, &command),
+            Outcome::Rejected {
+                reason: Rejection::InvalidKeyTransition
+            },
+            "case {case}"
+        );
+        assert!(state.room("one").unwrap().key_state.is_none());
+        assert_eq!(
+            state.room("one").unwrap().key_preparation.is_some(),
+            case != 0
+        );
+    }
 }
 
 #[test]

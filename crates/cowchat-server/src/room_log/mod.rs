@@ -15,6 +15,9 @@ pub mod ownership;
 #[cfg(feature = "cbfs-archive")]
 pub mod runtime;
 
+mod key_epoch;
+pub use key_epoch::{RoomKeyPreparation, RoomKeyState};
+
 use chrono::{DateTime, Utc};
 use cowchat_core::ChatMessage;
 use serde::{Deserialize, Serialize};
@@ -50,6 +53,11 @@ pub enum CommandBody {
         metadata: serde_json::Value,
         mentions: Vec<String>,
     },
+    /// Internal recovery intent; must be archived before control publication.
+    PrepareKeyEpoch {
+        room_id: String,
+        preparation: Box<RoomKeyPreparation>,
+    },
     /// Internal control command. The publication coordinator must authenticate
     /// the policy/current root and complete the all-holder barrier before
     /// submitting this. It is not exposed as a client command.
@@ -58,16 +66,6 @@ pub enum CommandBody {
         expected_policy_hash: Option<[u8; 32]>,
         state: RoomKeyState,
     },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RoomKeyState {
-    pub transition_id: [u8; 32],
-    pub policy_epoch: u64,
-    pub key_epoch: u64,
-    pub policy_hash: [u8; 32],
-    pub control_root: [u8; 32],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,6 +79,10 @@ pub enum Outcome {
         room_id: String,
         message_id: String,
         sequence: i64,
+    },
+    KeyEpochPrepared {
+        room_id: String,
+        transition_id: [u8; 32],
     },
     KeyEpochCommitted {
         room_id: String,
@@ -106,6 +108,7 @@ pub enum Rejection {
     SequenceExhausted,
     KeyEpochMismatch,
     InvalidKeyTransition,
+    KeyTransitionPending,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,6 +121,8 @@ pub struct RoomState {
     pub messages: Vec<StoredMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_state: Option<RoomKeyState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_preparation: Option<Box<RoomKeyPreparation>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -158,9 +163,9 @@ fn valid_identity(value: &str) -> bool {
 
 fn command_digest(command: &Command) -> Result<[u8; 32], ReplayError> {
     let canonical = match &command.body {
-        CommandBody::CreateRoom { .. } | CommandBody::CommitKeyEpoch { .. } => {
-            serde_json::to_vec(&command.body)
-        }
+        CommandBody::CreateRoom { .. }
+        | CommandBody::PrepareKeyEpoch { .. }
+        | CommandBody::CommitKeyEpoch { .. } => serde_json::to_vec(&command.body),
         CommandBody::AppendMessage {
             room_id,
             key_epoch,
@@ -249,7 +254,11 @@ impl OwnerState {
             return Err(ReplayError::Owner);
         }
         match &command.body {
-            CommandBody::CreateRoom { .. } | CommandBody::CommitKeyEpoch { .. } if lane_id != 0 => {
+            CommandBody::CreateRoom { .. }
+            | CommandBody::PrepareKeyEpoch { .. }
+            | CommandBody::CommitKeyEpoch { .. }
+                if lane_id != 0 =>
+            {
                 return Err(ReplayError::Lane)
             }
             CommandBody::AppendMessage { room_id, .. }
@@ -333,6 +342,7 @@ impl OwnerState {
                         created_at: command.timestamp,
                         messages: Vec::new(),
                         key_state: None,
+                        key_preparation: None,
                     },
                 );
                 Outcome::RoomCreated {
@@ -356,6 +366,9 @@ impl OwnerState {
                 let Some(room) = self.rooms.get_mut(room_id) else {
                     return rejected(Rejection::UnknownRoom);
                 };
+                if room.key_preparation.is_some() {
+                    return rejected(Rejection::KeyTransitionPending);
+                }
                 if *key_epoch != room.key_state.as_ref().map(|state| state.key_epoch) {
                     return rejected(Rejection::KeyEpochMismatch);
                 }
@@ -395,6 +408,27 @@ impl OwnerState {
                     sequence,
                 }
             }
+            CommandBody::PrepareKeyEpoch {
+                room_id,
+                preparation,
+            } => {
+                let Some(room) = self.rooms.get_mut(room_id) else {
+                    return rejected(Rejection::UnknownRoom);
+                };
+                if room.key_preparation.is_some() {
+                    return rejected(Rejection::KeyTransitionPending);
+                }
+                if command.command_id != preparation.command_id()
+                    || !preparation.extends(room.key_state.as_ref())
+                {
+                    return rejected(Rejection::InvalidKeyTransition);
+                }
+                room.key_preparation = Some(preparation.clone());
+                Outcome::KeyEpochPrepared {
+                    room_id: room_id.clone(),
+                    transition_id: preparation.transition_id,
+                }
+            }
             CommandBody::CommitKeyEpoch {
                 room_id,
                 expected_policy_hash,
@@ -403,32 +437,15 @@ impl OwnerState {
                 let Some(room) = self.rooms.get_mut(room_id) else {
                     return rejected(Rejection::UnknownRoom);
                 };
-                let transition_id: String = state
-                    .transition_id
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect();
-                let extends = match &room.key_state {
-                    None => {
-                        expected_policy_hash.is_none()
-                            && state.policy_epoch == 0
-                            && state.key_epoch == 0
-                    }
-                    Some(previous) => {
-                        *expected_policy_hash == Some(previous.policy_hash)
-                            && state.policy_epoch > previous.policy_epoch
-                            && state.key_epoch > previous.key_epoch
-                    }
-                };
-                if !extends
-                    || state.transition_id == [0; 32]
-                    || state.policy_hash == [0; 32]
-                    || state.control_root == [0; 32]
-                    || command.command_id != transition_id
+                if command.command_id != key_epoch::transition_id(&state.transition_id)
+                    || !room.key_preparation.as_ref().is_some_and(|prepared| {
+                        prepared.matches_commit(*expected_policy_hash, state)
+                    })
                 {
                     return rejected(Rejection::InvalidKeyTransition);
                 }
                 room.key_state = Some(state.clone());
+                room.key_preparation = None;
                 Outcome::KeyEpochCommitted {
                     room_id: room_id.clone(),
                     key_epoch: state.key_epoch,

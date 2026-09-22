@@ -1,7 +1,11 @@
 # Hosted room key epochs and durable cutover
 
-The follow-up writer now supports an internal `CommitKeyEpoch` command in its
-existing owner stream, on control lane zero. The record binds the transition ID,
+The follow-up writer supports internal `PrepareKeyEpoch` and `CommitKeyEpoch`
+commands in its existing owner stream, on control lane zero. Preparation retains
+the exact signed setup/policy bytes, encrypted custody and grants before any
+control-volume publication. It pauses fresh sends for that room while preserving
+existing receipts and service to other rooms. Commit must match the prepared
+transition exactly and clears preparation only after archive commit. The record binds the transition ID,
 expected previous policy hash, new policy/key epochs, policy hash and control
 root. Its command ID is the lowercase hex transition ID, so uncertain retries
 cannot silently switch bodies. Initial key/policy epochs are zero; later
@@ -42,13 +46,19 @@ old accepted intents first. That coordinator is not implemented yet; these
 changes do not claim an end-to-end safe room rotation or permission to activate
 the product.
 
-The next integration must also record preparation in shared durable state before
-publishing a new control policy. A marker only in the worker's local journal is
-insufficient: another host can take over without that file. Reuse the owner
-stream/archive for a prepared transition, retain the exact signed policy,
-wrapped custody and grants, and block fresh room sends while it is pending.
-Recovery must reconcile that same preparation before completing the cutover.
-This preparation command and coordinator are planned, not implemented here.
+Preparation is shared durable state, not a marker only in a worker's local
+journal. A replacement worker with an empty journal recovers it from the owner
+archive/log and keeps the room paused until matching cutover. Preparation only
+checks structural replay invariants; it does not authenticate its opaque signed
+bytes or prove that encrypted custody contains the intended key. A stored setup
+request is not a fresh attestation. The coordinator must re-establish current
+setup permission and preserve the exact prepared custody, policy and grants.
+There is no automatic abort, rebase or roster replacement while pending.
+
+The serialized preparation is bounded to 240 KiB, leaving space in a 256 KiB
+CBQS envelope. Large membership/history sets that exceed that bound must be
+rejected before publication; records are never truncated. This is not a claim
+that every protocol-maximum roster fits the current hosted transport.
 
 The pinned SDK's general `Volume::commit` can rebase a pending mutation after a
 conflict. The publication integration must explicitly enforce the attested
@@ -63,13 +73,17 @@ At protocol `1e25ac7`, CBFS SDK `e6e8233`, and the isolated CBQS child `eb2ba17`
 
 - Reducer tests exercise ordered rotation, old receipts versus fresh old sends,
   epoch relabelling, predecessor mismatch, stable IDs, lane checks and replay.
+  Preparation checks cover replacement conflicts, bounds, malformed bytes and
+  cutovers that disagree with prepared fields.
 - Real broker and subprocess CBFS-node tests hold the archive commit, prove the
   old epoch remains visible, cancel the write, require retired reads, recover
-  the same transition, and check message receipts across the boundary.
+  the same transition, and check message receipts across the boundary. A second
+  worker with an empty local journal recovers exact preparation, keeps fresh
+  sends paused, returns old receipts and serves another room through cutover.
 - An authenticated TCP caller test rejects omitted/noncanonical/stale epochs,
   preserves labels through receipts/history, and sends/decrypts a real raw-key
   contextual message. It also proves the local password decoder is not used.
-- The feature-enabled daemon library passes 158 tests (one existing ignored
+- The feature-enabled daemon library passes 162 tests (one existing ignored
   process helper); default workspace tests and strict all-target workspace
   Clippy pass. These are local author-run tests, not the consolidated live gate.
 

@@ -6,7 +6,7 @@ use super::*;
 use crate::room_log::{
     intent::{Intent, IntentError, IntentJournal},
     runtime::{FencedWriter, OwnerRuntime, RuntimeError, RuntimeLimits, WorkerIncarnation},
-    tests::{create, key_cutover, keyed_message, message},
+    tests::{create, key_cutover, key_prepare, keyed_message, message},
 };
 use std::path::Path;
 
@@ -140,6 +140,108 @@ struct HoldCommit {
 }
 
 #[tokio::test]
+async fn different_worker_recovers_preparation_without_local_journal() {
+    let fixture = Fixture::new().await;
+    let (control, volume) = Storage::new().await;
+    let mut writers = control.initialize_writers(volume).await;
+    let (storage, volume) = Storage::new().await;
+    let first_host = private_directory();
+    let second_host = private_directory();
+    let mut runtime = recover(
+        promote(&fixture, &mut writers).await,
+        storage.initialize_archive(volume).await,
+        &first_host.path().join("intents.sqlite"),
+    )
+    .await;
+    let old = keyed_message("before", "one", 0);
+    let pending = key_prepare("one", 1, Some([10; 32]));
+    runtime
+        .submit(vec![
+            create("one", 0),
+            create("two", 0),
+            key_prepare("one", 0, None),
+            key_cutover("one", 0, None),
+            old.clone(),
+            pending.clone(),
+        ])
+        .await
+        .unwrap();
+    let prepared = runtime
+        .state()
+        .unwrap()
+        .room("one")
+        .unwrap()
+        .key_preparation
+        .clone();
+    drop(runtime);
+    // A new worker has only the shared broker/archive, not host one's journal.
+    let archive = storage
+        .archive(storage.reopen().await, storage.registry.clone())
+        .await;
+    let mut runtime = recover(
+        promote(&fixture, &mut writers).await,
+        archive,
+        &second_host.path().join("intents.sqlite"),
+    )
+    .await;
+    assert_eq!(
+        runtime
+            .state()
+            .unwrap()
+            .room("one")
+            .unwrap()
+            .key_preparation,
+        prepared
+    );
+    let batch = runtime
+        .submit(vec![
+            pending,
+            old,
+            keyed_message("during", "one", 0),
+            message("unaffected", "two"),
+        ])
+        .await
+        .unwrap();
+    assert!(matches!(
+        batch.outcomes[0],
+        Outcome::KeyEpochPrepared { .. }
+    ));
+    assert!(matches!(
+        batch.outcomes[1],
+        Outcome::MessageAppended { sequence: 1, .. }
+    ));
+    assert_eq!(
+        batch.outcomes[2],
+        Outcome::Rejected {
+            reason: Rejection::KeyTransitionPending
+        }
+    );
+    assert!(matches!(batch.outcomes[3], Outcome::MessageAppended { .. }));
+    let batch = runtime
+        .submit(vec![
+            key_cutover("one", 1, Some([10; 32])),
+            keyed_message("after", "one", 1),
+        ])
+        .await
+        .unwrap();
+    assert!(matches!(
+        batch.outcomes[0],
+        Outcome::KeyEpochCommitted { key_epoch: 1, .. }
+    ));
+    assert!(matches!(
+        batch.outcomes[1],
+        Outcome::MessageAppended { sequence: 2, .. }
+    ));
+    assert!(runtime
+        .state()
+        .unwrap()
+        .room("one")
+        .unwrap()
+        .key_preparation
+        .is_none());
+}
+
+#[tokio::test]
 async fn key_cutover_waits_for_archive_and_recovers_same_transition_after_cancellation() {
     let fixture = Fixture::new().await;
     let (control, volume) = Storage::new().await;
@@ -157,8 +259,10 @@ async fn key_cutover_waits_for_archive_and_recovers_same_transition_after_cancel
     runtime
         .submit(vec![
             create("one", 0),
+            key_prepare("one", 0, None),
             key_cutover("one", 0, None),
             old.clone(),
+            key_prepare("one", 1, Some([10; 32])),
         ])
         .await
         .unwrap();
