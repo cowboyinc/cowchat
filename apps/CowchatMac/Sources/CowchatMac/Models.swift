@@ -183,7 +183,7 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     let roomID: String
     let agentID: String
     let agentName: String
-    let content: String
+    var content: String
     let replyToMessage: String?
     let metadata: MessageMetadata
     let timestamp: String

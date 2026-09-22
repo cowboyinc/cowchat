@@ -1,3 +1,7 @@
+mod actor_host;
+mod bridge;
+mod telegram;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use cowchat_client::{ClientError, CowchatClient};
 use cowchat_core::{ChatMessage, ErrorCode, FrameType};
@@ -202,6 +206,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run a local signed wake receiver and start the actor program only for work.
+    ActorHost(actor_host::ActorHostArgs),
+    /// Bridge one explicitly configured Telegram chat to an encrypted room.
+    TelegramBridge(telegram::TelegramArgs),
     /// Send a message to a room
     Send {
         /// Room ID or name
@@ -221,6 +229,10 @@ enum Commands {
         /// loop terminates cleanly instead of blocking for another turn.
         #[arg(long, conflicts_with = "kind")]
         end: bool,
+        /// Mention an agent by agent-id (repeatable). Mentions route the message
+        /// to `addressed`-mode actor subscriptions.
+        #[arg(long = "mention")]
+        mentions: Vec<String>,
     },
 
     /// Post a "thinking out loud" pulse to a room (persisted to history,
@@ -886,7 +898,9 @@ fn resolve_agent_id(cli: &Cli) -> Option<String> {
 fn command_represents_agent_session(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::Send { .. }
+        Commands::ActorHost(_)
+            | Commands::TelegramBridge(_)
+            | Commands::Send { .. }
             | Commands::SendFile { .. }
             | Commands::Thinking { .. }
             | Commands::Wait { .. }
@@ -1591,12 +1605,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     require_stable_named_agent(&cli)?;
 
     match &cli.command {
+        Commands::ActorHost(args) => actor_host::run(&cli, args).await?,
+        Commands::TelegramBridge(args) => telegram::run(&cli, args).await?,
         Commands::Send {
             room,
             message,
             reply_to,
             kind,
             end,
+            mentions,
         } => {
             let client = connect(&cli).await?;
             let room_id = resolve_room_id(&client, room).await?;
@@ -1615,14 +1632,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &room_id,
                             message,
                             reply_to.as_deref(),
-                            vec![],
+                            mentions.clone(),
                             serde_json::json!({ "kind": k }),
                         )
                         .await?
                 }
                 None => {
                     client
-                        .send_message(&room_id, message, reply_to.as_deref(), vec![])
+                        .send_message(&room_id, message, reply_to.as_deref(), mentions.clone())
                         .await?
                 }
             };

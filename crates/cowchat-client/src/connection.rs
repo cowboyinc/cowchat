@@ -260,6 +260,8 @@ mod tests {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    #[error("room encryption: {0}")]
+    Encryption(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -280,6 +282,18 @@ pub enum ClientError {
 #[derive(Debug, Clone)]
 pub struct Event {
     pub frame: Frame,
+}
+
+/// What one unit of actor work produced. `Skip` records an explicit skipped
+/// disposition (no message is appended); mentions in a reply route follow-on
+/// work to other actors, which is how actors coordinate in a room.
+#[derive(Debug, Clone)]
+pub enum ActorReply {
+    Reply {
+        content: String,
+        mentions: Vec<String>,
+    },
+    Skip,
 }
 
 pub struct CowchatClient {
@@ -808,6 +822,7 @@ impl CowchatClient {
             .request(
                 FrameType::SendMessage,
                 serde_json::to_value(SendMessagePayload {
+                    message_id: None,
                     room_id: room_id.to_string(),
                     content: self.encrypt_content(room_id, content),
                     reply_to: reply_to.map(String::from),
@@ -1244,6 +1259,134 @@ impl CowchatClient {
                 }
             }
         }
+    }
+
+    /// Create a durable processing subscription for this connection's identity.
+    pub async fn subscribe_actor(
+        &self,
+        payload: SubscribeActorPayload,
+    ) -> Result<String, ClientError> {
+        let response = self
+            .request(FrameType::SubscribeActor, serde_json::to_value(payload)?)
+            .await?;
+        serde_json::from_value(response.payload["subscription_id"].clone())
+            .map_err(ClientError::Json)
+    }
+
+    pub async fn claim_actor_work(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Option<ActorWork>, ClientError> {
+        let response = self
+            .request(
+                FrameType::ClaimActorWork,
+                serde_json::json!({"subscription_id": subscription_id}),
+            )
+            .await?;
+        let mut work: Option<ActorWork> = serde_json::from_value(response.payload["work"].clone())?;
+        if let Some(work) = &mut work {
+            for message in std::iter::once(&mut work.input).chain(work.existing_reply.iter_mut()) {
+                if cowchat_core::crypto::is_ciphertext(&message.content) {
+                    let secret = self
+                        .room_secret
+                        .as_deref()
+                        .ok_or_else(|| ClientError::Encryption("room secret is required".into()))?;
+                    message.content =
+                        cowchat_core::crypto::decrypt(secret, &message.room_id, &message.content)
+                            .map_err(|e| ClientError::Encryption(e.to_string()))?;
+                }
+            }
+        }
+        Ok(work)
+    }
+
+    pub async fn complete_actor_work(
+        &self,
+        subscription_id: &str,
+        work_id: &str,
+        outcome: ActorWorkOutcome,
+    ) -> Result<(), ClientError> {
+        self.request(
+            FrameType::CompleteActorWork,
+            serde_json::to_value(CompleteActorWorkPayload {
+                subscription_id: subscription_id.into(),
+                work_id: work_id.into(),
+                outcome,
+            })?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Process one claimed input. A worker may be invoked by a wake or kept warm.
+    /// A crash before append can repeat inference; external effects need their
+    /// own idempotency. Recovery after append skips inference entirely.
+    pub async fn process_actor_work<F, Fut>(
+        &self,
+        subscription_id: &str,
+        execute: F,
+    ) -> Result<bool, ClientError>
+    where
+        F: FnOnce(ActorWork) -> Fut,
+        Fut: std::future::Future<Output = Result<ActorReply, ClientError>>,
+    {
+        let Some(work) = self.claim_actor_work(subscription_id).await? else {
+            return Ok(false);
+        };
+        let outcome = if work.existing_reply.is_some() {
+            ActorWorkOutcome::Replied
+        } else {
+            match execute(work.clone()).await? {
+                ActorReply::Skip => ActorWorkOutcome::Skipped,
+                ActorReply::Reply { content, mentions } => {
+                    let payload = self.prepare_actor_reply(&work, &content, mentions);
+                    match self.append_prepared_message(&payload).await {
+                        Ok(_) => {}
+                        // Another claimant may have committed its reply first. Completion
+                        // checks the stored reply's actor, room, and input before accepting.
+                        Err(ClientError::Server {
+                            code: ErrorCode::MessageConflict,
+                            ..
+                        }) => {}
+                        Err(e) => return Err(e),
+                    }
+                    ActorWorkOutcome::Replied
+                }
+            }
+        };
+        self.complete_actor_work(subscription_id, &work.work_id, outcome)
+            .await?;
+        Ok(true)
+    }
+
+    /// Prepare once for an exact-byte append retry. After process restart, use
+    /// process_actor_work: a persisted reply wins without rerunning inference.
+    pub fn prepare_actor_reply(
+        &self,
+        work: &ActorWork,
+        content: &str,
+        mentions: Vec<String>,
+    ) -> SendMessagePayload {
+        SendMessagePayload {
+            message_id: Some(work.reply_message_id.clone()),
+            room_id: work.room_id.clone(),
+            content: self.encrypt_content(&work.room_id, content),
+            reply_to: Some(work.message_id.clone()),
+            metadata: serde_json::json!({}),
+            mentions,
+        }
+    }
+
+    pub async fn append_prepared_message(
+        &self,
+        payload: &SendMessagePayload,
+    ) -> Result<ChatMessage, ClientError> {
+        let response = self
+            .request(FrameType::SendMessage, serde_json::to_value(payload)?)
+            .await?;
+        let mut message: ChatMessage = serde_json::from_value(response.payload)?;
+        self.decrypt_message(&mut message);
+        Ok(message)
     }
 
     // --- Webhook subscriptions ---

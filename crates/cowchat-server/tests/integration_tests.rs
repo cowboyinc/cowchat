@@ -4101,3 +4101,168 @@ async fn test_list_invites_reports_metadata_and_revoke_by_id() {
         })
     ));
 }
+
+#[tokio::test]
+async fn actor_work_encrypted_tcp_room_wakes_without_content_and_completes() {
+    use cowchat_core::{ActorWorkOutcome, SubscribeActorPayload, WakeMode};
+    let (server, addr, key, dir) = start_test_server().await;
+    let (sender, mut wakes) = tokio::sync::mpsc::channel::<serde_json::Value>(8);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/wake", listener.local_addr().unwrap());
+    let http = tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/wake",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let sender = sender.clone();
+                async move {
+                    sender.send(body).await.unwrap();
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut human = connect_agent(&addr, &key, "Human").await;
+    let mut actor = connect_agent(&addr, &key, "Actor").await;
+    let mut peer = connect_agent(&addr, &key, "Peer").await;
+    for client in [&mut human, &mut actor, &mut peer] {
+        client.set_room_secret(b"room-secret");
+    }
+    let room = human
+        .create_room_with_options("actor-demo", None, None, false, true)
+        .await
+        .unwrap();
+    for client in [&human, &actor, &peer] {
+        client.join_room(&room.room_id).await.unwrap();
+    }
+    let sub = actor
+        .subscribe_actor(SubscribeActorPayload {
+            room_id: room.room_id.clone(),
+            webhook_url: url,
+            secret: "wake-secret".into(),
+            mode: WakeMode::Addressed,
+        })
+        .await
+        .unwrap();
+    human
+        .send_message(&room.room_id, "not addressed", None, vec![])
+        .await
+        .unwrap();
+    assert!(actor.claim_actor_work(&sub).await.unwrap().is_none());
+    let input = human
+        .send_message(
+            &room.room_id,
+            "count to three",
+            None,
+            vec![actor.agent_id.clone()],
+        )
+        .await
+        .unwrap();
+    let wake = tokio::time::timeout(Duration::from_secs(3), wakes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        wake,
+        serde_json::json!({"type":"cowchat.actor.wake", "subscription_id":sub, "room_id":room.room_id})
+    );
+    assert!(peer.claim_actor_work(&sub).await.unwrap().is_none());
+    let work = actor.claim_actor_work(&sub).await.unwrap().unwrap();
+    assert_eq!(work.message_id, input.message_id);
+    assert!(actor
+        .complete_actor_work(&sub, &work.work_id, ActorWorkOutcome::Replied)
+        .await
+        .is_err());
+    let prepared = actor.prepare_actor_reply(&work, "one two three", vec![]);
+    assert_ne!(prepared.content, "one two three");
+    let first = actor.append_prepared_message(&prepared).await.unwrap();
+    let retry = actor.append_prepared_message(&prepared).await.unwrap();
+    assert_eq!(first.message_id, retry.message_id);
+    assert!(peer.append_prepared_message(&prepared).await.is_err());
+    // Simulate restarting after append but before acknowledgment: an existing
+    // reply is immediately claimable and the executor must not run again.
+    assert!(actor
+        .process_actor_work(&sub, |_| async {
+            panic!("persisted reply must skip inference")
+        })
+        .await
+        .unwrap());
+    assert!(actor.claim_actor_work(&sub).await.unwrap().is_none());
+    let replay = peer.get_history(&room.room_id, 100, None).await.unwrap();
+    assert_eq!(
+        replay
+            .iter()
+            .filter(|m| m.message_id == first.message_id)
+            .count(),
+        1
+    );
+    assert_eq!(replay.last().unwrap().content, "one two three");
+    let store = cowchat_server::store::Store::open(&dir.path().join("test.db")).unwrap();
+    assert!(store
+        .get_message(&first.message_id)
+        .unwrap()
+        .unwrap()
+        .content
+        .starts_with("cow1:"));
+    // Re-enabling must preserve eligibility and completed dispositions, not
+    // enqueue all history (including the initially unaddressed message).
+    actor.enable_subscription(&sub).await.unwrap();
+    assert!(actor.claim_actor_work(&sub).await.unwrap().is_none());
+    actor.unsubscribe(&sub).await.unwrap();
+    http.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn dormant_actor_stays_addressable_in_its_room_roster() {
+    use cowchat_core::{SubscribeActorPayload, WakeMode};
+    let (server, addr, key, _dir) = start_test_server().await;
+    let human = connect_agent(&addr, &key, "Human").await;
+    let actor = connect_agent(&addr, &key, "Actor").await;
+    let room = human
+        .create_room("sleeping-actor", None, None)
+        .await
+        .unwrap();
+    actor.join_room(&room.room_id).await.unwrap();
+    actor
+        .subscribe_actor(SubscribeActorPayload {
+            room_id: room.room_id.clone(),
+            webhook_url: "https://example.com/wake".into(),
+            secret: "not-a-roster-field".into(),
+            mode: WakeMode::Addressed,
+        })
+        .await
+        .unwrap();
+    let actor_id = actor.agent_id.clone();
+    // While live, preserve the connected name and do not duplicate the actor.
+    let live = human.list_agents(Some(&room.room_id)).await.unwrap();
+    assert_eq!(live.iter().filter(|a| a.agent_id == actor_id).count(), 1);
+    drop(actor);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !human
+                .list_agents(None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|a| a.agent_id == actor_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let roster = human.list_agents(Some(&room.room_id)).await.unwrap();
+    let sleeping = roster.iter().find(|a| a.agent_id == actor_id).unwrap();
+    assert_eq!(sleeping.name, actor_id);
+    assert!(sleeping.connected_at.is_none());
+    assert!(!human
+        .list_agents(Some("lobby"))
+        .await
+        .unwrap()
+        .iter()
+        .any(|a| a.agent_id == actor_id));
+    server.abort();
+}

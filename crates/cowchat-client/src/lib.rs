@@ -1,3 +1,3 @@
 mod connection;
 
-pub use connection::{ClientError, CowchatClient, Event};
+pub use connection::{ActorReply, ClientError, CowchatClient, Event};

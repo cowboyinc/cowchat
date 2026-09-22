@@ -1032,6 +1032,9 @@ private struct ChatRoomView: View {
     @EnvironmentObject private var store: ChatStore
     let room: Room
     @Binding var isSidebarVisible: Bool
+    @State private var isRoomKeyPresented = false
+    @State private var roomKeyDraft = ""
+    @State private var roomKeyError: String?
     @State private var isComposerExpanded = false
     @State private var isFieldHovering = false
     @State private var isDestroyConfirmationPresented = false
@@ -1112,6 +1115,31 @@ private struct ChatRoomView: View {
             }
         }
         .background(SemanticColor.surface500)
+        .sheet(isPresented: $isRoomKeyPresented) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Room key for \(room.name)").font(.headline)
+                Text("Enter the shared room key. It stays in this Mac’s Keychain.").font(.callout)
+                SecureField("Room key", text: $roomKeyDraft)
+                    .textFieldStyle(.roundedBorder)
+                if let error = roomKeyError { Text(error).foregroundStyle(.red).font(.caption) }
+                HStack {
+                    if store.unlockedRoomIDs.contains(room.id) {
+                        Button("Forget key", role: .destructive) {
+                            do { try store.forgetRoomSecret(for: room); isRoomKeyPresented = false }
+                            catch { roomKeyError = error.localizedDescription }
+                        }
+                    }
+                    Spacer()
+                    Button("Cancel") { isRoomKeyPresented = false }
+                    Button("Save key") {
+                        do { try store.saveRoomSecret(roomKeyDraft, for: room); isRoomKeyPresented = false }
+                        catch { roomKeyError = "Could not save the key. Check that it matches this room and Keychain is available." }
+                    }.disabled(roomKeyDraft.isEmpty).keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(24).frame(width: 420)
+            .onDisappear { roomKeyDraft = ""; roomKeyError = nil }
+        }
         .sheet(isPresented: $isInvitesPresented) {
             RoomInvitesView(room: room)
                 .environmentObject(store)
@@ -1275,10 +1303,10 @@ private struct ChatRoomView: View {
                         ForEach(store.messages) { message in
                             VStack(alignment: .leading, spacing: 10) {
                                 MessageFeedRow(
-                                    message: message,
+                                    message: store.displayMessage(message),
                                     isMine: message.agentID == store.agentID,
                                     now: timeline.date,
-                                    onSaveAttachment: { saveAttachment($0) }
+                                    onSaveAttachment: room.encrypted ? nil : { saveAttachment($0) }
                                 )
                                 ForEach(
                                     pulseAnchors.byMessageID[message.id] ?? [],
@@ -1456,13 +1484,14 @@ private struct ChatRoomView: View {
     private var expandedComposer: some View {
         VStack(spacing: 0) {
             if room.encrypted {
-                Label {
-                    Text("Encrypted rooms are read-only in the macOS app.")
-                } icon: {
-                    GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
-                }
-                .gallopText(.caption, color: SemanticColor.textError)
-                .padding(.bottom, 8)
+                Button {
+                    roomKeyDraft = ""
+                    roomKeyError = nil
+                    isRoomKeyPresented = true
+                } label: {
+                    Label(store.unlockedRoomIDs.contains(room.id) ? "Room key saved" : "Add room key to read and send messages", systemImage: "lock.fill")
+                        .font(.caption)
+                }.buttonStyle(.plain).padding(.bottom, 8)
             } else if !store.connectionStatus.isConnected {
                 Label("Offline — reconnect before sending.", systemImage: "wifi.slash")
                     .gallopText(.caption, color: SemanticColor.textTertiary)
@@ -1473,7 +1502,7 @@ private struct ChatRoomView: View {
                 ComposerTextField(
                     text: $store.draft,
                     placeholder: "Message \(room.name)",
-                    isEnabled: !room.encrypted,
+                    isEnabled: !room.encrypted || store.unlockedRoomIDs.contains(room.id),
                     onSubmit: store.sendDraft,
                     onCancel: {
                         withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
@@ -1517,7 +1546,7 @@ private struct ChatRoomView: View {
 
     private var canSend: Bool {
         store.connectionStatus.isConnected
-            && !room.encrypted
+            && (!room.encrypted || store.unlockedRoomIDs.contains(room.id))
             && !store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
@@ -1602,7 +1631,7 @@ private struct MessageFeedRow: View {
 
     @ViewBuilder
     private var attachmentChip: some View {
-        if let attachment = message.fileAttachment {
+        if let attachment = message.fileAttachment, onSaveAttachment != nil {
             Button {
                 onSaveAttachment?(attachment)
             } label: {

@@ -1,3 +1,5 @@
+mod actor_work;
+
 use cowchat_core::*;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -378,6 +380,19 @@ pub async fn handle_frame(
             .await
         }
 
+        FrameType::SubscribeActor | FrameType::ClaimActorWork | FrameType::CompleteActorWork => {
+            actor_work::handle(
+                &frame,
+                agent_id,
+                agent_api_key,
+                no_auth,
+                store,
+                broker,
+                webhook_mgr,
+            )
+            .await
+        }
+
         // Webhook subscriptions
         FrameType::Subscribe => {
             handle_subscribe(
@@ -392,14 +407,32 @@ pub async fn handle_frame(
             .await
         }
         FrameType::Unsubscribe => {
-            handle_unsubscribe(req_id, frame.payload, store, agent_api_key).await
+            handle_unsubscribe(
+                req_id,
+                frame.payload,
+                store,
+                if no_auth { "no-auth" } else { agent_api_key },
+            )
+            .await
         }
         FrameType::ListSubscriptions => {
-            handle_list_subscriptions(req_id, frame.payload, store, agent_api_key).await
+            handle_list_subscriptions(
+                req_id,
+                frame.payload,
+                store,
+                if no_auth { "no-auth" } else { agent_api_key },
+            )
+            .await
         }
         FrameType::EnableSubscription => {
-            handle_enable_subscription(req_id, frame.payload, store, agent_api_key, webhook_mgr)
-                .await
+            handle_enable_subscription(
+                req_id,
+                frame.payload,
+                store,
+                if no_auth { "no-auth" } else { agent_api_key },
+                webhook_mgr,
+            )
+            .await
         }
 
         // Room invites
@@ -907,6 +940,15 @@ async fn handle_leave_room(
     Frame::ok(req_id, serde_json::json!({"room_id": p.room_id}))
 }
 
+fn append_error(req_id: Option<&str>, error: crate::store::StoreError) -> Frame {
+    let code = if matches!(error, crate::store::StoreError::MessageConflict) {
+        ErrorCode::MessageConflict
+    } else {
+        ErrorCode::InternalError
+    };
+    Frame::error(req_id, ErrorPayload::new(code, error.to_string()))
+}
+
 async fn handle_send_message(
     req_id: Option<&str>,
     payload: serde_json::Value,
@@ -940,6 +982,37 @@ async fn handle_send_message(
         return err;
     }
 
+    let message_id = match p.message_id.as_deref() {
+        Some(id) if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::InvalidPayload,
+                    "message_id must contain 1..128 bytes without control characters",
+                ),
+            );
+        }
+        Some(id) => id.to_owned(),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    let append = crate::store::MessageAppend {
+        message_id: &message_id,
+        room_id: &p.room_id,
+        agent_id,
+        agent_name,
+        content: &p.content,
+        reply_to: p.reply_to.as_deref(),
+        metadata: &p.metadata,
+        mentions: &p.mentions,
+    };
+    // Authorization above is required even for retries. Read-only preflight lets
+    // a previously accepted retry succeed after the message quota is exhausted.
+    match store.replay_append(&append) {
+        Ok(Some(message)) => return Frame::ok(req_id, serde_json::to_value(message).unwrap()),
+        Ok(None) => {}
+        Err(error) => return append_error(req_id, error),
+    }
+
     // The turn token is advisory: we publish whose turn it is and advance it on
     // every send, but we do NOT reject sends from non-holders. This avoids the
     // deadlock where the holder is stuck in `wait` and nobody else can speak.
@@ -961,25 +1034,17 @@ async fn handle_send_message(
         }
     }
 
-    let message_id = uuid::Uuid::new_v4().to_string();
-
-    let message = match store.insert_message(
-        &message_id,
-        &p.room_id,
-        agent_id,
-        agent_name,
-        &p.content,
-        p.reply_to.as_deref(),
-        &p.metadata,
-    ) {
-        Ok(msg) => msg,
-        Err(e) => {
-            return Frame::error(
-                req_id,
-                ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
-            )
-        }
+    let result = match store.append_message(&append) {
+        Ok(result) => result,
+        Err(error) => return append_error(req_id, error),
     };
+    let message = result.message;
+    if !result.inserted {
+        return Frame::ok(req_id, serde_json::to_value(&message).unwrap());
+    }
+    // The outbox is already committed. Notify only improves latency; the
+    // worker also discovers pending rows after a crash before this line.
+    webhook_mgr.wake();
 
     // Track in rate limiter
     if !agent_api_key.is_empty() {
@@ -1022,10 +1087,6 @@ async fn handle_send_message(
     // then notify the room. "Whoever just spoke passes to the next."
     broker.advance_turn_from(&p.room_id, agent_id);
     broadcast_turn_changed(broker, &p.room_id, "message_sent");
-
-    // Fire-and-forget: enqueue webhook deliveries to any matching subscriptions.
-    // This spawns a separate task internally, so it doesn't block the send path.
-    webhook_mgr.enqueue_for_message(&message);
 
     Frame::ok(req_id, serde_json::to_value(&message).unwrap())
 }
@@ -1124,7 +1185,7 @@ async fn handle_thinking(
 
     // Webhook subscriptions also see thinking pulses (unless they opted out
     // via `exclude_thinking`). The enqueue path filters per subscription.
-    webhook_mgr.enqueue_for_message(&message);
+    webhook_mgr.wake();
 
     Frame::ok(req_id, serde_json::to_value(&message).unwrap())
 }
@@ -1302,6 +1363,23 @@ async fn handle_list_agents(
                             progress,
                         });
                     }
+                }
+            }
+            if let Ok(actors) = store.room_actor_participants(room_id) {
+                for (agent_id, name) in actors {
+                    if list.iter().any(|agent| agent.agent_id == agent_id) {
+                        continue;
+                    }
+                    list.push(AgentInfo {
+                        agent_id,
+                        name,
+                        capabilities: Vec::new(),
+                        connected_at: None,
+                        last_active: None,
+                        status: None,
+                        status_detail: None,
+                        progress: None,
+                    });
                 }
             }
             list
@@ -2524,6 +2602,25 @@ async fn handle_enable_subscription(
         );
     }
 
+    // Actor eligibility is fixed at append. Retained work resumes as-is; generic
+    // webhook backfill would incorrectly turn unaddressed history into work.
+    match store.is_actor_subscription(&sub.subscription_id) {
+        Ok(true) => {
+            webhook_mgr.wake();
+            return Frame::ok(
+                req_id,
+                serde_json::json!({"subscription_id": sub.subscription_id, "status": "active"}),
+            );
+        }
+        Ok(false) => {}
+        Err(e) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
+            )
+        }
+    }
+
     // Re-enqueue the backlog of messages past last_delivered_seq so the user
     // sees the events that piled up while the sub was failed.
     let now = chrono::Utc::now();
@@ -3332,3 +3429,6 @@ mod invite_tests {
         assert_eq!(invite.redeemed_count, 1);
     }
 }
+
+#[cfg(test)]
+mod append_tests;

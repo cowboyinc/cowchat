@@ -22,6 +22,11 @@ final class ChatStore: ObservableObject {
     @Published var selectedRoomID: String?
     @Published var messages: [ChatMessage] = []
     @Published var roomMembers: [AgentPresence] = []
+    @Published private(set) var unlockedRoomIDs: Set<String> = []
+    private var roomSecrets: [String: String] = [:]
+    // Display-only plaintext; never enters history, previews, or persistence.
+    private var decryptedDisplayCache: [String: (source: ChatMessage, display: ChatMessage)] = [:]
+    private let roomCredentialStore: any CowchatCredentialStore
     @Published var draft = ""
     @Published var searchText = "" {
         didSet { scheduleMessageSearch(restartInFlight: true) }
@@ -195,6 +200,7 @@ final class ChatStore: ObservableObject {
         defaults: UserDefaults = .standard,
         connectionProfile: ConnectionProfile = .local,
         connectionPreferences: ConnectionProfilePreferences? = nil,
+        roomCredentialStore: any CowchatCredentialStore = KeychainCowchatCredentialStore(),
         localServerSupervisor: (any LocalServerSupervising)? = nil,
         connectionConfigurationError: Error? = nil,
         localServerRetryDelaysNanoseconds: [UInt64] = [
@@ -207,6 +213,7 @@ final class ChatStore: ObservableObject {
         ],
         memberRefreshRetryDelayNanoseconds: UInt64 = 2_000_000_000
     ) {
+        self.roomCredentialStore = roomCredentialStore
         self.connection = connection
         self.connectionProfile = connectionProfile
         self.connectionPreferences = connectionPreferences
@@ -500,10 +507,13 @@ final class ChatStore: ObservableObject {
 
     enum AttachmentError: LocalizedError {
         case unavailableLocally
+        case encryptedRoom
         case httpStatus(Int)
 
         var errorDescription: String? {
             switch self {
+            case .encryptedRoom:
+                return "Attachments are not supported in encrypted rooms yet."
             case .unavailableLocally:
                 return "Attachments download over the global server's HTTP endpoint; this room's server doesn't expose one."
             case let .httpStatus(status):
@@ -515,6 +525,7 @@ final class ChatStore: ObservableObject {
     /// Downloads a blob attachment to ~/Downloads (unique-suffixed on name
     /// collisions) and returns the saved location.
     func downloadAttachment(_ attachment: FileAttachment) async throws -> URL {
+        guard selectedRoom?.encrypted != true else { throw AttachmentError.encryptedRoom }
         guard connectionProfile.kind == .cowchatCloud,
               let url = WorkspaceStore.blobURL(
                   forCloudURLString: connectionProfile.endpointDescription,
@@ -747,6 +758,9 @@ final class ChatStore: ObservableObject {
             connectionConfigurationError = nil
             errorMessage = nil
             guard reloadedProfile != connectionProfile else { return }
+            roomSecrets.removeAll()
+            decryptedDisplayCache.removeAll()
+            unlockedRoomIDs.removeAll()
             connectionProfile = reloadedProfile
             stableAgentID = Self.resolveAgentID(
                 defaults: defaults,
@@ -787,6 +801,9 @@ final class ChatStore: ObservableObject {
         }
         connectionConfigurationError = nil
         errorMessage = nil
+        roomSecrets.removeAll()
+        decryptedDisplayCache.removeAll()
+        unlockedRoomIDs.removeAll()
         connectionProfile = profile
         stableAgentID = Self.resolveAgentID(
             defaults: defaults,
@@ -945,6 +962,7 @@ final class ChatStore: ObservableObject {
     }
 
     func select(room: Room) async {
+        loadRoomSecret(for: room)
         let expectedProfileGeneration = profileGeneration
         roomSelectionGeneration += 1
         // Keep join/leave transitions serialized, but release the previous
@@ -1271,14 +1289,69 @@ final class ChatStore: ObservableObject {
         guard expectedProfileGeneration == profileGeneration else { return }
     }
 
+    func displayMessage(_ message: ChatMessage) -> ChatMessage {
+        guard message.content.hasPrefix("cow1:") else { return message }
+        if let cached = decryptedDisplayCache[message.id], cached.source == message {
+            return cached.display
+        }
+        var display = message
+        if let secret = roomSecrets[message.roomID] {
+            display.content = (try? RoomCrypto.decrypt(message.content, secret: secret, roomID: message.roomID))
+                ?? "Unable to decrypt this message with the saved room key."
+        } else {
+            display.content = "Encrypted message — add the room key to read it."
+        }
+        // Bound memory independently of how many rooms have been visited.
+        if decryptedDisplayCache.count >= 1_000 { decryptedDisplayCache.removeAll() }
+        decryptedDisplayCache[message.id] = (message, display)
+        return display
+    }
+
+    private func loadRoomSecret(for room: Room) {
+        guard room.encrypted else { return }
+        do {
+            let account = RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id)
+            if let secret = try roomCredentialStore.credential(for: account) {
+                decryptedDisplayCache.removeAll()
+                roomSecrets[room.id] = secret
+                unlockedRoomIDs.insert(room.id)
+            }
+        } catch { present(error) }
+    }
+
+    func saveRoomSecret(_ secret: String, for room: Room) throws {
+        guard !secret.isEmpty else { throw RoomCrypto.Failure.invalidText }
+        if let encrypted = messages.first(where: { $0.roomID == room.id && $0.content.hasPrefix("cow1:") }) {
+            _ = try RoomCrypto.decrypt(encrypted.content, secret: secret, roomID: room.id)
+        }
+        try roomCredentialStore.setCredential(secret, for: RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id))
+        decryptedDisplayCache.removeAll()
+        roomSecrets[room.id] = secret
+        unlockedRoomIDs.insert(room.id)
+    }
+
+    func forgetRoomSecret(for room: Room) throws {
+        try roomCredentialStore.setCredential(nil, for: RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id))
+        decryptedDisplayCache.removeAll()
+        roomSecrets.removeValue(forKey: room.id)
+        unlockedRoomIDs.remove(room.id)
+    }
+
     func sendDraft() {
-        guard let room = selectedRoom, !room.encrypted else { return }
+        guard let room = selectedRoom, !room.encrypted || unlockedRoomIDs.contains(room.id) else { return }
         let content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
         guard connectionStatus.isConnected else {
             start()
             return
         }
+        let wireContent: String
+        do {
+            if room.encrypted {
+                guard let secret = roomSecrets[room.id] else { return }
+                wireContent = try RoomCrypto.encrypt(content, secret: secret, roomID: room.id)
+            } else { wireContent = content }
+        } catch { present(error); return }
         sendGeneration += 1
         let generation = sendGeneration
         let expectedProfileGeneration = profileGeneration
@@ -1287,7 +1360,7 @@ final class ChatStore: ObservableObject {
         failedDraftRestorationsByRoomID.removeValue(forKey: room.id)
         Task {
             do {
-                let message = try await connection.send(roomID: room.roomID, content: content)
+                let message = try await connection.send(roomID: room.roomID, content: wireContent)
                 guard expectedProfileGeneration == profileGeneration else { return }
                 if selectedRoomID == room.roomID { append(message) }
             } catch {
@@ -1850,7 +1923,7 @@ final class ChatStore: ObservableObject {
 
     private func updateRoomPreview(from message: ChatMessage) {
         guard !message.isThinking else { return }
-        let preview = message.content
+        let preview = (message.content.hasPrefix("cow1:") ? "Encrypted message" : message.content)
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
