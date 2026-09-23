@@ -68,7 +68,7 @@ pub(super) fn key_prepare(room: &str, epoch: u64, previous: Option<[u8; 32]>) ->
         signed_setup: "01".repeat(200),
         previous_policy: previous.map(|_| "06".repeat(400)),
         signed_policy: "02".repeat(400),
-        custody: "03".repeat(157),
+        custody: format!("{:02x}", epoch + 3).repeat(157),
         grants: vec!["04".repeat(178)],
     });
     Command {
@@ -80,6 +80,51 @@ pub(super) fn key_prepare(room: &str, epoch: u64, previous: Option<[u8; 32]>) ->
             preparation,
         },
     }
+}
+
+#[test]
+fn committed_custody_history_survives_serialization_replay_and_exact_retry() {
+    let entries = vec![
+        (0, create("one", 7)),
+        (0, key_prepare("one", 0, None)),
+        (0, key_cutover("one", 0, None)),
+        (0, key_prepare("one", 1, Some([10; 32]))),
+        (0, key_cutover("one", 1, Some([10; 32]))),
+        (0, key_prepare("one", 2, Some([11; 32]))),
+        (0, key_cutover("one", 2, Some([11; 32]))),
+    ];
+    let retry = entries.last().unwrap().clone();
+    let mut live = OwnerState::new("owner-a".into());
+    for (lane, command) in entries.iter().chain(std::iter::once(&retry)) {
+        assert!(matches!(
+            apply(&mut live, *lane, command),
+            Outcome::RoomCreated { .. }
+                | Outcome::KeyEpochPrepared { .. }
+                | Outcome::KeyEpochCommitted { .. }
+        ));
+    }
+    let expected = (0..3)
+        .map(|epoch| RoomKeyCustody {
+            key_epoch: epoch,
+            custody: format!("{:02x}", epoch + 3).repeat(157),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(live.room("one").unwrap().key_custodies, expected);
+
+    let live: OwnerState = serde_json::from_slice(&serde_json::to_vec(&live).unwrap()).unwrap();
+    assert_eq!(live.room("one").unwrap().key_custodies, expected);
+
+    let mut rebuilt = OwnerState::new("owner-a".into());
+    for (lane, command) in entries.into_iter().chain(std::iter::once(retry)) {
+        let command: Command =
+            serde_json::from_slice(&serde_json::to_vec(&command).unwrap()).unwrap();
+        apply(&mut rebuilt, lane, &command);
+    }
+    assert_eq!(rebuilt.room("one").unwrap().key_custodies, expected);
+    assert_eq!(
+        serde_json::to_value(rebuilt).unwrap(),
+        serde_json::to_value(live).unwrap()
+    );
 }
 
 pub(super) fn keyed_message(id: &str, room: &str, epoch: u64) -> Command {
@@ -101,9 +146,16 @@ fn key_cutover_orders_old_receipts_fresh_sends_and_replay() {
         (0, key_cutover("one", 1, Some([10; 32]))),
     ];
     let mut state = OwnerState::new("owner-a".into());
-    for (lane, command) in &entries {
+    for (lane, command) in &entries[..5] {
         apply(&mut state, *lane, command);
     }
+    assert_eq!(
+        apply(&mut state, 7, &keyed_message("during", "one", 0)),
+        Outcome::Rejected {
+            reason: Rejection::KeyTransitionPending
+        }
+    );
+    apply(&mut state, entries[5].0, &entries[5].1);
     assert_eq!(
         state
             .room("one")
