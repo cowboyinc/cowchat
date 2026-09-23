@@ -1,13 +1,15 @@
 //! Initial authenticated hosted surface: private encrypted rooms, transient
 //! connection membership, messages and reads. Other durable mutations are
 //! refused here, never passed through to the local SQLite room handlers.
+#[cfg(feature = "room-key-demo")]
+use crate::room_log::RoomKeyPreparation;
 use crate::{
     broker::Broker,
     rate_limit::{RateLimiter, TierLimits},
     reconnect::ReconnectManager,
     room_log::{
         runtime::{OwnerRuntime, OwnerView, RuntimeError},
-        Command, CommandBody, Outcome, Rejection, RoomKeyPreparation, RoomState,
+        Command, CommandBody, Outcome, Rejection, RoomState,
     },
     store::Store,
 };
@@ -1231,6 +1233,7 @@ impl HostedOwner {
                     })?;
                 self.require_member_room(id, room_id, address)
             }
+            #[cfg(feature = "room-key-demo")]
             FrameType::RelayRoomKeyOpen => {
                 let payload: RoomKeyBytesPayload = parse(frame)?;
                 let bytes = bounded_hex(&payload.request, 32 * 1024).ok_or_else(|| {
