@@ -200,10 +200,15 @@ pub enum RoomTurn {
 /// Messages a turn lookup scans (the hosted server's history bound).
 const TURN_WINDOW: u32 = 1000;
 
-/// The one reply id an actor member may commit for an input. The hosted writer
-/// deduplicates on it, so a repeated job cannot post a second reply.
+/// The one reply id an actor member may commit for an input: `ar:` and the
+/// first 32 hex of keccak256(member address bytes || input id). The hosted
+/// writer deduplicates on it, so a repeated job cannot post a second reply, and
+/// it stays inside the 64-byte locator bound when the reply mentions an actor.
 pub fn actor_reply_id(member: &SigningKey, input_message_id: &str) -> String {
-    format!("actor-reply:{}:{input_message_id}", member_address(member))
+    let point = member.verifying_key().to_encoded_point(false);
+    let mut preimage = keccak(&point.as_bytes()[1..])[12..].to_vec();
+    preimage.extend_from_slice(input_message_id.as_bytes());
+    format!("ar:{}", &hex::encode(keccak(&preimage))[..32])
 }
 
 impl CowchatClient {
@@ -317,6 +322,19 @@ mod tests {
             mutate(&mut bad);
             assert!(prove(&bad, &[7; 32], &member, &session, 1_000).is_err());
         }
+    }
+
+    #[test]
+    fn actor_reply_id_is_short_deterministic_and_member_bound() {
+        let member = SigningKey::from_slice(&[1u8; 32]).unwrap();
+        let other = SigningKey::from_slice(&[3u8; 32]).unwrap();
+        let input = "m".repeat(64);
+        let id = actor_reply_id(&member, &input);
+        assert_eq!(id.len(), 35);
+        assert!(id.starts_with("ar:"));
+        assert_eq!(id, actor_reply_id(&member, &input));
+        assert_ne!(id, actor_reply_id(&other, &input));
+        assert_ne!(id, actor_reply_id(&member, "another-input"));
     }
 
     #[test]
