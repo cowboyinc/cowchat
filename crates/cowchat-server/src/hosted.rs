@@ -568,7 +568,11 @@ fn parse_address(value: &str) -> Option<Address> {
 }
 
 pub struct HostedOwner {
+    /// Namespaces the ciphertext log and CBQS writer. It is not room authority;
+    /// that comes from each room's wallet-signed policy.
     owner_id: String,
+    /// Authorizes transport administration only. Member room access comes from
+    /// the wallet-signed policy roster.
     api_key: String,
     writer: tokio::sync::Mutex<OwnerRuntime>,
     view: Arc<OwnerView>,
