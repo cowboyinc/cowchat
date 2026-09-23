@@ -58,7 +58,7 @@ enum Commands {
         expected_epoch: u64,
     },
     /// Create and activate one prepared initial room, then serve it.
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     HostedRoomDemo {
         #[arg(long)]
         config: PathBuf,
@@ -280,7 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             Some((config, guard))
         }
-        #[cfg(feature = "room-key-demo")]
+        #[cfg(feature = "room-keys")]
         Commands::HostedRoomDemo { config, .. } => {
             let config = cowchat_server::hosted_bootstrap::Config::load(config)?;
             let guard = config.prepare_state()?;
@@ -324,13 +324,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let (config, _guard) = prepared.as_ref().expect("hosted preflight");
                     let (runtime, deadline) =
                         cowchat_server::hosted_bootstrap::recover(config, expected_epoch).await?;
-                    #[cfg(feature = "room-key-demo")]
+                    #[cfg(feature = "room-keys")]
                     let server = CowchatServer::new_hosted_with_room_keys(
                         config.server_config(),
                         runtime,
                         cowchat_server::hosted_bootstrap::HostedRoomKeys::new(config),
                     )?;
-                    #[cfg(not(feature = "room-key-demo"))]
+                    #[cfg(not(feature = "room-keys"))]
                     let server = CowchatServer::new_hosted(config.server_config(), runtime)?;
                     log::info!("Hosted recovery complete; starting bounded authenticated session");
                     tokio::select! {
@@ -340,7 +340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                #[cfg(feature = "room-key-demo")]
+                #[cfg(feature = "room-keys")]
                 Commands::HostedRoomDemo {
                     expected_epoch,
                     input,

@@ -1,7 +1,7 @@
 //! Initial authenticated hosted surface: private encrypted rooms, transient
 //! connection membership, messages and reads. Other durable mutations are
 //! refused here, never passed through to the local SQLite room handlers.
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 use crate::room_log::RoomKeyPreparation;
 use crate::{
     broker::Broker,
@@ -17,18 +17,18 @@ use cowchat_core::*;
 use serde::de::DeserializeOwned;
 use std::{collections::HashSet, sync::Arc};
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 use crate::room_log::RoomKeyCustody;
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 use commonware_codec::Decode;
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 use cowboy_protocol_codec::{
     room_policy::SignedRoomKeyPolicyV1, room_release::SignedRoomKeyGrantV1,
     room_setup::SignedRoomSetupV1, room_transport::RoomKeyCallV1, Address,
 };
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RoomKeyActivationTransition {
     Committed,
@@ -36,7 +36,7 @@ enum RoomKeyActivationTransition {
     Stage,
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrepareRoomKeyPayload {
@@ -47,7 +47,7 @@ struct PrepareRoomKeyPayload {
     remove_member: Option<String>,
 }
 
-#[cfg(all(test, feature = "room-key-demo"))]
+#[cfg(all(test, feature = "room-keys"))]
 mod member_policy_tests {
     use super::*;
     use crate::{
@@ -525,14 +525,14 @@ mod member_policy_tests {
     }
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoomKeyBytesPayload {
     request: String,
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoomKeyContextPayload {
@@ -540,7 +540,7 @@ struct RoomKeyContextPayload {
     member: String,
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActivateRoomKeyPayload {
@@ -549,7 +549,7 @@ struct ActivateRoomKeyPayload {
     preparation: RoomKeyPreparation,
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 fn bounded_hex(value: &str, max_bytes: usize) -> Option<Vec<u8>> {
     let value = value.strip_prefix("0x").unwrap_or(value);
     if value.is_empty() || value.len() > max_bytes * 2 || !value.len().is_multiple_of(2) {
@@ -558,7 +558,7 @@ fn bounded_hex(value: &str, max_bytes: usize) -> Option<Vec<u8>> {
     hex::decode(value).ok()
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 fn parse_address(value: &str) -> Option<Address> {
     bounded_hex(value, 20)?
         .try_into()
@@ -572,12 +572,12 @@ pub struct HostedOwner {
     api_key: String,
     writer: tokio::sync::Mutex<OwnerRuntime>,
     view: Arc<OwnerView>,
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     room_keys: Option<crate::hosted_bootstrap::HostedRoomKeys>,
     /// Serializes control-volume publication for this owner without holding
     /// the owner-log writer across CBSS finality. Two room activations built
     /// from the same control root must not race their compare-and-swap writes.
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     room_key_activation: tokio::sync::Mutex<()>,
 }
 
@@ -642,7 +642,7 @@ fn room_summary(room: &RoomState) -> Room {
     }
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 fn signed_policy_has_member(signed_policy: &str, room_id: &str, address: &str) -> bool {
     let Some(member) = parse_address(address) else {
         return false;
@@ -658,14 +658,14 @@ fn signed_policy_has_member(signed_policy: &str, room_id: &str, address: &str) -
         && policy.policy.members.binary_search(&member).is_ok()
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 fn room_has_member(room: &RoomState, address: &str) -> bool {
     room.key_publication.as_ref().is_some_and(|publication| {
         signed_policy_has_member(&publication.signed_policy, &room.room_id, address)
     })
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 fn member_grants(
     policy: &SignedRoomKeyPolicyV1,
     encoded_grants: &[String],
@@ -701,7 +701,7 @@ fn member_grants(
     .then_some(grants)
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 struct MemberKeyContext<'a> {
     key_epoch: u64,
     grant: SignedRoomKeyGrantV1,
@@ -709,7 +709,7 @@ struct MemberKeyContext<'a> {
     custody_bytes: Vec<u8>,
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 fn member_key_contexts<'a>(
     grants: Vec<(u64, SignedRoomKeyGrantV1)>,
     custodies: &'a [RoomKeyCustody],
@@ -735,7 +735,7 @@ fn member_key_contexts<'a>(
         .collect()
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 fn classify_room_key_activation(
     state: &crate::room_log::OwnerState,
     input: &crate::hosted_bootstrap::BrowserInitialRoom,
@@ -795,7 +795,7 @@ fn classify_room_key_activation(
     }
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 fn reconcile_room_key_commit(
     broker: &Broker,
     reconnect: &ReconnectManager,
@@ -867,7 +867,7 @@ fn reconcile_room_key_commit(
     }
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 fn wallet_room_usage(state: &crate::room_log::OwnerState, owner: Address) -> (usize, usize) {
     let mut active = 0;
     let mut pending = 0;
@@ -907,14 +907,14 @@ impl HostedOwner {
             api_key,
             view: runtime.view(),
             writer: tokio::sync::Mutex::new(runtime),
-            #[cfg(feature = "room-key-demo")]
+            #[cfg(feature = "room-keys")]
             room_keys: None,
-            #[cfg(feature = "room-key-demo")]
+            #[cfg(feature = "room-keys")]
             room_key_activation: tokio::sync::Mutex::new(()),
         })
     }
 
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     pub(crate) fn with_room_keys(
         mut self,
         room_keys: crate::hosted_bootstrap::HostedRoomKeys,
@@ -934,11 +934,11 @@ impl HostedOwner {
         let state = self.view.read().ok()?;
         let room = state.room(id)?;
         let allowed = member.map_or(key == self.api_key, |address| {
-            #[cfg(feature = "room-key-demo")]
+            #[cfg(feature = "room-keys")]
             {
                 room_has_member(room, address)
             }
-            #[cfg(not(feature = "room-key-demo"))]
+            #[cfg(not(feature = "room-keys"))]
             {
                 let _ = address;
                 false
@@ -1006,18 +1006,18 @@ impl HostedOwner {
         match frame.frame_type {
             FrameType::Ping => Ok(Frame::pong(id)),
             FrameType::CreateRoom => self.create(frame, agent_id, broker, store, reconnect).await,
-            #[cfg(feature = "room-key-demo")]
+            #[cfg(feature = "room-keys")]
             FrameType::PrepareRoomKey => self.prepare_room_key(frame, member).await,
-            #[cfg(feature = "room-key-demo")]
+            #[cfg(feature = "room-keys")]
             FrameType::AttestRoomKeySetup => self.attest_room_key_setup(frame, member).await,
-            #[cfg(feature = "room-key-demo")]
+            #[cfg(feature = "room-keys")]
             FrameType::ActivateRoomKey => {
                 self.activate_room_key(frame, agent_id, member, broker, store, reconnect)
                     .await
             }
-            #[cfg(feature = "room-key-demo")]
+            #[cfg(feature = "room-keys")]
             FrameType::GetRoomKeyContext => self.room_key_context(frame, member),
-            #[cfg(feature = "room-key-demo")]
+            #[cfg(feature = "room-keys")]
             FrameType::RelayRoomKeyOpen => self.relay_room_key_open(frame).await,
             FrameType::SendMessage => {
                 self.send(frame, agent_id, agent_name, broker, store, rates)
@@ -1128,11 +1128,11 @@ impl HostedOwner {
                             .values()
                             .filter(|room| {
                                 member.is_none_or(|address| {
-                                    #[cfg(feature = "room-key-demo")]
+                                    #[cfg(feature = "room-keys")]
                                     {
                                         room_has_member(room, address)
                                     }
-                                    #[cfg(not(feature = "room-key-demo"))]
+                                    #[cfg(not(feature = "room-keys"))]
                                     {
                                         let _ = (room, address);
                                         false
@@ -1233,7 +1233,7 @@ impl HostedOwner {
                     })?;
                 self.require_member_room(id, room_id, address)
             }
-            #[cfg(feature = "room-key-demo")]
+            #[cfg(feature = "room-keys")]
             FrameType::RelayRoomKeyOpen => {
                 let payload: RoomKeyBytesPayload = parse(frame)?;
                 let bytes = bounded_hex(&payload.request, 32 * 1024).ok_or_else(|| {
@@ -1252,7 +1252,7 @@ impl HostedOwner {
         }
     }
 
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     fn require_member_room(
         &self,
         id: Option<&str>,
@@ -1273,7 +1273,7 @@ impl HostedOwner {
         Ok(())
     }
 
-    #[cfg(not(feature = "room-key-demo"))]
+    #[cfg(not(feature = "room-keys"))]
     fn require_member_room(
         &self,
         id: Option<&str>,
@@ -1295,7 +1295,7 @@ impl HostedOwner {
             .ok_or_else(|| error(id, ErrorCode::RoomNotFound, "Room not found"))
     }
 
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     fn room_keys(
         &self,
         id: Option<&str>,
@@ -1309,7 +1309,7 @@ impl HostedOwner {
         })
     }
 
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     async fn prepare_room_key(&self, frame: &Frame, member: Option<&str>) -> Result<Frame, Frame> {
         let id = frame.id.as_deref();
         let payload: PrepareRoomKeyPayload = parse(frame)?;
@@ -1396,7 +1396,7 @@ impl HostedOwner {
         Ok(Frame::ok(id, context))
     }
 
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     async fn attest_room_key_setup(
         &self,
         frame: &Frame,
@@ -1423,7 +1423,7 @@ impl HostedOwner {
         Ok(Frame::ok(id, serde_json::json!({"responses": responses})))
     }
 
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     async fn activate_room_key(
         &self,
         frame: &Frame,
@@ -1584,7 +1584,7 @@ impl HostedOwner {
         Ok(Frame::ok(id, serde_json::to_value(room).unwrap()))
     }
 
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     fn room_key_context(&self, frame: &Frame, principal: Option<&str>) -> Result<Frame, Frame> {
         let id = frame.id.as_deref();
         let payload: RoomKeyContextPayload = parse(frame)?;
@@ -1667,7 +1667,7 @@ impl HostedOwner {
         Ok(Frame::ok(id, context))
     }
 
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     async fn relay_room_key_open(&self, frame: &Frame) -> Result<Frame, Frame> {
         let id = frame.id.as_deref();
         let payload: RoomKeyBytesPayload = parse(frame)?;

@@ -44,7 +44,7 @@ wired. CLI/Swift/browser room-key UX and discovery remain follow-up work.
 
 ## Initial-room executable composition
 
-The opt-in `room-key-demo` feature adds one executable path,
+The opt-in `room-keys` feature adds one executable path,
 `hosted-room-demo`. It accepts a prepared initial room only: the room must be
 absent, policy and key epochs must be zero, there is no predecessor, and exactly
 one owner-signed member grant is required. Before starting the listener it opens
@@ -67,7 +67,7 @@ Build and run it with the same reviewed room-release bundle used by CBSS:
 
 ```sh
 COWCHAT_ROOM_RELEASE_DIR=/absolute/reviewed/bundle \
-  cargo run --locked -p cowchat-server --features room-key-demo -- \
+  cargo run --locked -p cowchat-server --features room-keys -- \
   hosted-room-demo --config /absolute/hosted.json \
   --expected-epoch 0 --input /absolute/initial-room.json
 ```

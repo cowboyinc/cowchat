@@ -352,7 +352,7 @@ enum RoomMode {
     Local,
     #[cfg(feature = "cbfs-archive")]
     Hosted(Box<crate::room_log::runtime::OwnerRuntime>),
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     HostedRoomKeys(
         Box<crate::room_log::runtime::OwnerRuntime>,
         Box<crate::hosted_bootstrap::HostedRoomKeys>,
@@ -375,7 +375,7 @@ impl CowchatServer {
         Self::new_inner(config, RoomMode::Hosted(Box::new(runtime)))
     }
 
-    #[cfg(feature = "room-key-demo")]
+    #[cfg(feature = "room-keys")]
     pub fn new_hosted_with_room_keys(
         config: ServerConfig,
         runtime: crate::room_log::runtime::OwnerRuntime,
@@ -399,7 +399,7 @@ impl CowchatServer {
             )
             .into());
         }
-        #[cfg(feature = "room-key-demo")]
+        #[cfg(feature = "room-keys")]
         let session_auth = match &mode {
             RoomMode::HostedRoomKeys(_, room_keys) => Some(Arc::new(
                 crate::session_auth::SessionAuth::new(
@@ -410,7 +410,7 @@ impl CowchatServer {
             )),
             _ => None,
         };
-        #[cfg(not(feature = "room-key-demo"))]
+        #[cfg(not(feature = "room-keys"))]
         let session_auth = None;
         // Lock the canonical database identity before touching SQLite, auth,
         // webhooks, or any listener path. A losing launch cannot migrate the
@@ -442,7 +442,7 @@ impl CowchatServer {
         let room_members: Arc<DashMap<String, Vec<String>>> = Arc::new(DashMap::new());
         let broker = Arc::new(Broker::new(agents, room_members));
         let api_key = auth::load_or_create_key(&config.auth_key_path)?;
-        #[cfg(all(feature = "cbfs-archive", not(feature = "room-key-demo")))]
+        #[cfg(all(feature = "cbfs-archive", not(feature = "room-keys")))]
         if let RoomMode::Hosted(runtime) = mode {
             let hosted = Arc::new(crate::hosted::HostedOwner::new(*runtime, api_key.clone())?);
             broker
@@ -450,7 +450,7 @@ impl CowchatServer {
                 .set(hosted)
                 .map_err(|_| io::Error::other("hosted owner already configured"))?;
         }
-        #[cfg(feature = "room-key-demo")]
+        #[cfg(feature = "room-keys")]
         match mode {
             RoomMode::Local => {}
             RoomMode::Hosted(runtime) => {

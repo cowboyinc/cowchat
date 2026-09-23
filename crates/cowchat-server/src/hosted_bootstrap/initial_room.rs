@@ -684,7 +684,7 @@ pub async fn probe_initial_room(config: &Config, probe: InitialRoomProbe) -> Res
         match CowchatClient::connect_uds(
             &socket,
             api_key,
-            "room-key-demo",
+            "room-keys-probe",
             Some(&probe.agent_id),
             vec![],
         )
