@@ -118,7 +118,7 @@ renewal/reconciliation is wired, the prepared room remains paused.
 
 ## Validation
 
-At protocol `1e25ac7`, CBFS SDK `416d3c1`, and the isolated CBQS child `eb2ba17`:
+At protocol PR #149 @ `98c393e`, CBFS SDK `0711f7e`, CBQS child `00bdc82`, and CBSS room release `6865839`:
 
 - Reducer tests exercise ordered rotation, old receipts versus fresh old sends,
   epoch relabelling, predecessor mismatch, stable IDs, lane checks and replay.

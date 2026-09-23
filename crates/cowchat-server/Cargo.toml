@@ -57,24 +57,25 @@ sha2 = "0.10"
 base64 = "0.22"
 fs2 = "0.4"
 libc = "0.2"
-cbqs-client = { git = "https://github.com/cowboyinc/cbqs.git", rev = "83ca18dda4f5fe2aef3044ee80760cced7316e2a", optional = true }
-cbqsd = { git = "https://github.com/cowboyinc/cbqs.git", rev = "83ca18dda4f5fe2aef3044ee80760cced7316e2a", features = ["test-legacy-snapshots"], optional = true }
-cowboy-protocol-codec = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "1e25ac7ad74efa5d71a9118132d8a367b34d652e", features = ["cbqs-signing", "serde", "signing"], optional = true }
+# Cowchat room-release convergence: cowboy-protocol PR #149 @ 98c393e.
+cbqs-client = { git = "https://github.com/cowboyinc/cbqs.git", rev = "00bdc82b0e5bc971adf7584854a9a123f2574de3", optional = true }
+cbqsd = { git = "https://github.com/cowboyinc/cbqs.git", rev = "00bdc82b0e5bc971adf7584854a9a123f2574de3", features = ["test-legacy-snapshots"], optional = true }
+cowboy-protocol-codec = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "98c393edfd064b631345c8e4db0c112d4e346e5c", features = ["cbqs-signing", "serde", "signing"], optional = true }
 cowboy-protocol-activation = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "e893859785200a0ce487fc745ee34faaf3a21a36", optional = true }
 commonware-codec = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba", optional = true }
 ed25519-dalek = { version = "2.2", optional = true }
-cbfs-sdk = { git = "https://github.com/cowboyinc/cbfs.git", rev = "f18f72e89bb09a1c43e2c9541aacba6edefb1a63", optional = true }
-cbfs-hooks = { git = "https://github.com/cowboyinc/cbfs.git", rev = "f18f72e89bb09a1c43e2c9541aacba6edefb1a63", optional = true }
-cbfs-types = { git = "https://github.com/cowboyinc/cbfs.git", rev = "f18f72e89bb09a1c43e2c9541aacba6edefb1a63", optional = true }
-cbfs-transport = { git = "https://github.com/cowboyinc/cbfs.git", rev = "f18f72e89bb09a1c43e2c9541aacba6edefb1a63", optional = true }
+cbfs-sdk = { git = "https://github.com/cowboyinc/cbfs.git", rev = "0711f7e5d0ea800a716d64886ed149f0d5d57831", optional = true }
+cbfs-hooks = { git = "https://github.com/cowboyinc/cbfs.git", rev = "0711f7e5d0ea800a716d64886ed149f0d5d57831", optional = true }
+cbfs-types = { git = "https://github.com/cowboyinc/cbfs.git", rev = "0711f7e5d0ea800a716d64886ed149f0d5d57831", optional = true }
+cbfs-transport = { git = "https://github.com/cowboyinc/cbfs.git", rev = "0711f7e5d0ea800a716d64886ed149f0d5d57831", optional = true }
 sled = { version = "0.34", optional = true }
 async-trait = { version = "0.1", optional = true }
-cbfs-cli = { git = "https://github.com/cowboyinc/cbfs.git", rev = "f18f72e89bb09a1c43e2c9541aacba6edefb1a63", optional = true }
-cbfs-registry-proto = { git = "https://github.com/cowboyinc/cbfs.git", rev = "f18f72e89bb09a1c43e2c9541aacba6edefb1a63", optional = true }
+cbfs-cli = { git = "https://github.com/cowboyinc/cbfs.git", rev = "0711f7e5d0ea800a716d64886ed149f0d5d57831", optional = true }
+cbfs-registry-proto = { git = "https://github.com/cowboyinc/cbfs.git", rev = "0711f7e5d0ea800a716d64886ed149f0d5d57831", optional = true }
 anyhow = { version = "1", optional = true }
 hex = { version = "0.4", optional = true }
 zeroize = { version = "1", optional = true }
-cbssd = { git = "https://github.com/cowboyinc/cbss.git", rev = "13c3c8b0d1db200b3c245aca3a0e673f005b8159", features = ["cowchat-room-release"], optional = true }
+cbssd = { git = "https://github.com/cowboyinc/cbss.git", rev = "68658399857246d5a060afa080e475ab536b4e9c", features = ["cowchat-room-release"], optional = true }
 cowchat-client = { workspace = true, optional = true }
 k256 = { version = "0.13", optional = true }
 
