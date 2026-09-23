@@ -130,11 +130,10 @@ fn validate_successor_policy(
 fn validate_initial_grant_roster(
     policy: &cowboy_protocol_codec::room_policy::RoomKeyPolicyV1,
     room_owner: Address,
-    granted: &[Address],
 ) -> Result<()> {
     ensure!(
-        policy.members.as_slice() == [room_owner] && granted == [room_owner],
-        "initial room must grant exactly one key to its owner"
+        policy.members.binary_search(&room_owner).is_ok(),
+        "initial room roster must include its owner"
     );
     Ok(())
 }
@@ -352,13 +351,9 @@ fn validate_signed_preparation(
     if let Some(previous) = &previous {
         validate_successor_policy(&previous.policy, &policy.policy, room_owner)?;
     }
-    let granted = validate_grant_matrix(&policy, &grants, room_owner)?;
+    validate_grant_matrix(&policy, &grants, room_owner)?;
     if previous.is_none() {
-        let granted_members = granted
-            .iter()
-            .map(|(member, _)| *member)
-            .collect::<Vec<_>>();
-        validate_initial_grant_roster(&policy.policy, room_owner, &granted_members)?;
+        validate_initial_grant_roster(&policy.policy, room_owner)?;
     }
 
     Ok((setup, previous, policy, grants, custody))
@@ -643,18 +638,23 @@ pub async fn activate_initial_room(
     };
     stage_initial_room(runtime, &browser, true).await?;
     let prepared = finalize_initial_room(config, browser).await?;
-    ensure!(
-        Address::from_verifying_key(member.verifying_key()) == prepared.grants[0].grant.member,
-        "member key does not match the prepared room grant"
-    );
+    let member_address = Address::from_verifying_key(member.verifying_key());
+    let grant = prepared
+        .grants
+        .iter()
+        .find(|grant| {
+            grant.grant.member == member_address
+                && prepared
+                    .policy
+                    .policy
+                    .match_grant(&grant.grant)
+                    .is_ok_and(|key| key.key_epoch == prepared.policy.policy.active_key_epoch)
+        })
+        .context("member key has no prepared grant for the active key epoch")?
+        .clone();
     let key = prepared
         .deployment
-        .open_room_key(
-            &prepared.policy,
-            prepared.grants[0].clone(),
-            &prepared.custody,
-            &member,
-        )
+        .open_room_key(&prepared.policy, grant, &prepared.custody, &member)
         .await?;
     commit_initial_room(runtime, &prepared).await?;
     Ok(InitialRoomProbe {
@@ -823,14 +823,13 @@ mod successor_policy_tests {
     }
 
     #[test]
-    fn initial_room_grants_only_its_owner() {
+    fn initial_room_roster_includes_its_owner() {
         let owner = address(1);
-        let owner_only = policy(0, 0, vec![owner], vec![key(0, 10)]);
-        validate_initial_grant_roster(&owner_only, owner, &[owner]).unwrap();
+        let with_member = policy(0, 0, vec![owner, address(2)], vec![key(0, 10)]);
+        validate_initial_grant_roster(&with_member, owner).unwrap();
 
-        let extra_member = policy(0, 0, vec![owner, address(2)], vec![key(0, 10)]);
-        assert!(validate_initial_grant_roster(&extra_member, owner, &[owner, address(2)]).is_err());
-        assert!(validate_initial_grant_roster(&owner_only, owner, &[address(2)]).is_err());
+        let without_owner = policy(0, 0, vec![address(2)], vec![key(0, 10)]);
+        assert!(validate_initial_grant_roster(&without_owner, owner).is_err());
     }
 
     #[test]
