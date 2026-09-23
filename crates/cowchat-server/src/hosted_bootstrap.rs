@@ -475,9 +475,19 @@ async fn authority(config: &Config) -> Result<Authority> {
         "0x{}",
         hex::encode(chain_view_v2::STREAM_REGISTRY_SYSTEM_ACTOR)
     );
+    // The node requires claims strictly sorted by (actor, logical key); both
+    // share the registry actor, and `cbqs:provider:` sorts before `cbqs:stream:`.
+    let mut keys = [
+        chain_view_v2::stream_key(&stream),
+        chain_view_v2::provider_key(&provider),
+    ];
+    keys.sort();
+    let claims = keys
+        .iter()
+        .map(|key| serde_json::json!({"actor":actor,"logical_key_hex":format!("0x{}",hex::encode(key))}))
+        .collect::<Vec<_>>();
     let body = serde_json::json!({"checkpoint_height":checkpoint.height(),"bundle_version":2,
-        "claims":[{"actor":actor,"logical_key_hex":format!("0x{}",hex::encode(chain_view_v2::stream_key(&stream)))},
-                  {"actor":actor,"logical_key_hex":format!("0x{}",hex::encode(chain_view_v2::provider_key(&provider)))}]});
+        "claims":claims});
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
