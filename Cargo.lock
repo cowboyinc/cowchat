@@ -1729,30 +1729,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cowboy-protocol-cbss-wasm"
-version = "0.3.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=98c393edfd064b631345c8e4db0c112d4e346e5c#98c393edfd064b631345c8e4db0c112d4e346e5c"
-dependencies = [
- "aes-gcm",
- "base64 0.21.7",
- "blake3",
- "commonware-codec",
- "cowboy-protocol-cbss-crypto",
- "cowboy-protocol-client-crypto",
- "cowboy-protocol-codec",
- "cowboy-protocol-types",
- "getrandom 0.2.17",
- "hex",
- "js-sys",
- "k256",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "zeroize",
-]
-
-[[package]]
 name = "cowboy-protocol-client-crypto"
 version = "0.1.0"
 source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=76e9adaa462a8ff4e57737d6d3a93f3bf991e13d#76e9adaa462a8ff4e57737d6d3a93f3bf991e13d"
@@ -1875,7 +1851,7 @@ name = "cowchat-client"
 version = "0.9.1"
 dependencies = [
  "chrono",
- "cowboy-protocol-cbss-wasm",
+ "cowboy-protocol-client-crypto",
  "cowchat-core",
  "futures-util",
  "hex",
@@ -7538,7 +7514,6 @@ version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 dependencies = [
- "serde",
  "zeroize_derive",
 ]
 

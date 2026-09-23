@@ -1010,11 +1010,24 @@ mod tests {
 
     #[tokio::test]
     async fn native_member_key_registers_through_the_common_challenge() {
-        let state = test_state();
-        let observed = state.clone();
-        let (server, addr) = start_test_web_server(state).await;
-        let member = SigningKey::random(&mut OsRng);
+        // The member signs the endpoint it dialed, so the server must be
+        // configured with exactly that URL.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let url = format!("ws://{addr}/ws");
+        let mut state = test_state();
+        state.session_auth = Some(Arc::new(SessionAuth::new([0xab; 32], url.clone()).unwrap()));
+        let observed = state.clone();
+        let app = router(state);
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let member = SigningKey::random(&mut OsRng);
 
         // A client bound to another service refuses the challenge before signing.
         assert!(

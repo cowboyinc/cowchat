@@ -5,8 +5,8 @@
 
 use crate::{ClientError, CowchatClient};
 use cowchat_core::{
-    session_possession_statement, FrameType, SessionChallengeRequest, SessionChallengeResponse,
-    SessionProof, SESSION_MEMBER_AUDIENCE,
+    session_challenge_digest, session_possession_digest, FrameType, SessionChallengeRequest,
+    SessionChallengeResponse, SessionProof, SESSION_MEMBER_AUDIENCE,
 };
 use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
 use rand_core::OsRng;
@@ -63,12 +63,14 @@ fn challenge_url(ws_url: &str) -> Result<reqwest::Url, ClientError> {
 /// its digest with the session key.
 pub(crate) fn prove(
     challenge: &SessionChallengeResponse,
+    endpoint: &str,
     service_id: &[u8; 32],
     member: &SigningKey,
     session: &SigningKey,
     now_ms: u64,
 ) -> Result<SessionProof, ClientError> {
     if challenge.server_id != hex::encode(service_id)
+        || challenge.endpoint != endpoint
         || challenge.audience != SESSION_MEMBER_AUDIENCE
         || !challenge.origin.is_empty()
         || challenge.principal_address != member_address(member)
@@ -79,14 +81,14 @@ pub(crate) fn prove(
             "session challenge does not match this member and server",
         ));
     }
-    let digest = keccak(challenge.statement().as_bytes());
+    let digest = session_challenge_digest(challenge);
     let (signature, recovery): (Signature, _) = member
         .sign_prehash_recoverable(&digest)
         .map_err(|_| auth("cannot sign session challenge"))?;
     let mut principal = signature.to_bytes().to_vec();
     principal.push(recovery.to_byte());
     let possession: Signature = session
-        .sign_prehash(&keccak(session_possession_statement(&digest).as_bytes()))
+        .sign_prehash(&session_possession_digest(&digest))
         .map_err(|_| auth("cannot sign session possession"))?;
     Ok(SessionProof {
         nonce: challenge.nonce.clone(),
@@ -106,10 +108,14 @@ impl CowchatClient {
         name: &str,
     ) -> Result<Self, ClientError> {
         let session = SigningKey::random(&mut OsRng);
+        let endpoint = reqwest::Url::parse(ws_url)
+            .map_err(|_| auth("invalid Cowchat URL"))?
+            .to_string();
         let request = SessionChallengeRequest {
             principal_address: member_address(member),
             session_public_key: session_public_key(&session),
             audience: SESSION_MEMBER_AUDIENCE.to_string(),
+            endpoint: endpoint.clone(),
         };
         let response = reqwest::Client::new()
             .post(challenge_url(ws_url)?)
@@ -124,7 +130,14 @@ impl CowchatClient {
             .json()
             .await
             .map_err(|_| auth("invalid session challenge"))?;
-        let proof = prove(&challenge, service_id, member, &session, now_ms()?)?;
+        let proof = prove(
+            &challenge,
+            &endpoint,
+            service_id,
+            member,
+            &session,
+            now_ms()?,
+        )?;
         Self::connect_ws_registered(ws_url, "", Some(proof), name, None, Vec::new()).await
     }
 
@@ -293,6 +306,7 @@ mod tests {
     fn challenge(member: &SigningKey, session: &SigningKey) -> SessionChallengeResponse {
         SessionChallengeResponse {
             server_id: hex::encode([7u8; 32]),
+            endpoint: "wss://chat.example/ws".to_string(),
             audience: SESSION_MEMBER_AUDIENCE.to_string(),
             origin: String::new(),
             principal_address: member_address(member),
@@ -307,10 +321,18 @@ mod tests {
         let member = SigningKey::from_slice(&[1u8; 32]).unwrap();
         let session = SigningKey::from_slice(&[2u8; 32]).unwrap();
         let good = challenge(&member, &session);
-        let proof = prove(&good, &[7; 32], &member, &session, 1_000).unwrap();
+        let proof = prove(
+            &good,
+            "wss://chat.example/ws",
+            &[7; 32],
+            &member,
+            &session,
+            1_000,
+        )
+        .unwrap();
 
         let principal = hex::decode(proof.principal_signature.trim_start_matches("0x")).unwrap();
-        let digest = keccak(good.statement().as_bytes());
+        let digest = session_challenge_digest(&good);
         let recovered = k256::ecdsa::VerifyingKey::recover_from_prehash(
             &digest,
             &Signature::from_slice(&principal[..64]).unwrap(),
@@ -319,8 +341,9 @@ mod tests {
         .unwrap();
         assert_eq!(&recovered, member.verifying_key());
 
-        let mutations: [fn(&mut SessionChallengeResponse); 5] = [
+        let mutations: [fn(&mut SessionChallengeResponse); 6] = [
             |c| c.server_id = hex::encode([8u8; 32]),
+            |c| c.endpoint = "wss://other.example/ws".to_string(),
             |c| c.audience = "cowchat-browser".to_string(),
             |c| c.origin = "https://evil.example".to_string(),
             |c| c.principal_address = "0x0000000000000000000000000000000000000001".to_string(),
@@ -329,7 +352,15 @@ mod tests {
         for mutate in mutations {
             let mut bad = good.clone();
             mutate(&mut bad);
-            assert!(prove(&bad, &[7; 32], &member, &session, 1_000).is_err());
+            assert!(prove(
+                &bad,
+                "wss://chat.example/ws",
+                &[7; 32],
+                &member,
+                &session,
+                1_000
+            )
+            .is_err());
         }
     }
 
