@@ -50,9 +50,7 @@ const fn default_max_pending_rooms_per_wallet() -> usize {
 #[cfg(feature = "room-keys")]
 mod initial_room;
 #[cfg(feature = "room-keys")]
-pub use initial_room::{
-    activate_initial_room, probe_initial_room, BrowserInitialRoom, InitialRoomDemo,
-};
+pub use initial_room::BrowserInitialRoom;
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,10 +132,11 @@ impl HostedRoomKeys {
         &self,
         owner: Address,
         room_id: String,
+        members: Vec<Address>,
     ) -> Result<serde_json::Value> {
         let root = self.control_root().await?;
         cbssd::room_deployment::CompiledRoomDeployment::compiled()?
-            .initial_browser_context(owner, room_id, root)
+            .initial_browser_context(owner, room_id, members, root)
     }
 
     pub async fn successor_context(

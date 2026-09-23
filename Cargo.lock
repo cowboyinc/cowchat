@@ -947,7 +947,7 @@ dependencies = [
 [[package]]
 name = "cbss-client"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=e7b96a907d526dc7d5bf70c52c10efdfe1dfb5bf#e7b96a907d526dc7d5bf70c52c10efdfe1dfb5bf"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=48488e5382ca14ffbc6e9e3a513d9668db2ce96a#48488e5382ca14ffbc6e9e3a513d9668db2ce96a"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -984,7 +984,7 @@ dependencies = [
 [[package]]
 name = "cbss-crypto"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=e7b96a907d526dc7d5bf70c52c10efdfe1dfb5bf#e7b96a907d526dc7d5bf70c52c10efdfe1dfb5bf"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=48488e5382ca14ffbc6e9e3a513d9668db2ce96a#48488e5382ca14ffbc6e9e3a513d9668db2ce96a"
 dependencies = [
  "aes-gcm",
  "blstrs",
@@ -1012,12 +1012,12 @@ dependencies = [
 [[package]]
 name = "cbss-types"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=e7b96a907d526dc7d5bf70c52c10efdfe1dfb5bf#e7b96a907d526dc7d5bf70c52c10efdfe1dfb5bf"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=48488e5382ca14ffbc6e9e3a513d9668db2ce96a#48488e5382ca14ffbc6e9e3a513d9668db2ce96a"
 
 [[package]]
 name = "cbssd"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=e7b96a907d526dc7d5bf70c52c10efdfe1dfb5bf#e7b96a907d526dc7d5bf70c52c10efdfe1dfb5bf"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=48488e5382ca14ffbc6e9e3a513d9668db2ce96a#48488e5382ca14ffbc6e9e3a513d9668db2ce96a"
 dependencies = [
  "anyhow",
  "async-trait",

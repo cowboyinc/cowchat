@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+/// A full setup, current/previous policies, encrypted custody and one grant per
+/// retained member and key epoch must remain one CBQS record below the 256 KiB
+/// wire ceiling. One-at-a-time removals from 32 members peak at 272 grants.
+pub(crate) const MAX_DURABLE_ROOM_MEMBERS: usize = 32;
+pub(crate) const MAX_DURABLE_ROOM_GRANTS: usize =
+    (MAX_DURABLE_ROOM_MEMBERS + 1) * (MAX_DURABLE_ROOM_MEMBERS + 1) / 4;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RoomKeyState {
@@ -125,7 +132,7 @@ impl RoomKeyPreparation {
             && self.previous_policy.as_ref().is_none_or(|p| hex_bytes(p, 96 * 1024))
             && hex_bytes(&self.signed_policy, 96 * 1024)
             && self.custody.len() == 157 * 2 && hex_bytes(&self.custody, 157)
-            && self.grants.len() <= 1024
+            && self.grants.len() <= MAX_DURABLE_ROOM_GRANTS
             && self.grants.iter().all(|g| g.len() == 178 * 2 && hex_bytes(g, 178))
             // Leave room for the command and CBQS envelope below 256 KiB.
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= 240 * 1024)
@@ -201,6 +208,28 @@ mod tests {
                 .unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn durable_member_limit_keeps_a_successor_preparation_below_the_record_cap() {
+        let previous = RoomKeyState {
+            transition_id: [9; 32],
+            policy_epoch: 0,
+            key_epoch: 0,
+            policy_hash: [2; 32],
+            control_root: [8; 32],
+        };
+        let mut value = preparation();
+        value.signed_setup = "01".repeat(16 * 1024);
+        value.previous_policy = Some("02".repeat(16 * 1024));
+        value.signed_policy = "03".repeat(16 * 1024);
+        value.custody = "04".repeat(157);
+        value.grants = vec!["05".repeat(178); MAX_DURABLE_ROOM_GRANTS];
+        assert!(serde_json::to_vec(&value).unwrap().len() < 240 * 1024);
+        assert!(value.extends(Some(&previous)));
+
+        value.grants.push("05".repeat(178));
+        assert!(!value.extends(Some(&previous)));
     }
 
     #[test]

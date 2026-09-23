@@ -18,7 +18,7 @@ use serde::de::DeserializeOwned;
 use std::{collections::HashSet, sync::Arc};
 
 #[cfg(feature = "room-keys")]
-use crate::room_log::RoomKeyCustody;
+use crate::room_log::{RoomKeyCustody, MAX_DURABLE_ROOM_GRANTS, MAX_DURABLE_ROOM_MEMBERS};
 
 #[cfg(feature = "room-keys")]
 use commonware_codec::Decode;
@@ -43,8 +43,18 @@ struct PrepareRoomKeyPayload {
     room_id: String,
     name: String,
     owner: String,
+    #[serde(default, deserialize_with = "present_room_members")]
+    members: Option<Vec<String>>,
     #[serde(default)]
     remove_member: Option<String>,
+}
+
+#[cfg(feature = "room-keys")]
+fn present_room_members<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Vec<String> as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
 #[cfg(all(test, feature = "room-keys"))]
@@ -147,6 +157,148 @@ mod member_policy_tests {
             custody: "03".repeat(157),
             grants: vec!["04".repeat(178)],
         }
+    }
+
+    fn member_address(value: u8) -> Address {
+        Address::from_bytes([value; 20])
+    }
+
+    fn member_text(address: Address) -> String {
+        format!("0x{}", hex::encode(address.as_bytes()))
+    }
+
+    fn indexed_member(index: u64) -> Address {
+        let mut bytes = [0; 20];
+        bytes[12..].copy_from_slice(&index.to_be_bytes());
+        Address::from_bytes(bytes)
+    }
+
+    #[test]
+    fn initial_roster_accepts_and_sorts_multiple_members() {
+        let owner = member_address(3);
+        let first = member_address(1);
+        let second = member_address(2);
+        assert_eq!(
+            prepare_room_members(
+                Some(vec![
+                    member_text(owner),
+                    member_text(second),
+                    member_text(first),
+                ]),
+                owner,
+                false,
+            ),
+            Ok(Some(vec![first, second, owner]))
+        );
+        assert_eq!(
+            prepare_room_members(None, owner, false),
+            Ok(Some(vec![owner]))
+        );
+    }
+
+    #[test]
+    fn initial_roster_rejects_invalid_member_address() {
+        let owner = member_address(1);
+        assert!(
+            prepare_room_members(Some(vec![hex::encode(owner.as_bytes())]), owner, false).is_err()
+        );
+    }
+
+    #[test]
+    fn initial_roster_requires_owner() {
+        let owner = member_address(1);
+        assert!(
+            prepare_room_members(Some(vec![member_text(member_address(2))]), owner, false).is_err()
+        );
+    }
+
+    #[test]
+    fn initial_roster_canonicalizes_duplicate_addresses() {
+        let owner = member_address(1);
+        let member = member_address(2);
+        let uppercase_owner = format!("0x{}", hex::encode(owner.as_bytes()).to_uppercase());
+        assert_eq!(
+            prepare_room_members(
+                Some(vec![
+                    member_text(owner),
+                    uppercase_owner,
+                    member_text(member),
+                ]),
+                owner,
+                false,
+            ),
+            Ok(Some(vec![owner, member]))
+        );
+    }
+
+    #[test]
+    fn initial_roster_enforces_the_durable_record_limit() {
+        let members = (1..=MAX_DURABLE_ROOM_MEMBERS as u64)
+            .map(indexed_member)
+            .map(member_text)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prepare_room_members(Some(members.clone()), indexed_member(1), false)
+                .unwrap()
+                .unwrap()
+                .len(),
+            MAX_DURABLE_ROOM_MEMBERS
+        );
+        let mut overflow = members;
+        overflow.push(member_text(indexed_member(
+            MAX_DURABLE_ROOM_MEMBERS as u64 + 1,
+        )));
+        assert!(prepare_room_members(Some(overflow), indexed_member(1), false).is_err());
+    }
+
+    #[test]
+    fn successor_rejects_explicit_members() {
+        let owner = member_address(1);
+        assert!(prepare_room_members(Some(vec![member_text(owner)]), owner, true).is_err());
+        assert_eq!(prepare_room_members(None, owner, true), Ok(None));
+    }
+
+    #[test]
+    fn durable_member_limit_covers_every_removal_epoch() {
+        let mut peak = 0;
+        for removed in 0..MAX_DURABLE_ROOM_MEMBERS - 1 {
+            let current_members = MAX_DURABLE_ROOM_MEMBERS - removed;
+            let current_keys = removed + 1;
+            let grants = successor_grant_count(current_members, current_keys).unwrap();
+            peak = peak.max(grants);
+            assert!(grants <= MAX_DURABLE_ROOM_GRANTS);
+        }
+        assert_eq!(peak, MAX_DURABLE_ROOM_GRANTS);
+
+        // A 33-member room can reach a 17-member x 17-epoch successor.
+        assert!(successor_grant_count(18, 16).unwrap() > MAX_DURABLE_ROOM_GRANTS);
+        assert!(successor_grant_count(usize::MAX, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn successor_distinguishes_absent_members_from_an_explicit_array() {
+        let owner = member_address(1);
+        let base = serde_json::json!({
+            "room_id": "11111111-1111-4111-8111-111111111111",
+            "name": "room",
+            "owner": member_text(owner),
+            "remove_member": member_text(member_address(2)),
+        });
+        let absent: PrepareRoomKeyPayload = serde_json::from_value(base.clone()).unwrap();
+        assert!(absent.members.is_none());
+        assert_eq!(
+            prepare_room_members(absent.members, owner, absent.remove_member.is_some()),
+            Ok(None)
+        );
+
+        let mut explicit = base;
+        explicit["members"] = serde_json::json!([]);
+        let explicit: PrepareRoomKeyPayload = serde_json::from_value(explicit).unwrap();
+        assert_eq!(explicit.members.as_deref(), Some([].as_slice()));
+        assert!(
+            prepare_room_members(explicit.members, owner, explicit.remove_member.is_some())
+                .is_err()
+        );
     }
 
     #[test]
@@ -565,6 +717,45 @@ fn parse_address(value: &str) -> Option<Address> {
         .ok()
         .map(Address::from_bytes)
         .filter(|address| *address != Address::ZERO)
+}
+
+#[cfg(feature = "room-keys")]
+fn prepare_room_members(
+    members: Option<Vec<String>>,
+    owner: Address,
+    successor: bool,
+) -> Result<Option<Vec<Address>>, ()> {
+    if successor {
+        return members.is_none().then_some(None).ok_or(());
+    }
+    let mut members = match members {
+        Some(members) => members
+            .into_iter()
+            .map(|member| {
+                member
+                    .strip_prefix("0x")
+                    .and_then(|_| parse_address(&member))
+                    .ok_or(())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        None => vec![owner],
+    };
+    members.sort_unstable();
+    members.dedup();
+    if members.len() > MAX_DURABLE_ROOM_MEMBERS {
+        return Err(());
+    }
+    if members.binary_search(&owner).is_err() {
+        return Err(());
+    }
+    Ok(Some(members))
+}
+
+#[cfg(feature = "room-keys")]
+fn successor_grant_count(member_count: usize, key_count: usize) -> Option<usize> {
+    member_count
+        .checked_sub(1)?
+        .checked_mul(key_count.checked_add(1)?)
 }
 
 pub struct HostedOwner {
@@ -1335,6 +1526,8 @@ impl HostedOwner {
                 "Room owner must match the authenticated wallet",
             ));
         }
+        let members = prepare_room_members(payload.members, owner, payload.remove_member.is_some())
+            .map_err(|_| error(id, ErrorCode::InvalidPayload, "Invalid room member roster"))?;
         let current = {
             let state = self.view.read().map_err(|_| unavailable(id))?;
             state.room(&payload.room_id).map(|room| {
@@ -1345,13 +1538,15 @@ impl HostedOwner {
                 )
             })
         };
-        let context = match (current, payload.remove_member) {
-            (None, None) => self
+        let context = match (current, payload.remove_member, members) {
+            (None, None, Some(members)) => self
                 .room_keys(id)?
-                .initial_context(owner, payload.room_id)
+                .initial_context(owner, payload.room_id, members)
                 .await
                 .map_err(|_| unavailable(id))?,
-            (Some((name, pending, publication)), Some(removed)) if name == normalized_name => {
+            (Some((name, pending, publication)), Some(removed), None)
+                if name == normalized_name =>
+            {
                 if pending {
                     return Err(error(
                         id,
@@ -1373,6 +1568,19 @@ impl HostedOwner {
                         id,
                         ErrorCode::AccessDenied,
                         "Room owner must match the authenticated wallet",
+                    ));
+                }
+                if previous.policy.members.len() > MAX_DURABLE_ROOM_MEMBERS
+                    || successor_grant_count(
+                        previous.policy.members.len(),
+                        previous.policy.keys.len(),
+                    )
+                    .is_none_or(|count| count > MAX_DURABLE_ROOM_GRANTS)
+                {
+                    return Err(error(
+                        id,
+                        ErrorCode::InvalidPayload,
+                        "Room key history is too large to rotate",
                     ));
                 }
                 let removed = parse_address(&removed).ok_or_else(|| {
