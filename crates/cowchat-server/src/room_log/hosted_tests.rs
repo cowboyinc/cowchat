@@ -36,6 +36,11 @@ impl Drop for Network {
 }
 impl Network {
     async fn new(runtime: OwnerRuntime) -> Self {
+        Self::with_member_sessions(runtime, None).await
+    }
+
+    /// Serve member sessions for `service_id` on this fixture's own `/ws`.
+    async fn with_member_sessions(runtime: OwnerRuntime, service_id: Option<[u8; 32]>) -> Self {
         let directory = private_directory();
         let server = Arc::new(
             CowchatServer::new_hosted(
@@ -66,6 +71,14 @@ impl Network {
             server.store().clone(),
             false,
         ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_address = listener.local_addr().unwrap().to_string();
+        let session_auth = service_id.map(|id| {
+            Arc::new(
+                crate::session_auth::SessionAuth::new(id, format!("ws://{http_address}/ws"))
+                    .unwrap(),
+            )
+        });
         let app = crate::web::router(crate::web::AppState {
             broker: server.broker().clone(),
             store: server.store().clone(),
@@ -80,10 +93,8 @@ impl Network {
             admin_secret: None,
             allowed_origins: vec![],
             trusted_proxy_ips: vec![],
-            session_auth: None,
+            session_auth,
         });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let http_address = listener.local_addr().unwrap().to_string();
         let http = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -344,6 +355,141 @@ async fn hosted_member_dispatch_uses_the_signed_roster() {
         let denied = call!(frame, "outsider", Some(&outsider)).await;
         assert_eq!(denied.payload["code"], "access_denied");
     }
+}
+
+#[cfg(feature = "room-key-demo")]
+#[tokio::test]
+async fn actor_member_replies_once_under_its_deterministic_id() {
+    use cowchat_client::member::{actor_reply_id, RoomTurn};
+    use cowchat_core::room_crypto::{decrypt, Context};
+
+    let fixture = Fixture::new().await;
+    let (control, volume) = Storage::new().await;
+    let mut writers = control.initialize_writers(volume).await;
+    let (storage, volume) = Storage::new().await;
+    let directory = private_directory();
+    let mut runtime = recover(
+        promote(&fixture, &mut writers).await,
+        storage.initialize_archive(volume).await,
+        &directory.path().join("intents.sqlite"),
+    )
+    .await;
+    let owner = SigningKey::from_bytes((&[0x11; 32]).into()).unwrap();
+    let actor_key = SigningKey::from_bytes((&[0x22; 32]).into()).unwrap();
+    let peer_key = SigningKey::from_bytes((&[0x33; 32]).into()).unwrap();
+    let policy = RoomKeyPolicyV1 {
+        identity: RoomPolicyIdentityV1 {
+            chain_id: 1,
+            chain_instance_id: [1; 32],
+            service_id: [2; 32],
+            owner: Address::from_verifying_key(owner.verifying_key()),
+            room_id: "one".into(),
+        },
+        policy_epoch: 0,
+        active_key_epoch: 0,
+        members: vec![
+            Address::from_verifying_key(actor_key.verifying_key()),
+            Address::from_verifying_key(peer_key.verifying_key()),
+        ],
+        keys: vec![RoomCustodyCommitmentV1 {
+            key_epoch: 0,
+            scope_hash: [3; 32],
+            ciphertext_hash: [4; 32],
+        }],
+    };
+    let signed = SignedRoomKeyPolicyV1 {
+        owner_signature: EthSignature::sign(&owner, &policy.signing_hash()),
+        policy,
+    };
+    let mut prepare = key_prepare("one", 0, None);
+    let CommandBody::PrepareKeyEpoch { preparation, .. } = &mut prepare.body else {
+        unreachable!();
+    };
+    preparation.signed_policy = hex::encode(signed.encode());
+    runtime
+        .submit(vec![create("one", 0), prepare, key_cutover("one", 0, None)])
+        .await
+        .unwrap();
+    let network = Network::with_member_sessions(runtime, Some([2; 32])).await;
+    let url = format!("ws://{}/ws", network.http_address);
+
+    // Both roster members authenticate with their member keys, no API key.
+    let room_key = [9u8; 32];
+    let mut peer = CowchatClient::connect_member(&url, &[2; 32], &peer_key, "peer")
+        .await
+        .unwrap();
+    let mut actor = CowchatClient::connect_member(&url, &[2; 32], &actor_key, "actor")
+        .await
+        .unwrap();
+    for client in [&mut peer, &mut actor] {
+        client.set_hosted_room_key("one", 0, room_key);
+        client.join_room("one").await.unwrap();
+    }
+    let input = CowchatClient::prepare_room_key_message(
+        &room_key,
+        &Context {
+            room_id: "one",
+            key_epoch: 0,
+            message_id: "input-1",
+        },
+        "hello actor",
+        None,
+        vec![],
+        serde_json::json!({}),
+    )
+    .unwrap();
+    peer.append_prepared_message(&input).await.unwrap();
+
+    let reply_id = actor_reply_id(&actor_key, "input-1");
+    let RoomTurn::Input(found) = actor
+        .find_room_turn("one", "input-1", &reply_id)
+        .await
+        .unwrap()
+    else {
+        panic!("the addressed input is found");
+    };
+    assert_eq!(found.content, "hello actor");
+    actor
+        .send_hosted_reply(&found, &reply_id, "hi peer")
+        .await
+        .unwrap();
+
+    // A repeated job finds the committed reply and never runs inference; a
+    // racing duplicate send cannot add a second visible reply.
+    assert!(matches!(
+        actor
+            .find_room_turn("one", "input-1", &reply_id)
+            .await
+            .unwrap(),
+        RoomTurn::AlreadyReplied
+    ));
+    let _ = actor.send_hosted_reply(&found, &reply_id, "hi again").await;
+    let history = peer.get_history("one", 100, None).await.unwrap();
+    let replies: Vec<_> = history
+        .iter()
+        .filter(|message| message.message_id == reply_id)
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(
+        decrypt(
+            &room_key,
+            &Context {
+                room_id: "one",
+                key_epoch: 0,
+                message_id: &reply_id,
+            },
+            &replies[0].content,
+        )
+        .unwrap(),
+        "hi peer"
+    );
+
+    // A key outside the roster registers but cannot join the room.
+    let outsider = SigningKey::from_bytes((&[0x44; 32]).into()).unwrap();
+    let stranger = CowchatClient::connect_member(&url, &[2; 32], &outsider, "stranger")
+        .await
+        .unwrap();
+    assert!(stranger.join_room("one").await.is_err());
 }
 
 #[tokio::test]
