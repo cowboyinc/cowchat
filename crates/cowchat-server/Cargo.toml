@@ -82,6 +82,6 @@ cowchat-client = { workspace = true, optional = true }
 k256 = { version = "0.13", features = ["ecdsa"] }
 
 [dev-dependencies]
-cowchat-client.workspace = true
+cowchat-client = { workspace = true, features = ["member"] }
 tempfile = "3"
 tokio-tungstenite = "0.26"

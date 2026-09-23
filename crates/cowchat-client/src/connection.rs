@@ -311,6 +311,9 @@ pub struct CowchatClient {
     /// `content` is encrypted before send and decrypted after receive, keyed
     /// per-room. None means the client sends/receives plaintext.
     room_secret: Option<Vec<u8>>,
+    /// Hosted room keys by (room, key epoch). Replies use the room's newest
+    /// epoch; claimed inputs decrypt with the epoch they carry.
+    hosted_keys: HashMap<(String, u64), zeroize::Zeroizing<[u8; 32]>>,
 }
 
 impl CowchatClient {
@@ -426,6 +429,7 @@ impl CowchatClient {
             pending,
             event_tx,
             key,
+            None,
             name,
             agent_id,
             capabilities,
@@ -439,6 +443,19 @@ impl CowchatClient {
     pub async fn connect_ws(
         url: &str,
         key: &str,
+        name: &str,
+        agent_id: Option<&str>,
+        capabilities: Vec<String>,
+    ) -> Result<Self, ClientError> {
+        Self::connect_ws_registered(url, key, None, name, agent_id, capabilities).await
+    }
+
+    /// WebSocket transport with either the transport key or a member session
+    /// proof in the register frame.
+    pub(crate) async fn connect_ws_registered(
+        url: &str,
+        key: &str,
+        session: Option<SessionProof>,
         name: &str,
         agent_id: Option<&str>,
         capabilities: Vec<String>,
@@ -516,6 +533,7 @@ impl CowchatClient {
             pending,
             event_tx,
             key,
+            session,
             name,
             agent_id,
             capabilities,
@@ -526,11 +544,13 @@ impl CowchatClient {
     /// Shared post-transport setup: perform the register handshake over the
     /// already-wired channels and construct the client. Used by every transport
     /// (UDS, TCP, WebSocket).
+    #[allow(clippy::too_many_arguments)]
     async fn finish_register(
         write_tx: mpsc::Sender<Frame>,
         pending: Arc<Mutex<HashMap<String, oneshot::Sender<Frame>>>>,
         event_tx: broadcast::Sender<Event>,
         key: &str,
+        session: Option<SessionProof>,
         name: &str,
         agent_id: Option<&str>,
         capabilities: Vec<String>,
@@ -542,7 +562,7 @@ impl CowchatClient {
             frame_type: FrameType::Register,
             payload: serde_json::to_value(RegisterPayload {
                 key: key.to_string(),
-                session: None,
+                session,
                 agent_id: agent_id.map(String::from),
                 name: name.to_string(),
                 capabilities,
@@ -596,6 +616,7 @@ impl CowchatClient {
             agent_name: name.to_string(),
             stable_identity,
             room_secret: None,
+            hosted_keys: HashMap::new(),
         })
     }
 
@@ -605,6 +626,34 @@ impl CowchatClient {
     /// receiving — both keyed per-room. Set this before sending or receiving.
     pub fn set_room_secret(&mut self, secret: &[u8]) {
         self.room_secret = Some(secret.to_vec());
+    }
+
+    /// Hold an opened hosted room key for one epoch. Claimed inputs decrypt
+    /// with the epoch they carry; replies encrypt under the newest held epoch.
+    pub fn set_hosted_room_key(&mut self, room_id: &str, key_epoch: u64, key: [u8; 32]) {
+        self.hosted_keys.insert(
+            (room_id.to_string(), key_epoch),
+            zeroize::Zeroizing::new(key),
+        );
+    }
+
+    pub(crate) fn hosted_key(
+        &self,
+        room_id: &str,
+        key_epoch: u64,
+    ) -> Result<&[u8; 32], ClientError> {
+        self.hosted_keys
+            .get(&(room_id.to_string(), key_epoch))
+            .map(|key| &**key)
+            .ok_or_else(|| ClientError::Encryption("room key epoch is not open".into()))
+    }
+
+    pub(crate) fn newest_hosted_epoch(&self, room_id: &str) -> Option<u64> {
+        self.hosted_keys
+            .keys()
+            .filter(|(room, _)| room == room_id)
+            .map(|(_, epoch)| *epoch)
+            .max()
     }
 
     /// Encrypt `content` for `room_id` if a room secret is configured, otherwise
@@ -644,7 +693,7 @@ impl CowchatClient {
     }
 
     /// Send a request and wait for the response.
-    async fn request(
+    pub(crate) async fn request(
         &self,
         frame_type: FrameType,
         payload: serde_json::Value,
@@ -1347,12 +1396,22 @@ impl CowchatClient {
         let mut work: Option<ActorWork> = serde_json::from_value(response.payload["work"].clone())?;
         if let Some(work) = &mut work {
             for message in std::iter::once(&mut work.input).chain(work.existing_reply.iter_mut()) {
-                if message.key_epoch.is_some() {
-                    return Err(ClientError::Encryption(
-                        "actor requires the hosted room key codec".into(),
-                    ));
-                }
-                if cowchat_core::crypto::is_ciphertext(&message.content) {
+                if let Some(epoch) = &message.key_epoch {
+                    let epoch: u64 = epoch
+                        .parse()
+                        .map_err(|_| ClientError::Encryption("invalid room key epoch".into()))?;
+                    let context = cowchat_core::room_crypto::Context {
+                        room_id: &message.room_id,
+                        key_epoch: epoch,
+                        message_id: &message.message_id,
+                    };
+                    message.content = cowchat_core::room_crypto::decrypt(
+                        self.hosted_key(&message.room_id, epoch)?,
+                        &context,
+                        &message.content,
+                    )
+                    .map_err(|e| ClientError::Encryption(e.to_string()))?;
+                } else if cowchat_core::crypto::is_ciphertext(&message.content) {
                     let secret = self
                         .room_secret
                         .as_deref()
@@ -1405,7 +1464,7 @@ impl CowchatClient {
             match execute(work.clone()).await? {
                 ActorReply::Skip => ActorWorkOutcome::Skipped,
                 ActorReply::Reply { content, mentions } => {
-                    let payload = self.prepare_actor_reply(&work, &content, mentions);
+                    let payload = self.prepare_actor_reply(&work, &content, mentions)?;
                     match self.append_prepared_message(&payload).await {
                         Ok(_) => {}
                         // Another claimant may have committed its reply first. Completion
@@ -1432,16 +1491,33 @@ impl CowchatClient {
         work: &ActorWork,
         content: &str,
         mentions: Vec<String>,
-    ) -> SendMessagePayload {
-        SendMessagePayload {
-            key_epoch: None,
+    ) -> Result<SendMessagePayload, ClientError> {
+        let (key_epoch, content) = match self.newest_hosted_epoch(&work.room_id) {
+            Some(epoch) => {
+                let context = cowchat_core::room_crypto::Context {
+                    room_id: &work.room_id,
+                    key_epoch: epoch,
+                    message_id: &work.reply_message_id,
+                };
+                let sealed = cowchat_core::room_crypto::encrypt(
+                    self.hosted_key(&work.room_id, epoch)?,
+                    &context,
+                    content,
+                )
+                .map_err(|e| ClientError::Encryption(e.to_string()))?;
+                (Some(epoch.to_string()), sealed)
+            }
+            None => (None, self.encrypt_content(&work.room_id, content)),
+        };
+        Ok(SendMessagePayload {
+            key_epoch,
             message_id: Some(work.reply_message_id.clone()),
             room_id: work.room_id.clone(),
-            content: self.encrypt_content(&work.room_id, content),
+            content,
             reply_to: Some(work.message_id.clone()),
             metadata: serde_json::json!({}),
             mentions,
-        }
+        })
     }
 
     pub async fn append_prepared_message(

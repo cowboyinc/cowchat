@@ -1009,6 +1009,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_member_key_registers_through_the_common_challenge() {
+        // The member signs the endpoint it dialed, so the server must be
+        // configured with exactly that URL.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{addr}/ws");
+        let mut state = test_state();
+        state.session_auth = Some(Arc::new(SessionAuth::new([0xab; 32], url.clone()).unwrap()));
+        let observed = state.clone();
+        let app = router(state);
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let member = SigningKey::random(&mut OsRng);
+
+        // A client bound to another service refuses the challenge before signing.
+        assert!(
+            cowchat_client::CowchatClient::connect_member(&url, &[0xcd; 32], &member, "actor")
+                .await
+                .is_err()
+        );
+
+        let client =
+            cowchat_client::CowchatClient::connect_member(&url, &[0xab; 32], &member, "actor")
+                .await
+                .unwrap();
+        let expected = format!(
+            "member:{}",
+            crate::session_auth::address_for_key(member.verifying_key())
+        );
+        assert_eq!(client.agent_id, expected);
+        assert!(observed.broker.agents.get(&expected).is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn websocket_delivers_terminal_registration_error_before_closing() {
         let (server, addr) = start_test_web_server(test_state()).await;
         let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
