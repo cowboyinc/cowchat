@@ -129,10 +129,12 @@ impl CowchatClient {
     }
 
     /// Open the room's current key over the member relay and hold it for
-    /// claims and replies. Returns the opened key epoch.
+    /// claims and replies. The owner-signed policy must belong to
+    /// `expected_owner`. Returns the opened key epoch.
     pub async fn open_hosted_room_key(
         &mut self,
         room_id: &str,
+        expected_owner: &[u8],
         member: &SigningKey,
     ) -> Result<u64, ClientError> {
         let context = self
@@ -143,6 +145,13 @@ impl CowchatClient {
             .await?
             .payload;
         let invalid = || auth("invalid room key context");
+        let owner = context
+            .pointer("/input/scope/owner")
+            .and_then(|value| value.as_str())
+            .ok_or_else(invalid)?;
+        if owner.trim_start_matches("0x") != hex::encode(expected_owner) {
+            return Err(auth("room belongs to another owner"));
+        }
         let input = serde_json::to_string(context.get("input").ok_or_else(invalid)?)?;
         let custody = context
             .get("custody")
