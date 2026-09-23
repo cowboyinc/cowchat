@@ -16,7 +16,7 @@ pub mod ownership;
 pub mod runtime;
 
 mod key_epoch;
-pub use key_epoch::{RoomKeyPreparation, RoomKeyState};
+pub use key_epoch::{RoomKeyCustody, RoomKeyPreparation, RoomKeyState};
 
 use chrono::{DateTime, Utc};
 use cowchat_core::ChatMessage;
@@ -128,6 +128,10 @@ pub struct RoomState {
     /// This never contains the plaintext room key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_publication: Option<Box<RoomKeyPreparation>>,
+    /// Committed encrypted custody, ordered by adjacent key epoch. This keeps
+    /// history recoverable without retaining plaintext keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_custodies: Vec<RoomKeyCustody>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -349,6 +353,7 @@ impl OwnerState {
                         key_state: None,
                         key_preparation: None,
                         key_publication: None,
+                        key_custodies: Vec::new(),
                     },
                 );
                 Outcome::RoomCreated {
@@ -444,12 +449,21 @@ impl OwnerState {
                     return rejected(Rejection::UnknownRoom);
                 };
                 if command.command_id != key_epoch::transition_id(&state.transition_id)
+                    || u64::try_from(room.key_custodies.len()).ok() != Some(state.key_epoch)
                     || !room.key_preparation.as_ref().is_some_and(|prepared| {
                         prepared.matches_commit(*expected_policy_hash, state)
                     })
                 {
                     return rejected(Rejection::InvalidKeyTransition);
                 }
+                let prepared = room
+                    .key_preparation
+                    .as_ref()
+                    .expect("validated room-key preparation");
+                room.key_custodies.push(RoomKeyCustody {
+                    key_epoch: state.key_epoch,
+                    custody: prepared.custody.clone(),
+                });
                 room.key_state = Some(state.clone());
                 room.key_publication = room.key_preparation.take();
                 Outcome::KeyEpochCommitted {

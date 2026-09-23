@@ -16,6 +16,9 @@ use serde::de::DeserializeOwned;
 use std::{collections::HashSet, sync::Arc};
 
 #[cfg(feature = "room-key-demo")]
+use crate::room_log::RoomKeyCustody;
+
+#[cfg(feature = "room-key-demo")]
 use commonware_codec::Decode;
 #[cfg(feature = "room-key-demo")]
 use cowboy_protocol_codec::{
@@ -24,35 +27,52 @@ use cowboy_protocol_codec::{
 };
 
 #[cfg(feature = "room-key-demo")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoomKeyActivationTransition {
+    Committed,
+    ResumePending,
+    Stage,
+}
+
+#[cfg(feature = "room-key-demo")]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrepareRoomKeyPayload {
     room_id: String,
     name: String,
     owner: String,
+    #[serde(default)]
+    remove_member: Option<String>,
 }
 
 #[cfg(all(test, feature = "room-key-demo"))]
 mod member_policy_tests {
     use super::*;
+    use crate::{
+        broker::Broker, connection::AgentConnection, hosted_bootstrap::BrowserInitialRoom,
+        reconnect::ReconnectManager, room_log::OwnerState,
+    };
     use commonware_codec::Encode;
     use cowboy_protocol_codec::{
         room_policy::{
             RoomCustodyCommitmentV1, RoomKeyPolicyV1, RoomPolicyIdentityV1, SignedRoomKeyPolicyV1,
         },
+        room_release::{RoomKeyGrantV1, SignedRoomKeyGrantV1},
         EthSignature,
     };
+    use cowchat_core::AgentInfo;
+    use dashmap::DashMap;
     use k256::ecdsa::SigningKey;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
 
-    #[test]
-    fn hosted_member_access_comes_only_from_the_signed_roster() {
-        let owner = SigningKey::from_bytes((&[0x11; 32]).into()).unwrap();
-        let member = SigningKey::from_bytes((&[0x22; 32]).into()).unwrap();
-        let member_address = Address::from_verifying_key(member.verifying_key());
-        let mut members = vec![
-            Address::from_verifying_key(owner.verifying_key()),
-            member_address,
-        ];
+    fn signed_policy(
+        owner: &SigningKey,
+        policy_epoch: u64,
+        active_key_epoch: u64,
+        mut members: Vec<Address>,
+        keys: Vec<RoomCustodyCommitmentV1>,
+    ) -> SignedRoomKeyPolicyV1 {
         members.sort_unstable();
         let policy = RoomKeyPolicyV1 {
             identity: RoomPolicyIdentityV1 {
@@ -62,19 +82,90 @@ mod member_policy_tests {
                 owner: Address::from_verifying_key(owner.verifying_key()),
                 room_id: "11111111-1111-4111-8111-111111111111".into(),
             },
-            policy_epoch: 0,
-            active_key_epoch: 0,
+            policy_epoch,
+            active_key_epoch,
             members,
-            keys: vec![RoomCustodyCommitmentV1 {
+            keys,
+        };
+        SignedRoomKeyPolicyV1 {
+            owner_signature: EthSignature::sign(owner, &policy.signing_hash()),
+            policy,
+        }
+    }
+
+    fn connection(
+        id: &str,
+        api_key: &str,
+        member_address: Option<String>,
+    ) -> (AgentConnection, mpsc::Receiver<Frame>) {
+        let (sender, receiver) = mpsc::channel(16);
+        (
+            AgentConnection::new_with_member(
+                AgentInfo {
+                    agent_id: id.into(),
+                    name: id.into(),
+                    capabilities: vec![],
+                    connected_at: None,
+                    last_active: None,
+                    status: None,
+                    status_detail: None,
+                    progress: None,
+                },
+                format!("session-{id}"),
+                sender,
+                tokio::spawn(async {}),
+                tokio::spawn(async {}),
+                Arc::new(tokio::sync::Notify::new()),
+                api_key.into(),
+                member_address,
+            ),
+            receiver,
+        )
+    }
+
+    fn drained(receiver: &mut mpsc::Receiver<Frame>) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        while let Ok(frame) = receiver.try_recv() {
+            frames.push(frame);
+        }
+        frames
+    }
+
+    fn structural_preparation() -> RoomKeyPreparation {
+        RoomKeyPreparation {
+            transition_id: [1; 32],
+            expected_policy_hash: None,
+            policy_epoch: 0,
+            key_epoch: 0,
+            policy_hash: [2; 32],
+            expected_control_root: [3; 32],
+            signed_setup: "01".into(),
+            previous_policy: None,
+            signed_policy: "02".into(),
+            custody: "03".repeat(157),
+            grants: vec!["04".repeat(178)],
+        }
+    }
+
+    #[test]
+    fn hosted_member_access_comes_only_from_the_signed_roster() {
+        let owner = SigningKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let member = SigningKey::from_bytes((&[0x22; 32]).into()).unwrap();
+        let member_address = Address::from_verifying_key(member.verifying_key());
+        let signed = signed_policy(
+            &owner,
+            0,
+            0,
+            vec![
+                Address::from_verifying_key(owner.verifying_key()),
+                member_address,
+            ],
+            vec![RoomCustodyCommitmentV1 {
                 key_epoch: 0,
                 scope_hash: [3; 32],
                 ciphertext_hash: [4; 32],
             }],
-        };
-        let signed = SignedRoomKeyPolicyV1 {
-            owner_signature: EthSignature::sign(&owner, &policy.signing_hash()),
-            policy,
-        };
+        );
         let bytes = hex::encode(signed.encode());
         let address = format!("0x{}", hex::encode(member_address.as_bytes()));
         assert!(signed_policy_has_member(
@@ -92,6 +183,343 @@ mod member_policy_tests {
             "11111111-1111-4111-8111-111111111111",
             &format!("0x{}", "44".repeat(20))
         ));
+        let mut successor = signed.policy;
+        successor.policy_epoch = 1;
+        successor.active_key_epoch = 1;
+        successor
+            .members
+            .retain(|candidate| *candidate != member_address);
+        successor.keys.push(RoomCustodyCommitmentV1 {
+            key_epoch: 1,
+            scope_hash: [5; 32],
+            ciphertext_hash: [6; 32],
+        });
+        let successor = SignedRoomKeyPolicyV1 {
+            owner_signature: EthSignature::sign(&owner, &successor.signing_hash()),
+            policy: successor,
+        };
+        assert!(!signed_policy_has_member(
+            &hex::encode(successor.encode()),
+            "11111111-1111-4111-8111-111111111111",
+            &address
+        ));
+    }
+
+    #[test]
+    fn room_context_selects_all_member_epochs_or_fails_as_one_batch() {
+        let owner = SigningKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let member = SigningKey::from_bytes((&[0x22; 32]).into()).unwrap();
+        let outsider = SigningKey::from_bytes((&[0x33; 32]).into()).unwrap();
+        let owner_address = Address::from_verifying_key(owner.verifying_key());
+        let member_address = Address::from_verifying_key(member.verifying_key());
+        let policy = signed_policy(
+            &owner,
+            2,
+            2,
+            vec![member_address],
+            vec![
+                RoomCustodyCommitmentV1 {
+                    key_epoch: 0,
+                    scope_hash: [3; 32],
+                    ciphertext_hash: [4; 32],
+                },
+                RoomCustodyCommitmentV1 {
+                    key_epoch: 1,
+                    scope_hash: [5; 32],
+                    ciphertext_hash: [6; 32],
+                },
+                RoomCustodyCommitmentV1 {
+                    key_epoch: 2,
+                    scope_hash: [7; 32],
+                    ciphertext_hash: [8; 32],
+                },
+            ],
+        );
+        let encoded = [
+            (2, [7; 32], [8; 32]),
+            (0, [3; 32], [4; 32]),
+            (1, [5; 32], [6; 32]),
+        ]
+        .into_iter()
+        .map(|(_, scope_hash, ciphertext_hash)| {
+            let grant = RoomKeyGrantV1 {
+                owner: owner_address,
+                member: member_address,
+                scope_hash,
+                ciphertext_hash,
+                policy_epoch: 2,
+            };
+            hex::encode(
+                SignedRoomKeyGrantV1 {
+                    owner_signature: EthSignature::sign(&owner, &grant.signing_hash()),
+                    grant,
+                }
+                .encode(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+        let grants = member_grants(&policy, &encoded, member_address).unwrap();
+        assert_eq!(
+            grants.iter().map(|(epoch, _)| *epoch).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(grants.last().unwrap().1.grant.scope_hash, [7; 32]);
+        assert!(member_grants(
+            &policy,
+            &encoded,
+            Address::from_verifying_key(outsider.verifying_key())
+        )
+        .is_none());
+
+        let custodies = (0..3)
+            .map(|key_epoch| RoomKeyCustody {
+                key_epoch,
+                custody: format!("{:02x}", key_epoch + 10).repeat(157),
+            })
+            .collect::<Vec<_>>();
+        let contexts = member_key_contexts(grants.clone(), &custodies).unwrap();
+        assert_eq!(
+            contexts
+                .iter()
+                .map(|context| context.key_epoch)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(contexts
+            .iter()
+            .all(|context| context.custody_bytes.len() == 157));
+
+        assert!(member_key_contexts(grants.clone(), &custodies[..2]).is_none());
+        let mut corrupt = custodies.clone();
+        corrupt[1].custody = "zz".repeat(157);
+        assert!(member_key_contexts(grants.clone(), &corrupt).is_none());
+        let mut out_of_order = custodies;
+        out_of_order.swap(0, 1);
+        assert!(member_key_contexts(grants, &out_of_order).is_none());
+    }
+
+    #[tokio::test]
+    async fn successor_commit_evicts_removed_wallet_and_fans_out_without_leaking() {
+        let owner = SigningKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let removed = SigningKey::from_bytes((&[0x22; 32]).into()).unwrap();
+        let retained = SigningKey::from_bytes((&[0x33; 32]).into()).unwrap();
+        let outsider = SigningKey::from_bytes((&[0x44; 32]).into()).unwrap();
+        let owner_address = Address::from_verifying_key(owner.verifying_key());
+        let removed_address = Address::from_verifying_key(removed.verifying_key());
+        let retained_address = Address::from_verifying_key(retained.verifying_key());
+        let predecessor = signed_policy(
+            &owner,
+            0,
+            0,
+            vec![owner_address, removed_address, retained_address],
+            vec![RoomCustodyCommitmentV1 {
+                key_epoch: 0,
+                scope_hash: [3; 32],
+                ciphertext_hash: [4; 32],
+            }],
+        );
+        let successor = signed_policy(
+            &owner,
+            1,
+            1,
+            vec![owner_address, retained_address],
+            vec![
+                RoomCustodyCommitmentV1 {
+                    key_epoch: 0,
+                    scope_hash: [3; 32],
+                    ciphertext_hash: [4; 32],
+                },
+                RoomCustodyCommitmentV1 {
+                    key_epoch: 1,
+                    scope_hash: [5; 32],
+                    ciphertext_hash: [6; 32],
+                },
+            ],
+        );
+        let agents = Arc::new(DashMap::new());
+        let broker = Broker::new(agents.clone(), Arc::new(DashMap::new()));
+        let mut receivers = std::collections::HashMap::new();
+        for (id, api_key, member) in [
+            (
+                "removed",
+                "",
+                Some(format!("0x{}", hex::encode(removed_address.as_bytes()))),
+            ),
+            (
+                "removed-idle",
+                "",
+                Some(format!("0x{}", hex::encode(removed_address.as_bytes()))),
+            ),
+            (
+                "retained",
+                "",
+                Some(format!("0x{}", hex::encode(retained_address.as_bytes()))),
+            ),
+            (
+                "outsider",
+                "",
+                Some(format!(
+                    "0x{}",
+                    hex::encode(Address::from_verifying_key(outsider.verifying_key()).as_bytes())
+                )),
+            ),
+            ("service", "service-key", None),
+            ("foreign-service", "foreign-key", None),
+        ] {
+            let (connection, receiver) = connection(id, api_key, member);
+            agents.insert(id.into(), connection);
+            receivers.insert(id, receiver);
+        }
+        for id in ["removed", "service", "retained"] {
+            broker
+                .join_room(id, &predecessor.policy.identity.room_id, || true)
+                .unwrap();
+        }
+        assert_eq!(
+            broker
+                .turn_holder(&predecessor.policy.identity.room_id)
+                .as_deref(),
+            Some("removed")
+        );
+
+        let room = Room {
+            room_id: predecessor.policy.identity.room_id.clone(),
+            name: "room".into(),
+            description: None,
+            parent_id: None,
+            created_at: chrono::Utc::now(),
+            created_by: Some("owner".into()),
+            visibility: "private".into(),
+            owner_key: None,
+            last_activity: None,
+            member_count: None,
+            encrypted: true,
+        };
+        let reconnect = ReconnectManager::new();
+        // A stale reconnect stash must not suppress the event for a live
+        // service session using the same stable agent ID.
+        reconnect.stash(
+            "service".into(),
+            "service".into(),
+            "service-key".into(),
+            HashSet::new(),
+        );
+        reconcile_room_key_commit(
+            &broker,
+            &reconnect,
+            "service-key",
+            &room,
+            Some(&predecessor),
+            &successor,
+        );
+
+        assert!(broker.agents.contains_key("removed"));
+        assert!(!broker.is_agent_in_room("removed", &room.room_id));
+        assert!(broker.is_agent_in_room("service", &room.room_id));
+        assert!(broker.is_agent_in_room("retained", &room.room_id));
+        assert_eq!(
+            broker.turn_holder(&room.room_id).as_deref(),
+            Some("service")
+        );
+
+        for id in ["removed", "removed-idle", "retained", "service"] {
+            assert!(drained(receivers.get_mut(id).unwrap())
+                .iter()
+                .any(|frame| frame.frame_type == FrameType::RoomUpdated));
+        }
+        for id in ["outsider", "foreign-service"] {
+            assert!(!drained(receivers.get_mut(id).unwrap())
+                .iter()
+                .any(|frame| frame.frame_type == FrameType::RoomUpdated));
+        }
+
+        reconcile_room_key_commit(
+            &broker,
+            &reconnect,
+            "service-key",
+            &room,
+            Some(&predecessor),
+            &successor,
+        );
+        let replay = drained(receivers.get_mut("retained").unwrap());
+        assert!(replay
+            .iter()
+            .any(|frame| frame.frame_type == FrameType::RoomUpdated));
+        assert!(!replay
+            .iter()
+            .any(|frame| frame.frame_type == FrameType::TurnChanged));
+        assert_eq!(
+            broker.turn_holder(&room.room_id).as_deref(),
+            Some("service")
+        );
+    }
+
+    #[test]
+    fn exact_committed_activation_is_classified_locally() {
+        let room_id = "11111111-1111-4111-8111-111111111111";
+        let preparation = structural_preparation();
+        let mut state = OwnerState::new("owner".into());
+        let create = Command {
+            owner_id: "owner".into(),
+            command_id: "create".into(),
+            timestamp: chrono::Utc::now(),
+            body: CommandBody::CreateRoom {
+                room_id: room_id.into(),
+                lane_id: 7,
+                name: "room".into(),
+                created_by: "owner".into(),
+            },
+        };
+        let prepare = Command {
+            owner_id: "owner".into(),
+            command_id: preparation.command_id(),
+            timestamp: chrono::Utc::now(),
+            body: CommandBody::PrepareKeyEpoch {
+                room_id: room_id.into(),
+                preparation: Box::new(preparation.clone()),
+            },
+        };
+        let commit = Command {
+            owner_id: "owner".into(),
+            command_id: hex::encode(preparation.transition_id),
+            timestamp: chrono::Utc::now(),
+            body: CommandBody::CommitKeyEpoch {
+                room_id: room_id.into(),
+                expected_policy_hash: None,
+                state: crate::room_log::RoomKeyState {
+                    transition_id: preparation.transition_id,
+                    policy_epoch: 0,
+                    key_epoch: 0,
+                    policy_hash: preparation.policy_hash,
+                    control_root: [4; 32],
+                },
+            },
+        };
+        for (sequence, command) in [(1, create), (2, prepare), (3, commit)] {
+            assert!(!matches!(
+                state.apply(sequence, 0, &command).unwrap(),
+                Outcome::Rejected { .. }
+            ));
+        }
+        let owner = Address::from_bytes([9; 20]);
+        let input = BrowserInitialRoom {
+            room_id: room_id.into(),
+            name: "room".into(),
+            created_by: "owner".into(),
+            room_owner: owner,
+            preparation,
+        };
+        assert_eq!(
+            classify_room_key_activation(&state, &input, "room", owner, 50, (5, 2), None).unwrap(),
+            RoomKeyActivationTransition::Committed
+        );
+        let mut changed = input.clone();
+        changed.preparation.signed_policy.push_str("00");
+        assert!(
+            classify_room_key_activation(&state, &changed, "room", owner, 50, (5, 2), None)
+                .is_err()
+        );
     }
 }
 
@@ -233,6 +661,208 @@ fn room_has_member(room: &RoomState, address: &str) -> bool {
     room.key_publication.as_ref().is_some_and(|publication| {
         signed_policy_has_member(&publication.signed_policy, &room.room_id, address)
     })
+}
+
+#[cfg(feature = "room-key-demo")]
+fn member_grants(
+    policy: &SignedRoomKeyPolicyV1,
+    encoded_grants: &[String],
+    member: Address,
+) -> Option<Vec<(u64, SignedRoomKeyGrantV1)>> {
+    policy.verify_owner().ok()?;
+    let mut grants = encoded_grants
+        .iter()
+        .filter_map(|value| bounded_hex(value, 178))
+        .filter_map(|bytes| SignedRoomKeyGrantV1::decode_cfg(bytes.as_slice(), &()).ok())
+        .filter_map(|grant| {
+            if grant.grant.member != member
+                || !grant
+                    .owner_signature
+                    .recover_address(&grant.grant.signing_hash())
+                    .is_ok_and(|signer| signer == policy.policy.identity.owner)
+            {
+                return None;
+            }
+            policy
+                .policy
+                .match_grant(&grant.grant)
+                .ok()
+                .map(|key| (key.key_epoch, grant))
+        })
+        .collect::<Vec<_>>();
+    grants.sort_unstable_by_key(|(key_epoch, _)| *key_epoch);
+    (grants.len() == policy.policy.keys.len()
+        && grants
+            .iter()
+            .zip(&policy.policy.keys)
+            .all(|((granted_epoch, _), key)| *granted_epoch == key.key_epoch))
+    .then_some(grants)
+}
+
+#[cfg(feature = "room-key-demo")]
+struct MemberKeyContext<'a> {
+    key_epoch: u64,
+    grant: SignedRoomKeyGrantV1,
+    custody: &'a str,
+    custody_bytes: Vec<u8>,
+}
+
+#[cfg(feature = "room-key-demo")]
+fn member_key_contexts<'a>(
+    grants: Vec<(u64, SignedRoomKeyGrantV1)>,
+    custodies: &'a [RoomKeyCustody],
+) -> Option<Vec<MemberKeyContext<'a>>> {
+    if grants.len() != custodies.len() {
+        return None;
+    }
+    grants
+        .into_iter()
+        .zip(custodies)
+        .map(|((key_epoch, grant), custody)| {
+            if custody.key_epoch != key_epoch || custody.custody.len() != 157 * 2 {
+                return None;
+            }
+            let custody_bytes = bounded_hex(&custody.custody, 157)?;
+            (custody_bytes.len() == 157).then_some(MemberKeyContext {
+                key_epoch,
+                grant,
+                custody: &custody.custody,
+                custody_bytes,
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "room-key-demo")]
+fn classify_room_key_activation(
+    state: &crate::room_log::OwnerState,
+    input: &crate::hosted_bootstrap::BrowserInitialRoom,
+    normalized_name: &str,
+    room_owner: Address,
+    max_rooms: u64,
+    wallet_limits: (usize, usize),
+    id: Option<&str>,
+) -> Result<RoomKeyActivationTransition, Frame> {
+    match state.room(&input.room_id) {
+        Some(existing)
+            if existing.name == normalized_name
+                && existing.key_publication.as_deref() == Some(&input.preparation)
+                && existing.key_state.is_some() =>
+        {
+            Ok(RoomKeyActivationTransition::Committed)
+        }
+        Some(existing)
+            if existing.name == normalized_name
+                && existing.key_preparation.as_deref() == Some(&input.preparation)
+                && existing.key_publication.as_deref() != Some(&input.preparation) =>
+        {
+            Ok(RoomKeyActivationTransition::ResumePending)
+        }
+        Some(existing)
+            if existing.name == normalized_name
+                && existing.key_preparation.is_none()
+                && input.preparation.expected_policy_hash.is_some() =>
+        {
+            Ok(RoomKeyActivationTransition::Stage)
+        }
+        Some(_) => Err(error(
+            id,
+            ErrorCode::MessageConflict,
+            "Room activation conflicts with committed state",
+        )),
+        None if input.preparation.expected_policy_hash.is_some() => Err(error(
+            id,
+            ErrorCode::MessageConflict,
+            "Room activation conflicts with committed state",
+        )),
+        None if state.rooms().len() as u64 >= max_rooms => {
+            Err(error(id, ErrorCode::RateLimitRooms, "Room limit exceeded"))
+        }
+        None => {
+            let (active, pending) = wallet_room_usage(state, room_owner);
+            if active + pending >= wallet_limits.0 || pending >= wallet_limits.1 {
+                Err(error(
+                    id,
+                    ErrorCode::RateLimitRooms,
+                    "Wallet room limit exceeded",
+                ))
+            } else {
+                Ok(RoomKeyActivationTransition::Stage)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "room-key-demo")]
+fn reconcile_room_key_commit(
+    broker: &Broker,
+    reconnect: &ReconnectManager,
+    service_api_key: &str,
+    room: &Room,
+    previous: Option<&SignedRoomKeyPolicyV1>,
+    current: &SignedRoomKeyPolicyV1,
+) {
+    let event = Frame::event(
+        if previous.is_some() {
+            FrameType::RoomUpdated
+        } else {
+            FrameType::RoomCreated
+        },
+        serde_json::to_value(room).unwrap(),
+    );
+    let _lifecycle = broker.lock_agent_lifecycle();
+    let _ = reconnect.buffer_visible_room_event(
+        "private",
+        Some(service_api_key),
+        &HashSet::new(),
+        false,
+        &event,
+    );
+    let notification_policy = previous.unwrap_or(current);
+    let live = broker
+        .agents
+        .iter()
+        .map(|agent| {
+            let member = agent.member_address.as_deref().and_then(parse_address);
+            let is_wallet = agent.member_address.is_some();
+            let retained =
+                member.is_some_and(|member| current.policy.members.binary_search(&member).is_ok());
+            let relevant = if is_wallet {
+                member.is_some_and(|member| {
+                    notification_policy
+                        .policy
+                        .members
+                        .binary_search(&member)
+                        .is_ok()
+                })
+            } else {
+                agent.api_key == service_api_key
+            };
+            (agent.key().clone(), is_wallet, retained, relevant)
+        })
+        .collect::<Vec<_>>();
+
+    let holder_before = broker.turn_holder(&room.room_id);
+    for (agent_id, is_wallet, retained, _) in &live {
+        if *is_wallet && !retained && broker.is_agent_in_room(agent_id, &room.room_id) {
+            broker.leave_room(agent_id, &room.room_id);
+            broker.broadcast_to_room_all(
+                &room.room_id,
+                &Frame::event(
+                    FrameType::AgentLeft,
+                    serde_json::json!({"room_id":room.room_id,"agent_id":agent_id}),
+                ),
+            );
+        }
+    }
+    if holder_before != broker.turn_holder(&room.room_id) {
+        crate::handler::broadcast_turn_changed(broker, &room.room_id, "left");
+    }
+    for (agent_id, _, _, relevant) in live {
+        if relevant {
+            broker.send_to_agent(&agent_id, event.clone());
+        }
+    }
 }
 
 #[cfg(feature = "room-key-demo")]
@@ -680,19 +1310,13 @@ impl HostedOwner {
     async fn prepare_room_key(&self, frame: &Frame, member: Option<&str>) -> Result<Frame, Frame> {
         let id = frame.id.as_deref();
         let payload: PrepareRoomKeyPayload = parse(frame)?;
-        if uuid::Uuid::parse_str(&payload.room_id).is_err()
-            || crate::store::normalize_room_name(&payload.name).is_err()
-            || self
-                .view
-                .read()
-                .map_err(|_| unavailable(id))?
-                .room(&payload.room_id)
-                .is_some()
-        {
+        let normalized_name = crate::store::normalize_room_name(&payload.name)
+            .map_err(|_| error(id, ErrorCode::InvalidPayload, "Invalid room key request"))?;
+        if uuid::Uuid::parse_str(&payload.room_id).is_err() {
             return Err(error(
                 id,
                 ErrorCode::InvalidPayload,
-                "Invalid new room key request",
+                "Invalid room key request",
             ));
         }
         let owner = parse_address(&payload.owner)
@@ -704,11 +1328,68 @@ impl HostedOwner {
                 "Room owner must match the authenticated wallet",
             ));
         }
-        let context = self
-            .room_keys(id)?
-            .initial_context(owner, payload.room_id)
-            .await
-            .map_err(|_| unavailable(id))?;
+        let current = {
+            let state = self.view.read().map_err(|_| unavailable(id))?;
+            state.room(&payload.room_id).map(|room| {
+                (
+                    room.name.clone(),
+                    room.key_preparation.is_some(),
+                    room.key_publication.clone(),
+                )
+            })
+        };
+        let context = match (current, payload.remove_member) {
+            (None, None) => self
+                .room_keys(id)?
+                .initial_context(owner, payload.room_id)
+                .await
+                .map_err(|_| unavailable(id))?,
+            (Some((name, pending, publication)), Some(removed)) if name == normalized_name => {
+                if pending {
+                    return Err(error(
+                        id,
+                        ErrorCode::MessageConflict,
+                        "Room key rotation is already pending",
+                    ));
+                }
+                let publication = publication.as_ref().ok_or_else(|| {
+                    error(id, ErrorCode::InvalidPayload, "Room key is not active")
+                })?;
+                let previous = SignedRoomKeyPolicyV1::decode_canonical(
+                    &bounded_hex(&publication.signed_policy, 96 * 1024)
+                        .ok_or_else(|| unavailable(id))?,
+                )
+                .map_err(|_| unavailable(id))?;
+                previous.verify_owner().map_err(|_| unavailable(id))?;
+                if previous.policy.identity.owner != owner {
+                    return Err(error(
+                        id,
+                        ErrorCode::AccessDenied,
+                        "Room owner must match the authenticated wallet",
+                    ));
+                }
+                let removed = parse_address(&removed).ok_or_else(|| {
+                    error(id, ErrorCode::InvalidPayload, "Invalid member to remove")
+                })?;
+                self.room_keys(id)?
+                    .successor_context(&previous, removed)
+                    .await
+                    .map_err(|_| {
+                        error(
+                            id,
+                            ErrorCode::InvalidPayload,
+                            "Invalid room key rotation request",
+                        )
+                    })?
+            }
+            _ => {
+                return Err(error(
+                    id,
+                    ErrorCode::InvalidPayload,
+                    "Room key request does not match current room state",
+                ));
+            }
+        };
         Ok(Frame::ok(id, context))
     }
 
@@ -754,6 +1435,37 @@ impl HostedOwner {
         let room_owner = member
             .and_then(parse_address)
             .ok_or_else(|| error(id, ErrorCode::AccessDenied, "Invalid member principal"))?;
+        let signed_policy = SignedRoomKeyPolicyV1::decode_canonical(
+            &bounded_hex(&payload.preparation.signed_policy, 96 * 1024)
+                .ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Invalid room activation"))?,
+        )
+        .map_err(|_| error(id, ErrorCode::InvalidPayload, "Invalid room activation"))?;
+        signed_policy
+            .verify_owner()
+            .map_err(|_| error(id, ErrorCode::InvalidPayload, "Invalid room activation"))?;
+        let previous_policy = payload
+            .preparation
+            .previous_policy
+            .as_deref()
+            .map(|encoded| -> Result<SignedRoomKeyPolicyV1, Frame> {
+                let bytes = bounded_hex(encoded, 96 * 1024).ok_or_else(|| {
+                    error(id, ErrorCode::InvalidPayload, "Invalid room activation")
+                })?;
+                let policy = SignedRoomKeyPolicyV1::decode_canonical(&bytes)
+                    .map_err(|_| error(id, ErrorCode::InvalidPayload, "Invalid room activation"))?;
+                policy
+                    .verify_owner()
+                    .map_err(|_| error(id, ErrorCode::InvalidPayload, "Invalid room activation"))?;
+                Ok(policy)
+            })
+            .transpose()?;
+        if signed_policy.policy.identity.owner != room_owner {
+            return Err(error(
+                id,
+                ErrorCode::AccessDenied,
+                "Room owner must match the authenticated wallet",
+            ));
+        }
         let normalized_name = crate::store::normalize_room_name(&payload.name)
             .map_err(|_| error(id, ErrorCode::InvalidPayload, "Invalid room activation"))?;
         if uuid::Uuid::parse_str(&payload.room_id).is_err() {
@@ -780,65 +1492,58 @@ impl HostedOwner {
         // room-key ceremonies ordered while leaving the general owner writer
         // available to existing rooms' message appends.
         let _activation = self.room_key_activation.lock().await;
-        // Classify and (for a fresh room) reserve it under the owner-write lock,
-        // then release the lock. The CBSS publication ceremony below must not be
-        // run under this lock: its up-to-120s finality wait would otherwise
-        // serialize every concurrent send for this owner.
+        // Exact committed retries are local: reconcile live state and replay
+        // the event without contacting CBSS again.
+        let transition = {
+            let writer = self.writer.lock().await;
+            let transition = {
+                let state = writer.state().map_err(|_| unavailable(id))?;
+                classify_room_key_activation(
+                    &state,
+                    &input,
+                    &normalized_name,
+                    room_owner,
+                    limits.max_rooms,
+                    wallet_limits,
+                    id,
+                )?
+            };
+            if transition == RoomKeyActivationTransition::Committed {
+                let room = {
+                    let state = writer.state().map_err(|_| unavailable(id))?;
+                    room_summary(state.room(&input.room_id).ok_or_else(|| unavailable(id))?)
+                };
+                reconcile_room_key_commit(
+                    broker,
+                    reconnect,
+                    &self.api_key,
+                    &room,
+                    previous_policy.as_ref(),
+                    &signed_policy,
+                );
+                return Ok(Frame::ok(id, serde_json::to_value(room).unwrap()));
+            }
+            transition
+        };
+        self.room_keys(id)?.preflight(&input).await.map_err(|_| {
+            error(
+                id,
+                ErrorCode::MessageConflict,
+                "Room key preparation conflicts with current control state",
+            )
+        })?;
+        // Reserve only the local log records under the owner writer. CBSS
+        // publication and finality remain outside this lock.
         {
             let mut writer = self.writer.lock().await;
-            let is_fresh = {
-                let state = writer.state().map_err(|_| unavailable(id))?;
-                match state.room(&input.room_id) {
-                    Some(existing)
-                        if existing.name == normalized_name
-                            && existing.key_publication.as_deref() == Some(&input.preparation)
-                            && existing.key_state.is_some() =>
-                    {
-                        // Already committed: idempotent success.
-                        return Ok(Frame::ok(
-                            id,
-                            serde_json::to_value(room_summary(existing)).unwrap(),
-                        ));
-                    }
-                    Some(existing)
-                        if existing.name == normalized_name
-                            && existing.key_preparation.as_deref() == Some(&input.preparation)
-                            && existing.key_state.is_none() =>
-                    {
-                        // Prepared but never committed — a prior finalize failed
-                        // or timed out. Resume the ceremony rather than leaving
-                        // the room permanently wedged.
-                        false
-                    }
-                    Some(_) => {
-                        return Err(error(
-                            id,
-                            ErrorCode::MessageConflict,
-                            "Room activation conflicts with committed state",
-                        ));
-                    }
-                    None if state.rooms().len() as u64 >= limits.max_rooms => {
-                        return Err(error(id, ErrorCode::RateLimitRooms, "Room limit exceeded"));
-                    }
-                    None => {
-                        let (active, pending) = wallet_room_usage(&state, room_owner);
-                        if active + pending >= wallet_limits.0 || pending >= wallet_limits.1 {
-                            return Err(error(
-                                id,
-                                ErrorCode::RateLimitRooms,
-                                "Wallet room limit exceeded",
-                            ));
-                        }
-                        true
-                    }
-                }
-            };
-            if is_fresh {
-                self.room_keys(id)?
-                    .stage(&mut writer, &input, true)
-                    .await
-                    .map_err(|_| unavailable(id))?;
-            }
+            self.room_keys(id)?
+                .stage(
+                    &mut writer,
+                    &input,
+                    transition == RoomKeyActivationTransition::Stage,
+                )
+                .await
+                .map_err(|_| unavailable(id))?;
         }
         // Publish + finalize with the owner-write lock released.
         let prepared = self
@@ -846,32 +1551,33 @@ impl HostedOwner {
             .finalize(input)
             .await
             .map_err(|_| unavailable(id))?;
-        // Commit the finalized epoch back under the lock.
-        {
+        // Commit and reconcile membership under the same writer lock. A send
+        // that was authorized against the predecessor cannot pass the second
+        // membership check below after this lock is released.
+        let room = {
             let mut writer = self.writer.lock().await;
             self.room_keys(id)?
                 .commit(&mut writer, &prepared)
                 .await
                 .map_err(|_| unavailable(id))?;
-        }
-        let room = self.require_room(id, &payload.room_id)?;
-        let event = Frame::event(FrameType::RoomCreated, serde_json::to_value(&room).unwrap());
-        let buffered = reconnect.buffer_visible_room_event(
-            "private",
-            Some(&self.api_key),
-            &HashSet::new(),
-            false,
-            &event,
-        );
-        let recipients = broker
-            .agents
-            .iter()
-            .filter(|agent| agent.api_key == self.api_key && !buffered.contains(agent.key()))
-            .map(|agent| agent.key().clone())
-            .collect::<Vec<_>>();
-        for agent in recipients {
-            broker.send_to_agent(&agent, event.clone());
-        }
+            let room = {
+                let state = writer.state().map_err(|_| unavailable(id))?;
+                room_summary(
+                    state
+                        .room(&payload.room_id)
+                        .ok_or_else(|| unavailable(id))?,
+                )
+            };
+            reconcile_room_key_commit(
+                broker,
+                reconnect,
+                &self.api_key,
+                &room,
+                previous_policy.as_ref(),
+                &signed_policy,
+            );
+            room
+        };
         Ok(Frame::ok(id, serde_json::to_value(room).unwrap()))
     }
 
@@ -900,18 +1606,61 @@ impl HostedOwner {
             &bounded_hex(&publication.signed_policy, 96 * 1024).ok_or_else(|| unavailable(id))?,
         )
         .map_err(|_| unavailable(id))?;
-        let grant = publication
-            .grants
-            .iter()
-            .filter_map(|value| bounded_hex(value, 178))
-            .filter_map(|bytes| SignedRoomKeyGrantV1::decode_cfg(bytes.as_slice(), &()).ok())
-            .find(|grant| grant.grant.member == member)
+        let grants = member_grants(&policy, &publication.grants, member)
             .ok_or_else(|| error(id, ErrorCode::AccessDenied, "Wallet is not a room member"))?;
-        let custody = bounded_hex(&publication.custody, 157).ok_or_else(|| unavailable(id))?;
-        let context = self
-            .room_keys(id)?
-            .open_context(&policy, &grant, &custody)
-            .map_err(|_| unavailable(id))?;
+        let member_contexts =
+            member_key_contexts(grants, &room.key_custodies).ok_or_else(|| unavailable(id))?;
+        let mut contexts = Vec::with_capacity(member_contexts.len());
+        let mut active_input = None;
+        for member_context in member_contexts {
+            let context = self
+                .room_keys(id)?
+                .open_context(
+                    &policy,
+                    &member_context.grant,
+                    &member_context.custody_bytes,
+                )
+                .map_err(|_| unavailable(id))?;
+            let context_object = context.as_object().ok_or_else(|| unavailable(id))?;
+            let input = context_object
+                .get("input")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| unavailable(id))?;
+            let encoded_grant = input
+                .get("grant")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| unavailable(id))?;
+            if member_context.key_epoch == policy.policy.active_key_epoch {
+                active_input = Some(serde_json::Value::Object(input.clone()));
+            }
+            contexts.push(serde_json::json!({
+                "grant": encoded_grant,
+                "custody": member_context.custody,
+                "key_epoch": member_context.key_epoch.to_string(),
+            }));
+        }
+        let context = serde_json::json!({
+            "input": active_input.ok_or_else(|| unavailable(id))?,
+            "contexts": contexts,
+            "key_epoch": policy.policy.active_key_epoch.to_string(),
+            "policy_owner": format!(
+                "0x{}",
+                hex::encode(policy.policy.identity.owner.as_bytes())
+            ),
+            "policy_members": policy
+                .policy
+                .members
+                .iter()
+                .map(|address| format!("0x{}", hex::encode(address.as_bytes())))
+                .collect::<Vec<_>>(),
+        });
+        if serde_json::to_vec(&context)
+            .map_err(|_| unavailable(id))?
+            .len()
+            > crate::server::MAX_FRAME_BYTES.saturating_sub(1024)
+        {
+            return Err(unavailable(id));
+        }
         Ok(Frame::ok(id, context))
     }
 
@@ -1064,6 +1813,9 @@ impl HostedOwner {
             },
         };
         let mut writer = self.writer.lock().await;
+        if !broker.is_agent_in_room(agent_id, &p.room_id) {
+            return Err(error(id, ErrorCode::NotInRoom, "Not in this room"));
+        }
         let seen = writer
             .state()
             .map_err(|_| unavailable(id))?

@@ -101,9 +101,7 @@ impl HostedRoomKeys {
     /// The deployment service ID is also the Cowchat session server ID. This
     /// lets native jobs reject a valid session challenge from another service.
     pub fn service_id(&self) -> Result<[u8; 32]> {
-        Ok(CompiledRoomDeployment::compiled()?
-            .identity(Address::from_bytes([1; 20]), "service-id".into())
-            .service_id)
+        Ok(CompiledRoomDeployment::compiled()?.service_id())
     }
 
     pub fn public_ws_url(&self) -> &str {
@@ -117,11 +115,7 @@ impl HostedRoomKeys {
         )
     }
 
-    pub async fn initial_context(
-        &self,
-        owner: Address,
-        room_id: String,
-    ) -> Result<serde_json::Value> {
+    async fn control_root(&self) -> Result<[u8; 32]> {
         let auth = authority(&self.config).await?;
         let ctx = volume_with_access(
             &self.config,
@@ -133,8 +127,30 @@ impl HostedRoomKeys {
         .await?;
         let root = ctx.volume.manifest_root().0;
         ctx.close().await;
+        Ok(root)
+    }
+
+    pub async fn initial_context(
+        &self,
+        owner: Address,
+        room_id: String,
+    ) -> Result<serde_json::Value> {
+        let root = self.control_root().await?;
         cbssd::room_deployment::CompiledRoomDeployment::compiled()?
             .initial_browser_context(owner, room_id, root)
+    }
+
+    pub async fn successor_context(
+        &self,
+        previous: &cowboy_protocol_codec::room_policy::SignedRoomKeyPolicyV1,
+        removed_member: Address,
+    ) -> Result<serde_json::Value> {
+        let root = self.control_root().await?;
+        cbssd::room_deployment::CompiledRoomDeployment::compiled()?.successor_browser_context(
+            previous,
+            removed_member,
+            root,
+        )
     }
 
     pub async fn attest_setup(&self, signed_setup: &[u8]) -> Result<Vec<String>> {
@@ -144,6 +160,12 @@ impl HostedRoomKeys {
             .into_iter()
             .map(hex::encode)
             .collect())
+    }
+
+    /// Reject stale/conflicting preparations before they enter the owner log.
+    /// An exact publication from a lost-ack attempt is accepted for retry.
+    pub(crate) async fn preflight(&self, input: &BrowserInitialRoom) -> Result<()> {
+        initial_room::preflight_initial_room(&self.config, input).await
     }
 
     /// Reserve the room in the owner log. Holds the owner-write lock only for
