@@ -369,10 +369,13 @@ impl CowchatClient {
             )
             .map_err(|e| auth(&e))?;
         let preparation: serde_json::Value = serde_json::from_str(&preparation)?;
+        // The server publishes, waits for courier finality (up to 120 s) and
+        // fences every holder before it answers.
         let activated = self
-            .request(
+            .request_within(
                 FrameType::ActivateRoomKey,
                 serde_json::json!({"room_id": room_id, "name": name, "preparation": preparation}),
+                std::time::Duration::from_secs(180),
             )
             .await?
             .payload;
