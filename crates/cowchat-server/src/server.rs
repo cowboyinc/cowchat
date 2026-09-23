@@ -85,16 +85,17 @@ fn frame_room_id(frame: &Frame) -> Option<&str> {
 fn accessible_room(
     room_id: &str,
     api_key: &str,
+    member_address: Option<&str>,
     no_auth: bool,
     store: &Store,
     broker: &Broker,
 ) -> Option<Room> {
     #[cfg(feature = "cbfs-archive")]
     if let Some(hosted) = broker.hosted.get() {
-        return hosted.accessible_room(room_id, api_key);
+        return hosted.accessible_room(room_id, api_key, member_address);
     }
     #[cfg(not(feature = "cbfs-archive"))]
-    let _ = broker;
+    let _ = (broker, member_address);
     store
         .get_room(room_id)
         .ok()
@@ -135,6 +136,7 @@ pub struct CowchatServer {
     task_mgr: Arc<TaskManager>,
     webhook_mgr: Arc<crate::webhooks::WebhookManager>,
     api_key: String,
+    session_auth: Option<Arc<crate::session_auth::SessionAuth>>,
 }
 
 struct PreparedListeners {
@@ -397,6 +399,19 @@ impl CowchatServer {
             )
             .into());
         }
+        #[cfg(feature = "room-key-demo")]
+        let session_auth = match &mode {
+            RoomMode::HostedRoomKeys(_, room_keys) => Some(Arc::new(
+                crate::session_auth::SessionAuth::new(
+                    room_keys.service_id()?,
+                    room_keys.public_ws_url().to_owned(),
+                )
+                .map_err(io::Error::other)?,
+            )),
+            _ => None,
+        };
+        #[cfg(not(feature = "room-key-demo"))]
+        let session_auth = None;
         // Lock the canonical database identity before touching SQLite, auth,
         // webhooks, or any listener path. A losing launch cannot migrate the
         // incumbent database or unlink its Unix socket.
@@ -484,6 +499,7 @@ impl CowchatServer {
             task_mgr,
             webhook_mgr,
             api_key,
+            session_auth,
         })
     }
 
@@ -547,6 +563,8 @@ impl CowchatServer {
                                 task_mgr,
                                 webhook_mgr,
                                 None,
+                                None,
+                                None,
                             )
                             .await;
                         });
@@ -606,6 +624,8 @@ impl CowchatServer {
                                     task_mgr,
                                     webhook_mgr,
                                     None,
+                                    None,
+                                    None,
                                 )
                                 .await;
                             });
@@ -637,6 +657,7 @@ impl CowchatServer {
                 admin_secret: self.config.http_admin_secret.clone(),
                 allowed_origins: self.config.http_allowed_origins.clone(),
                 trusted_proxy_ips: self.config.trusted_proxy_ips.clone(),
+                session_auth: self.session_auth.clone(),
             };
             let router = crate::web::router(app_state);
             let addr = listener.local_addr()?;
@@ -788,6 +809,8 @@ pub async fn connection_loop<R, W>(
     reconnect_mgr: Arc<ReconnectManager>,
     task_mgr: Arc<TaskManager>,
     webhook_mgr: Arc<crate::webhooks::WebhookManager>,
+    session_auth: Option<Arc<crate::session_auth::SessionAuth>>,
+    session_origin: Option<String>,
     transport_disconnect: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -807,6 +830,7 @@ where
         register_reply_to,
         mut missed_messages,
         reclaim_lease,
+        member_address,
         agent_lifecycle_guard,
     ) = loop {
         let line = tokio::time::timeout(
@@ -885,8 +909,61 @@ where
             return Ok(());
         }
 
-        // Validate API key
-        let authenticated_key = if no_auth
+        let member_principal = if let Some(proof) = payload.session.as_ref() {
+            if !payload.key.is_empty() {
+                let err = Frame::error(
+                    frame.id.as_deref(),
+                    ErrorPayload::new(
+                        ErrorCode::InvalidPayload,
+                        "Member sessions must not send a transport API key",
+                    ),
+                );
+                write_half.write_all(err.to_line()?.as_bytes()).await?;
+                return Ok(());
+            }
+            let Some(verifier) = session_auth.as_ref() else {
+                let err = Frame::error(
+                    frame.id.as_deref(),
+                    ErrorPayload::new(
+                        ErrorCode::Unauthorized,
+                        "Member sessions are unavailable on this transport",
+                    ),
+                );
+                write_half.write_all(err.to_line()?.as_bytes()).await?;
+                return Ok(());
+            };
+            match verifier.verify(proof, session_origin.as_deref().unwrap_or("")) {
+                Ok(principal) => Some(principal),
+                Err(_) => {
+                    let err = Frame::error(
+                        frame.id.as_deref(),
+                        ErrorPayload::new(ErrorCode::Unauthorized, "Invalid member session"),
+                    );
+                    write_half.write_all(err.to_line()?.as_bytes()).await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+
+        if member_principal.is_some() && !payload.key.is_empty() {
+            let err = Frame::error(
+                frame.id.as_deref(),
+                ErrorPayload::new(
+                    ErrorCode::InvalidPayload,
+                    "Member sessions cannot include an API key",
+                ),
+            );
+            write_half.write_all(err.to_line()?.as_bytes()).await?;
+            continue;
+        }
+
+        // A member session carries no transport bearer credential. Hosted room
+        // authorization uses the verified member principal and signed roster.
+        let authenticated_key = if member_principal.is_some() {
+            String::new()
+        } else if no_auth
             || (allow_keyless && payload.key.is_empty())
             || (!payload.key.is_empty()
                 && (payload.key == api_key
@@ -921,12 +998,31 @@ where
             }
         }
 
-        let stable_identity_requested = payload.agent_id.is_some();
-        let agent_id = payload
-            .agent_id
+        let stable_identity_requested = member_principal.is_some() || payload.agent_id.is_some();
+        let agent_id = member_principal
+            .as_ref()
+            .map(|principal| principal.agent_id.clone())
+            .or(payload.agent_id)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        if !no_auth && !authenticated_key.is_empty() && stable_identity_requested {
+        // The member namespace is server-derived. An API-key bearer cannot
+        // impersonate a member principal by selecting the same stable ID.
+        if member_principal.is_none() && agent_id.starts_with("member:") {
+            let err = Frame::error(
+                frame.id.as_deref(),
+                ErrorPayload::new(ErrorCode::InvalidPayload, "Reserved agent ID"),
+            );
+            write_half.write_all(err.to_line()?.as_bytes()).await?;
+            continue;
+        }
+
+        let member_address = member_principal.map(|principal| principal.principal_address);
+
+        if !no_auth
+            && !authenticated_key.is_empty()
+            && stable_identity_requested
+            && member_address.is_none()
+        {
             match store.claim_agent_identity(&agent_id, &authenticated_key) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -973,8 +1069,15 @@ where
                         .expect("a newly acquired reconnect lease has a stash");
                     let mut rooms = stashed.rooms;
                     rooms.retain(|room_id| {
-                        accessible_room(room_id, &authenticated_key, no_auth, &store, &broker)
-                            .is_some()
+                        accessible_room(
+                            room_id,
+                            &authenticated_key,
+                            member_address.as_deref(),
+                            no_auth,
+                            &store,
+                            &broker,
+                        )
+                        .is_some()
                     });
                     reconnected_rooms = Some(rooms);
                     missed_messages = stashed.missed_messages;
@@ -984,6 +1087,7 @@ where
                                 accessible_room(
                                     room_id,
                                     &authenticated_key,
+                                    member_address.as_deref(),
                                     no_auth,
                                     &store,
                                     &broker,
@@ -1053,6 +1157,7 @@ where
                                 accessible_room(
                                     room_id,
                                     &authenticated_key,
+                                    member_address.as_deref(),
                                     no_auth,
                                     &store,
                                     &broker,
@@ -1112,6 +1217,7 @@ where
             frame.id,
             missed_messages,
             reclaim_lease,
+            member_address,
             agent_lifecycle_guard,
         );
     };
@@ -1168,7 +1274,7 @@ where
     };
 
     // Store the connection
-    let conn = AgentConnection::new(
+    let conn = AgentConnection::new_with_member(
         agent_info,
         session_id.clone(),
         tx.clone(),
@@ -1176,6 +1282,7 @@ where
         tokio::spawn(async {}),
         disconnect.clone(),
         agent_api_key.clone(),
+        member_address.clone(),
     );
     broker.agents.insert(agent_id.clone(), conn);
     let was_reconnected = reconnected_rooms.is_some();
@@ -1188,7 +1295,15 @@ where
     if let Some(rooms) = takeover_rooms {
         for room_id in &rooms {
             let _ = broker.join_room(&agent_id, room_id, || {
-                accessible_room(room_id, &agent_api_key, no_auth, &store, &broker).is_some()
+                accessible_room(
+                    room_id,
+                    &agent_api_key,
+                    member_address.as_deref(),
+                    no_auth,
+                    &store,
+                    &broker,
+                )
+                .is_some()
             });
         }
     }
@@ -1198,7 +1313,15 @@ where
         for room_id in &rooms {
             if broker
                 .join_room(&agent_id, room_id, || {
-                    accessible_room(room_id, &agent_api_key, no_auth, &store, &broker).is_some()
+                    accessible_room(
+                        room_id,
+                        &agent_api_key,
+                        member_address.as_deref(),
+                        no_auth,
+                        &store,
+                        &broker,
+                    )
+                    .is_some()
                 })
                 .is_err()
             {
@@ -1235,13 +1358,29 @@ where
     missed_messages.retain(|frame| {
         frame_room_id(frame)
             .map(|room_id| {
-                accessible_room(room_id, &agent_api_key, no_auth, &store, &broker).is_some()
+                accessible_room(
+                    room_id,
+                    &agent_api_key,
+                    member_address.as_deref(),
+                    no_auth,
+                    &store,
+                    &broker,
+                )
+                .is_some()
             })
             .unwrap_or(true)
     });
     restored_rooms.retain(|room_id| {
         broker.is_agent_in_room(&agent_id, room_id)
-            && accessible_room(room_id, &agent_api_key, no_auth, &store, &broker).is_some()
+            && accessible_room(
+                room_id,
+                &agent_api_key,
+                member_address.as_deref(),
+                no_auth,
+                &store,
+                &broker,
+            )
+            .is_some()
     });
 
     let mut ok_payload = serde_json::json!({
@@ -1306,7 +1445,15 @@ where
                     continue;
                 }
                 if frame_room_id(&frame).is_some_and(|room_id| {
-                    accessible_room(room_id, &agent_api_key, no_auth, &store, &broker).is_none()
+                    accessible_room(
+                        room_id,
+                        &agent_api_key,
+                        member_address.as_deref(),
+                        no_auth,
+                        &store,
+                        &broker,
+                    )
+                    .is_none()
                 }) {
                     continue;
                 }
@@ -1897,7 +2044,7 @@ mod local_auth_tests {
         );
 
         let would_report_restored = broker.is_agent_in_room("stable", "pending-room")
-            && accessible_room("pending-room", "owner-key", false, &store, &broker).is_some();
+            && accessible_room("pending-room", "owner-key", None, false, &store, &broker).is_some();
         assert!(!would_report_restored);
         let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await

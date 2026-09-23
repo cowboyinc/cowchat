@@ -16,6 +16,7 @@ pub mod rate_limit;
 pub mod reconnect;
 pub mod room_log;
 pub mod server;
+pub mod session_auth;
 pub mod store;
 pub mod tasks;
 pub mod voting;

@@ -207,12 +207,17 @@ pub async fn handle_frame(
 
     #[cfg(feature = "cbfs-archive")]
     if let Some(hosted) = broker.hosted.get() {
+        let member_address = broker
+            .agents
+            .get(agent_id)
+            .and_then(|agent| agent.member_address.clone());
         return hosted
             .handle(
                 frame,
                 agent_id,
                 agent_name,
                 agent_api_key,
+                member_address.as_deref(),
                 broker,
                 store,
                 rate_limiter,

@@ -70,6 +70,9 @@ Example configuration (replace every placeholder with actual provisioned data):
   "api_key_file": "/srv/cowchat/api.key",
   "http_addr": "127.0.0.1:19440",
   "http_origins": ["https://dashboard.example"],
+  "public_ws_url": "wss://chat.example/ws",
+  "max_rooms_per_wallet": 100,
+  "max_pending_rooms_per_wallet": 4,
   "session_seconds": 600
 }
 ```

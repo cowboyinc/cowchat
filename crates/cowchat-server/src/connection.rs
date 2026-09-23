@@ -71,6 +71,9 @@ pub struct AgentConnection {
     pub disconnect: std::sync::Arc<Notify>,
     /// The API key this agent authenticated with (for room visibility checks).
     pub api_key: String,
+    /// Wallet address verified by a member-session proof. API-key and local
+    /// connections have no member address.
+    pub member_address: Option<String>,
 }
 
 impl AgentConnection {
@@ -83,6 +86,29 @@ impl AgentConnection {
         disconnect: std::sync::Arc<Notify>,
         api_key: String,
     ) -> Self {
+        Self::new_with_member(
+            info,
+            session_id,
+            sender,
+            send_task,
+            receive_task,
+            disconnect,
+            api_key,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_member(
+        info: AgentInfo,
+        session_id: String,
+        sender: mpsc::Sender<Frame>,
+        send_task: JoinHandle<()>,
+        receive_task: JoinHandle<()>,
+        disconnect: std::sync::Arc<Notify>,
+        api_key: String,
+        member_address: Option<String>,
+    ) -> Self {
         Self {
             info,
             session_id,
@@ -91,6 +117,7 @@ impl AgentConnection {
             receive_task,
             disconnect,
             api_key,
+            member_address,
         }
     }
 }

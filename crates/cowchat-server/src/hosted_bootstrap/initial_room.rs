@@ -42,6 +42,7 @@ pub struct BrowserInitialRoom {
     pub room_id: String,
     pub name: String,
     pub created_by: String,
+    pub room_owner: Address,
     pub preparation: RoomKeyPreparation,
 }
 
@@ -121,7 +122,7 @@ pub(crate) async fn stage_initial_room(
         "first demo supports only initial room provisioning"
     );
     // Reject a malformed or self-inconsistent preparation before any log write.
-    validate_signed_preparation(preparation)?;
+    validate_signed_preparation(preparation, input.room_owner, &input.room_id)?;
     if !submit {
         return Ok(());
     }
@@ -170,6 +171,8 @@ pub(crate) async fn stage_initial_room(
 /// and again while rebuilding the publication in `finalize_initial_room`.
 fn validate_signed_preparation(
     preparation: &RoomKeyPreparation,
+    room_owner: Address,
+    room_id: &str,
 ) -> Result<(
     SignedRoomSetupV1,
     SignedRoomKeyPolicyV1,
@@ -196,6 +199,9 @@ fn validate_signed_preparation(
     let intent = &setup.request.intent;
     ensure!(
         setup.request.control_root == preparation.expected_control_root
+            && intent.identity.owner == room_owner
+            && intent.identity.room_id == room_id
+            && policy.policy.identity == intent.identity
             && intent.transition_id == preparation.transition_id
             && intent.policy_epoch == preparation.policy_epoch
             && intent.key_epoch == preparation.key_epoch
@@ -216,7 +222,8 @@ pub(crate) async fn finalize_initial_room(
     input: BrowserInitialRoom,
 ) -> Result<PreparedInitialRoom> {
     let preparation = input.preparation;
-    let (setup, policy, grants, custody) = validate_signed_preparation(&preparation)?;
+    let (setup, policy, grants, custody) =
+        validate_signed_preparation(&preparation, input.room_owner, &input.room_id)?;
     let intent = &setup.request.intent;
     let deployment = CompiledRoomDeployment::compiled()?;
     let expected_identity = deployment.identity(intent.identity.owner, input.room_id.clone());
@@ -351,6 +358,7 @@ pub async fn activate_initial_room(
         room_id: input.room_id,
         name: input.name,
         created_by: input.created_by,
+        room_owner: Address::from_verifying_key(member.verifying_key()),
         preparation: input.preparation,
     };
     stage_initial_room(runtime, &browser, true).await?;

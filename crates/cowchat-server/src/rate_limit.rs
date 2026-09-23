@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 /// stays self-serve, but a client can't spam unlimited keys to dodge per-key limits.
 const SIGNUP_MAX_PER_WINDOW: u32 = 10;
 const SIGNUP_WINDOW: Duration = Duration::from_secs(3600);
+const SESSION_MAX_PER_WINDOW: u32 = 120;
+const SESSION_WINDOW: Duration = Duration::from_secs(60);
 
 /// Max blob uploads a single API key may perform per [`UPLOAD_WINDOW`].
 pub(crate) const UPLOAD_MAX_PER_WINDOW: u32 = 60;
@@ -86,9 +88,13 @@ pub struct RateLimiter {
     usage: DashMap<String, KeyUsage>,
     /// Per-IP API-key creation throttle (gates open signup against key-spam).
     signups: DashMap<String, CountWindow>,
+    /// Per-IP member challenge throttle.
+    sessions: DashMap<String, CountWindow>,
     /// Per-key blob-upload throttle.
     uploads: DashMap<String, CountWindow>,
 }
+
+const SESSION_BUCKET_CAP: usize = 4_096;
 
 fn try_register_window(
     windows: &DashMap<String, CountWindow>,
@@ -118,6 +124,7 @@ impl RateLimiter {
         Self {
             usage: DashMap::new(),
             signups: DashMap::new(),
+            sessions: DashMap::new(),
             uploads: DashMap::new(),
         }
     }
@@ -126,6 +133,17 @@ impl RateLimiter {
     /// Counts against a per-IP window; denies once the window cap is hit.
     pub fn try_register_signup(&self, ip: &str) -> bool {
         try_register_window(&self.signups, ip, SIGNUP_MAX_PER_WINDOW, SIGNUP_WINDOW)
+    }
+
+    pub fn try_register_session(&self, ip: &str) -> bool {
+        if self.sessions.len() >= SESSION_BUCKET_CAP {
+            self.sessions
+                .retain(|_, window| window.window_start.elapsed() <= SESSION_WINDOW);
+            if !self.sessions.contains_key(ip) && self.sessions.len() >= SESSION_BUCKET_CAP {
+                return false;
+            }
+        }
+        try_register_window(&self.sessions, ip, SESSION_MAX_PER_WINDOW, SESSION_WINDOW)
     }
 
     /// Record a blob upload for `api_key` and return whether it's allowed.

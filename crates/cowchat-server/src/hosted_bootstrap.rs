@@ -21,6 +21,8 @@ use cbqs_client::{
     chain_view_v2, AuthenticatedStreamViewV2, CheckpointTrustV2, PinnedBrokerEndpoint,
     SessionConfig,
 };
+#[cfg(feature = "room-key-demo")]
+use cbssd::room_deployment::CompiledRoomDeployment;
 use cowboy_protocol_codec::{cbqs_v2 as wire, Address};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Deserialize;
@@ -38,6 +40,12 @@ use zeroize::Zeroizing;
 const IO_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const SAFETY_MS: u64 = 30_000;
+const fn default_max_rooms_per_wallet() -> usize {
+    100
+}
+const fn default_max_pending_rooms_per_wallet() -> usize {
+    4
+}
 
 #[cfg(feature = "room-key-demo")]
 mod initial_room;
@@ -65,6 +73,11 @@ pub struct Config {
     api_key_file: PathBuf,
     http_addr: SocketAddr,
     http_origins: Vec<String>,
+    public_ws_url: String,
+    #[serde(default = "default_max_rooms_per_wallet")]
+    max_rooms_per_wallet: usize,
+    #[serde(default = "default_max_pending_rooms_per_wallet")]
+    max_pending_rooms_per_wallet: usize,
     /// This first entrypoint has a bounded process lifetime, not renewal.
     session_seconds: u64,
 }
@@ -83,6 +96,25 @@ impl HostedRoomKeys {
         Self {
             config: config.clone(),
         }
+    }
+
+    /// The deployment service ID is also the Cowchat session server ID. This
+    /// lets native jobs reject a valid session challenge from another service.
+    pub fn service_id(&self) -> Result<[u8; 32]> {
+        Ok(CompiledRoomDeployment::compiled()?
+            .identity(Address::from_bytes([1; 20]), "service-id".into())
+            .service_id)
+    }
+
+    pub fn public_ws_url(&self) -> &str {
+        &self.config.public_ws_url
+    }
+
+    pub fn wallet_room_limits(&self) -> (usize, usize) {
+        (
+            self.config.max_rooms_per_wallet,
+            self.config.max_pending_rooms_per_wallet,
+        )
     }
 
     pub async fn initial_context(
@@ -295,6 +327,28 @@ impl Config {
         ensure!(
             self.http_addr.port() != 0,
             "hosted HTTP port must be explicit"
+        );
+        let public_ws = reqwest::Url::parse(&self.public_ws_url)?;
+        let loopback = public_ws.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+        ensure!(
+            (public_ws.scheme() == "wss" || (public_ws.scheme() == "ws" && loopback))
+                && public_ws.host_str().is_some()
+                && public_ws.username().is_empty()
+                && public_ws.password().is_none()
+                && public_ws.path() == "/ws"
+                && public_ws.query().is_none()
+                && public_ws.fragment().is_none(),
+            "public_ws_url must be wss://, or ws:// on loopback, with path /ws"
+        );
+        ensure!(
+            (1..=10_000).contains(&self.max_rooms_per_wallet)
+                && (1..=100).contains(&self.max_pending_rooms_per_wallet),
+            "invalid per-wallet room limits"
         );
         let key = read_file(&self.api_key_file, true, 4096)?;
         ensure!(
@@ -788,6 +842,9 @@ mod tests {
             api_key_file: key,
             http_addr: "127.0.0.1:19440".parse().unwrap(),
             http_origins: vec![],
+            public_ws_url: "ws://127.0.0.1:19440/ws".into(),
+            max_rooms_per_wallet: default_max_rooms_per_wallet(),
+            max_pending_rooms_per_wallet: default_max_pending_rooms_per_wallet(),
             session_seconds: 600,
         };
         (dir, config)
@@ -837,6 +894,12 @@ mod tests {
         config.broker_url = "ws://broker.example/ws".into();
         assert!(config.validate().is_err());
         config.broker_url = "wss://broker.example/ws".into();
+        config.public_ws_url = "ws://chat.example/ws".into();
+        assert!(config.validate().is_err());
+        config.public_ws_url = "wss://chat.example/ws".into();
+        config.max_rooms_per_wallet = 0;
+        assert!(config.validate().is_err());
+        config.max_rooms_per_wallet = default_max_rooms_per_wallet();
         config.archive_volume = config.control_volume.clone();
         assert!(config.validate().is_err());
     }

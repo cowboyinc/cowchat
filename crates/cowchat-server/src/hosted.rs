@@ -19,7 +19,8 @@ use std::{collections::HashSet, sync::Arc};
 use commonware_codec::Decode;
 #[cfg(feature = "room-key-demo")]
 use cowboy_protocol_codec::{
-    room_policy::SignedRoomKeyPolicyV1, room_release::SignedRoomKeyGrantV1, Address,
+    room_policy::SignedRoomKeyPolicyV1, room_release::SignedRoomKeyGrantV1,
+    room_setup::SignedRoomSetupV1, room_transport::RoomKeyCallV1, Address,
 };
 
 #[cfg(feature = "room-key-demo")]
@@ -29,6 +30,69 @@ struct PrepareRoomKeyPayload {
     room_id: String,
     name: String,
     owner: String,
+}
+
+#[cfg(all(test, feature = "room-key-demo"))]
+mod member_policy_tests {
+    use super::*;
+    use commonware_codec::Encode;
+    use cowboy_protocol_codec::{
+        room_policy::{
+            RoomCustodyCommitmentV1, RoomKeyPolicyV1, RoomPolicyIdentityV1, SignedRoomKeyPolicyV1,
+        },
+        EthSignature,
+    };
+    use k256::ecdsa::SigningKey;
+
+    #[test]
+    fn hosted_member_access_comes_only_from_the_signed_roster() {
+        let owner = SigningKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let member = SigningKey::from_bytes((&[0x22; 32]).into()).unwrap();
+        let member_address = Address::from_verifying_key(member.verifying_key());
+        let mut members = vec![
+            Address::from_verifying_key(owner.verifying_key()),
+            member_address,
+        ];
+        members.sort_unstable();
+        let policy = RoomKeyPolicyV1 {
+            identity: RoomPolicyIdentityV1 {
+                chain_id: 1,
+                chain_instance_id: [1; 32],
+                service_id: [2; 32],
+                owner: Address::from_verifying_key(owner.verifying_key()),
+                room_id: "11111111-1111-4111-8111-111111111111".into(),
+            },
+            policy_epoch: 0,
+            active_key_epoch: 0,
+            members,
+            keys: vec![RoomCustodyCommitmentV1 {
+                key_epoch: 0,
+                scope_hash: [3; 32],
+                ciphertext_hash: [4; 32],
+            }],
+        };
+        let signed = SignedRoomKeyPolicyV1 {
+            owner_signature: EthSignature::sign(&owner, &policy.signing_hash()),
+            policy,
+        };
+        let bytes = hex::encode(signed.encode());
+        let address = format!("0x{}", hex::encode(member_address.as_bytes()));
+        assert!(signed_policy_has_member(
+            &bytes,
+            "11111111-1111-4111-8111-111111111111",
+            &address
+        ));
+        assert!(!signed_policy_has_member(
+            &bytes,
+            "22222222-2222-4222-8222-222222222222",
+            &address
+        ));
+        assert!(!signed_policy_has_member(
+            &bytes,
+            "11111111-1111-4111-8111-111111111111",
+            &format!("0x{}", "44".repeat(20))
+        ));
+    }
 }
 
 #[cfg(feature = "room-key-demo")]
@@ -148,6 +212,58 @@ fn room_summary(room: &RoomState) -> Room {
     }
 }
 
+#[cfg(feature = "room-key-demo")]
+fn signed_policy_has_member(signed_policy: &str, room_id: &str, address: &str) -> bool {
+    let Some(member) = parse_address(address) else {
+        return false;
+    };
+    let Some(bytes) = bounded_hex(signed_policy, 96 * 1024) else {
+        return false;
+    };
+    let Ok(policy) = SignedRoomKeyPolicyV1::decode_canonical(&bytes) else {
+        return false;
+    };
+    policy.verify_owner().is_ok()
+        && policy.policy.identity.room_id == room_id
+        && policy.policy.members.binary_search(&member).is_ok()
+}
+
+#[cfg(feature = "room-key-demo")]
+fn room_has_member(room: &RoomState, address: &str) -> bool {
+    room.key_publication.as_ref().is_some_and(|publication| {
+        signed_policy_has_member(&publication.signed_policy, &room.room_id, address)
+    })
+}
+
+#[cfg(feature = "room-key-demo")]
+fn wallet_room_usage(state: &crate::room_log::OwnerState, owner: Address) -> (usize, usize) {
+    let mut active = 0;
+    let mut pending = 0;
+    for room in state.rooms().values() {
+        if let Some(publication) = &room.key_publication {
+            let matches = bounded_hex(&publication.signed_policy, 96 * 1024)
+                .and_then(|bytes| SignedRoomKeyPolicyV1::decode_canonical(&bytes).ok())
+                .is_some_and(|policy| {
+                    policy.verify_owner().is_ok() && policy.policy.identity.owner == owner
+                });
+            if matches {
+                active += 1;
+            }
+        } else if let Some(preparation) = &room.key_preparation {
+            let matches = bounded_hex(&preparation.signed_setup, 32 * 1024)
+                .and_then(|bytes| SignedRoomSetupV1::decode_canonical(&bytes).ok())
+                .is_some_and(|setup| {
+                    setup.verify_owner_at(setup.request.issued_at_ms).is_ok()
+                        && setup.request.intent.identity.owner == owner
+                });
+            if matches {
+                pending += 1;
+            }
+        }
+    }
+    (active, pending)
+}
+
 impl HostedOwner {
     pub(crate) fn new(runtime: OwnerRuntime, api_key: String) -> Result<Self, RuntimeError> {
         drop(runtime.state()?);
@@ -177,11 +293,26 @@ impl HostedOwner {
 
     /// Called under existing synchronous lifecycle guards. Reads only committed
     /// memory; it neither waits for the writer queue nor performs network I/O.
-    pub(crate) fn accessible_room(&self, id: &str, key: &str) -> Option<Room> {
-        if key != self.api_key {
-            return None;
-        }
-        self.view.read().ok()?.room(id).map(room_summary)
+    pub(crate) fn accessible_room(
+        &self,
+        id: &str,
+        key: &str,
+        member: Option<&str>,
+    ) -> Option<Room> {
+        let state = self.view.read().ok()?;
+        let room = state.room(id)?;
+        let allowed = member.map_or(key == self.api_key, |address| {
+            #[cfg(feature = "room-key-demo")]
+            {
+                room_has_member(room, address)
+            }
+            #[cfg(not(feature = "room-key-demo"))]
+            {
+                let _ = address;
+                false
+            }
+        });
+        allowed.then(|| room_summary(room))
     }
 
     pub(crate) async fn handle(
@@ -190,13 +321,22 @@ impl HostedOwner {
         agent_id: &str,
         agent_name: &str,
         key: &str,
+        member_address: Option<&str>,
         broker: &Broker,
         store: &Store,
         rates: &RateLimiter,
         reconnect: &ReconnectManager,
     ) -> Frame {
         self.dispatch(
-            &frame, agent_id, agent_name, key, broker, store, rates, reconnect,
+            &frame,
+            agent_id,
+            agent_name,
+            key,
+            member_address,
+            broker,
+            store,
+            rates,
+            reconnect,
         )
         .await
         .unwrap_or_else(|frame| frame)
@@ -208,35 +348,43 @@ impl HostedOwner {
         agent_id: &str,
         agent_name: &str,
         key: &str,
+        member_address: Option<&str>,
         broker: &Broker,
         store: &Store,
         rates: &RateLimiter,
         reconnect: &ReconnectManager,
     ) -> Result<Frame, Frame> {
         let id = frame.id.as_deref();
-        if key != self.api_key {
+        let member = if let Some(address) = member_address.filter(|_| key.is_empty()) {
+            Some(address)
+        } else if member_address.is_none() && key == self.api_key {
+            None
+        } else {
             return Err(error(
                 id,
                 ErrorCode::AccessDenied,
-                "This credential is not bound to the hosted owner",
+                "This principal is not authorized for hosted transport",
             ));
-        }
+        };
         // Reject retired owners even for methods that only touch Broker state.
         drop(self.view.read().map_err(|_| unavailable(id))?);
+        if let Some(address) = member {
+            self.authorize_member_frame(frame, address)?;
+        }
         match frame.frame_type {
             FrameType::Ping => Ok(Frame::pong(id)),
             FrameType::CreateRoom => self.create(frame, agent_id, broker, store, reconnect).await,
             #[cfg(feature = "room-key-demo")]
-            FrameType::PrepareRoomKey => self.prepare_room_key(frame).await,
+            FrameType::PrepareRoomKey => self.prepare_room_key(frame, member).await,
             #[cfg(feature = "room-key-demo")]
-            FrameType::AttestRoomKeySetup => self.attest_room_key_setup(frame).await,
+            FrameType::AttestRoomKeySetup => self.attest_room_key_setup(frame, member).await,
             #[cfg(feature = "room-key-demo")]
             FrameType::ActivateRoomKey => {
-                self.activate_room_key(frame, agent_id, broker, store, reconnect)
+                self.activate_room_key(frame, agent_id, member, broker, store, reconnect)
                     .await
             }
             #[cfg(feature = "room-key-demo")]
-            FrameType::GetRoomKeyContext => self.room_key_context(frame),
+            FrameType::GetRoomKeyContext => self.room_key_context(frame, member),
             #[cfg(feature = "room-key-demo")]
             FrameType::RelayRoomKeyOpen => self.relay_room_key_open(frame).await,
             FrameType::SendMessage => {
@@ -249,7 +397,7 @@ impl HostedOwner {
                 let was_member = broker.is_agent_in_room(agent_id, &p.room_id);
                 let joined = broker
                     .join_room(agent_id, &p.room_id, || {
-                        self.accessible_room(&p.room_id, key).is_some()
+                        self.accessible_room(&p.room_id, key, member).is_some()
                     })
                     .map_err(|_| unavailable(id))?;
                 if !was_member {
@@ -343,7 +491,24 @@ impl HostedOwner {
                     if p.parent_id.is_some() {
                         Vec::new()
                     } else {
-                        state.rooms().values().map(room_summary).collect()
+                        state
+                            .rooms()
+                            .values()
+                            .filter(|room| {
+                                member.is_none_or(|address| {
+                                    #[cfg(feature = "room-key-demo")]
+                                    {
+                                        room_has_member(room, address)
+                                    }
+                                    #[cfg(not(feature = "room-key-demo"))]
+                                    {
+                                        let _ = (room, address);
+                                        false
+                                    }
+                                })
+                            })
+                            .map(room_summary)
+                            .collect()
                     }
                 };
                 for room in &mut rooms {
@@ -378,7 +543,7 @@ impl HostedOwner {
                 let agents: Vec<_> = broker
                     .agents
                     .iter()
-                    .filter(|a| a.api_key == self.api_key)
+                    .filter(|a| member.is_some() || a.api_key == self.api_key)
                     .filter(|a| {
                         p.room_id
                             .as_ref()
@@ -398,6 +563,95 @@ impl HostedOwner {
                 "This operation is not enabled in hosted mode",
             )),
         }
+    }
+
+    fn authorize_member_frame(&self, frame: &Frame, address: &str) -> Result<(), Frame> {
+        let id = frame.id.as_deref();
+        match frame.frame_type {
+            FrameType::Ping
+            | FrameType::ListRooms
+            | FrameType::PrepareRoomKey
+            | FrameType::AttestRoomKeySetup
+            | FrameType::ActivateRoomKey => Ok(()),
+            FrameType::JoinRoom
+            | FrameType::LeaveRoom
+            | FrameType::GetHistory
+            | FrameType::RoomTip
+            | FrameType::RoomInfo
+            | FrameType::SendMessage
+            | FrameType::GetRoomKeyContext => {
+                let room_id = frame
+                    .payload
+                    .get("room_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Invalid room request"))?;
+                self.require_member_room(id, room_id, address)
+            }
+            FrameType::ListAgents => {
+                let room_id = frame
+                    .payload
+                    .get("room_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        error(
+                            id,
+                            ErrorCode::AccessDenied,
+                            "Member agent listing requires a room",
+                        )
+                    })?;
+                self.require_member_room(id, room_id, address)
+            }
+            FrameType::RelayRoomKeyOpen => {
+                let payload: RoomKeyBytesPayload = parse(frame)?;
+                let bytes = bounded_hex(&payload.request, 32 * 1024).ok_or_else(|| {
+                    error(id, ErrorCode::InvalidPayload, "Invalid room-key request")
+                })?;
+                let call = RoomKeyCallV1::decode_canonical(&bytes).map_err(|_| {
+                    error(id, ErrorCode::InvalidPayload, "Invalid room-key request")
+                })?;
+                self.require_member_room(id, &call.identity.room_id, address)
+            }
+            _ => Err(error(
+                id,
+                ErrorCode::AccessDenied,
+                "This operation requires transport authority",
+            )),
+        }
+    }
+
+    #[cfg(feature = "room-key-demo")]
+    fn require_member_room(
+        &self,
+        id: Option<&str>,
+        room_id: &str,
+        address: &str,
+    ) -> Result<(), Frame> {
+        let state = self.view.read().map_err(|_| unavailable(id))?;
+        let room = state
+            .room(room_id)
+            .ok_or_else(|| error(id, ErrorCode::RoomNotFound, "Room not found"))?;
+        if !room_has_member(room, address) {
+            return Err(error(
+                id,
+                ErrorCode::AccessDenied,
+                "Wallet is not a room member",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "room-key-demo"))]
+    fn require_member_room(
+        &self,
+        id: Option<&str>,
+        _room_id: &str,
+        _address: &str,
+    ) -> Result<(), Frame> {
+        Err(error(
+            id,
+            ErrorCode::AccessDenied,
+            "Member sessions are unavailable",
+        ))
     }
 
     fn require_room(&self, id: Option<&str>, room: &str) -> Result<Room, Frame> {
@@ -423,7 +677,7 @@ impl HostedOwner {
     }
 
     #[cfg(feature = "room-key-demo")]
-    async fn prepare_room_key(&self, frame: &Frame) -> Result<Frame, Frame> {
+    async fn prepare_room_key(&self, frame: &Frame, member: Option<&str>) -> Result<Frame, Frame> {
         let id = frame.id.as_deref();
         let payload: PrepareRoomKeyPayload = parse(frame)?;
         if uuid::Uuid::parse_str(&payload.room_id).is_err()
@@ -443,6 +697,13 @@ impl HostedOwner {
         }
         let owner = parse_address(&payload.owner)
             .ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Invalid room owner"))?;
+        if Some(owner) != member.and_then(parse_address) {
+            return Err(error(
+                id,
+                ErrorCode::AccessDenied,
+                "Room owner must match the authenticated wallet",
+            ));
+        }
         let context = self
             .room_keys(id)?
             .initial_context(owner, payload.room_id)
@@ -452,11 +713,24 @@ impl HostedOwner {
     }
 
     #[cfg(feature = "room-key-demo")]
-    async fn attest_room_key_setup(&self, frame: &Frame) -> Result<Frame, Frame> {
+    async fn attest_room_key_setup(
+        &self,
+        frame: &Frame,
+        member: Option<&str>,
+    ) -> Result<Frame, Frame> {
         let id = frame.id.as_deref();
         let payload: RoomKeyBytesPayload = parse(frame)?;
         let bytes = bounded_hex(&payload.request, 32 * 1024)
             .ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Invalid signed room setup"))?;
+        let setup = SignedRoomSetupV1::decode_canonical(&bytes)
+            .map_err(|_| error(id, ErrorCode::InvalidPayload, "Invalid signed room setup"))?;
+        if Some(setup.request.intent.identity.owner) != member.and_then(parse_address) {
+            return Err(error(
+                id,
+                ErrorCode::AccessDenied,
+                "Room owner must match the authenticated wallet",
+            ));
+        }
         let responses = self
             .room_keys(id)?
             .attest_setup(&bytes)
@@ -470,12 +744,16 @@ impl HostedOwner {
         &self,
         frame: &Frame,
         agent_id: &str,
+        member: Option<&str>,
         broker: &Broker,
         store: &Store,
         reconnect: &ReconnectManager,
     ) -> Result<Frame, Frame> {
         let id = frame.id.as_deref();
         let payload: ActivateRoomKeyPayload = parse(frame)?;
+        let room_owner = member
+            .and_then(parse_address)
+            .ok_or_else(|| error(id, ErrorCode::AccessDenied, "Invalid member principal"))?;
         let normalized_name = crate::store::normalize_room_name(&payload.name)
             .map_err(|_| error(id, ErrorCode::InvalidPayload, "Invalid room activation"))?;
         if uuid::Uuid::parse_str(&payload.room_id).is_err() {
@@ -494,8 +772,10 @@ impl HostedOwner {
             room_id: payload.room_id.clone(),
             name: payload.name,
             created_by: agent_id.into(),
+            room_owner,
             preparation: payload.preparation,
         };
+        let wallet_limits = self.room_keys(id)?.wallet_room_limits();
         // The control volume has one mutable root per owner. Keep complete
         // room-key ceremonies ordered while leaving the general owner writer
         // available to existing rooms' message appends.
@@ -540,7 +820,17 @@ impl HostedOwner {
                     None if state.rooms().len() as u64 >= limits.max_rooms => {
                         return Err(error(id, ErrorCode::RateLimitRooms, "Room limit exceeded"));
                     }
-                    None => true,
+                    None => {
+                        let (active, pending) = wallet_room_usage(&state, room_owner);
+                        if active + pending >= wallet_limits.0 || pending >= wallet_limits.1 {
+                            return Err(error(
+                                id,
+                                ErrorCode::RateLimitRooms,
+                                "Wallet room limit exceeded",
+                            ));
+                        }
+                        true
+                    }
                 }
             };
             if is_fresh {
@@ -586,11 +876,18 @@ impl HostedOwner {
     }
 
     #[cfg(feature = "room-key-demo")]
-    fn room_key_context(&self, frame: &Frame) -> Result<Frame, Frame> {
+    fn room_key_context(&self, frame: &Frame, principal: Option<&str>) -> Result<Frame, Frame> {
         let id = frame.id.as_deref();
         let payload: RoomKeyContextPayload = parse(frame)?;
         let member = parse_address(&payload.member)
             .ok_or_else(|| error(id, ErrorCode::InvalidPayload, "Invalid room member"))?;
+        if Some(member) != principal.and_then(parse_address) {
+            return Err(error(
+                id,
+                ErrorCode::AccessDenied,
+                "Room member must match the authenticated wallet",
+            ));
+        }
         let state = self.view.read().map_err(|_| unavailable(id))?;
         let room = state
             .room(&payload.room_id)
