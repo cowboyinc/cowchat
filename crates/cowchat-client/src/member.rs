@@ -152,7 +152,7 @@ impl CowchatClient {
     pub async fn open_hosted_room_key(
         &mut self,
         room_id: &str,
-        expected_owner: &[u8],
+        expected_owner: &[u8; 20],
         member: &SigningKey,
     ) -> Result<u64, ClientError> {
         let context = self
