@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 cowchat-core.workspace = true
-cowchat-client.workspace = true
+cowchat-client = { workspace = true, features = ["member"] }
 tokio.workspace = true
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
@@ -25,6 +25,9 @@ sha2 = "0.10"
 axum = "0.8"
 hmac = "0.12"
 base64 = "0.22"
+hex = "0.4"
+k256 = { version = "0.13", features = ["ecdsa"] }
+zeroize = "1"
 
 [dev-dependencies]
 cowchat-server.workspace = true

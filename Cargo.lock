@@ -1836,7 +1836,9 @@ dependencies = [
  "cowchat-server",
  "directories",
  "env_logger",
+ "hex",
  "hmac",
+ "k256",
  "log",
  "reqwest 0.12.28",
  "serde",
@@ -1844,6 +1846,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
