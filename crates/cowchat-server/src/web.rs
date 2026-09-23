@@ -1009,6 +1009,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_member_key_registers_through_the_common_challenge() {
+        let state = test_state();
+        let observed = state.clone();
+        let (server, addr) = start_test_web_server(state).await;
+        let member = SigningKey::random(&mut OsRng);
+        let url = format!("ws://{addr}/ws");
+
+        // A client bound to another service refuses the challenge before signing.
+        assert!(
+            cowchat_client::CowchatClient::connect_member(&url, &[0xcd; 32], &member, "actor")
+                .await
+                .is_err()
+        );
+
+        let client =
+            cowchat_client::CowchatClient::connect_member(&url, &[0xab; 32], &member, "actor")
+                .await
+                .unwrap();
+        let expected = format!(
+            "member:{}",
+            crate::session_auth::address_for_key(member.verifying_key())
+        );
+        assert_eq!(client.agent_id, expected);
+        assert!(observed.broker.agents.get(&expected).is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn websocket_delivers_terminal_registration_error_before_closing() {
         let (server, addr) = start_test_web_server(test_state()).await;
         let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();

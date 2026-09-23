@@ -6,7 +6,21 @@ license.workspace = true
 repository.workspace = true
 description = "Cowchat client library for agent integration"
 
+[features]
+# Native member sessions (actor, @builder, connector keys): the common session
+# challenge plus hosted room-key open over the member relay.
+member = ["dep:k256", "dep:sha3", "dep:hex", "dep:reqwest", "dep:rand_core", "dep:cowboy-protocol-cbss-wasm"]
+
 [dependencies]
+zeroize = "1"
+k256 = { version = "0.13", features = ["ecdsa"], optional = true }
+sha3 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+# The browser's own room-context parser and release composition, as a plain
+# Rust library; the member relay is the only transport.
+cowboy-protocol-cbss-wasm = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "98c393edfd064b631345c8e4db0c112d4e346e5c", optional = true }
 cowchat-core.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "sync", "rt", "macros", "time"] }
 serde_json.workspace = true
