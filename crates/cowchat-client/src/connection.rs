@@ -698,6 +698,18 @@ impl CowchatClient {
         frame_type: FrameType,
         payload: serde_json::Value,
     ) -> Result<Frame, ClientError> {
+        self.request_within(frame_type, payload, std::time::Duration::from_secs(10))
+            .await
+    }
+
+    /// `request` for operations the server legitimately holds open longer,
+    /// such as room-key activation (publication, finality and holder fence).
+    pub(crate) async fn request_within(
+        &self,
+        frame_type: FrameType,
+        payload: serde_json::Value,
+        response_timeout: std::time::Duration,
+    ) -> Result<Frame, ClientError> {
         let id = uuid::Uuid::new_v4().to_string();
         let frame = Frame {
             id: Some(id.clone()),
@@ -733,8 +745,7 @@ impl CowchatClient {
             }
         }
 
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(10), resp_rx).await
-        {
+        let response = match tokio::time::timeout(response_timeout, resp_rx).await {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
                 self.pending.lock().await.remove(&id);
