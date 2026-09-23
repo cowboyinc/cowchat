@@ -23,7 +23,11 @@ use cbqs_client::{
 };
 #[cfg(feature = "room-keys")]
 use cbssd::room_deployment::CompiledRoomDeployment;
-use cowboy_protocol_codec::{cbqs_v2 as wire, Address};
+use cowboy_protocol_codec::{
+    cbqs_v2 as wire,
+    room_authority::{derive_cowchat_service_id_v1, is_cowchat_service_endpoint_v1},
+    Address,
+};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Deserialize;
 use std::{
@@ -39,6 +43,8 @@ use zeroize::Zeroizing;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_BYTES: usize = 4 * 1024 * 1024;
+const MAX_COWCHAT_SERVICES: usize = 256;
+const MAX_COWCHAT_SERVICES_RESPONSE_BYTES: usize = 256 * 1024;
 const SAFETY_MS: u64 = 30_000;
 const fn default_max_rooms_per_wallet() -> usize {
     100
@@ -451,6 +457,131 @@ struct Authority {
     admin: SigningKey,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CowchatServicesResponse {
+    services: Vec<CowchatServiceResponse>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CowchatServiceResponse {
+    service_id: String,
+    operator: String,
+    endpoint: String,
+    #[serde(rename = "registered_at_block")]
+    _registered_at_block: u64,
+}
+
+fn canonical_rpc_hex<const N: usize>(value: &str, label: &str) -> Result<[u8; N]> {
+    ensure!(
+        value.len() == 2 + N * 2
+            && value.starts_with("0x")
+            && value[2..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "invalid {label}"
+    );
+    hex::decode(&value[2..])?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid {label}"))
+}
+
+async fn fetch_cowchat_services(rpc_url: &str) -> Result<CowchatServicesResponse> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut response = client
+        .get(format!(
+            "{}/cowchat/services",
+            rpc_url.trim_end_matches('/')
+        ))
+        .send()
+        .await?;
+    ensure!(
+        response.status() == reqwest::StatusCode::OK,
+        "Cowchat service registry request failed"
+    );
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        ensure!(
+            body.len()
+                .checked_add(chunk.len())
+                .is_some_and(|size| size <= MAX_COWCHAT_SERVICES_RESPONSE_BYTES),
+            "Cowchat service registry response exceeds bound"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).context("invalid Cowchat service registry response")
+}
+
+fn verify_cowchat_services(
+    response: CowchatServicesResponse,
+    chain_id: u64,
+    expected_operator: &Address,
+    expected_endpoint: &str,
+) -> Result<()> {
+    ensure!(
+        response.services.len() <= MAX_COWCHAT_SERVICES,
+        "Cowchat service registry exceeds entry bound"
+    );
+    let expected_service_id = derive_cowchat_service_id_v1(chain_id, expected_operator);
+    let mut seen = BTreeSet::new();
+    let mut matched = false;
+    for service in response.services {
+        let CowchatServiceResponse {
+            service_id,
+            operator,
+            endpoint,
+            _registered_at_block: _,
+        } = service;
+        let service_id = canonical_rpc_hex::<32>(&service_id, "Cowchat service ID")?;
+        let operator = canonical_rpc_hex::<20>(&operator, "Cowchat service operator")?;
+        let operator = Address::from_bytes(operator);
+        ensure!(
+            is_cowchat_service_endpoint_v1(endpoint.as_bytes()),
+            "invalid Cowchat service endpoint"
+        );
+        ensure!(
+            service_id == derive_cowchat_service_id_v1(chain_id, &operator),
+            "Cowchat service ID does not match its operator"
+        );
+        ensure!(
+            seen.insert(service_id),
+            "duplicate Cowchat service registry entry"
+        );
+        if service_id == expected_service_id {
+            ensure!(
+                &operator == expected_operator,
+                "Cowchat service operator mismatch"
+            );
+            ensure!(
+                endpoint == expected_endpoint,
+                "Cowchat service endpoint mismatch"
+            );
+            matched = true;
+        }
+    }
+    ensure!(matched, "Cowchat service is not registered");
+    Ok(())
+}
+
+async fn verify_cowchat_service_registration(
+    config: &Config,
+    chain_id: u64,
+    operator: Address,
+) -> Result<()> {
+    #[cfg(feature = "room-keys")]
+    ensure!(
+        CompiledRoomDeployment::compiled()?.service_id()
+            == derive_cowchat_service_id_v1(chain_id, &operator),
+        "compiled room deployment service ID does not match the registered Cowchat service"
+    );
+    let response = fetch_cowchat_services(&config.rpc_url).await?;
+    verify_cowchat_services(response, chain_id, &operator, &config.public_ws_url)
+}
+
 fn now_ms() -> Result<u64> {
     u64::try_from(chrono::Utc::now().timestamp_millis()).context("clock predates Unix epoch")
 }
@@ -755,6 +886,15 @@ async fn attach(
 pub async fn recover(config: &Config, expected_epoch: u64) -> Result<(OwnerRuntime, Instant)> {
     ensure!(expected_epoch < u64::MAX - 1, "expected epoch is exhausted");
     let auth = authority(config).await?;
+    // `authority` proved that this configured owner is both the CBFS wallet and
+    // the stream owner. Refuse to serve under an unregistered endpoint before
+    // opening local journals, attaching volumes, or claiming a writer epoch.
+    verify_cowchat_service_registration(
+        config,
+        auth.view.chain_id(),
+        Address::from_bytes(*auth.view.stream().owner.as_bytes()),
+    )
+    .await?;
     let owner = format!("0x{}", hex::encode(auth.view.stream().owner.as_bytes()));
     let instance = auth.view.chain_instance_id();
     let stream = auth.view.stream().stream_id;
@@ -844,6 +984,7 @@ pub async fn recover(config: &Config, expected_epoch: u64) -> Result<(OwnerRunti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{http::StatusCode, routing::get, Router};
 
     fn config() -> (tempfile::TempDir, Config) {
         let dir = tempfile::Builder::new()
@@ -879,6 +1020,104 @@ mod tests {
             session_seconds: 600,
         };
         (dir, config)
+    }
+
+    async fn registry_server(status: StatusCode, body: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/cowchat/services",
+            get(move || {
+                let body = body.clone();
+                async move { (status, body) }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}")
+    }
+
+    fn service_json(chain_id: u64, operator: &Address, endpoint: &str) -> serde_json::Value {
+        serde_json::json!({
+            "service_id": format!(
+                "0x{}",
+                hex::encode(derive_cowchat_service_id_v1(chain_id, operator))
+            ),
+            "operator": format!("0x{}", hex::encode(operator.as_bytes())),
+            "endpoint": endpoint,
+            "registered_at_block": 7,
+        })
+    }
+
+    #[tokio::test]
+    async fn cowchat_registry_accepts_only_the_exact_registered_service() {
+        let chain_id = 9;
+        let operator = Address::from_bytes([0x22; 20]);
+        let endpoint = "wss://chat.example/ws";
+        let body = serde_json::to_vec(&serde_json::json!({
+            "services": [service_json(chain_id, &operator, endpoint)]
+        }))
+        .unwrap();
+        let rpc_url = registry_server(StatusCode::OK, body).await;
+
+        let response = fetch_cowchat_services(&rpc_url).await.unwrap();
+        verify_cowchat_services(response, chain_id, &operator, endpoint).unwrap();
+    }
+
+    #[test]
+    fn cowchat_registry_rejects_missing_mismatched_and_noncanonical_records() {
+        let chain_id = 9;
+        let operator = Address::from_bytes([0x22; 20]);
+        let endpoint = "wss://chat.example/ws";
+        let exact = service_json(chain_id, &operator, endpoint);
+        let mut wrong_endpoint = exact.clone();
+        wrong_endpoint["endpoint"] = serde_json::json!("wss://other.example/ws");
+        let mut wrong_id = exact.clone();
+        wrong_id["service_id"] = serde_json::json!(format!("0x{}", "00".repeat(32)));
+        let mut uppercase_id = exact.clone();
+        uppercase_id["service_id"] = serde_json::json!(exact["service_id"]
+            .as_str()
+            .unwrap()
+            .to_ascii_uppercase()
+            .replacen("0X", "0x", 1));
+
+        for services in [
+            Vec::new(),
+            vec![wrong_endpoint],
+            vec![wrong_id],
+            vec![uppercase_id],
+            vec![exact.clone(), exact],
+        ] {
+            let response: CowchatServicesResponse =
+                serde_json::from_value(serde_json::json!({"services": services})).unwrap();
+            assert!(verify_cowchat_services(response, chain_id, &operator, endpoint).is_err());
+        }
+
+        let services = (0..=MAX_COWCHAT_SERVICES)
+            .map(|index| service_json(chain_id, &Address::from_bytes([index as u8; 20]), endpoint))
+            .collect::<Vec<_>>();
+        let response: CowchatServicesResponse =
+            serde_json::from_value(serde_json::json!({"services": services})).unwrap();
+        assert!(verify_cowchat_services(response, chain_id, &operator, endpoint).is_err());
+    }
+
+    #[tokio::test]
+    async fn cowchat_registry_fetch_rejects_non_success_malformed_and_oversized_bodies() {
+        let valid = serde_json::to_vec(&serde_json::json!({"services": []})).unwrap();
+        for (status, body) in [
+            (StatusCode::FOUND, valid),
+            (
+                StatusCode::CREATED,
+                serde_json::to_vec(&serde_json::json!({"services": []})).unwrap(),
+            ),
+            (StatusCode::OK, b"not-json".to_vec()),
+            (
+                StatusCode::OK,
+                vec![b' '; MAX_COWCHAT_SERVICES_RESPONSE_BYTES + 1],
+            ),
+        ] {
+            let rpc_url = registry_server(status, body).await;
+            assert!(fetch_cowchat_services(&rpc_url).await.is_err());
+        }
     }
 
     #[test]
