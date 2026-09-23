@@ -164,7 +164,7 @@ impl CowchatClient {
             .and_then(|value| value.parse().ok())
             .ok_or_else(invalid)?;
         let secret = Zeroizing::new(member.to_bytes());
-        let attempt = cowboy_protocol_cbss_wasm::room::prepare_room_key(
+        let attempt = cowboy_protocol_client_crypto::room_context::prepare_room_key(
             &input,
             secret.as_slice(),
             &mut OsRng,
