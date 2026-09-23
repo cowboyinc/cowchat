@@ -21,7 +21,7 @@ use cbqs_client::{
     chain_view_v2, AuthenticatedStreamViewV2, CheckpointTrustV2, PinnedBrokerEndpoint,
     SessionConfig,
 };
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 use cbssd::room_deployment::CompiledRoomDeployment;
 use cowboy_protocol_codec::{cbqs_v2 as wire, Address};
 use ed25519_dalek::{Signer, SigningKey};
@@ -47,9 +47,9 @@ const fn default_max_pending_rooms_per_wallet() -> usize {
     4
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 mod initial_room;
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 pub use initial_room::{
     activate_initial_room, probe_initial_room, BrowserInitialRoom, InitialRoomDemo,
 };
@@ -84,13 +84,13 @@ pub struct Config {
 
 /// Browser room-key coordinator. It owns only hosted service configuration;
 /// generated room keys and member signing keys remain in the browser.
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 #[derive(Clone)]
 pub struct HostedRoomKeys {
     config: Config,
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 impl HostedRoomKeys {
     pub fn new(config: &Config) -> Self {
         Self {

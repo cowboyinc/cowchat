@@ -7,7 +7,7 @@ use super::*;
 use crate::{CowchatServer, ServerConfig};
 use cowchat_client::{ClientError, CowchatClient};
 use cowchat_core::{ErrorCode, FrameType};
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 use {
     commonware_codec::Encode,
     cowboy_protocol_codec::{
@@ -213,7 +213,7 @@ async fn next_message(
     .unwrap()
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 fn request(frame_type: FrameType, payload: serde_json::Value) -> cowchat_core::Frame {
     cowchat_core::Frame {
         id: Some(uuid::Uuid::new_v4().to_string()),
@@ -223,7 +223,7 @@ fn request(frame_type: FrameType, payload: serde_json::Value) -> cowchat_core::F
     }
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 #[tokio::test]
 async fn hosted_member_dispatch_uses_the_signed_roster() {
     let fixture = Fixture::new().await;
@@ -357,7 +357,7 @@ async fn hosted_member_dispatch_uses_the_signed_roster() {
     }
 }
 
-#[cfg(feature = "room-key-demo")]
+#[cfg(feature = "room-keys")]
 #[tokio::test]
 async fn actor_member_replies_once_under_its_deterministic_id() {
     use cowchat_client::member::{actor_reply_id, RoomTurn};

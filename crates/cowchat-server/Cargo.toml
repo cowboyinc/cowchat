@@ -21,7 +21,7 @@ river-perf = ["cbfs-archive-test", "hosted-bootstrap"]
 hosted-bootstrap = ["cbfs-archive", "dep:cbfs-cli", "dep:cbfs-registry-proto", "dep:anyhow", "dep:zeroize"]
 # One initial-room executable composition. Requires a reviewed embedded CBSS
 # deployment at build time; later rotation/recovery UX is intentionally absent.
-room-key-demo = ["hosted-bootstrap", "dep:cbssd", "dep:cowchat-client"]
+room-keys = ["hosted-bootstrap", "dep:cbssd", "dep:cowchat-client"]
 
 [[bin]]
 name = "cowchat-server"
