@@ -17,6 +17,8 @@ pub mod runtime;
 
 mod key_epoch;
 pub use key_epoch::{RoomKeyCustody, RoomKeyPreparation, RoomKeyState};
+#[cfg(feature = "room-keys")]
+pub(crate) use key_epoch::{MAX_DURABLE_ROOM_GRANTS, MAX_DURABLE_ROOM_MEMBERS};
 
 use chrono::{DateTime, Utc};
 use cowchat_core::ChatMessage;

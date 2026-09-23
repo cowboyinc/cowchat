@@ -19,9 +19,9 @@ cbfs-archive-test = ["cbfs-archive", "cbqs-test", "cbfs-sdk/test-support", "dep:
 river-perf = ["cbfs-archive-test", "hosted-bootstrap"]
 # Production entrypoint; contains no broker or storage fixture.
 hosted-bootstrap = ["cbfs-archive", "dep:cbfs-cli", "dep:cbfs-registry-proto", "dep:anyhow", "dep:zeroize"]
-# One initial-room executable composition. Requires a reviewed embedded CBSS
-# deployment at build time; later rotation/recovery UX is intentionally absent.
-room-keys = ["hosted-bootstrap", "dep:cbssd", "dep:cowchat-client"]
+# Browser and native room-key coordination against the reviewed embedded CBSS
+# deployment.
+room-keys = ["hosted-bootstrap", "dep:cbssd"]
 
 [[bin]]
 name = "cowchat-server"
@@ -77,8 +77,7 @@ cbfs-registry-proto = { git = "https://github.com/cowboyinc/cbfs.git", rev = "9e
 anyhow = { version = "1", optional = true }
 hex = "0.4"
 zeroize = { version = "1", optional = true }
-cbssd = { git = "https://github.com/cowboyinc/cbss.git", rev = "e7b96a907d526dc7d5bf70c52c10efdfe1dfb5bf", features = ["cowchat-room-release"], optional = true }
-cowchat-client = { workspace = true, optional = true }
+cbssd = { git = "https://github.com/cowboyinc/cbss.git", rev = "48488e5382ca14ffbc6e9e3a513d9668db2ce96a", features = ["cowchat-room-release"], optional = true }
 k256 = { version = "0.13", features = ["ecdsa"] }
 
 [dev-dependencies]

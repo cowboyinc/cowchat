@@ -57,17 +57,6 @@ enum Commands {
         #[arg(long)]
         expected_epoch: u64,
     },
-    /// Create and activate one prepared initial room, then serve it.
-    #[cfg(feature = "room-keys")]
-    HostedRoomDemo {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        expected_epoch: u64,
-        /// Owner-signed initial room input; contains no plaintext room key.
-        #[arg(long)]
-        input: PathBuf,
-    },
     /// Start the Cowchat server
     Serve {
         /// Unix socket path
@@ -280,20 +269,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             Some((config, guard))
         }
-        #[cfg(feature = "room-keys")]
-        Commands::HostedRoomDemo { config, .. } => {
-            let config = cowchat_server::hosted_bootstrap::Config::load(config)?;
-            let guard = config.prepare_state()?;
-            std::env::set_var(
-                "CBFS_PENDING_DIFF_DIR",
-                config.worker_dir.join("cbfs-pending"),
-            );
-            std::env::set_var(
-                "CBFS_PATH_TAG_KEY_DIR",
-                config.worker_dir.join("cbfs-path-tags"),
-            );
-            Some((config, guard))
-        }
         _ => None,
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -335,46 +310,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     log::info!("Hosted recovery complete; starting bounded authenticated session");
                     tokio::select! {
                         result = server.run() => result?,
-                        _ = tokio::time::sleep_until(deadline.into()) => {
-                            log::info!("Hosted credential deadline reached; stopping worker");
-                        }
-                    }
-                }
-                #[cfg(feature = "room-keys")]
-                Commands::HostedRoomDemo {
-                    expected_epoch,
-                    input,
-                    ..
-                } => {
-                    let (config, _guard) = prepared.as_ref().expect("hosted preflight");
-                    let (mut runtime, deadline) =
-                        cowchat_server::hosted_bootstrap::recover(config, expected_epoch).await?;
-                    let input = cowchat_server::hosted_bootstrap::InitialRoomDemo::load(&input)?;
-                    let probe = cowchat_server::hosted_bootstrap::activate_initial_room(
-                        config,
-                        &mut runtime,
-                        input,
-                    )
-                    .await?;
-                    let server = CowchatServer::new_hosted_with_room_keys(
-                        config.server_config(),
-                        runtime,
-                        cowchat_server::hosted_bootstrap::HostedRoomKeys::new(config),
-                    )?;
-                    let server_task = server.run();
-                    tokio::pin!(server_task);
-                    let (message_id, seq) = tokio::select! {
-                        result = &mut server_task => {
-                            result?;
-                            return Err("hosted server stopped before the room-key probe".into());
-                        }
-                        result = cowchat_server::hosted_bootstrap::probe_initial_room(config, probe) => result?,
-                    };
-                    log::info!(
-                        "Initial room activated and CBSS-backed message replayed: id={message_id} seq={seq}"
-                    );
-                    tokio::select! {
-                        result = &mut server_task => result?,
                         _ = tokio::time::sleep_until(deadline.into()) => {
                             log::info!("Hosted credential deadline reached; stopping worker");
                         }

@@ -13,28 +13,6 @@ use cowboy_protocol_codec::{
     room_policy::SignedRoomKeyPolicyV1, room_release::SignedRoomKeyGrantV1,
     room_setup::SignedRoomSetupV1, Address,
 };
-use cowchat_client::CowchatClient;
-use k256::ecdsa::SigningKey;
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InitialRoomDemo {
-    pub room_id: String,
-    pub name: String,
-    pub created_by: String,
-    pub preparation: RoomKeyPreparation,
-    /// Private member signing key used only by the executable proof client.
-    pub member_key_file: PathBuf,
-    pub probe_text: String,
-}
-
-pub struct InitialRoomProbe {
-    room_id: String,
-    agent_id: String,
-    probe_text: String,
-    key: Zeroizing<Vec<u8>>,
-    key_epoch: u64,
-}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,27 +26,8 @@ pub struct BrowserInitialRoom {
 
 pub(crate) struct PreparedInitialRoom {
     room_id: String,
-    created_by: String,
     preparation: RoomKeyPreparation,
-    deployment: CompiledRoomDeployment,
-    policy: SignedRoomKeyPolicyV1,
-    grants: Vec<SignedRoomKeyGrantV1>,
-    custody: Vec<u8>,
     control_root: [u8; 32],
-}
-
-impl InitialRoomDemo {
-    pub fn load(path: &Path) -> Result<Self> {
-        ensure!(
-            path.is_absolute(),
-            "initial room input path must be absolute"
-        );
-        Ok(serde_json::from_slice(&read_file(
-            path,
-            false,
-            MAX_BYTES as u64,
-        )?)?)
-    }
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>> {
@@ -78,13 +37,6 @@ fn decode_hex(value: &str) -> Result<Vec<u8>> {
 fn accepted(outcome: &Outcome, expected: impl FnOnce(&Outcome) -> bool) -> Result<()> {
     ensure!(expected(outcome), "initial room command was rejected");
     Ok(())
-}
-
-fn member_key(path: &Path) -> Result<SigningKey> {
-    ensure!(path.is_absolute(), "member key path must be absolute");
-    let bytes = read_file(path, true, 256)?;
-    let bytes = decode_hex(std::str::from_utf8(&bytes)?.trim())?;
-    SigningKey::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid member signing key"))
 }
 
 fn validate_successor_policy(
@@ -577,12 +529,7 @@ pub(crate) async fn finalize_initial_room(
     deployment.fence(&policy, confirmed).await?;
     Ok(PreparedInitialRoom {
         room_id: input.room_id,
-        created_by: input.created_by,
         preparation,
-        deployment,
-        policy,
-        grants,
-        custody,
         control_root: confirmed,
     })
 }
@@ -613,122 +560,6 @@ pub(crate) async fn commit_initial_room(
         matches!(outcome, Outcome::KeyEpochCommitted { room_id, key_epoch }
             if room_id == &prepared.room_id && *key_epoch == prepared.preparation.key_epoch)
     })
-}
-
-/// Native executable proof: stage the room, finalize its publication, open the
-/// real CBSS key, then commit. Shares the same setup/publication/fence path as
-/// the browser activation, adding the member-key open before commit.
-pub async fn activate_initial_room(
-    config: &Config,
-    runtime: &mut OwnerRuntime,
-    input: InitialRoomDemo,
-) -> Result<InitialRoomProbe> {
-    ensure!(
-        !input.probe_text.is_empty() && input.probe_text.len() <= 4 * 1024,
-        "invalid room demo probe text"
-    );
-    let member = member_key(&input.member_key_file)?;
-    let probe_text = input.probe_text;
-    let browser = BrowserInitialRoom {
-        room_id: input.room_id,
-        name: input.name,
-        created_by: input.created_by,
-        room_owner: Address::from_verifying_key(member.verifying_key()),
-        preparation: input.preparation,
-    };
-    stage_initial_room(runtime, &browser, true).await?;
-    let prepared = finalize_initial_room(config, browser).await?;
-    let member_address = Address::from_verifying_key(member.verifying_key());
-    let grant = prepared
-        .grants
-        .iter()
-        .find(|grant| {
-            grant.grant.member == member_address
-                && prepared
-                    .policy
-                    .policy
-                    .match_grant(&grant.grant)
-                    .is_ok_and(|key| key.key_epoch == prepared.policy.policy.active_key_epoch)
-        })
-        .context("member key has no prepared grant for the active key epoch")?
-        .clone();
-    let key = prepared
-        .deployment
-        .open_room_key(&prepared.policy, grant, &prepared.custody, &member)
-        .await?;
-    commit_initial_room(runtime, &prepared).await?;
-    Ok(InitialRoomProbe {
-        room_id: prepared.room_id,
-        agent_id: prepared.created_by,
-        probe_text,
-        key,
-        key_epoch: prepared.preparation.key_epoch,
-    })
-}
-
-/// Prove the activated room is usable: the member opens the real CBSS key,
-/// sends one contextual ciphertext through the normal hosted socket, replays
-/// it from history, and decrypts the stored bytes locally.
-pub async fn probe_initial_room(config: &Config, probe: InitialRoomProbe) -> Result<(String, i64)> {
-    let key: &[u8; 32] = probe
-        .key
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("CBSS returned an invalid room key"))?;
-
-    let api_key = read_file(&config.api_key_file, true, 4096)?;
-    let api_key = std::str::from_utf8(&api_key)?.trim();
-    let socket = config.worker_dir.join("server.sock");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let client = loop {
-        match CowchatClient::connect_uds(
-            &socket,
-            api_key,
-            "room-keys-probe",
-            Some(&probe.agent_id),
-            vec![],
-        )
-        .await
-        {
-            Ok(client) => break client,
-            Err(error) if Instant::now() < deadline => {
-                log::debug!("Waiting for hosted demo socket: {error}");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    };
-    client.join_room(&probe.room_id).await?;
-    let message_id = uuid::Uuid::new_v4().to_string();
-    let context = cowchat_core::room_crypto::Context {
-        room_id: &probe.room_id,
-        key_epoch: probe.key_epoch,
-        message_id: &message_id,
-    };
-    let payload = CowchatClient::prepare_room_key_message(
-        key,
-        &context,
-        &probe.probe_text,
-        None,
-        vec![],
-        serde_json::json!({"demo":"cbss-room-key"}),
-    )?;
-    client.append_prepared_message(&payload).await?;
-    let history = client.get_history(&probe.room_id, 20, None).await?;
-    let stored = history
-        .iter()
-        .find(|message| message.message_id == message_id)
-        .context("room demo message missing from replayed history")?;
-    ensure!(
-        stored.key_epoch.as_deref() == Some(probe.key_epoch.to_string().as_str()),
-        "replayed room message has the wrong key epoch"
-    );
-    let plaintext = cowchat_core::room_crypto::decrypt(key, &context, &stored.content)?;
-    ensure!(
-        plaintext == probe.probe_text,
-        "replayed room message did not decrypt to the submitted text"
-    );
-    Ok((message_id, stored.seq))
 }
 
 #[cfg(test)]

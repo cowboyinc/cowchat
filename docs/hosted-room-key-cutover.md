@@ -42,48 +42,20 @@ rejects labelled sends; its SQLite schema and history remain unchanged. The
 legacy actor-work helper refuses this profile until its room-key consumer is
 wired. CLI/Swift/browser room-key UX and discovery remain follow-up work.
 
-## Initial-room executable composition
+## Hosted room-key creation
 
-The opt-in `room-keys` feature adds one executable path,
-`hosted-room-demo`. It accepts a prepared initial room only: the room must be
-absent, policy and key epochs must be zero, there is no predecessor, and exactly
-one owner-signed member grant is required. Before starting the listener it opens
-the current private control volume, atomically archives room creation and the
-exact preparation, gathers fresh all-holder setup attestations, publishes with
-the signed root as the expected predecessor, confirms the result through a
-freshly reopened read-only volume and independently finalized source, fences
-every holder, and requires the granted member to open the room key through the
-deployment's compiled CBSS committee and origins. Only then does it commit that
-exact epoch through the owner log/archive.
+The opt-in `room-keys` feature adds the production prepare, attest, activate,
+open, and rotation frames to `hosted-serve`. Dashboard and native clients keep
+member signing keys and plaintext room keys locally. Cowchat stores only the
+signed public setup, policy, grants and encrypted custody, then publishes,
+confirms, fences every holder, and commits the exact epoch through the owner
+log and archive. A room may contain up to 32 members; that bound keeps every
+all-epoch grant matrix through the full removal lifecycle in one durable CBQS
+record.
 
-The command then starts the normal hosted server and runs one bounded proof
-client. It sends one contextual ciphertext through the hosted Unix socket,
-replays it from Cowchat history, and decrypts the stored bytes locally.
-The member signing key comes from a private owner-only file; the input and
-Cowchat archive contain signed public objects and encrypted custody, never the
-plaintext room key.
-
-Build and run it with the same reviewed room-release bundle used by CBSS:
-
-```sh
-COWCHAT_ROOM_RELEASE_DIR=/absolute/reviewed/bundle \
-  cargo run --locked -p cowchat-server --features room-keys -- \
-  hosted-room-demo --config /absolute/hosted.json \
-  --expected-epoch 0 --input /absolute/initial-room.json
-```
-
-The bounded JSON input contains `room_id`, `name`, `created_by`, the existing
-`RoomKeyPreparation`, `member_key_file`, and `probe_text`. Both the config and
-member-key paths must be absolute; the signing-key file must be private,
-owner-only, unlinked, and contain one hex-encoded secp256k1 key.
-
-This is deliberately not a public room-creation route or a rotation/recovery
-API. An existing room, a failed setup, or a partial publication is an error; the
-durable preparation remains pending for inspection and the command does not
-invent a retry, rebase, abort, or takeover policy. Production client UI and
-general hosted room provisioning remain unfinished. The proof client uses the
-hosted owner's Cowchat API key; binding a member signing key to a distinct
-hosted Cowchat participant identity remains separate identity-enrollment work.
+The earlier `hosted-room-demo` command duplicated this client flow around one
+prepared JSON file and could no longer create a room after writer claim moved
+the control root. It has been removed; clients use the hosted frames directly.
 
 Preparation is shared durable state, not a marker only in a worker's local
 journal. A replacement worker with an empty journal recovers it from the owner
@@ -104,8 +76,8 @@ base or pending mutation and never rebases onto an unrelated root. Use it for
 publication: general `Volume::commit` still supports automatic rebase. The
 registry must enforce actual predecessor CAS, and the coordinator must retain
 pending evidence and independently confirm the published policy/root before
-the proxy barrier. The CBSS publication library and the initial-room executable
-coordinator both use that path.
+the proxy barrier. The CBSS publication library and hosted room-key coordinator
+both use that path.
 
 A worker takeover itself changes the control volume through writer allocation.
 An old setup request/root therefore cannot automatically authorize a fresh
@@ -144,17 +116,13 @@ and verifies that the room objects remain unpublished and journal bytes remain
 unchanged. Takeover can advance the control root; a new publication still needs
 fresh owner setup for that root and preserves the older pending evidence.
 
-## Demo scope and remaining proof
+## Remaining proof
 
-The executable now contains the one-room vertical slice: creation, actual CBSS
-room-key retrieval, and encrypted send/replay/decrypt through the existing
-services. Local checks compile that composition and exercise its underlying
-room-key, publication, archive and hosted-message components. It has not run
-against a live validator, finalized-proof couriers, private CBFS volumes, CBQS
-broker and CBSS committee as one deployment, so it is not a live end-to-end
-PASS. Rotation, takeover, Google/WebAuthn identity recovery and broader
-connectors remain separate follow-up milestones. The narrower demo does not
-waive the consolidated release gates or claim product readiness.
+Local checks exercise the room-key, publication, archive and hosted-message
+components. The complete flow still needs a live run against a validator,
+finalized-proof couriers, private CBFS volumes, CBQS broker and CBSS committee
+before it is a live end-to-end PASS. That consolidated gate must include room
+creation, rotation, recovery and connector clients.
 
 The preserved transport PR branches are unchanged. Final Homestead C1
 height-based workload-authority reconciliation remains outstanding; see
