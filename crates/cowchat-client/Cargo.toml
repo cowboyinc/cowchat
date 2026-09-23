@@ -20,7 +20,7 @@ rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 # The browser's own room-context parser and release composition; the member
 # relay is the only transport.
-cowboy-protocol-client-crypto = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "76e9adaa462a8ff4e57737d6d3a93f3bf991e13d", optional = true }
+cowboy-protocol-client-crypto = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "eb63a09cdabeed1dc83bcb9f82c5b687d9b0c3a3", optional = true }
 cowchat-core.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "sync", "rt", "macros", "time"] }
 serde_json.workspace = true
