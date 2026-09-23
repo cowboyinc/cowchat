@@ -67,6 +67,21 @@ async fn connect_agent(addr: &str, key: &str, name: &str) -> CowchatClient {
         .unwrap()
 }
 
+#[tokio::test]
+async fn api_key_client_cannot_claim_the_member_namespace() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let result = CowchatClient::connect_tcp(
+        &addr,
+        &key,
+        "impostor",
+        Some(&format!("member:0x{}", "11".repeat(20))),
+        vec![],
+    )
+    .await;
+    assert!(result.is_err());
+    server.abort();
+}
+
 async fn receives_room_event(
     events: &mut tokio::sync::broadcast::Receiver<cowchat_client::Event>,
     frame_type: FrameType,
@@ -119,6 +134,7 @@ async fn register_then_trigger_read_error(addr: &str, key: &str, name: &str) {
             frame_type: FrameType::Register,
             payload: serde_json::to_value(RegisterPayload {
                 key,
+                session: None,
                 agent_id: None,
                 name,
                 capabilities: vec![],
@@ -3314,6 +3330,7 @@ async fn test_persistent_room_rename_is_authorized_scoped_and_reconnect_visible(
         frame_type: FrameType::Register,
         payload: serde_json::to_value(RegisterPayload {
             key: key_a.clone(),
+            session: None,
             agent_id: Some("rename-stashed".into()),
             name: "stashed".into(),
             capabilities: vec![],

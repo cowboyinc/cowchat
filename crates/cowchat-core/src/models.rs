@@ -88,6 +88,11 @@ pub struct ChatMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterPayload {
     pub key: String,
+    /// Member sessions authenticate with a principal-bound, single-use server
+    /// challenge instead of receiving the transport API key. The server
+    /// derives the canonical agent ID from the verified principal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionProof>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     pub name: String,
@@ -101,6 +106,78 @@ pub struct RegisterPayload {
     /// pre-versioning clients, which the server treats as version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_version: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionProof {
+    pub nonce: String,
+    pub principal_signature: String,
+    pub possession_signature: String,
+}
+
+pub const SESSION_CHALLENGE_DOMAIN: &str = "cowchat-session-v1";
+pub const SESSION_POSSESSION_DOMAIN: &str = "cowchat-session-possession-v1";
+pub const SESSION_BROWSER_AUDIENCE: &str = "cowchat-browser";
+pub const SESSION_MEMBER_AUDIENCE: &str = "cowchat-member";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionChallengeRequest {
+    pub principal_address: String,
+    pub session_public_key: String,
+    pub audience: String,
+    pub endpoint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionChallengeResponse {
+    pub server_id: String,
+    pub endpoint: String,
+    pub audience: String,
+    pub origin: String,
+    pub principal_address: String,
+    pub session_public_key: String,
+    pub nonce: String,
+    pub expires_at_ms: u64,
+}
+
+impl SessionChallengeResponse {
+    /// Canonical bytes signed by both browser wallets and native member keys.
+    pub fn statement(&self) -> String {
+        format!(
+            "{SESSION_CHALLENGE_DOMAIN}\nserver:{}\nendpoint:{}\naudience:{}\norigin:{}\nprincipal:{}\nsession:{}\nnonce:{}\nexpires:{}",
+            self.server_id,
+            self.endpoint,
+            self.audience,
+            self.origin,
+            self.principal_address,
+            self.session_public_key,
+            self.nonce,
+            self.expires_at_ms,
+        )
+    }
+}
+
+pub fn session_challenge_digest(challenge: &SessionChallengeResponse) -> [u8; 32] {
+    use sha3::{Digest as _, Keccak256};
+    Keccak256::digest(challenge.statement().as_bytes()).into()
+}
+
+pub fn session_possession_statement(challenge_digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut digest = String::with_capacity(64);
+    for byte in challenge_digest {
+        write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{SESSION_POSSESSION_DOMAIN}\nchallenge:{digest}")
+}
+
+pub fn session_possession_digest(challenge_digest: &[u8; 32]) -> [u8; 32] {
+    use sha3::{Digest as _, Keccak256};
+    Keccak256::digest(session_possession_statement(challenge_digest).as_bytes()).into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -635,4 +712,31 @@ pub enum ActorWorkOutcome {
     Replied,
     Skipped,
     Failed,
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn session_challenge_has_a_fixed_cross_client_digest() {
+        let challenge = SessionChallengeResponse {
+            server_id: "ab".repeat(32),
+            endpoint: "wss://chat.example/ws".into(),
+            audience: SESSION_BROWSER_AUDIENCE.into(),
+            origin: "https://dashboard.example".into(),
+            principal_address: format!("0x{}", "11".repeat(20)),
+            session_public_key: format!("0x02{}", "22".repeat(32)),
+            nonce: "A".repeat(43),
+            expires_at_ms: 1_700_000_000_000,
+        };
+        assert_eq!(
+            session_challenge_digest(&challenge),
+            [
+                0x25, 0x59, 0x48, 0x00, 0xe9, 0x3e, 0x85, 0x1b, 0x85, 0x63, 0x87, 0x61, 0x6d, 0xc6,
+                0x7f, 0x83, 0x01, 0xab, 0x57, 0x16, 0xa6, 0xa6, 0x9f, 0x49, 0x80, 0xa9, 0x76, 0x2c,
+                0x0e, 0x02, 0xa3, 0xaf,
+            ]
+        );
+    }
 }

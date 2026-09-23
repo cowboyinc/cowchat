@@ -25,7 +25,8 @@ fn missing_chain_credentials_exit_without_local_fallback_or_key_disclosure() {
         "admin_key_file":dir.path().join("admin.seed"),
         "broker_url":"wss://broker.example/ws", "broker_pin":null,
         "archive_volume":"archive", "control_volume":"control", "api_key_file":api_key,
-        "http_addr":"127.0.0.1:19440", "http_origins":[], "session_seconds":600
+        "http_addr":"127.0.0.1:19440", "http_origins":[],
+        "public_ws_url":"ws://127.0.0.1:19440/ws", "session_seconds":600
     })).unwrap()).unwrap();
     for command in ["hosted-serve", "hosted-init"] {
         let mut process = Command::new(env!("CARGO_BIN_EXE_cowchat-server"));

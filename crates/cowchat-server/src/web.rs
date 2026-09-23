@@ -18,9 +18,11 @@ use crate::broker::Broker;
 use crate::rate_limit::RateLimiter;
 use crate::reconnect::ReconnectManager;
 use crate::server::connection_loop;
+use crate::session_auth::SessionAuth;
 use crate::store::Store;
 use crate::tasks::TaskManager;
 use crate::voting::VoteManager;
+use cowchat_core::SessionChallengeRequest;
 
 const ADMIN_HEADER: &str = "x-cowchat-admin";
 const API_KEY_HEADER: &str = "x-cowchat-key";
@@ -79,6 +81,7 @@ pub struct AppState {
     pub admin_secret: Option<String>,
     pub allowed_origins: Vec<String>,
     pub trusted_proxy_ips: Vec<IpAddr>,
+    pub session_auth: Option<Arc<SessionAuth>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -86,6 +89,10 @@ pub fn router(state: AppState) -> Router {
     let hosted = state.broker.is_hosted();
     let router = Router::new()
         .route("/ws", get(ws_handler))
+        .route(
+            "/auth/session/challenge",
+            post(issue_session_challenge).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
         .route("/api/keys", post(create_api_key))
         .route("/api/invites/redeem", post(redeem_invite))
         .route("/api/status", get(api_status))
@@ -136,6 +143,32 @@ pub fn router(state: AppState) -> Router {
     }
 }
 
+async fn issue_session_challenge(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<SessionChallengeRequest>,
+) -> axum::response::Response {
+    let Some(session_auth) = state.session_auth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !origin_allowed(&headers, &state.allowed_origins) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let client_ip = signup_bucket(peer, &headers, &state.trusted_proxy_ips);
+    if !state.rate_limiter.try_register_session(&client_ip) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    match session_auth.issue(request, origin) {
+        Ok(challenge) => Json(challenge).into_response(),
+        Err(_) => json_error(StatusCode::BAD_REQUEST, "Invalid session request"),
+    }
+}
+
 // --- WebSocket handler ---
 
 fn origin_allowed(headers: &HeaderMap, allowed: &[String]) -> bool {
@@ -156,11 +189,16 @@ async fn ws_handler(
     if !origin_allowed(&headers, &state.allowed_origins) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, state, origin))
         .into_response()
 }
 
-async fn handle_ws_connection(ws: WebSocket, state: AppState) {
+async fn handle_ws_connection(ws: WebSocket, state: AppState, origin: String) {
     let (mut ws_sender, mut ws_receiver) = ws.split();
 
     // Create an in-memory duplex stream (bidirectional pipe)
@@ -224,6 +262,7 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
     let reconnect_mgr = state.reconnect_mgr;
     let task_mgr = state.task_mgr;
     let webhook_mgr = state.webhook_mgr;
+    let session_auth = state.session_auth;
     let transport_disconnect = Arc::new(tokio::sync::Notify::new());
     let connection_disconnect = transport_disconnect.clone();
 
@@ -241,6 +280,8 @@ async fn handle_ws_connection(ws: WebSocket, state: AppState) {
             reconnect_mgr,
             task_mgr,
             webhook_mgr,
+            session_auth,
+            Some(origin),
             Some(connection_disconnect),
         )
         .await;
@@ -734,9 +775,14 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cowchat_core::{ErrorCode, ErrorPayload, Frame, FrameType, RegisterPayload};
+    use cowchat_core::{ErrorCode, ErrorPayload, Frame, FrameType, RegisterPayload, SessionProof};
     use dashmap::DashMap;
-    use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
+    use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+    use rand::rngs::OsRng;
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{client::IntoClientRequest, Message as ClientMessage},
+    };
 
     fn test_state() -> AppState {
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -758,6 +804,9 @@ mod tests {
             admin_secret: None,
             allowed_origins: vec![],
             trusted_proxy_ips: vec![],
+            session_auth: Some(Arc::new(
+                SessionAuth::new([0xab; 32], "wss://chat.example/ws".into()).unwrap(),
+            )),
         }
     }
 
@@ -776,6 +825,189 @@ mod tests {
         (server, addr)
     }
 
+    async fn issue_test_session(addr: SocketAddr) -> (SessionProof, String) {
+        let wallet = SigningKey::random(&mut OsRng);
+        let ephemeral = SigningKey::random(&mut OsRng);
+        let principal_address = crate::session_auth::address_for_key(wallet.verifying_key());
+        let request = reqwest::Client::new()
+            .post(format!("http://{addr}/auth/session/challenge"))
+            .header(header::ORIGIN, "https://dashboard.example")
+            .json(&serde_json::json!({
+                "principal_address": principal_address,
+                "session_public_key": format!(
+                    "0x{}",
+                    hex::encode(ephemeral.verifying_key().to_encoded_point(true).as_bytes())
+                ),
+                "audience": cowchat_core::SESSION_BROWSER_AUDIENCE,
+                "endpoint": "wss://chat.example/ws",
+            }));
+        let challenge = request
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<cowchat_core::SessionChallengeResponse>()
+            .await
+            .unwrap();
+        let digest = cowchat_core::session_challenge_digest(&challenge);
+        let (principal_signature, recovery) = wallet.sign_prehash_recoverable(&digest).unwrap();
+        let mut principal_signature = principal_signature.to_bytes().to_vec();
+        principal_signature.push(recovery.to_byte());
+        let possession: Signature = ephemeral
+            .sign_prehash(&cowchat_core::session_possession_digest(&digest))
+            .unwrap();
+        (
+            SessionProof {
+                nonce: challenge.nonce,
+                principal_signature: format!("0x{}", hex::encode(principal_signature)),
+                possession_signature: format!("0x{}", hex::encode(possession.to_bytes())),
+            },
+            principal_address,
+        )
+    }
+
+    async fn register_test_session(addr: SocketAddr, proof: SessionProof, key: &str) -> Frame {
+        let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, "https://dashboard.example".parse().unwrap());
+        let (mut socket, _) = connect_async(request).await.unwrap();
+        socket
+            .send(ClientMessage::Text(
+                Frame {
+                    id: Some("session-register".into()),
+                    reply_to: None,
+                    frame_type: FrameType::Register,
+                    payload: serde_json::to_value(RegisterPayload {
+                        key: key.into(),
+                        session: Some(proof),
+                        agent_id: Some("attacker-selected".into()),
+                        name: "Wallet user".into(),
+                        capabilities: vec![],
+                        reconnect: true,
+                        protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+                    })
+                    .unwrap(),
+                }
+                .to_line()
+                .unwrap()
+                .trim_end()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let reply = socket.next().await.unwrap().unwrap();
+        let reply = Frame::from_line(reply.to_text().unwrap()).unwrap();
+        socket.close(None).await.unwrap();
+        reply
+    }
+
+    #[tokio::test]
+    async fn member_session_rejects_a_transport_api_key() {
+        let mut state = test_state();
+        state.allowed_origins = vec!["https://dashboard.example".into()];
+        let observed = state.clone();
+        let (server, addr) = start_test_web_server(state).await;
+        let (proof, principal_address) = issue_test_session(addr).await;
+
+        let reply = register_test_session(addr, proof, "master").await;
+        assert_eq!(reply.frame_type, FrameType::Error);
+        assert_eq!(reply.payload["code"], "invalid_payload");
+        assert!(!observed
+            .broker
+            .agents
+            .contains_key(&format!("member:{principal_address}")));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn browser_challenge_registers_only_the_server_derived_wallet_principal() {
+        let mut state = test_state();
+        state.allowed_origins = vec!["https://dashboard.example".into()];
+        let observed = state.clone();
+        let (server, addr) = start_test_web_server(state).await;
+
+        let wallet = SigningKey::random(&mut OsRng);
+        let ephemeral = SigningKey::random(&mut OsRng);
+        let principal_address = crate::session_auth::address_for_key(wallet.verifying_key());
+        let challenge = reqwest::Client::new()
+            .post(format!("http://{addr}/auth/session/challenge"))
+            .header(header::ORIGIN, "https://dashboard.example")
+            .json(&serde_json::json!({
+                "principal_address": principal_address,
+                "session_public_key": format!(
+                    "0x{}",
+                    hex::encode(ephemeral.verifying_key().to_encoded_point(true).as_bytes())
+                ),
+                "audience": cowchat_core::SESSION_BROWSER_AUDIENCE,
+                "endpoint": "wss://chat.example/ws",
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<cowchat_core::SessionChallengeResponse>()
+            .await
+            .unwrap();
+        let digest = cowchat_core::session_challenge_digest(&challenge);
+        let (principal_signature, recovery) = wallet.sign_prehash_recoverable(&digest).unwrap();
+        let mut principal_signature = principal_signature.to_bytes().to_vec();
+        principal_signature.push(recovery.to_byte());
+        let possession: Signature = ephemeral
+            .sign_prehash(&cowchat_core::session_possession_digest(&digest))
+            .unwrap();
+
+        let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, "https://dashboard.example".parse().unwrap());
+        let (mut socket, _) = connect_async(request).await.unwrap();
+        socket
+            .send(ClientMessage::Text(
+                Frame {
+                    id: Some("wallet-register".into()),
+                    reply_to: None,
+                    frame_type: FrameType::Register,
+                    payload: serde_json::to_value(RegisterPayload {
+                        key: String::new(),
+                        session: Some(SessionProof {
+                            nonce: challenge.nonce,
+                            principal_signature: format!("0x{}", hex::encode(principal_signature)),
+                            possession_signature: format!(
+                                "0x{}",
+                                hex::encode(possession.to_bytes())
+                            ),
+                        }),
+                        // This must be ignored rather than becoming the identity.
+                        agent_id: Some("attacker-selected".into()),
+                        name: "Wallet user".into(),
+                        capabilities: vec![],
+                        reconnect: true,
+                        protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+                    })
+                    .unwrap(),
+                }
+                .to_line()
+                .unwrap()
+                .trim_end()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let reply = socket.next().await.unwrap().unwrap();
+        let reply = Frame::from_line(reply.to_text().unwrap()).unwrap();
+        let expected_id = format!("member:{principal_address}");
+        assert_eq!(reply.payload["agent_id"], expected_id);
+        let connection = observed.broker.agents.get(&expected_id).unwrap();
+        assert!(connection.api_key.is_empty());
+        assert_eq!(connection.member_address, Some(principal_address));
+        drop(connection);
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn websocket_delivers_terminal_registration_error_before_closing() {
         let (server, addr) = start_test_web_server(test_state()).await;
@@ -786,6 +1018,7 @@ mod tests {
             frame_type: FrameType::Register,
             payload: serde_json::to_value(RegisterPayload {
                 key: "wrong-key".into(),
+                session: None,
                 agent_id: None,
                 name: "invalid-agent".into(),
                 capabilities: vec![],
@@ -840,6 +1073,7 @@ mod tests {
             frame_type: FrameType::Register,
             payload: serde_json::to_value(RegisterPayload {
                 key: "master".into(),
+                session: None,
                 agent_id: Some(agent_id.into()),
                 name: "cleanup-agent".into(),
                 capabilities: vec![],
@@ -918,6 +1152,7 @@ mod tests {
             frame_type: FrameType::Register,
             payload: serde_json::to_value(RegisterPayload {
                 key: "master".into(),
+                session: None,
                 agent_id: Some(agent_id.into()),
                 name: "cancel-agent".into(),
                 capabilities: vec![],

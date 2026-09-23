@@ -7,6 +7,17 @@ use super::*;
 use crate::{CowchatServer, ServerConfig};
 use cowchat_client::{ClientError, CowchatClient};
 use cowchat_core::{ErrorCode, FrameType};
+#[cfg(feature = "room-key-demo")]
+use {
+    commonware_codec::Encode,
+    cowboy_protocol_codec::{
+        room_policy::{
+            RoomCustodyCommitmentV1, RoomKeyPolicyV1, RoomPolicyIdentityV1, SignedRoomKeyPolicyV1,
+        },
+        Address, EthSignature,
+    },
+    k256::ecdsa::SigningKey,
+};
 
 struct Network {
     server: Arc<CowchatServer>,
@@ -69,6 +80,7 @@ impl Network {
             admin_secret: None,
             allowed_origins: vec![],
             trusted_proxy_ips: vec![],
+            session_auth: None,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let http_address = listener.local_addr().unwrap().to_string();
@@ -96,7 +108,7 @@ impl Network {
                         connections.spawn(async move {
                             let _=crate::server::connection_loop(read,write,server.broker().clone(),server.store().clone(),votes,
                                 server.api_key().into(),false,false,server.rate_limiter().clone(),server.reconnect_mgr().clone(),
-                                server.task_mgr().clone(),webhooks,None).await;
+                                server.task_mgr().clone(),webhooks,None,None,None).await;
                         });
                     }
                     _=connections.join_next(),if !connections.is_empty()=>{}
@@ -188,6 +200,150 @@ async fn next_message(
     })
     .await
     .unwrap()
+}
+
+#[cfg(feature = "room-key-demo")]
+fn request(frame_type: FrameType, payload: serde_json::Value) -> cowchat_core::Frame {
+    cowchat_core::Frame {
+        id: Some(uuid::Uuid::new_v4().to_string()),
+        reply_to: None,
+        frame_type,
+        payload,
+    }
+}
+
+#[cfg(feature = "room-key-demo")]
+#[tokio::test]
+async fn hosted_member_dispatch_uses_the_signed_roster() {
+    let fixture = Fixture::new().await;
+    let (control, volume) = Storage::new().await;
+    let mut writers = control.initialize_writers(volume).await;
+    let (storage, volume) = Storage::new().await;
+    let directory = private_directory();
+    let mut runtime = recover(
+        promote(&fixture, &mut writers).await,
+        storage.initialize_archive(volume).await,
+        &directory.path().join("intents.sqlite"),
+    )
+    .await;
+
+    let owner = SigningKey::from_bytes((&[0x11; 32]).into()).unwrap();
+    let member = SigningKey::from_bytes((&[0x22; 32]).into()).unwrap();
+    let member_address = Address::from_verifying_key(member.verifying_key());
+    let policy = RoomKeyPolicyV1 {
+        identity: RoomPolicyIdentityV1 {
+            chain_id: 1,
+            chain_instance_id: [1; 32],
+            service_id: [2; 32],
+            owner: Address::from_verifying_key(owner.verifying_key()),
+            room_id: "one".into(),
+        },
+        policy_epoch: 0,
+        active_key_epoch: 0,
+        members: vec![member_address],
+        keys: vec![RoomCustodyCommitmentV1 {
+            key_epoch: 0,
+            scope_hash: [3; 32],
+            ciphertext_hash: [4; 32],
+        }],
+    };
+    let signed = SignedRoomKeyPolicyV1 {
+        owner_signature: EthSignature::sign(&owner, &policy.signing_hash()),
+        policy,
+    };
+    let mut prepare = key_prepare("one", 0, None);
+    let CommandBody::PrepareKeyEpoch { preparation, .. } = &mut prepare.body else {
+        unreachable!();
+    };
+    preparation.signed_policy = hex::encode(signed.encode());
+    runtime
+        .submit(vec![create("one", 0), prepare, key_cutover("one", 0, None)])
+        .await
+        .unwrap();
+
+    let network = Network::new(runtime).await;
+    let hosted = network.server.broker().hosted.get().unwrap();
+    let member = format!("0x{}", hex::encode(member_address.as_bytes()));
+    let outsider = format!("0x{}", "44".repeat(20));
+    macro_rules! call {
+        ($frame:expr, $agent:expr, $principal:expr $(,)?) => {
+            hosted.handle(
+                $frame,
+                $agent,
+                $agent,
+                "",
+                $principal,
+                network.server.broker(),
+                network.server.store(),
+                network.server.rate_limiter(),
+                network.server.reconnect_mgr(),
+            )
+        };
+    }
+
+    let listed = call!(
+        request(FrameType::ListRooms, serde_json::json!({})),
+        "member",
+        Some(&member),
+    )
+    .await;
+    assert_eq!(listed.payload["rooms"].as_array().unwrap().len(), 1);
+    let hidden = call!(
+        request(FrameType::ListRooms, serde_json::json!({})),
+        "outsider",
+        Some(&outsider),
+    )
+    .await;
+    assert!(hidden.payload["rooms"].as_array().unwrap().is_empty());
+
+    let joined = call!(
+        request(FrameType::JoinRoom, serde_json::json!({"room_id":"one"})),
+        "member",
+        Some(&member),
+    )
+    .await;
+    assert_eq!(joined.frame_type, FrameType::Ok);
+    let sent = call!(
+        request(
+            FrameType::SendMessage,
+            serde_json::json!({
+                "message_id":"member-message", "room_id":"one",
+                "content":"cow1:opaque", "key_epoch":"0",
+                "reply_to":null, "metadata":{}, "mentions":[]
+            }),
+        ),
+        "member",
+        Some(&member),
+    )
+    .await;
+    assert_ne!(sent.frame_type, FrameType::Error);
+    let history = call!(
+        request(FrameType::GetHistory, serde_json::json!({"room_id":"one"})),
+        "member",
+        Some(&member),
+    )
+    .await;
+    assert_eq!(history.payload["messages"].as_array().unwrap().len(), 1);
+
+    for frame in [
+        request(FrameType::JoinRoom, serde_json::json!({"room_id":"one"})),
+        request(FrameType::GetHistory, serde_json::json!({"room_id":"one"})),
+        request(
+            FrameType::SendMessage,
+            serde_json::json!({
+                "message_id":"outsider-message", "room_id":"one",
+                "content":"cow1:opaque", "key_epoch":"0",
+                "reply_to":null, "metadata":{}, "mentions":[]
+            }),
+        ),
+        request(
+            FrameType::GetRoomKeyContext,
+            serde_json::json!({"room_id":"one","member":outsider}),
+        ),
+    ] {
+        let denied = call!(frame, "outsider", Some(&outsider)).await;
+        assert_eq!(denied.payload["code"], "access_denied");
+    }
 }
 
 #[tokio::test]

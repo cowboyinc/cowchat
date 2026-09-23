@@ -542,6 +542,7 @@ impl CowchatClient {
             frame_type: FrameType::Register,
             payload: serde_json::to_value(RegisterPayload {
                 key: key.to_string(),
+                session: None,
                 agent_id: agent_id.map(String::from),
                 name: name.to_string(),
                 capabilities,
