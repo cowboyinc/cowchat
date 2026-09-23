@@ -13,6 +13,11 @@ use rand_core::OsRng;
 use sha3::{Digest, Keccak256};
 use zeroize::Zeroizing;
 
+/// Clock skew tolerated on the challenge expiry. The server stays authoritative
+/// (60-second TTL, single use); this only avoids refusing a valid challenge on a
+/// fast local clock.
+const CHALLENGE_SKEW_MS: u64 = 5 * 60 * 1000;
+
 fn keccak(bytes: &[u8]) -> [u8; 32] {
     Keccak256::digest(bytes).into()
 }
@@ -75,7 +80,7 @@ pub(crate) fn prove(
         || !challenge.origin.is_empty()
         || challenge.principal_address != member_address(member)
         || challenge.session_public_key != session_public_key(session)
-        || challenge.expires_at_ms <= now_ms
+        || challenge.expires_at_ms.saturating_add(CHALLENGE_SKEW_MS) <= now_ms
     {
         return Err(auth(
             "session challenge does not match this member and server",
@@ -303,6 +308,8 @@ impl CowchatClient {
 mod tests {
     use super::*;
 
+    const NOW: u64 = 10_000_000;
+
     fn challenge(member: &SigningKey, session: &SigningKey) -> SessionChallengeResponse {
         SessionChallengeResponse {
             server_id: hex::encode([7u8; 32]),
@@ -312,7 +319,7 @@ mod tests {
             principal_address: member_address(member),
             session_public_key: session_public_key(session),
             nonce: "nonce".to_string(),
-            expires_at_ms: 2_000,
+            expires_at_ms: NOW + 60_000,
         }
     }
 
@@ -327,7 +334,7 @@ mod tests {
             &[7; 32],
             &member,
             &session,
-            1_000,
+            NOW,
         )
         .unwrap();
 
@@ -347,7 +354,7 @@ mod tests {
             |c| c.audience = "cowchat-browser".to_string(),
             |c| c.origin = "https://evil.example".to_string(),
             |c| c.principal_address = "0x0000000000000000000000000000000000000001".to_string(),
-            |c| c.expires_at_ms = 1_000,
+            |c| c.expires_at_ms = NOW - CHALLENGE_SKEW_MS,
         ];
         for mutate in mutations {
             let mut bad = good.clone();
@@ -358,7 +365,7 @@ mod tests {
                 &[7; 32],
                 &member,
                 &session,
-                1_000
+                NOW
             )
             .is_err());
         }
