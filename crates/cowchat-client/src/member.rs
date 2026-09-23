@@ -102,6 +102,87 @@ pub(crate) fn prove(
     })
 }
 
+/// The owner plus `members`, lowercased, sorted and deduplicated: the only
+/// roster form room policies accept.
+fn canonical_roster(owner: &str, members: &[String]) -> Result<Vec<String>, ClientError> {
+    let mut roster = vec![owner.to_string()];
+    for member in members {
+        let member = member.to_ascii_lowercase();
+        let hex = member.strip_prefix("0x").unwrap_or(&member);
+        if hex.len() != 40 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(auth("member must be a 0x-prefixed 20-byte address"));
+        }
+        roster.push(format!("0x{hex}"));
+    }
+    roster.sort_unstable();
+    roster.dedup();
+    Ok(roster)
+}
+
+/// A hosted Cowchat service as registered on chain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedService {
+    pub service_id: [u8; 32],
+    pub operator: String,
+    pub endpoint: String,
+}
+
+/// Find a hosted Cowchat service in the chain's registry
+/// (`GET <rpc_url>/cowchat/services`). With `operator`, the service that
+/// operator runs; otherwise the chain must list exactly one.
+pub async fn discover_hosted_service(
+    rpc_url: &str,
+    operator: Option<&str>,
+) -> Result<HostedService, ClientError> {
+    let url = format!("{}/cowchat/services", rpc_url.trim_end_matches('/'));
+    let response = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| ClientError::Ws(e.to_string()))?;
+    if !response.status().is_success() {
+        return Err(auth("chain service registry unavailable"));
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|_| auth("invalid chain service registry"))?;
+    let invalid = || auth("invalid chain service registry");
+    let mut services = Vec::new();
+    for entry in body
+        .get("services")
+        .and_then(|v| v.as_array())
+        .ok_or_else(invalid)?
+    {
+        let field = |name: &str| entry.get(name).and_then(|v| v.as_str()).ok_or_else(invalid);
+        let mut service_id = [0u8; 32];
+        hex::decode_to_slice(
+            field("service_id")?.trim_start_matches("0x"),
+            &mut service_id,
+        )
+        .map_err(|_| invalid())?;
+        services.push(HostedService {
+            service_id,
+            operator: field("operator")?.to_ascii_lowercase(),
+            endpoint: field("endpoint")?.to_string(),
+        });
+    }
+    match operator {
+        Some(operator) => {
+            let operator = operator.to_ascii_lowercase();
+            services
+                .into_iter()
+                .find(|s| s.operator == operator)
+                .ok_or_else(|| auth("no Cowchat service registered by that operator"))
+        }
+        None if services.len() == 1 => Ok(services.remove(0)),
+        None if services.is_empty() => Err(auth("no Cowchat service is registered on this chain")),
+        None => Err(auth(
+            "several Cowchat services are registered; choose one by operator",
+        )),
+    }
+}
+
 impl CowchatClient {
     /// Register as `member:<address>` of the hosted service `service_id`,
     /// without the transport key. Aborts unless the server's challenge names
@@ -210,6 +291,98 @@ impl CowchatClient {
         let key: [u8; 32] = key.as_slice().try_into().map_err(|_| invalid())?;
         self.set_hosted_room_key(room_id, key_epoch, key);
         Ok(key_epoch)
+    }
+
+    /// Create an encrypted hosted room owned by `owner`, the member this
+    /// session proved. Every pinned holder attests the owner-signed setup
+    /// before this client wraps a fresh room key; the key never leaves this
+    /// process and is held as epoch 0 for this session.
+    pub async fn create_hosted_room(
+        &mut self,
+        name: &str,
+        owner: &SigningKey,
+        service_id: &[u8; 32],
+        members: &[String],
+    ) -> Result<cowchat_core::Room, ClientError> {
+        use cowboy_protocol_client_crypto::room_setup::SetupAttempt;
+        use rand_core::RngCore;
+
+        let invalid = || auth("invalid room key setup context");
+        let room_id = uuid::Uuid::new_v4().to_string();
+        let owner_address = member_address(owner);
+        let roster = canonical_roster(&owner_address, members)?;
+        let mut prepare =
+            serde_json::json!({"room_id": room_id, "name": name, "owner": owner_address});
+        if roster.len() > 1 {
+            prepare["members"] = serde_json::json!(roster);
+        }
+        let context = self
+            .request(FrameType::PrepareRoomKey, prepare)
+            .await?
+            .payload;
+        let setup = context
+            .get("setup")
+            .filter(|v| v.is_object())
+            .ok_or_else(invalid)?;
+        let scope = context
+            .get("scope")
+            .filter(|v| v.is_object())
+            .ok_or_else(invalid)?;
+        let secret = Zeroizing::new(owner.to_bytes());
+        let attempt = SetupAttempt::prepare(&setup.to_string(), secret.as_slice(), now_ms()?)
+            .map_err(|e| auth(&e))?;
+        // Release the owner-signed request only for exactly the room asked for.
+        let intent: serde_json::Value = serde_json::from_str(&attempt.intent_projection())?;
+        if intent["service_id"] != format!("0x{}", hex::encode(service_id))
+            || intent["owner"] != owner_address
+            || intent["room_id"] != room_id
+            || intent["policy_epoch"] != "0"
+            || intent["key_epoch"] != "0"
+            || intent["members"] != serde_json::json!(roster)
+        {
+            return Err(auth("room key setup does not match the requested room"));
+        }
+        let attested = self
+            .request(
+                FrameType::AttestRoomKeySetup,
+                serde_json::json!({"request": hex::encode(attempt.request_bytes())}),
+            )
+            .await?
+            .payload;
+        let responses = attested
+            .get("responses")
+            .filter(|v| {
+                v.as_array()
+                    .is_some_and(|a| a.iter().all(|r| r.is_string()))
+            })
+            .ok_or_else(|| auth("invalid room key setup response"))?;
+        let mut key = Zeroizing::new([0u8; 32]);
+        OsRng.fill_bytes(key.as_mut_slice());
+        let preparation = attempt
+            .finalize_initial(
+                &responses.to_string(),
+                &scope.to_string(),
+                key.as_slice(),
+                secret.as_slice(),
+                now_ms()?,
+                &mut OsRng,
+            )
+            .map_err(|e| auth(&e))?;
+        let preparation: serde_json::Value = serde_json::from_str(&preparation)?;
+        let activated = self
+            .request(
+                FrameType::ActivateRoomKey,
+                serde_json::json!({"room_id": room_id, "name": name, "preparation": preparation}),
+            )
+            .await?
+            .payload;
+        let room: cowchat_core::Room = serde_json::from_value(activated)
+            .map_err(|_| auth("invalid encrypted-room activation"))?;
+        if room.room_id != room_id || !room.encrypted {
+            return Err(auth("invalid encrypted-room activation"));
+        }
+        self.set_hosted_room_key(&room_id, 0, *key);
+        Ok(room)
     }
 }
 
@@ -382,6 +555,87 @@ mod tests {
         assert_eq!(id, actor_reply_id(&member, &input));
         assert_ne!(id, actor_reply_id(&other, &input));
         assert_ne!(id, actor_reply_id(&member, "another-input"));
+    }
+
+    /// Serve `body` once per connection as a JSON HTTP response.
+    async fn registry(body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn discovery_picks_the_only_service_or_the_named_operator() {
+        let one = registry(concat!(
+            r#"{"services":[{"service_id":"0x"#,
+            "0707070707070707070707070707070707070707070707070707070707070707",
+            r#"","operator":"0xAA00000000000000000000000000000000000001","endpoint":"wss://a.example/ws","registered_at_block":3}]}"#
+        ))
+        .await;
+        let found = discover_hosted_service(&one, None).await.unwrap();
+        assert_eq!(found.service_id, [7; 32]);
+        assert_eq!(found.endpoint, "wss://a.example/ws");
+        assert_eq!(
+            discover_hosted_service(&one, Some("0xaa00000000000000000000000000000000000001"))
+                .await
+                .unwrap(),
+            found
+        );
+        assert!(discover_hosted_service(&one, Some("0x01")).await.is_err());
+
+        let none = registry(r#"{"services":[]}"#).await;
+        assert!(discover_hosted_service(&none, None).await.is_err());
+
+        let two = registry(concat!(
+            r#"{"services":[{"service_id":"0x"#,
+            "0707070707070707070707070707070707070707070707070707070707070707",
+            r#"","operator":"0x01","endpoint":"wss://a.example/ws"},{"service_id":"0x"#,
+            "0808080808080808080808080808080808080808080808080808080808080808",
+            r#"","operator":"0x02","endpoint":"wss://b.example/ws"}]}"#
+        ))
+        .await;
+        assert!(discover_hosted_service(&two, None).await.is_err());
+        let b = discover_hosted_service(&two, Some("0x02")).await.unwrap();
+        assert_eq!(
+            (b.service_id, b.endpoint.as_str()),
+            ([8; 32], "wss://b.example/ws")
+        );
+    }
+
+    #[test]
+    fn roster_is_canonical_and_always_holds_the_owner() {
+        let owner = "0x0000000000000000000000000000000000000002";
+        let roster = canonical_roster(
+            owner,
+            &[
+                "0xAA00000000000000000000000000000000000003".to_string(),
+                "0x0000000000000000000000000000000000000001".to_string(),
+                owner.to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            roster,
+            [
+                "0x0000000000000000000000000000000000000001",
+                owner,
+                "0xaa00000000000000000000000000000000000003",
+            ]
+        );
+        assert_eq!(canonical_roster(owner, &[]).unwrap(), [owner]);
+        assert!(canonical_roster(owner, &["0x01".to_string()]).is_err());
     }
 
     #[test]
