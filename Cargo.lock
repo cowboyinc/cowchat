@@ -645,7 +645,7 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 [[package]]
 name = "cbfs-auth"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -671,7 +671,7 @@ dependencies = [
 [[package]]
 name = "cbfs-cli"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -716,7 +716,7 @@ dependencies = [
 [[package]]
 name = "cbfs-crypto"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -737,7 +737,7 @@ dependencies = [
 [[package]]
 name = "cbfs-erasure"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "blake3",
  "cbfs-types",
@@ -748,7 +748,7 @@ dependencies = [
 [[package]]
 name = "cbfs-hooks"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "async-trait",
  "bincode",
@@ -776,7 +776,7 @@ dependencies = [
 [[package]]
 name = "cbfs-manifest"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "blake3",
  "cbfs-crypto",
@@ -787,7 +787,7 @@ dependencies = [
 [[package]]
 name = "cbfs-placement"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "async-trait",
  "bincode",
@@ -800,7 +800,7 @@ dependencies = [
 [[package]]
 name = "cbfs-registry-proto"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "aes-gcm",
  "bincode",
@@ -821,7 +821,7 @@ dependencies = [
 [[package]]
 name = "cbfs-sdk"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -852,7 +852,7 @@ dependencies = [
 [[package]]
 name = "cbfs-store"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "cbfs-types",
  "serde",
@@ -864,7 +864,7 @@ dependencies = [
 [[package]]
 name = "cbfs-transport"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "async-trait",
  "bincode",
@@ -883,7 +883,7 @@ dependencies = [
 [[package]]
 name = "cbfs-types"
 version = "0.1.4"
-source = "git+https://github.com/cowboyinc/cbfs.git?rev=11ea7cafb41d5d0193bf962a24edbb5b3f28a030#11ea7cafb41d5d0193bf962a24edbb5b3f28a030"
+source = "git+https://github.com/cowboyinc/cbfs.git?rev=05286e90d81b91b347184fb7dec7a3ce3dbe6706#05286e90d81b91b347184fb7dec7a3ce3dbe6706"
 dependencies = [
  "bincode",
  "blake3",
@@ -898,7 +898,7 @@ dependencies = [
 [[package]]
 name = "cbqs-client"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cbqs.git?rev=8d0fabbadbe8d78534c85e23a65a6e264856edb7#8d0fabbadbe8d78534c85e23a65a6e264856edb7"
+source = "git+https://github.com/cowboyinc/cbqs.git?rev=16b12e8cd5f01e9ab2e78ba80d808a6f5a25fcda#16b12e8cd5f01e9ab2e78ba80d808a6f5a25fcda"
 dependencies = [
  "chacha20poly1305",
  "commonware-codec",
@@ -919,7 +919,7 @@ dependencies = [
 [[package]]
 name = "cbqsd"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cbqs.git?rev=8d0fabbadbe8d78534c85e23a65a6e264856edb7#8d0fabbadbe8d78534c85e23a65a6e264856edb7"
+source = "git+https://github.com/cowboyinc/cbqs.git?rev=16b12e8cd5f01e9ab2e78ba80d808a6f5a25fcda#16b12e8cd5f01e9ab2e78ba80d808a6f5a25fcda"
 dependencies = [
  "axum",
  "commonware-codec",
@@ -947,7 +947,7 @@ dependencies = [
 [[package]]
 name = "cbss-client"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=2bd1a952957e161792b2c39073d7ab7acc94fb23#2bd1a952957e161792b2c39073d7ab7acc94fb23"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=7983163788ab43d07c381ab8eec8cf093097b5e0#7983163788ab43d07c381ab8eec8cf093097b5e0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -984,7 +984,7 @@ dependencies = [
 [[package]]
 name = "cbss-crypto"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=2bd1a952957e161792b2c39073d7ab7acc94fb23#2bd1a952957e161792b2c39073d7ab7acc94fb23"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=7983163788ab43d07c381ab8eec8cf093097b5e0#7983163788ab43d07c381ab8eec8cf093097b5e0"
 dependencies = [
  "aes-gcm",
  "blstrs",
@@ -1012,12 +1012,12 @@ dependencies = [
 [[package]]
 name = "cbss-types"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=2bd1a952957e161792b2c39073d7ab7acc94fb23#2bd1a952957e161792b2c39073d7ab7acc94fb23"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=7983163788ab43d07c381ab8eec8cf093097b5e0#7983163788ab43d07c381ab8eec8cf093097b5e0"
 
 [[package]]
 name = "cbssd"
 version = "0.0.9"
-source = "git+https://github.com/cowboyinc/cbss.git?rev=2bd1a952957e161792b2c39073d7ab7acc94fb23#2bd1a952957e161792b2c39073d7ab7acc94fb23"
+source = "git+https://github.com/cowboyinc/cbss.git?rev=7983163788ab43d07c381ab8eec8cf093097b5e0#7983163788ab43d07c381ab8eec8cf093097b5e0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1695,7 +1695,7 @@ checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 [[package]]
 name = "cowboy-protocol-activation"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=9dc74291e75ffc7ce2f8e410a7440991ee50d3fc#9dc74291e75ffc7ce2f8e410a7440991ee50d3fc"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=5e9645ad70bf701f9b8e51bdd61ed036ef811985#5e9645ad70bf701f9b8e51bdd61ed036ef811985"
 dependencies = [
  "serde",
  "serde_json",
@@ -1706,7 +1706,7 @@ dependencies = [
 [[package]]
 name = "cowboy-protocol-cbss-crypto"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=9dc74291e75ffc7ce2f8e410a7440991ee50d3fc#9dc74291e75ffc7ce2f8e410a7440991ee50d3fc"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=5e9645ad70bf701f9b8e51bdd61ed036ef811985#5e9645ad70bf701f9b8e51bdd61ed036ef811985"
 dependencies = [
  "blstrs",
  "ff",
@@ -1720,7 +1720,7 @@ dependencies = [
 [[package]]
 name = "cowboy-protocol-client-crypto"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=9dc74291e75ffc7ce2f8e410a7440991ee50d3fc#9dc74291e75ffc7ce2f8e410a7440991ee50d3fc"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=5e9645ad70bf701f9b8e51bdd61ed036ef811985#5e9645ad70bf701f9b8e51bdd61ed036ef811985"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1748,7 +1748,7 @@ dependencies = [
 [[package]]
 name = "cowboy-protocol-codec"
 version = "0.3.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=9dc74291e75ffc7ce2f8e410a7440991ee50d3fc#9dc74291e75ffc7ce2f8e410a7440991ee50d3fc"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=5e9645ad70bf701f9b8e51bdd61ed036ef811985#5e9645ad70bf701f9b8e51bdd61ed036ef811985"
 dependencies = [
  "blake3",
  "bytes",
@@ -1769,7 +1769,7 @@ dependencies = [
 [[package]]
 name = "cowboy-protocol-light-client"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=9dc74291e75ffc7ce2f8e410a7440991ee50d3fc#9dc74291e75ffc7ce2f8e410a7440991ee50d3fc"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=5e9645ad70bf701f9b8e51bdd61ed036ef811985#5e9645ad70bf701f9b8e51bdd61ed036ef811985"
 dependencies = [
  "blake3",
  "commonware-codec",
@@ -1785,7 +1785,7 @@ dependencies = [
 [[package]]
 name = "cowboy-protocol-service-release"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=9dc74291e75ffc7ce2f8e410a7440991ee50d3fc#9dc74291e75ffc7ce2f8e410a7440991ee50d3fc"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=5e9645ad70bf701f9b8e51bdd61ed036ef811985#5e9645ad70bf701f9b8e51bdd61ed036ef811985"
 dependencies = [
  "blake3",
  "cowboy-protocol-codec",
@@ -1799,7 +1799,7 @@ dependencies = [
 [[package]]
 name = "cowboy-protocol-types"
 version = "0.1.0"
-source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=9dc74291e75ffc7ce2f8e410a7440991ee50d3fc#9dc74291e75ffc7ce2f8e410a7440991ee50d3fc"
+source = "git+https://github.com/cowboyinc/cowboy-protocol.git?rev=5e9645ad70bf701f9b8e51bdd61ed036ef811985#5e9645ad70bf701f9b8e51bdd61ed036ef811985"
 dependencies = [
  "ethereum-types",
  "hex",
