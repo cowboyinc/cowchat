@@ -23,8 +23,6 @@ use std::time::Duration;
 pub enum LogError {
     #[error("owner-stream configuration requires a finite epoch, full stream scope and a chain provider anchor")]
     Configuration,
-    #[error("replacement CBQS session rejected: {0}")]
-    Renewal(String),
     #[error("a newer owner epoch has already fenced this writer")]
     Fenced,
     #[error("CBQS operation failed; reacquire ownership and replay before retrying")]
@@ -183,34 +181,29 @@ impl CbqsOwnerLog {
         })
     }
 
-    /// Open before swapping. Cancellation/failure leaves the old session intact.
-    /// No subscriptions survive an operation: replay cursors use fresh IDs and
-    /// are closed before returning. Dropping the replaced session closes its socket.
-    pub async fn renew_session(
+    /// Swap in a replacement session the caller attached with `grant` outside
+    /// the writer lock. No subscriptions survive an operation: replay cursors
+    /// use fresh IDs and are closed before returning. Dropping the replaced
+    /// session closes its socket.
+    pub fn swap_session(
         &mut self,
-        socket: Socket,
-        config: SessionConfig,
-        now_ms: u64,
+        session: SessionV2,
+        grant: wire::StreamGrantV2,
     ) -> Result<(), LogError> {
         if !self.usable.load(Ordering::Relaxed) {
             return Err(LogError::Unavailable);
         }
         let mut expected = self.grant.clone();
-        expected.grant_nonce = config.grant.grant_nonce;
-        expected.not_before_ms = config.grant.not_before_ms;
-        expected.expires_at_ms = config.grant.expires_at_ms;
-        expected.signature = config.grant.signature;
-        if expected != config.grant
-            || config.grant.grant_nonce == self.grant.grant_nonce
-            || config.grant.expires_at_ms <= self.grant.expires_at_ms
-            || config.holder.verifying_key().to_bytes() != self.holder
+        expected.grant_nonce = grant.grant_nonce;
+        expected.not_before_ms = grant.not_before_ms;
+        expected.expires_at_ms = grant.expires_at_ms;
+        expected.signature = grant.signature;
+        if expected != grant
+            || grant.grant_nonce == self.grant.grant_nonce
+            || grant.expires_at_ms <= self.grant.expires_at_ms
         {
             return Err(LogError::Configuration);
         }
-        let grant = config.grant.clone();
-        let session = SessionV2::attach(socket, config, now_ms)
-            .await
-            .map_err(|error| LogError::Renewal(format!("{error:?}")))?;
         self.session = session;
         self.grant = grant;
         Ok(())

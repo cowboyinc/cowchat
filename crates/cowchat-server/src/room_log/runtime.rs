@@ -295,14 +295,13 @@ impl OwnerRuntime {
     }
 
     #[cfg(feature = "hosted-bootstrap")]
-    pub(crate) async fn renew_session(
+    pub(crate) fn swap_session(
         &mut self,
-        socket: cbqs_client::Socket,
-        config: cbqs_client::SessionConfig,
-        now_ms: u64,
+        session: cbqs_client::SessionV2,
+        grant: cowboy_protocol_codec::cbqs_v2::StreamGrantV2,
     ) -> Result<(), RuntimeError> {
         self.ensure_usable()?;
-        self.log.renew_session(socket, config, now_ms).await?;
+        self.log.swap_session(session, grant)?;
         self.ensure_usable()
     }
 

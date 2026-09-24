@@ -29,7 +29,7 @@ fn missing_chain_credentials_exit_without_local_fallback_or_key_disclosure() {
         "public_ws_url":"ws://127.0.0.1:19440/ws", "grant_ttl_seconds":600
     })).unwrap()).unwrap();
     // The old lifetime cap is removed, not retained as an alias. Omitting the
-    // replacement setting selects the 900-second default.
+    // replacement setting selects the 86400-second default.
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
     value.as_object_mut().unwrap().remove("grant_ttl_seconds");
     fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();

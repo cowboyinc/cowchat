@@ -19,7 +19,7 @@ use cbfs_cli::{
 use cbfs_registry_proto::AccessMode;
 use cbqs_client::{
     chain_view_v2, AuthenticatedStreamViewV2, CheckpointTrustV2, PinnedBrokerEndpoint,
-    SessionConfig,
+    SessionConfig, SessionV2,
 };
 #[cfg(feature = "room-keys")]
 use cbssd::room_deployment::CompiledRoomDeployment;
@@ -47,7 +47,7 @@ const MAX_COWCHAT_SERVICES: usize = 256;
 const MAX_COWCHAT_SERVICES_RESPONSE_BYTES: usize = 256 * 1024;
 const SAFETY_MS: u64 = 30_000;
 const fn default_grant_ttl_seconds() -> u64 {
-    900
+    86_400
 }
 const fn default_max_rooms_per_wallet() -> usize {
     100
@@ -970,7 +970,9 @@ impl Renewal {
         Ok((instant + Duration::from_millis(remaining)).min(self.delegation_horizon))
     }
 
-    async fn renew(&mut self, runtime: &mut OwnerRuntime) -> Result<()> {
+    /// Token minting and the new broker session happen without the writer
+    /// lock; the lock covers only the session swap and horizon advance.
+    async fn renew(&mut self, writer: &tokio::sync::Mutex<OwnerRuntime>) -> Result<()> {
         for token in &mut self.tokens {
             let minted = (token.mint)().map_err(anyhow::Error::msg)?;
             ensure!(
@@ -991,21 +993,23 @@ impl Renewal {
             expiry,
         );
         let socket = connect_broker(&self.config).await?;
-        runtime
-            .renew_session(
-                socket,
-                SessionConfig {
-                    broker_url: self.config.broker_url.clone(),
-                    grant,
-                    holder: self.holder.clone(),
-                    handshake_timeout: Duration::from_secs(30),
-                    checkpoints: CheckpointTrustV2::ChainProvider(Box::new(
-                        self.auth.view.provider().clone(),
-                    )),
-                },
-                now_ms()?,
-            )
-            .await?;
+        let session = SessionV2::attach(
+            socket,
+            SessionConfig {
+                broker_url: self.config.broker_url.clone(),
+                grant: grant.clone(),
+                holder: self.holder.clone(),
+                handshake_timeout: Duration::from_secs(30),
+                checkpoints: CheckpointTrustV2::ChainProvider(Box::new(
+                    self.auth.view.provider().clone(),
+                )),
+            },
+            now_ms()?,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("replacement CBQS session rejected: {error:?}"))?;
+        let mut runtime = writer.lock().await;
+        runtime.swap_session(session, grant)?;
         self.grant_expiry = expiry;
         let horizon = self.new_horizon()?;
         // The fixed delegation ceiling cannot advance with clock conversion
@@ -1036,8 +1040,7 @@ impl Renewal {
             let horizon = self.horizon;
             let attempt = async {
                 tokio::time::sleep_until(next.into()).await;
-                let mut runtime = writer.lock().await;
-                tokio::time::timeout(IO_TIMEOUT, self.renew(&mut runtime))
+                tokio::time::timeout(IO_TIMEOUT, self.renew(writer))
                     .await
                     .context("hosted credential renewal timed out")?
             };
@@ -1055,9 +1058,13 @@ impl Renewal {
                     // Half the remaining safe lifetime is before 2/3 grant TTL,
                     // and also respects shorter CBFS credentials/delegation.
                     let delay = self.horizon.saturating_duration_since(Instant::now()) / 2;
-                    next = Instant::now()
-                        + delay.clamp(Duration::from_secs(1), Duration::from_secs(3600));
-                    log::info!("Hosted credentials renewed at writer epoch {}", self.epoch);
+                    let delay = delay.max(Duration::from_secs(1));
+                    next = Instant::now() + delay;
+                    log::info!(
+                        "Hosted credentials renewed at writer epoch {}; next renewal in {}s",
+                        self.epoch,
+                        delay.as_secs()
+                    );
                 }
                 Err(error) => {
                     log::error!(
@@ -1224,7 +1231,7 @@ mod tests {
     #[test]
     fn grant_ttl_bounds_allow_a_day_without_capping_process_lifetime() {
         let (_directory, mut config) = config();
-        assert_eq!(default_grant_ttl_seconds(), 900);
+        assert_eq!(default_grant_ttl_seconds(), 86_400);
         for ttl in [120, 900, 3601, 86400] {
             config.grant_ttl_seconds = ttl;
             config.validate().unwrap();

@@ -5,7 +5,7 @@ mod cbfs_archive_tests;
 use super::cbqs::{CbqsOwnerLog, LogError};
 use super::*;
 use axum::{routing::get, Router};
-use cbqs_client::{CheckpointTrustV2, SessionConfig};
+use cbqs_client::{CheckpointTrustV2, SessionConfig, SessionV2};
 use cbqsd::{
     activation::RuntimeCompatibility,
     store_v2::StoreV2,
@@ -316,7 +316,9 @@ async fn renewal_swaps_same_epoch_sessions_and_replay_uses_fresh_subscriptions()
     let socket = cbqs_client::connect_socket(&config.broker_url)
         .await
         .unwrap();
-    log.renew_session(socket, config, now_ms()).await.unwrap();
+    let grant = config.grant.clone();
+    let session = SessionV2::attach(socket, config, now_ms()).await.unwrap();
+    log.swap_session(session, grant).unwrap();
     assert_eq!(log.epoch(), 1);
     let second = log.append(0, &tests::create("after", 8)).await.unwrap();
     let after = log
@@ -328,19 +330,20 @@ async fn renewal_swaps_same_epoch_sessions_and_replay_uses_fresh_subscriptions()
 }
 
 #[tokio::test]
-async fn rejected_renewal_leaves_old_session_usable() {
+async fn rejected_replacement_grant_leaves_old_session_usable() {
     let fixture = Fixture::new().await;
     let mut log = fixture.connect(1).await.unwrap();
-    let mut config = fixture.config(1);
-    config.grant.grant_nonce = [0x88; 32];
-    config.grant.expires_at_ms += 60_000;
-    // Signature deliberately does not cover the replacement fields.
+    // A validly signed, broker-admitted session whose grant widens nothing
+    // but reuses the current nonce and expiry is not a renewal.
+    let config = fixture.config(1);
+    let grant = config.grant.clone();
     let socket = cbqs_client::connect_socket(&config.broker_url)
         .await
         .unwrap();
+    let session = SessionV2::attach(socket, config, now_ms()).await.unwrap();
     assert!(matches!(
-        log.renew_session(socket, config, now_ms()).await,
-        Err(LogError::Renewal(_))
+        log.swap_session(session, grant),
+        Err(LogError::Configuration)
     ));
     assert!(log
         .append(0, &tests::create("still-active", 7))

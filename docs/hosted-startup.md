@@ -132,10 +132,11 @@ list, join and leave; unsupported coordination/REST paths fail closed.
 
 ## Credential renewal and remaining live gate
 
-`grant_ttl_seconds` controls each CBQS grant's lifetime (default 900 seconds,
+`grant_ttl_seconds` controls each CBQS grant's lifetime (default 86400 seconds,
 range 120 through 86400). There is no process-lifetime cap. The hosted owner
-renews before two thirds of the TTL, opening a fresh checked/pinned socket at
-the same writer epoch and swapping sessions without fencing. Replay cursors
+renews at half the remaining credential lifetime (about every 12 hours by
+default), opening a fresh checked/pinned session at the same writer epoch
+without the writer lock, then swapping it in without fencing. Replay cursors
 use fresh subscription IDs. CBFS control and archive owner tokens renew using
 the access mode each volume was opened with.
 
