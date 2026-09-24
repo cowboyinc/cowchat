@@ -84,3 +84,5 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 cowchat-client = { workspace = true, features = ["member"] }
 tempfile = "3"
 tokio-tungstenite = "0.26"
+
+cbfs-auth = { git = "https://github.com/cowboyinc/cbfs.git", rev = "c052f6d0e4b01333059a3ed3243507c78b80669d" }

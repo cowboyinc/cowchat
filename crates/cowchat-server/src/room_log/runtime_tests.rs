@@ -343,6 +343,37 @@ async fn key_cutover_waits_for_archive_and_recovers_same_transition_after_cancel
 }
 
 #[tokio::test]
+async fn credential_horizon_advance_keeps_broker_writes_usable() {
+    let fixture = Fixture::new().await;
+    let (control, volume) = Storage::new().await;
+    let mut writers = control.initialize_writers(volume).await;
+    let (storage, volume) = Storage::new().await;
+    let directory = private_directory();
+    let mut runtime = recover(
+        promote(&fixture, &mut writers).await,
+        storage.initialize_archive(volume).await,
+        &directory.path().join("intents.sqlite"),
+    )
+    .await;
+    let original = std::time::Instant::now() + Duration::from_millis(50);
+    runtime.advance_horizon(original).unwrap();
+    runtime
+        .advance_horizon(original + Duration::from_secs(30))
+        .unwrap();
+    tokio::time::sleep_until(original.into()).await;
+    runtime
+        .submit(vec![create("after-renewal", 0)])
+        .await
+        .unwrap();
+    assert!(runtime
+        .view()
+        .read()
+        .unwrap()
+        .room("after-renewal")
+        .is_some());
+}
+
+#[tokio::test]
 async fn credential_deadline_retires_reads_and_prevents_new_broker_writes() {
     let fixture = Fixture::new().await;
     let (control, volume) = Storage::new().await;
@@ -358,11 +389,11 @@ async fn credential_deadline_retires_reads_and_prevents_new_broker_writes() {
     .await;
     runtime.submit(vec![create("one", 0)]).await.unwrap();
     let view = runtime.view();
-    assert!(runtime.expire_at(std::time::Instant::now()).is_err());
+    assert!(runtime.advance_horizon(std::time::Instant::now()).is_err());
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
-    runtime.expire_at(deadline).unwrap();
+    runtime.advance_horizon(deadline).unwrap();
     assert!(runtime
-        .expire_at(deadline + std::time::Duration::from_secs(1))
+        .advance_horizon(deadline - std::time::Duration::from_millis(1))
         .is_err());
     tokio::time::sleep_until(deadline.into()).await;
     assert!(matches!(view.read(), Err(RuntimeError::Retired)));

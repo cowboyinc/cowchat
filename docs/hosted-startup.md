@@ -73,7 +73,7 @@ Example configuration (replace every placeholder with actual provisioned data):
   "public_ws_url": "wss://chat.example/ws",
   "max_rooms_per_wallet": 100,
   "max_pending_rooms_per_wallet": 4,
-  "session_seconds": 600
+  "grant_ttl_seconds": 600
 }
 ```
 
@@ -130,15 +130,24 @@ files hold local identity bookkeeping and pending intents, not hosted history.
 The chat-first surface supports private encrypted room creation, send, history,
 list, join and leave; unsupported coordination/REST paths fail closed.
 
-## Bounded lifetime and remaining live gate
+## Credential renewal and remaining live gate
 
-This entrypoint runs a bounded session, **not an automatically renewing daemon**.
-`session_seconds` must be 120 through 3600. It stops 30 seconds before the
-earliest configured session, CBQS grant, CBFS attachment or delegation expiry.
-Recovery consumes that budget. The runtime independently retires reads and
-writes at the deadline even if the listener shutdown task is delayed. A restart
-requires explicit promotion and recovery; a service manager must not guess the
-next epoch. Automatic credential renewal is follow-up work.
+`grant_ttl_seconds` controls each CBQS grant's lifetime (default 900 seconds,
+range 120 through 86400). There is no process-lifetime cap. The hosted owner
+renews before two thirds of the TTL, opening a fresh checked/pinned socket at
+the same writer epoch and swapping sessions without fencing. Replay cursors
+use fresh subscription IDs. CBFS control and archive owner tokens renew using
+the access mode each volume was opened with.
+
+The runtime retires reads and writes 30 seconds before the earliest grant,
+owner token, or wallet-signed delegation expiry. Renewal failures are logged
+and retried with bounded backoff; the horizon still expires independently of
+blocked writes or renewal I/O, and hosted-serve exits non-zero. The 30-day
+wallet-signed CBFS delegation cannot renew in process: an error is logged
+within its final 24 hours. Arrange operator renewal and a controlled restart
+before that ceiling. A restart still requires explicit promotion and recovery;
+a service manager must not guess the next epoch. Credential refresh adds no
+persistent state and does not change intent staging, commit, or crash replay.
 
 Local boundary tests do not establish River E2E. The live acceptance run must
 use this executable against finalized chain authority, real CBQS and CBFS:

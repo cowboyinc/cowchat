@@ -297,6 +297,58 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn renewal_swaps_same_epoch_sessions_and_replay_uses_fresh_subscriptions() {
+    let fixture = Fixture::new().await;
+    let mut config = fixture.config(1);
+    let old_expiry = config.grant.expires_at_ms;
+    let mut log = fixture.connect(1).await.unwrap();
+    let first = log.append(0, &tests::create("before", 7)).await.unwrap();
+    let before = log.replay(None, first, 100, 1_000_000).await.unwrap();
+    config.grant.grant_nonce = [0x88; 32];
+    config.grant.expires_at_ms = old_expiry + 60_000;
+    config.grant.signature = wire::CbqsSignatureV2(
+        key(0xA1)
+            .sign(&cowboy_protocol_codec::keccak256(
+                &wire::stream_grant_signing_bytes_v2(&config.grant),
+            ))
+            .to_bytes(),
+    );
+    let socket = cbqs_client::connect_socket(&config.broker_url)
+        .await
+        .unwrap();
+    log.renew_session(socket, config, now_ms()).await.unwrap();
+    assert_eq!(log.epoch(), 1);
+    let second = log.append(0, &tests::create("after", 8)).await.unwrap();
+    let after = log
+        .replay(before.checkpoint.as_ref(), second, 100, 1_000_000)
+        .await
+        .unwrap();
+    assert_eq!(after.records.len(), 1);
+    assert_eq!(after.records[0].sequence, second);
+}
+
+#[tokio::test]
+async fn rejected_renewal_leaves_old_session_usable() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.connect(1).await.unwrap();
+    let mut config = fixture.config(1);
+    config.grant.grant_nonce = [0x88; 32];
+    config.grant.expires_at_ms += 60_000;
+    // Signature deliberately does not cover the replacement fields.
+    let socket = cbqs_client::connect_socket(&config.broker_url)
+        .await
+        .unwrap();
+    assert!(matches!(
+        log.renew_session(socket, config, now_ms()).await,
+        Err(LogError::Renewal(_))
+    ));
+    assert!(log
+        .append(0, &tests::create("still-active", 7))
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
 async fn fence_does_not_allocate_exclusive_ownership_between_same_epoch_holders() {
     let fixture = Fixture::new().await;
     let mut first = fixture.connect(1).await.unwrap();

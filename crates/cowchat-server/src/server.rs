@@ -505,6 +505,17 @@ impl CowchatServer {
 
     /// Start the server, listening on UDS, TCP, and/or HTTP (as configured).
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(feature = "hosted-bootstrap")]
+        if let Some(hosted) = self.broker.hosted.get() {
+            return tokio::select! {
+                result = self.run_listeners() => result,
+                result = hosted.renew_credentials() => result.map_err(Into::into),
+            };
+        }
+        self.run_listeners().await
+    }
+
+    async fn run_listeners(&self) -> Result<(), Box<dyn std::error::Error>> {
         let prepared = self
             .listeners
             .lock()
