@@ -118,6 +118,8 @@ fn remint_preserves_authority_and_signs_fresh_nonce_and_lifetime() {
     };
     let renewed = remint_grant(old.clone(), &admin, 81000, 201000);
     assert_ne!(renewed.grant_nonce, old.grant_nonce);
+    let again = remint_grant(old.clone(), &admin, 81000, 201000);
+    assert_ne!(again.grant_nonce, renewed.grant_nonce);
     assert_eq!(renewed.not_before_ms, 81000);
     assert_eq!(renewed.expires_at_ms, 201000);
     admin
@@ -133,4 +135,99 @@ fn remint_preserves_authority_and_signs_fresh_nonce_and_lifetime() {
     expected.expires_at_ms = renewed.expires_at_ms;
     expected.signature = renewed.signature;
     assert_eq!(renewed, expected);
+}
+
+/// Never attaches: these tests cover only the horizon arithmetic.
+struct Unused;
+
+impl Issue for Unused {
+    async fn attach(
+        &mut self,
+        _: u64,
+        _: u64,
+    ) -> Result<(SessionV2, wire::StreamGrantV2), Failure> {
+        unreachable!()
+    }
+}
+
+pub(super) fn token(expires_at_ms: u64) -> cbfs_cli::token_refresh::OwnerTokenRefresh {
+    cbfs_cli::token_refresh::OwnerTokenRefresh {
+        mint: Box::new(move || {
+            Ok(cbfs_cli::token_refresh::MintedToken {
+                token_bytes: vec![1],
+                expires_at_ms,
+            })
+        }),
+        http_config: cbfs_hooks::cowboy::CowboyHttpConfig::new("http://127.0.0.1:1"),
+        initial_expires_at_ms: expires_at_ms,
+    }
+}
+
+fn remaining(horizon: Instant) -> u64 {
+    horizon
+        .saturating_duration_since(Instant::now())
+        .as_millis() as u64
+}
+
+#[test]
+fn horizon_is_the_earliest_credential_less_the_safety_margin() {
+    let now = now_ms().unwrap();
+    let hour = 3_600_000;
+    for (grant, delegation, tokens, earliest) in [
+        (
+            now + hour,
+            now + 2 * hour,
+            [now + 3 * hour, now + 3 * hour],
+            hour,
+        ),
+        (
+            now + 3 * hour,
+            now + hour,
+            [now + 3 * hour, now + 3 * hour],
+            hour,
+        ),
+        (
+            now + 3 * hour,
+            now + 3 * hour,
+            [now + 3 * hour, now + hour],
+            hour,
+        ),
+    ] {
+        let renewal =
+            Renewal::new(Unused, hour, 1, grant, delegation, tokens.map(token).into()).unwrap();
+        let left = remaining(renewal.horizon());
+        assert!(left <= earliest - SAFETY_MS && left + 1_000 >= earliest - SAFETY_MS);
+    }
+}
+
+#[test]
+fn horizon_never_exceeds_the_delegation() {
+    let now = now_ms().unwrap();
+    let mut renewal = Renewal::new(
+        Unused,
+        86_400_000,
+        1,
+        now + 60_000,
+        now + 120_000,
+        vec![token(now + 86_400_000)],
+    )
+    .unwrap();
+    renewal.grant_expiry = now + 86_400_000;
+    assert!(renewal.new_horizon().unwrap() <= renewal.delegation_horizon);
+    assert!(remaining(renewal.new_horizon().unwrap()) <= 120_000 - SAFETY_MS);
+}
+
+#[test]
+fn credentials_inside_the_safety_margin_refuse_to_start() {
+    let now = now_ms().unwrap();
+    let far = now + 3_600_000;
+    for (grant, delegation, expiry) in [
+        (now + SAFETY_MS - 1, far, far),
+        (far, now + SAFETY_MS - 1, far),
+        (far, far, now + SAFETY_MS - 1),
+    ] {
+        assert!(
+            Renewal::new(Unused, 3_600_000, 1, grant, delegation, vec![token(expiry)]).is_err()
+        );
+    }
 }

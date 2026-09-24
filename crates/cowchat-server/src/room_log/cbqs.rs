@@ -209,6 +209,21 @@ impl CbqsOwnerLog {
         Ok(())
     }
 
+    /// One authorized read on the current session. A fenced, revoked, or
+    /// expired session fails it and latches the log unusable.
+    pub async fn probe(&mut self) -> Result<(), LogError> {
+        match self
+            .request(Request::ListLanes {
+                after_lane_id: None,
+                limit: 1,
+            })
+            .await?
+        {
+            Response::Lanes { .. } => Ok(()),
+            _ => self.fail(LogError::Verification),
+        }
+    }
+
     pub fn epoch(&self) -> u64 {
         self.epoch
     }

@@ -72,8 +72,7 @@ Example configuration (replace every placeholder with actual provisioned data):
   "http_origins": ["https://dashboard.example"],
   "public_ws_url": "wss://chat.example/ws",
   "max_rooms_per_wallet": 100,
-  "max_pending_rooms_per_wallet": 4,
-  "grant_ttl_seconds": 600
+  "max_pending_rooms_per_wallet": 4
 }
 ```
 
@@ -133,7 +132,7 @@ list, join and leave; unsupported coordination/REST paths fail closed.
 ## Credential renewal and remaining live gate
 
 `grant_ttl_seconds` controls each CBQS grant's lifetime (default 86400 seconds,
-range 120 through 86400). There is no process-lifetime cap. The hosted owner
+range 600 through 86400). There is no process-lifetime cap. The hosted owner
 renews at half the remaining credential lifetime (about every 12 hours by
 default), opening a fresh checked/pinned session at the same writer epoch
 without the writer lock, then swapping it in without fencing. Replay cursors
@@ -141,9 +140,14 @@ use fresh subscription IDs. CBFS control and archive owner tokens renew using
 the access mode each volume was opened with.
 
 The runtime retires reads and writes 30 seconds before the earliest grant,
-owner token, or wallet-signed delegation expiry. Renewal failures are logged
-and retried with bounded backoff; the horizon still expires independently of
-blocked writes or renewal I/O, and hosted-serve exits non-zero. The 30-day
+owner token, or wallet-signed delegation expiry. Transient renewal failures
+(broker unreachable, timeout, token mint error) are logged and retried with
+bounded backoff; the horizon still expires independently of blocked writes or
+renewal I/O. A broker refusal that no retry can clear (stream not active,
+authorization generation stale, invalid grant, policy epoch stale) or a
+rejected swap retires the worker at once. Every 15 seconds the owner also
+makes one read on its current session, so a fenced or revoked writer retires
+within that interval even when idle. In each case hosted-serve exits non-zero. The 30-day
 wallet-signed CBFS delegation cannot renew in process: an error is logged
 within its final 24 hours. Arrange operator renewal and a controlled restart
 before that ceiling. A restart still requires explicit promotion and recovery;

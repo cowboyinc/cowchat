@@ -271,6 +271,11 @@ impl Fixture {
             checkpoints: CheckpointTrustV2::ChainProvider(Box::new(provider)),
         }
     }
+    fn config_clone(&self, template: &SessionConfig) -> SessionConfig {
+        let mut config = self.config(template.grant.policy_epoch);
+        config.grant = template.grant.clone();
+        config
+    }
     async fn connect(&self, epoch: u64) -> Result<CbqsOwnerLog, LogError> {
         self.connect_config(self.config(epoch)).await
     }
@@ -884,4 +889,93 @@ async fn cancelling_an_append_after_commit_retires_the_uncertain_session() {
     let recovered = next.replay_from_start(1, 10, 100_000).await.unwrap();
     assert_eq!(recovered.len(), 1);
     assert_eq!(recovered[0].command.command_id, command.command_id);
+}
+
+fn resign(grant: &mut wire::StreamGrantV2) {
+    grant.signature = wire::CbqsSignatureV2(
+        key(0xA1)
+            .sign(&cowboy_protocol_codec::keccak256(
+                &wire::stream_grant_signing_bytes_v2(grant),
+            ))
+            .to_bytes(),
+    );
+}
+
+async fn attach_session(mut config: SessionConfig, grant: &wire::StreamGrantV2) -> SessionV2 {
+    config.grant = grant.clone();
+    let socket = cbqs_client::connect_socket(&config.broker_url)
+        .await
+        .unwrap();
+    SessionV2::attach(socket, config, now_ms()).await.unwrap()
+}
+
+#[tokio::test]
+async fn swapped_session_outlives_the_original_grant() {
+    let fixture = Fixture::new().await;
+    let mut short = fixture.config(1);
+    short.grant.expires_at_ms = now_ms() + 3_000;
+    resign(&mut short.grant);
+    let mut stale = fixture
+        .connect_config(fixture.config_clone(&short))
+        .await
+        .unwrap();
+    let mut log = fixture
+        .connect_config(fixture.config_clone(&short))
+        .await
+        .unwrap();
+    let mut grant = short.grant.clone();
+    grant.grant_nonce = [0x88; 32];
+    grant.expires_at_ms = now_ms() + 3_600_000;
+    resign(&mut grant);
+    let session = attach_session(fixture.config(1), &grant).await;
+    log.swap_session(session, grant).unwrap();
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    // The unswapped control proves the original grant really lapsed.
+    assert!(stale.append(0, &tests::create("stale", 7)).await.is_err());
+    log.append(0, &tests::create("renewed", 8)).await.unwrap();
+    log.probe().await.unwrap();
+}
+
+#[tokio::test]
+async fn swap_rejects_authority_change_non_extension_and_nonce_reuse() {
+    let fixture = Fixture::new().await;
+    let config = fixture.config(1);
+    let current = config.grant.clone();
+    let mut log = fixture.connect_config(config).await.unwrap();
+    let mut narrowed = current.clone();
+    narrowed.verbs = wire::CBQS_V2_VERB_APPEND | wire::CBQS_V2_VERB_REPLAY;
+    narrowed.grant_nonce = [0x90; 32];
+    narrowed.expires_at_ms += 60_000;
+    let mut same_expiry = current.clone();
+    same_expiry.grant_nonce = [0x91; 32];
+    let mut reused_nonce = current.clone();
+    reused_nonce.expires_at_ms += 60_000;
+    for (name, mut grant) in [
+        ("authority change", narrowed),
+        ("expiry must extend", same_expiry),
+        ("nonce reuse", reused_nonce),
+    ] {
+        resign(&mut grant);
+        let session = attach_session(fixture.config(1), &grant).await;
+        assert!(
+            matches!(
+                log.swap_session(session, grant),
+                Err(LogError::Configuration)
+            ),
+            "{name}"
+        );
+    }
+    log.append(0, &tests::create("still-active", 7))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn probe_detects_a_fence_by_a_later_epoch() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.connect(1).await.unwrap();
+    log.probe().await.unwrap();
+    let _next = fixture.connect(2).await.unwrap();
+    assert!(matches!(log.probe().await, Err(LogError::Fenced)));
+    assert!(matches!(log.probe().await, Err(LogError::Unavailable)));
 }
