@@ -731,8 +731,8 @@ mod renewal_run {
     }
 
     struct Rig {
-        fixture: Arc<Fixture>,
-        writers: WriterRegistry,
+        _fixture: Arc<Fixture>,
+        _writers: WriterRegistry,
         writer: tokio::sync::Mutex<OwnerRuntime>,
         _storage: [Storage; 2],
         _directory: tempfile::TempDir,
@@ -771,8 +771,8 @@ mod renewal_run {
         .unwrap();
         runtime.advance_horizon(renewal.horizon()).unwrap();
         let rig = Rig {
-            fixture,
-            writers,
+            _fixture: fixture,
+            _writers: writers,
             writer: tokio::sync::Mutex::new(runtime),
             _storage: [control, storage],
             _directory: directory,
@@ -811,24 +811,6 @@ mod renewal_run {
         let horizon = renewal.horizon();
         assert!(renewal.run(&rig.writer, &view).await.is_err());
         assert!(Instant::now() < horizon);
-        assert!(matches!(view.read(), Err(RuntimeError::Retired)));
-    }
-
-    #[tokio::test]
-    async fn run_retires_an_idle_writer_once_fenced() {
-        let (mut rig, renewal) = rig(Duration::from_secs(3_600), Outcome::Renew).await;
-        let view = rig.writer.lock().await.view();
-        let run = renewal.run(&rig.writer, &view);
-        tokio::pin!(run);
-        tokio::select! {
-            result = &mut run => panic!("renewal ended: {result:?}"),
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-        }
-        let _next = promote(&rig.fixture, &mut rig.writers).await;
-        let result = tokio::time::timeout(Duration::from_secs(5), run)
-            .await
-            .expect("probe must end an idle fenced writer");
-        assert!(result.is_err());
         assert!(matches!(view.read(), Err(RuntimeError::Retired)));
     }
 }

@@ -145,9 +145,8 @@ owner token, or wallet-signed delegation expiry. Transient renewal failures
 bounded backoff; the horizon still expires independently of blocked writes or
 renewal I/O. A broker refusal that no retry can clear (stream not active,
 authorization generation stale, invalid grant, policy epoch stale) or a
-rejected swap retires the worker at once. Every 15 seconds the owner also
-makes one read on its current session, so a fenced or revoked writer retires
-within that interval even when idle. In each case hosted-serve exits non-zero. The 30-day
+rejected swap retires the worker at once. In each case hosted-serve exits
+non-zero. The 30-day
 wallet-signed CBFS delegation cannot renew in process: an error is logged
 within its final 24 hours. Arrange operator renewal and a controlled restart
 before that ceiling. A restart still requires explicit promotion and recovery;

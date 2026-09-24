@@ -986,15 +986,6 @@ impl Issue for Issuer {
     }
 }
 
-/// How often an idle writer proves its session still holds authority. A
-/// fence or revocation otherwise surfaces only on the next write, and until
-/// then this process would keep serving reads it can no longer vouch for.
-const PROBE_INTERVAL: Duration = if cfg!(test) {
-    Duration::from_millis(200)
-} else {
-    Duration::from_secs(15)
-};
-
 /// Credential state belongs to this writer incarnation only. Nothing is
 /// persisted: a crash still follows the existing intent replay/fence path.
 pub(crate) struct Renewal<I = Issuer> {
@@ -1107,7 +1098,6 @@ impl<I: Issue> Renewal<I> {
     ) -> Result<()> {
         let mut backoff = Duration::from_secs(1);
         let mut next = Instant::now() + self.horizon.saturating_duration_since(Instant::now()) / 2;
-        let mut probe = Instant::now() + PROBE_INTERVAL;
         let mut warned = false;
         let horizon_reached = || {
             view.retire();
@@ -1124,14 +1114,6 @@ impl<I: Issue> Renewal<I> {
             tokio::select! {
                 biased;
                 _ = tokio::time::sleep_until(horizon.into()) => return Err(horizon_reached()),
-                _ = tokio::time::sleep_until(probe.into()) => {
-                    probe = Instant::now() + PROBE_INTERVAL;
-                    if let Err(error) = writer.lock().await.probe().await {
-                        view.retire();
-                        anyhow::bail!("Hosted writer lost broker authority: {error}; worker retired");
-                    }
-                    continue;
-                }
                 _ = tokio::time::sleep_until(next.into()) => {}
             }
             let prepared = tokio::select! {

@@ -933,7 +933,6 @@ async fn swapped_session_outlives_the_original_grant() {
     // The unswapped control proves the original grant really lapsed.
     assert!(stale.append(0, &tests::create("stale", 7)).await.is_err());
     log.append(0, &tests::create("renewed", 8)).await.unwrap();
-    log.probe().await.unwrap();
 }
 
 #[tokio::test]
@@ -968,14 +967,4 @@ async fn swap_rejects_authority_change_non_extension_and_nonce_reuse() {
     log.append(0, &tests::create("still-active", 7))
         .await
         .unwrap();
-}
-
-#[tokio::test]
-async fn probe_detects_a_fence_by_a_later_epoch() {
-    let fixture = Fixture::new().await;
-    let mut log = fixture.connect(1).await.unwrap();
-    log.probe().await.unwrap();
-    let _next = fixture.connect(2).await.unwrap();
-    assert!(matches!(log.probe().await, Err(LogError::Fenced)));
-    assert!(matches!(log.probe().await, Err(LogError::Unavailable)));
 }

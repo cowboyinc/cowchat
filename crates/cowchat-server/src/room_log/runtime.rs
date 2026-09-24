@@ -305,22 +305,6 @@ impl OwnerRuntime {
         self.ensure_usable()
     }
 
-    /// Confirms the broker still honors this writer's session. Any failure
-    /// retires the view, as a failed submit does.
-    #[cfg(feature = "hosted-bootstrap")]
-    pub(crate) async fn probe(&mut self) -> Result<(), RuntimeError> {
-        self.ensure_usable()?;
-        self.usable = false;
-        let mut retirement = RetireView {
-            view: self.view(),
-            completed: false,
-        };
-        self.log.probe().await?;
-        self.usable = true;
-        retirement.completed = true;
-        self.ensure_usable()
-    }
-
     fn read_state(&self) -> Result<RwLockReadGuard<'_, OwnerState>, RuntimeError> {
         self.view.state.read().map_err(|_| RuntimeError::Retired)
     }
