@@ -297,7 +297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 #[cfg(feature = "hosted-bootstrap")]
                 Commands::HostedServe { expected_epoch, .. } => {
                     let (config, _guard) = prepared.as_ref().expect("hosted preflight");
-                    let (runtime, deadline) =
+                    let runtime =
                         cowchat_server::hosted_bootstrap::recover(config, expected_epoch).await?;
                     #[cfg(feature = "room-keys")]
                     let server = CowchatServer::new_hosted_with_room_keys(
@@ -307,13 +307,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                     #[cfg(not(feature = "room-keys"))]
                     let server = CowchatServer::new_hosted(config.server_config(), runtime)?;
-                    log::info!("Hosted recovery complete; starting bounded authenticated session");
-                    tokio::select! {
-                        result = server.run() => result?,
-                        _ = tokio::time::sleep_until(deadline.into()) => {
-                            log::info!("Hosted credential deadline reached; stopping worker");
-                        }
-                    }
+                    log::info!("Hosted recovery complete; starting authenticated service with credential renewal");
+                    server.run().await?;
                 }
                 Commands::Serve {
                     socket,

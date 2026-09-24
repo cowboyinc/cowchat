@@ -19,7 +19,7 @@ use cbfs_cli::{
 use cbfs_registry_proto::AccessMode;
 use cbqs_client::{
     chain_view_v2, AuthenticatedStreamViewV2, CheckpointTrustV2, PinnedBrokerEndpoint,
-    SessionConfig,
+    SessionConfig, SessionV2,
 };
 #[cfg(feature = "room-keys")]
 use cbssd::room_deployment::CompiledRoomDeployment;
@@ -46,6 +46,9 @@ const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_COWCHAT_SERVICES: usize = 256;
 const MAX_COWCHAT_SERVICES_RESPONSE_BYTES: usize = 256 * 1024;
 const SAFETY_MS: u64 = 30_000;
+const fn default_grant_ttl_seconds() -> u64 {
+    86_400
+}
 const fn default_max_rooms_per_wallet() -> usize {
     100
 }
@@ -82,8 +85,8 @@ pub struct Config {
     max_rooms_per_wallet: usize,
     #[serde(default = "default_max_pending_rooms_per_wallet")]
     max_pending_rooms_per_wallet: usize,
-    /// This first entrypoint has a bounded process lifetime, not renewal.
-    session_seconds: u64,
+    #[serde(default = "default_grant_ttl_seconds")]
+    grant_ttl_seconds: u64,
 }
 
 /// Browser room-key coordinator. It owns only hosted service configuration;
@@ -310,8 +313,8 @@ impl Config {
             ensure!(path.is_absolute(), "hosted paths must be absolute");
         }
         ensure!(
-            (120..=3600).contains(&self.session_seconds),
-            "session_seconds must be 120..=3600"
+            (600..=86400).contains(&self.grant_ttl_seconds),
+            "grant_ttl_seconds must be 600..=86400"
         );
         ensure!(
             self.worker_dir.join("server.sock").as_os_str().len() < 100,
@@ -687,7 +690,7 @@ async fn volume_with_access(
     mount: bool,
 ) -> Result<VolumeContext> {
     // A hosted writer is a long-lived owner session, using the existing mount
-    // token lifetime with the same ReadWrite grant. No renewal or widening.
+    // token lifetime; renewal retains the access mode recorded in the context.
     let ctx = open_volume(
         &config.cbfs_state_dir,
         name,
@@ -786,24 +789,24 @@ pub async fn initialize(config: &Config, reserve_wei: u128, k: u8, m: u8) -> Res
     Ok(())
 }
 
-async fn attach(
-    config: &Config,
-    auth: &Authority,
-    worker: &WorkerIncarnation,
+fn mint_grant(
+    view: &AuthenticatedStreamViewV2,
+    admin: &SigningKey,
+    holder: &SigningKey,
     epoch: u64,
+    now: u64,
     expiry: u64,
-) -> Result<CbqsOwnerLog> {
-    let now = now_ms()?;
-    let mut grant = wire::StreamGrantV2 {
+) -> wire::StreamGrantV2 {
+    let grant = wire::StreamGrantV2 {
         version: wire::CBQS_VERSION_V2,
-        chain_instance_id: auth.view.chain_instance_id(),
-        stream_id: auth.view.stream().stream_id,
-        authorization_generation: auth.view.stream().authorization_generation,
+        chain_instance_id: view.chain_instance_id(),
+        stream_id: view.stream().stream_id,
+        authorization_generation: view.stream().authorization_generation,
         policy_epoch: epoch,
         grant_nonce: rand::random(),
         holder_signing_key: wire::SigningPublicKeyV2 {
             algorithm: wire::SigningKeyAlgorithmV2::Ed25519,
-            key_bytes: worker.holder().verifying_key().to_bytes(),
+            key_bytes: holder.verifying_key().to_bytes(),
         },
         verbs: wire::CBQS_V2_VERB_APPEND
             | wire::CBQS_V2_VERB_REPLAY
@@ -811,36 +814,46 @@ async fn attach(
             | wire::CBQS_V2_VERB_LANE_ADMIN,
         lane_scope: wire::LaneScopeV2::Any,
         group_scope: wire::GroupScopeV2::Any,
-        not_before_ms: now.saturating_sub(1000),
+        not_before_ms: now,
         expires_at_ms: expiry,
         max_message_bytes: 262_144,
         max_append_bytes_per_sec: 1_048_576,
         signature: wire::CbqsSignatureV2([0; 64]),
     };
+    remint_grant(grant, admin, now, expiry)
+}
+
+fn remint_grant(
+    mut grant: wire::StreamGrantV2,
+    admin: &SigningKey,
+    now: u64,
+    expiry: u64,
+) -> wire::StreamGrantV2 {
+    grant.grant_nonce = rand::random();
+    grant.not_before_ms = now;
+    grant.expires_at_ms = expiry;
     grant.signature = wire::CbqsSignatureV2(
-        auth.admin
+        admin
             .sign(&cowboy_protocol_codec::keccak256(
                 &wire::stream_grant_signing_bytes_v2(&grant),
             ))
             .to_bytes(),
     );
-    let (fence, session) = if let Some(pin) = &config.broker_pin {
+    grant
+}
+
+async fn connect_broker(config: &Config) -> Result<cbqs_client::Socket> {
+    if let Some(pin) = &config.broker_pin {
         let endpoint = PinnedBrokerEndpoint::new(
             &config.broker_url,
             pin.address,
             &read_file(&pin.certificate_der_file, false, 16 * 1024)?,
         )
         .map_err(|_| anyhow::anyhow!("invalid pinned broker endpoint"))?;
-        (
-            endpoint
-                .connect_socket(&config.broker_url)
-                .await
-                .map_err(|_| anyhow::anyhow!("pinned broker connection failed"))?,
-            endpoint
-                .connect_socket(&config.broker_url)
-                .await
-                .map_err(|_| anyhow::anyhow!("pinned broker connection failed"))?,
-        )
+        endpoint
+            .connect_socket(&config.broker_url)
+            .await
+            .map_err(|error| anyhow::anyhow!("pinned broker connection failed: {error:?}"))
     } else {
         let url = reqwest::Url::parse(&config.broker_url)?;
         let addresses: Vec<_> = tokio::net::lookup_host((
@@ -852,15 +865,29 @@ async fn attach(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-        (
-            cbqs_client::transport_v2::connect_checked(&config.broker_url, &addresses)
-                .await
-                .map_err(|_| anyhow::anyhow!("checked broker connection failed"))?,
-            cbqs_client::transport_v2::connect_checked(&config.broker_url, &addresses)
-                .await
-                .map_err(|_| anyhow::anyhow!("checked broker connection failed"))?,
-        )
-    };
+        cbqs_client::transport_v2::connect_checked(&config.broker_url, &addresses)
+            .await
+            .map_err(|error| anyhow::anyhow!("checked broker connection failed: {error:?}"))
+    }
+}
+
+async fn attach(
+    config: &Config,
+    auth: &Authority,
+    worker: &WorkerIncarnation,
+    epoch: u64,
+    expiry: u64,
+) -> Result<CbqsOwnerLog> {
+    let grant = mint_grant(
+        &auth.view,
+        &auth.admin,
+        worker.holder(),
+        epoch,
+        now_ms()?,
+        expiry,
+    );
+    let fence = connect_broker(config).await?;
+    let session = connect_broker(config).await?;
     Ok(CbqsOwnerLog::attach(
         fence,
         session,
@@ -881,9 +908,262 @@ async fn attach(
     .await?)
 }
 
+/// A renewal failure either may clear before the horizon, or proves this
+/// writer's authority is gone. Only a restart (claim, fence, replay) recovers
+/// from the second, so the loop retires the view and returns it.
+pub(crate) enum Failure {
+    Retry(anyhow::Error),
+    Terminal(anyhow::Error),
+}
+
+/// Broker refusals that no retry of the same authority can clear.
+fn terminal_attach(error: &cbqs_client::TransportError) -> bool {
+    matches!(error, cbqs_client::TransportError::Broker(error) if matches!(
+        error.code,
+        wire::CBQS_V2_ERR_STREAM_NOT_ACTIVE
+            | wire::CBQS_V2_ERR_AUTHORIZATION_GENERATION_STALE
+            | wire::CBQS_V2_ERR_INVALID_GRANT
+            | wire::CBQS_V2_ERR_POLICY_EPOCH_STALE
+    ))
+}
+
+/// Mints a same-epoch grant and attaches its session on a new connection.
+/// A seam only so the renewal loop can run against the fixture broker.
+pub(crate) trait Issue {
+    fn attach(
+        &mut self,
+        now: u64,
+        expiry: u64,
+    ) -> impl std::future::Future<Output = Result<(SessionV2, wire::StreamGrantV2), Failure>> + Send;
+}
+
+pub(crate) struct Issuer {
+    config: Config,
+    auth: Authority,
+    holder: SigningKey,
+    epoch: u64,
+}
+
+impl Issue for Issuer {
+    async fn attach(
+        &mut self,
+        now: u64,
+        expiry: u64,
+    ) -> Result<(SessionV2, wire::StreamGrantV2), Failure> {
+        let grant = mint_grant(
+            &self.auth.view,
+            &self.auth.admin,
+            &self.holder,
+            self.epoch,
+            now,
+            expiry,
+        );
+        let socket = connect_broker(&self.config).await.map_err(Failure::Retry)?;
+        let session = SessionV2::attach(
+            socket,
+            SessionConfig {
+                broker_url: self.config.broker_url.clone(),
+                grant: grant.clone(),
+                holder: self.holder.clone(),
+                handshake_timeout: Duration::from_secs(30),
+                checkpoints: CheckpointTrustV2::ChainProvider(Box::new(
+                    self.auth.view.provider().clone(),
+                )),
+            },
+            now_ms().map_err(Failure::Retry)?,
+        )
+        .await
+        .map_err(|error| {
+            let terminal = terminal_attach(&error);
+            let error = anyhow::anyhow!("replacement CBQS session rejected: {error:?}");
+            if terminal {
+                Failure::Terminal(error)
+            } else {
+                Failure::Retry(error)
+            }
+        })?;
+        Ok((session, grant))
+    }
+}
+
+/// Credential state belongs to this writer incarnation only. Nothing is
+/// persisted: a crash still follows the existing intent replay/fence path.
+pub(crate) struct Renewal<I = Issuer> {
+    issuer: I,
+    grant_ttl_ms: u64,
+    epoch: u64,
+    grant_expiry: u64,
+    delegation_expiry: u64,
+    tokens: Vec<cbfs_cli::token_refresh::OwnerTokenRefresh>,
+    horizon: Instant,
+    delegation_horizon: Instant,
+}
+
+impl<I: Issue> Renewal<I> {
+    pub(crate) fn new(
+        issuer: I,
+        grant_ttl_ms: u64,
+        epoch: u64,
+        grant_expiry: u64,
+        delegation_expiry: u64,
+        tokens: Vec<cbfs_cli::token_refresh::OwnerTokenRefresh>,
+    ) -> Result<Self> {
+        let instant = Instant::now();
+        let delegation_remaining = delegation_expiry
+            .checked_sub(now_ms()?.saturating_add(SAFETY_MS))
+            .context("CBFS delegation expired during recovery")?;
+        let delegation_horizon = instant + Duration::from_millis(delegation_remaining);
+        let mut renewal = Self {
+            issuer,
+            grant_ttl_ms,
+            epoch,
+            grant_expiry,
+            delegation_expiry,
+            tokens,
+            horizon: Instant::now(),
+            delegation_horizon,
+        };
+        renewal.horizon = renewal.new_horizon()?;
+        Ok(renewal)
+    }
+
+    pub(crate) fn horizon(&self) -> Instant {
+        self.horizon
+    }
+
+    fn expiry(&self) -> u64 {
+        self.tokens.iter().fold(
+            self.grant_expiry.min(self.delegation_expiry),
+            |expiry, token| expiry.min(token.initial_expires_at_ms),
+        )
+    }
+
+    fn new_horizon(&self) -> Result<Instant> {
+        // Sample monotonic time first: conversion must never extend authority.
+        let instant = Instant::now();
+        let remaining = self
+            .expiry()
+            .checked_sub(now_ms()?.saturating_add(SAFETY_MS))
+            .context("hosted credentials expired or inside safety margin")?;
+        Ok((instant + Duration::from_millis(remaining)).min(self.delegation_horizon))
+    }
+
+    /// Token minting and the new broker session; no writer lock is held, so
+    /// this is the part bounded by IO_TIMEOUT.
+    async fn prepare(&mut self) -> Result<(SessionV2, wire::StreamGrantV2, u64), Failure> {
+        for token in &mut self.tokens {
+            let minted =
+                (token.mint)().map_err(|error| Failure::Retry(anyhow::Error::msg(error)))?;
+            if minted.expires_at_ms < token.initial_expires_at_ms {
+                return Err(Failure::Retry(anyhow::anyhow!(
+                    "CBFS replacement would shorten credential validity"
+                )));
+            }
+            token.http_config.set_attachment_token(minted.token_bytes);
+            token.initial_expires_at_ms = minted.expires_at_ms;
+        }
+        let now = now_ms().map_err(Failure::Retry)?;
+        let expiry = now.saturating_add(self.grant_ttl_ms);
+        let (session, grant) = self.issuer.attach(now, expiry).await?;
+        Ok((session, grant, expiry))
+    }
+
+    /// Any failure here is terminal: the runtime refused the replacement or
+    /// the horizon cannot advance, and neither changes on retry.
+    fn install(
+        &mut self,
+        runtime: &mut OwnerRuntime,
+        session: SessionV2,
+        grant: wire::StreamGrantV2,
+        expiry: u64,
+    ) -> Result<()> {
+        runtime.swap_session(session, grant)?;
+        self.grant_expiry = expiry;
+        let horizon = self.new_horizon()?;
+        // The fixed delegation ceiling cannot advance with clock conversion
+        // jitter. Keep the current bound if a candidate is shorter.
+        if horizon > self.horizon {
+            runtime.advance_horizon(horizon)?;
+            self.horizon = horizon;
+        }
+        Ok(())
+    }
+
+    /// Returns only with an error, after retiring the view, so the process
+    /// exits and its supervisor restarts it against current authority.
+    pub(crate) async fn run(
+        mut self,
+        writer: &tokio::sync::Mutex<OwnerRuntime>,
+        view: &crate::room_log::runtime::OwnerView,
+    ) -> Result<()> {
+        let mut backoff = Duration::from_secs(1);
+        let mut next = Instant::now() + self.horizon.saturating_duration_since(Instant::now()) / 2;
+        let mut warned = false;
+        let horizon_reached = || {
+            view.retire();
+            anyhow::anyhow!("Hosted credential horizon reached; renewal did not extend valid credentials; worker retired")
+        };
+        loop {
+            let now = now_ms()?;
+            if !warned && self.delegation_expiry.saturating_sub(now) <= 86_400_000 {
+                log::error!("CBFS wallet-signed delegation expires at {} (within 24 hours); operator renewal and worker restart required",
+                    self.delegation_expiry);
+                warned = true;
+            }
+            let horizon = self.horizon;
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(horizon.into()) => return Err(horizon_reached()),
+                _ = tokio::time::sleep_until(next.into()) => {}
+            }
+            let prepared = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(horizon.into()) => return Err(horizon_reached()),
+                result = tokio::time::timeout(IO_TIMEOUT, self.prepare()) => result.unwrap_or_else(|_| {
+                    Err(Failure::Retry(anyhow::anyhow!("hosted credential renewal timed out")))
+                }),
+            };
+            let result = match prepared {
+                Ok((session, grant, expiry)) => {
+                    let mut runtime = writer.lock().await;
+                    self.install(&mut runtime, session, grant, expiry)
+                        .map_err(Failure::Terminal)
+                }
+                Err(failure) => Err(failure),
+            };
+            match result {
+                Ok(()) => {
+                    backoff = Duration::from_secs(1);
+                    // Half the remaining safe lifetime is before 2/3 grant TTL,
+                    // and also respects shorter CBFS credentials/delegation.
+                    let delay = self.horizon.saturating_duration_since(Instant::now()) / 2;
+                    let delay = delay.max(Duration::from_secs(1));
+                    next = Instant::now() + delay;
+                    log::info!(
+                        "Hosted credentials renewed at writer epoch {}; next renewal in {}s",
+                        self.epoch,
+                        delay.as_secs()
+                    );
+                }
+                Err(Failure::Retry(error)) => {
+                    log::error!(
+                        "Hosted credential renewal failed: {error:#}; retrying in {backoff:?}"
+                    );
+                    next = Instant::now() + backoff;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                }
+                Err(Failure::Terminal(error)) => {
+                    view.retire();
+                    return Err(error.context("Hosted credential renewal refused; worker retired"));
+                }
+            }
+        }
+    }
+}
+
 /// The caller supplies the one expected epoch. Never auto-increment/retry a
 /// losing CAS. Recover fully before the caller constructs any listener.
-pub async fn recover(config: &Config, expected_epoch: u64) -> Result<(OwnerRuntime, Instant)> {
+pub async fn recover(config: &Config, expected_epoch: u64) -> Result<OwnerRuntime> {
     ensure!(expected_epoch < u64::MAX - 1, "expected epoch is exhausted");
     let auth = authority(config).await?;
     // `authority` proved that this configured owner is both the CBFS wallet and
@@ -907,13 +1187,12 @@ pub async fn recover(config: &Config, expected_epoch: u64) -> Result<(OwnerRunti
         MAX_BYTES,
     )?;
     let ctx = volume(config, &auth, &config.control_volume).await?;
-    let mut expiry = now_ms()?
-        .saturating_add(config.session_seconds * 1000)
-        .min(auth.cbfs.delegation.expires_at_ms)
-        .min(
-            ctx.initial_token_expires_at_ms
-                .context("missing token expiry")?,
-        );
+    let control_refresh = cbfs_cli::token_refresh::build_owner_token_refresh(
+        &config.cbfs_state_dir,
+        Some(&config.rpc_url),
+        &ctx,
+        5,
+    )?;
     let mut registry = WriterRegistry::open(
         ctx.volume,
         ctx.auth_store,
@@ -934,19 +1213,25 @@ pub async fn recover(config: &Config, expected_epoch: u64) -> Result<(OwnerRunti
         "Acquired hosted writer epoch {}; fencing before recovery",
         allocation.epoch()
     );
+    // Sampled after the claim so claim latency never shortens the first grant.
+    let grant_expiry = now_ms()?.saturating_add(config.grant_ttl_seconds * 1000);
     let log = tokio::time::timeout(
         IO_TIMEOUT,
-        attach(config, &auth, &worker, allocation.epoch(), expiry),
+        attach(config, &auth, &worker, allocation.epoch(), grant_expiry),
     )
     .await??;
+    let epoch = allocation.epoch();
+    let holder = worker.holder().clone();
     let writer = worker.bind(allocation, log)?;
     // Open archive AFTER fencing the previous writer, so its final committed
     // root participates in recovery rather than a pre-fence snapshot.
     let ctx = volume(config, &auth, &config.archive_volume).await?;
-    expiry = expiry.min(
-        ctx.initial_token_expires_at_ms
-            .context("missing token expiry")?,
-    );
+    let archive_refresh = cbfs_cli::token_refresh::build_owner_token_refresh(
+        &config.cbfs_state_dir,
+        Some(&config.rpc_url),
+        &ctx,
+        5,
+    )?;
     let archive = CbfsArchive::open(
         ctx.volume,
         ctx.auth_store,
@@ -973,12 +1258,23 @@ pub async fn recover(config: &Config, expected_epoch: u64) -> Result<(OwnerRunti
         },
     )
     .await?;
-    let remaining = expiry
-        .checked_sub(now_ms()?.saturating_add(SAFETY_MS))
-        .context("credentials expired during recovery")?;
-    let deadline = Instant::now() + Duration::from_millis(remaining);
-    runtime.expire_at(deadline)?;
-    Ok((runtime, deadline))
+    let delegation_expiry = auth.cbfs.delegation.expires_at_ms;
+    let renewal = Renewal::new(
+        Issuer {
+            config: config.clone(),
+            auth,
+            holder,
+            epoch,
+        },
+        config.grant_ttl_seconds * 1000,
+        epoch,
+        grant_expiry,
+        delegation_expiry,
+        vec![control_refresh, archive_refresh],
+    )?;
+    runtime.advance_horizon(renewal.horizon())?;
+    runtime.renewal = Some(renewal);
+    Ok(runtime)
 }
 
 #[cfg(test)]
@@ -1017,9 +1313,23 @@ mod tests {
             public_ws_url: "ws://127.0.0.1:19440/ws".into(),
             max_rooms_per_wallet: default_max_rooms_per_wallet(),
             max_pending_rooms_per_wallet: default_max_pending_rooms_per_wallet(),
-            session_seconds: 600,
+            grant_ttl_seconds: 600,
         };
         (dir, config)
+    }
+
+    #[test]
+    fn grant_ttl_bounds_allow_a_day_without_capping_process_lifetime() {
+        let (_directory, mut config) = config();
+        assert_eq!(default_grant_ttl_seconds(), 86_400);
+        for ttl in [600, 900, 3601, 86400] {
+            config.grant_ttl_seconds = ttl;
+            config.validate().unwrap();
+        }
+        for ttl in [0, 120, 599, 86401] {
+            config.grant_ttl_seconds = ttl;
+            assert!(config.validate().is_err());
+        }
     }
 
     async fn registry_server(status: StatusCode, body: Vec<u8>) -> String {
@@ -1174,3 +1484,6 @@ mod tests {
         assert!(config.validate().is_err());
     }
 }
+
+#[cfg(test)]
+mod renewal_tests;

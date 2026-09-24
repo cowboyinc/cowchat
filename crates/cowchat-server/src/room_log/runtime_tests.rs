@@ -41,6 +41,12 @@ fn config(fixture: &Fixture, worker: &WorkerIncarnation, epoch: u64) -> SessionC
     config
 }
 async fn promote(fixture: &Fixture, writers: &mut WriterRegistry) -> FencedWriter {
+    promote_session(fixture, writers).await.0
+}
+async fn promote_session(
+    fixture: &Fixture,
+    writers: &mut WriterRegistry,
+) -> (FencedWriter, SigningKey, wire::StreamGrantV2) {
     let worker = WorkerIncarnation::fresh();
     let allocation = writers
         .claim(
@@ -50,11 +56,10 @@ async fn promote(fixture: &Fixture, writers: &mut WriterRegistry) -> FencedWrite
         )
         .await
         .unwrap();
-    let log = fixture
-        .connect_config(config(fixture, &worker, allocation.epoch()))
-        .await
-        .unwrap();
-    worker.bind(allocation, log).unwrap()
+    let config = config(fixture, &worker, allocation.epoch());
+    let (holder, grant) = (config.holder.clone(), config.grant.clone());
+    let log = fixture.connect_config(config).await.unwrap();
+    (worker.bind(allocation, log).unwrap(), holder, grant)
 }
 async fn recover(writer: FencedWriter, archive: CbfsArchive, path: &Path) -> OwnerRuntime {
     OwnerRuntime::recover("owner-a".into(), writer, archive, journal(path), limits())
@@ -343,6 +348,37 @@ async fn key_cutover_waits_for_archive_and_recovers_same_transition_after_cancel
 }
 
 #[tokio::test]
+async fn credential_horizon_advance_keeps_broker_writes_usable() {
+    let fixture = Fixture::new().await;
+    let (control, volume) = Storage::new().await;
+    let mut writers = control.initialize_writers(volume).await;
+    let (storage, volume) = Storage::new().await;
+    let directory = private_directory();
+    let mut runtime = recover(
+        promote(&fixture, &mut writers).await,
+        storage.initialize_archive(volume).await,
+        &directory.path().join("intents.sqlite"),
+    )
+    .await;
+    let original = std::time::Instant::now() + Duration::from_millis(50);
+    runtime.advance_horizon(original).unwrap();
+    runtime
+        .advance_horizon(original + Duration::from_secs(30))
+        .unwrap();
+    tokio::time::sleep_until(original.into()).await;
+    runtime
+        .submit(vec![create("after-renewal", 0)])
+        .await
+        .unwrap();
+    assert!(runtime
+        .view()
+        .read()
+        .unwrap()
+        .room("after-renewal")
+        .is_some());
+}
+
+#[tokio::test]
 async fn credential_deadline_retires_reads_and_prevents_new_broker_writes() {
     let fixture = Fixture::new().await;
     let (control, volume) = Storage::new().await;
@@ -358,11 +394,11 @@ async fn credential_deadline_retires_reads_and_prevents_new_broker_writes() {
     .await;
     runtime.submit(vec![create("one", 0)]).await.unwrap();
     let view = runtime.view();
-    assert!(runtime.expire_at(std::time::Instant::now()).is_err());
+    assert!(runtime.advance_horizon(std::time::Instant::now()).is_err());
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
-    runtime.expire_at(deadline).unwrap();
+    runtime.advance_horizon(deadline).unwrap();
     assert!(runtime
-        .expire_at(deadline + std::time::Duration::from_secs(1))
+        .advance_horizon(deadline - std::time::Duration::from_millis(1))
         .is_err());
     tokio::time::sleep_until(deadline.into()).await;
     assert!(matches!(view.read(), Err(RuntimeError::Retired)));
@@ -635,4 +671,146 @@ async fn journal_lock_binding_bounds_and_exact_pending_bytes_survive_reopen() {
         Err(IntentError::Limit)
     ));
     assert!(bounded.pending().await.unwrap().is_empty());
+}
+
+#[cfg(feature = "hosted-bootstrap")]
+mod renewal_run {
+    use super::*;
+    use crate::hosted_bootstrap::{Failure, Issue, Renewal};
+    use std::time::Instant;
+
+    #[derive(Clone, Copy)]
+    enum Outcome {
+        Renew,
+        Retry,
+        Terminal,
+    }
+
+    /// Re-signs the writer's own grant with a fresh nonce and lifetime, as the
+    /// production issuer does, against the fixture broker.
+    struct Reissue {
+        fixture: Arc<Fixture>,
+        holder: SigningKey,
+        grant: wire::StreamGrantV2,
+        outcome: Outcome,
+        issued: u8,
+    }
+
+    impl Issue for Reissue {
+        async fn attach(
+            &mut self,
+            now: u64,
+            expiry: u64,
+        ) -> Result<(SessionV2, wire::StreamGrantV2), Failure> {
+            match self.outcome {
+                Outcome::Retry => return Err(Failure::Retry(anyhow::anyhow!("broker down"))),
+                Outcome::Terminal => return Err(Failure::Terminal(anyhow::anyhow!("revoked"))),
+                Outcome::Renew => {}
+            }
+            self.issued += 1;
+            let mut config = self.fixture.config(self.grant.policy_epoch);
+            config.holder = self.holder.clone();
+            config.grant = self.grant.clone();
+            config.grant.grant_nonce = [self.issued; 32];
+            config.grant.not_before_ms = now;
+            config.grant.expires_at_ms = expiry;
+            config.grant.signature = wire::CbqsSignatureV2(
+                key(0xA1)
+                    .sign(&cowboy_protocol_codec::keccak256(
+                        &wire::stream_grant_signing_bytes_v2(&config.grant),
+                    ))
+                    .to_bytes(),
+            );
+            let grant = config.grant.clone();
+            let socket = cbqs_client::connect_socket(&config.broker_url)
+                .await
+                .unwrap();
+            let session = SessionV2::attach(socket, config, now_ms()).await.unwrap();
+            Ok((session, grant))
+        }
+    }
+
+    struct Rig {
+        _fixture: Arc<Fixture>,
+        _writers: WriterRegistry,
+        writer: tokio::sync::Mutex<OwnerRuntime>,
+        _storage: [Storage; 2],
+        _directory: tempfile::TempDir,
+    }
+
+    /// A recovered runtime whose first grant leaves `horizon` of safe life,
+    /// plus the renewal that owns it.
+    async fn rig(horizon: Duration, outcome: Outcome) -> (Rig, Renewal<Reissue>) {
+        let fixture = Arc::new(Fixture::new().await);
+        let (control, volume) = Storage::new().await;
+        let mut writers = control.initialize_writers(volume).await;
+        let (storage, volume) = Storage::new().await;
+        let directory = private_directory();
+        let (writer, holder, grant) = promote_session(&fixture, &mut writers).await;
+        let mut runtime = recover(
+            writer,
+            storage.initialize_archive(volume).await,
+            &directory.path().join("intents.sqlite"),
+        )
+        .await;
+        let now = now_ms();
+        let renewal = Renewal::new(
+            Reissue {
+                fixture: fixture.clone(),
+                holder,
+                grant,
+                outcome,
+                issued: 0,
+            },
+            7_200_000,
+            1,
+            now + 30_000 + horizon.as_millis() as u64,
+            now + 86_400_000 * 2,
+            Vec::new(),
+        )
+        .unwrap();
+        runtime.advance_horizon(renewal.horizon()).unwrap();
+        let rig = Rig {
+            _fixture: fixture,
+            _writers: writers,
+            writer: tokio::sync::Mutex::new(runtime),
+            _storage: [control, storage],
+            _directory: directory,
+        };
+        (rig, renewal)
+    }
+
+    #[tokio::test]
+    async fn run_renews_past_the_original_horizon() {
+        let (rig, renewal) = rig(Duration::from_secs(2), Outcome::Renew).await;
+        let view = rig.writer.lock().await.view();
+        let original = renewal.horizon();
+        tokio::select! {
+            result = renewal.run(&rig.writer, &view) => panic!("renewal ended: {result:?}"),
+            _ = tokio::time::sleep_until((original + Duration::from_secs(1)).into()) => {}
+        }
+        let mut runtime = rig.writer.lock().await;
+        runtime.submit(vec![create("renewed", 0)]).await.unwrap();
+        assert!(view.read().unwrap().room("renewed").is_some());
+    }
+
+    #[tokio::test]
+    async fn run_retires_at_the_horizon_when_retries_never_succeed() {
+        let (rig, renewal) = rig(Duration::from_millis(1_500), Outcome::Retry).await;
+        let view = rig.writer.lock().await.view();
+        let horizon = renewal.horizon();
+        assert!(renewal.run(&rig.writer, &view).await.is_err());
+        assert!(Instant::now() >= horizon);
+        assert!(matches!(view.read(), Err(RuntimeError::Retired)));
+    }
+
+    #[tokio::test]
+    async fn run_retires_immediately_on_terminal_failure() {
+        let (rig, renewal) = rig(Duration::from_secs(4), Outcome::Terminal).await;
+        let view = rig.writer.lock().await.view();
+        let horizon = renewal.horizon();
+        assert!(renewal.run(&rig.writer, &view).await.is_err());
+        assert!(Instant::now() < horizon);
+        assert!(matches!(view.read(), Err(RuntimeError::Retired)));
+    }
 }

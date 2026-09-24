@@ -26,8 +26,19 @@ fn missing_chain_credentials_exit_without_local_fallback_or_key_disclosure() {
         "broker_url":"wss://broker.example/ws", "broker_pin":null,
         "archive_volume":"archive", "control_volume":"control", "api_key_file":api_key,
         "http_addr":"127.0.0.1:19440", "http_origins":[],
-        "public_ws_url":"ws://127.0.0.1:19440/ws", "session_seconds":600
+        "public_ws_url":"ws://127.0.0.1:19440/ws", "grant_ttl_seconds":600
     })).unwrap()).unwrap();
+    // The old lifetime cap is removed, not retained as an alias. Omitting the
+    // replacement setting selects the 86400-second default.
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("grant_ttl_seconds");
+    fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+    cowchat_server::hosted_bootstrap::Config::load(&config).unwrap();
+    value["session_seconds"] = 600.into();
+    fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(cowchat_server::hosted_bootstrap::Config::load(&config).is_err());
+    value.as_object_mut().unwrap().remove("session_seconds");
+    fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
     for command in ["hosted-serve", "hosted-init"] {
         let mut process = Command::new(env!("CARGO_BIN_EXE_cowchat-server"));
         process.arg(command).arg("--config").arg(&config);
