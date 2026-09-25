@@ -1925,6 +1925,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "cbfs-auth",
  "cbfs-cli",
  "cbfs-hooks",
  "cbfs-registry-proto",

@@ -1092,6 +1092,15 @@ fn wallet_room_usage(state: &crate::room_log::OwnerState, owner: Address) -> (us
 }
 
 impl HostedOwner {
+    #[cfg(feature = "hosted-bootstrap")]
+    pub(crate) async fn renew_credentials(&self) -> anyhow::Result<()> {
+        let renewal = self.writer.lock().await.renewal.take();
+        match renewal {
+            Some(renewal) => renewal.run(&self.writer, &self.view).await,
+            None => std::future::pending().await,
+        }
+    }
+
     pub(crate) fn new(runtime: OwnerRuntime, api_key: String) -> Result<Self, RuntimeError> {
         drop(runtime.state()?);
         if api_key.is_empty() {

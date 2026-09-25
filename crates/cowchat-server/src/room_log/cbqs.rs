@@ -71,6 +71,7 @@ pub struct Replay {
 
 pub struct CbqsOwnerLog {
     session: SessionV2,
+    grant: wire::StreamGrantV2,
     instance: [u8; 32],
     stream: [u8; 32],
     epoch: u64,
@@ -164,11 +165,13 @@ impl CbqsOwnerLog {
         if fenced.ack.policy_epoch != epoch {
             return Err(LogError::Fenced);
         }
+        let grant = config.grant.clone();
         let session = SessionV2::attach(session_socket, config, now_ms)
             .await
             .map_err(|_| LogError::Unavailable)?;
         Ok(Self {
             session,
+            grant,
             instance,
             stream,
             epoch,
@@ -176,6 +179,34 @@ impl CbqsOwnerLog {
             usable: Arc::new(AtomicBool::new(true)),
             timeout,
         })
+    }
+
+    /// Swap in a replacement session the caller attached with `grant` outside
+    /// the writer lock. No subscriptions survive an operation: replay cursors
+    /// use fresh IDs and are closed before returning. Dropping the replaced
+    /// session closes its socket.
+    pub fn swap_session(
+        &mut self,
+        session: SessionV2,
+        grant: wire::StreamGrantV2,
+    ) -> Result<(), LogError> {
+        if !self.usable.load(Ordering::Relaxed) {
+            return Err(LogError::Unavailable);
+        }
+        let mut expected = self.grant.clone();
+        expected.grant_nonce = grant.grant_nonce;
+        expected.not_before_ms = grant.not_before_ms;
+        expected.expires_at_ms = grant.expires_at_ms;
+        expected.signature = grant.signature;
+        if expected != grant
+            || grant.grant_nonce == self.grant.grant_nonce
+            || grant.expires_at_ms <= self.grant.expires_at_ms
+        {
+            return Err(LogError::Configuration);
+        }
+        self.session = session;
+        self.grant = grant;
+        Ok(())
     }
 
     pub fn epoch(&self) -> u64 {

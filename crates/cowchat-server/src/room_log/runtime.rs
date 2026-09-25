@@ -13,7 +13,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, OnceLock, RwLock, RwLockReadGuard,
+    Arc, Mutex, RwLock, RwLockReadGuard,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -120,19 +120,44 @@ pub struct CommittedBatch {
 pub struct OwnerView {
     state: RwLock<OwnerState>,
     usable: AtomicBool,
-    deadline: OnceLock<std::time::Instant>,
+    horizon: Mutex<Option<std::time::Instant>>,
 }
 impl OwnerView {
+    #[cfg(feature = "hosted-bootstrap")]
+    pub(crate) fn retire(&self) {
+        self.usable.store(false, Ordering::Release);
+    }
+
     fn active(&self) -> bool {
-        if self
-            .deadline
-            .get()
-            .is_some_and(|deadline| std::time::Instant::now() >= *deadline)
-        {
+        let horizon = match self.horizon.lock() {
+            Ok(horizon) => horizon,
+            Err(_) => {
+                self.usable.store(false, Ordering::Release);
+                return false;
+            }
+        };
+        if horizon.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
             self.usable.store(false, Ordering::Release);
         }
         self.usable.load(Ordering::Acquire)
     }
+
+    fn advance_horizon(&self, horizon: std::time::Instant) -> Result<(), RuntimeError> {
+        let mut current = self.horizon.lock().map_err(|_| RuntimeError::Retired)?;
+        let now = std::time::Instant::now();
+        if current.is_some_and(|old| now >= old) {
+            self.usable.store(false, Ordering::Release);
+        }
+        if !self.usable.load(Ordering::Acquire) {
+            return Err(RuntimeError::Retired);
+        }
+        if horizon <= now || current.is_some_and(|old| horizon < old) {
+            return Err(RuntimeError::Configuration);
+        }
+        *current = Some(horizon);
+        Ok(())
+    }
+
     pub fn read(&self) -> Result<RwLockReadGuard<'_, OwnerState>, RuntimeError> {
         let state = self.state.read().map_err(|_| RuntimeError::Retired)?;
         if !self.active() {
@@ -143,9 +168,11 @@ impl OwnerView {
     fn apply(&self, records: Vec<LogRecord>) -> Result<Vec<LogRecord>, RuntimeError> {
         let mut state = self.state.write().map_err(|_| RuntimeError::Retired)?;
         if self
-            .deadline
-            .get()
-            .is_some_and(|deadline| std::time::Instant::now() >= *deadline)
+            .horizon
+            .lock()
+            .map(|horizon| *horizon)
+            .unwrap_or(Some(std::time::Instant::now()))
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
         {
             self.usable.store(false, Ordering::Release);
             return Err(RuntimeError::Retired);
@@ -192,6 +219,8 @@ pub struct OwnerRuntime {
     segments: usize,
     encoded_bytes: usize,
     usable: bool,
+    #[cfg(feature = "hosted-bootstrap")]
+    pub(crate) renewal: Option<crate::hosted_bootstrap::Renewal>,
 }
 
 impl OwnerRuntime {
@@ -227,13 +256,15 @@ impl OwnerRuntime {
             view: Arc::new(OwnerView {
                 state: RwLock::new(state),
                 usable: AtomicBool::new(false),
-                deadline: OnceLock::new(),
+                horizon: Mutex::new(None),
             }),
             checkpoint: recovered.checkpoint,
             limits,
             segments: recovered.segments,
             encoded_bytes: recovered.encoded_bytes,
             usable: false,
+            #[cfg(feature = "hosted-bootstrap")]
+            renewal: None,
         };
         // Archive any surviving but previously unacknowledged broker suffix
         // before it becomes served state. Never bridge an expired/missing gap.
@@ -257,14 +288,23 @@ impl OwnerRuntime {
     pub fn owner_id(&self) -> &str {
         &self.owner_id
     }
-    /// A bounded hosted process must retire reads as well as writes before its
-    /// grant/attachment credentials expire. Set once, before serving clients.
-    pub fn expire_at(&mut self, deadline: std::time::Instant) -> Result<(), RuntimeError> {
-        if deadline <= std::time::Instant::now() || self.view.deadline.set(deadline).is_err() {
-            return Err(RuntimeError::Configuration);
-        }
-        Ok(())
+    /// Advance credentials without reviving an expired or uncertain writer.
+    pub fn advance_horizon(&mut self, horizon: std::time::Instant) -> Result<(), RuntimeError> {
+        self.ensure_usable()?;
+        self.view.advance_horizon(horizon)
     }
+
+    #[cfg(feature = "hosted-bootstrap")]
+    pub(crate) fn swap_session(
+        &mut self,
+        session: cbqs_client::SessionV2,
+        grant: cowboy_protocol_codec::cbqs_v2::StreamGrantV2,
+    ) -> Result<(), RuntimeError> {
+        self.ensure_usable()?;
+        self.log.swap_session(session, grant)?;
+        self.ensure_usable()
+    }
+
     fn read_state(&self) -> Result<RwLockReadGuard<'_, OwnerState>, RuntimeError> {
         self.view.state.read().map_err(|_| RuntimeError::Retired)
     }
@@ -430,14 +470,45 @@ impl Drop for OwnerRuntime {
 mod tests {
     use super::*;
 
-    #[test]
-    fn expired_projection_refuses_publication_without_waiting_for_shutdown() {
-        let deadline = OnceLock::new();
-        deadline.set(std::time::Instant::now()).unwrap();
+    #[tokio::test]
+    async fn horizon_advances_monotonically_and_never_revives_a_retired_view() {
         let view = OwnerView {
             state: RwLock::new(OwnerState::new("owner-a".into())),
             usable: AtomicBool::new(true),
-            deadline,
+            horizon: Mutex::new(None),
+        };
+        let original = std::time::Instant::now() + std::time::Duration::from_millis(50);
+        let renewed = original + std::time::Duration::from_secs(1);
+        view.advance_horizon(original).unwrap();
+        view.advance_horizon(renewed).unwrap();
+        view.advance_horizon(renewed).unwrap();
+        assert!(matches!(
+            view.advance_horizon(original),
+            Err(RuntimeError::Configuration)
+        ));
+        tokio::time::sleep_until(original.into()).await;
+        assert!(view.read().is_ok());
+        view.apply(vec![LogRecord {
+            sequence: 1,
+            lane_id: 0,
+            command: super::super::tests::create("one", 7),
+        }])
+        .unwrap();
+        tokio::time::sleep_until(renewed.into()).await;
+        assert!(matches!(
+            view.advance_horizon(renewed + std::time::Duration::from_secs(1)),
+            Err(RuntimeError::Retired)
+        ));
+        assert!(matches!(view.read(), Err(RuntimeError::Retired)));
+    }
+
+    #[test]
+    fn expired_projection_refuses_publication_without_waiting_for_shutdown() {
+        let horizon = Mutex::new(Some(std::time::Instant::now()));
+        let view = OwnerView {
+            state: RwLock::new(OwnerState::new("owner-a".into())),
+            usable: AtomicBool::new(true),
+            horizon,
         };
         assert!(matches!(
             view.apply(vec![LogRecord {
@@ -456,7 +527,7 @@ mod tests {
         let view = OwnerView {
             state: RwLock::new(OwnerState::new("owner-a".into())),
             usable: AtomicBool::new(true),
-            deadline: OnceLock::new(),
+            horizon: Mutex::new(None),
         };
         let mut wrong_owner = super::super::tests::message("wrong", "one");
         wrong_owner.owner_id = "owner-b".into();
