@@ -36,27 +36,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Provision new private hosted control/archive volumes (no listener).
-    #[cfg(feature = "hosted-bootstrap")]
-    HostedInit {
-        #[arg(long)]
-        config: PathBuf,
-        /// Explicit reserve for EACH of the two volumes.
-        #[arg(long)]
-        reserve_wei: u128,
-        #[arg(long, default_value_t = 2)]
-        erasure_k: u8,
-        #[arg(long, default_value_t = 1)]
-        erasure_m: u8,
-    },
-    /// Claim one expected writer epoch, recover, then serve hosted rooms.
-    #[cfg(feature = "hosted-bootstrap")]
-    HostedServe {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        expected_epoch: u64,
-    },
     /// Start the Cowchat server
     Serve {
         /// Unix socket path
@@ -252,64 +231,13 @@ fn start_app_control_stdin(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    #[cfg(feature = "hosted-bootstrap")]
-    let prepared = match &cli.command {
-        Commands::HostedInit { config, .. } | Commands::HostedServe { config, .. } => {
-            let config = cowchat_server::hosted_bootstrap::Config::load(config)?;
-            let guard = config.prepare_state()?;
-            // This is the single-threaded process entrypoint, before logger or
-            // Tokio initialization. These SDK directories are worker-local.
-            std::env::set_var(
-                "CBFS_PENDING_DIFF_DIR",
-                config.worker_dir.join("cbfs-pending"),
-            );
-            std::env::set_var(
-                "CBFS_PATH_TAG_KEY_DIR",
-                config.worker_dir.join("cbfs-path-tags"),
-            );
-            Some((config, guard))
-        }
-        _ => None,
-    };
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(async {
             match cli.command {
-                #[cfg(feature = "hosted-bootstrap")]
-                Commands::HostedInit {
-                    reserve_wei,
-                    erasure_k,
-                    erasure_m,
-                    ..
-                } => {
-                    let (config, _guard) = prepared.as_ref().expect("hosted preflight");
-                    cowchat_server::hosted_bootstrap::initialize(
-                        config,
-                        reserve_wei,
-                        erasure_k,
-                        erasure_m,
-                    )
-                    .await?;
-                    log::info!("Hosted volumes initialized at writer epoch 0; no listener started");
-                }
-                #[cfg(feature = "hosted-bootstrap")]
-                Commands::HostedServe { expected_epoch, .. } => {
-                    let (config, _guard) = prepared.as_ref().expect("hosted preflight");
-                    let runtime =
-                        cowchat_server::hosted_bootstrap::recover(config, expected_epoch).await?;
-                    #[cfg(feature = "room-keys")]
-                    let server = CowchatServer::new_hosted_with_room_keys(
-                        config.server_config(),
-                        runtime,
-                        cowchat_server::hosted_bootstrap::HostedRoomKeys::new(config),
-                    )?;
-                    #[cfg(not(feature = "room-keys"))]
-                    let server = CowchatServer::new_hosted(config.server_config(), runtime)?;
-                    log::info!("Hosted recovery complete; starting authenticated service with credential renewal");
-                    server.run().await?;
-                }
                 Commands::Serve {
                     socket,
                     tcp,
@@ -407,34 +335,6 @@ mod tests {
     enum ControlEvent {
         Command(AppControlCommand),
         Wait(Duration),
-    }
-
-    #[cfg(feature = "hosted-bootstrap")]
-    #[test]
-    fn hosted_commands_require_explicit_epoch_or_provisioning_reserve() {
-        assert!(Cli::try_parse_from([
-            "cowchat-server",
-            "hosted-serve",
-            "--config",
-            "/tmp/config.json"
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "cowchat-server",
-            "hosted-serve",
-            "--config",
-            "/tmp/config.json",
-            "--expected-epoch",
-            "0"
-        ])
-        .is_ok());
-        assert!(Cli::try_parse_from([
-            "cowchat-server",
-            "hosted-init",
-            "--config",
-            "/tmp/config.json"
-        ])
-        .is_err());
     }
 
     #[test]
