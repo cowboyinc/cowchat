@@ -6,23 +6,6 @@ license.workspace = true
 repository.workspace = true
 description = "Cowchat server daemon"
 
-[features]
-# Hosted owner-stream transport. Local clients do not need the chain SDK.
-cbqs = ["dep:cbqs-client", "dep:cowboy-protocol-codec", "dep:commonware-codec", "dep:ed25519-dalek"]
-# In-process real broker used only by the integration tests.
-cbqs-test = ["cbqs", "dep:cbqsd", "dep:cowboy-protocol-activation"]
-# Durable checkpoint-batch publication through the existing CBFS SDK.
-cbfs-archive = ["cbqs", "dep:cbfs-sdk", "dep:cbfs-hooks", "dep:cbfs-types"]
-# Opt-in subprocess tests require COWCHAT_TEST_CBFS_NODE built at the SDK pin.
-cbfs-archive-test = ["cbfs-archive", "cbqs-test", "cbfs-sdk/test-support", "dep:cbfs-transport", "dep:sled", "dep:async-trait"]
-# Explicit, ignored River probe; reuses production CBFS CLI auth/provisioning.
-river-perf = ["cbfs-archive-test", "hosted-bootstrap"]
-# Production entrypoint; contains no broker or storage fixture.
-hosted-bootstrap = ["cbfs-archive", "dep:cbfs-cli", "dep:cbfs-registry-proto", "dep:anyhow", "dep:zeroize"]
-# Browser and native room-key coordination against the reviewed embedded CBSS
-# deployment.
-room-keys = ["hosted-bootstrap", "dep:cbssd"]
-
 [[bin]]
 name = "cowchat-server"
 path = "src/main.rs"
@@ -60,29 +43,10 @@ base64 = "0.22"
 fs2 = "0.4"
 libc = "0.2"
 # Cowchat room-release convergence: protocol/CBFS/CBQS/CBSS devnet train.
-cbqs-client = { git = "https://github.com/cowboyinc/cbqs.git", rev = "a646e907697274d48cd59d548baf77b3540a8449", optional = true }
-cbqsd = { git = "https://github.com/cowboyinc/cbqs.git", rev = "a646e907697274d48cd59d548baf77b3540a8449", features = ["test-legacy-snapshots"], optional = true }
-cowboy-protocol-codec = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "330d25f5194469e594b78252aaa4b1750a6caf9a", features = ["cbqs-signing", "serde", "signing"], optional = true }
-cowboy-protocol-activation = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "330d25f5194469e594b78252aaa4b1750a6caf9a", optional = true }
-commonware-codec = { git = "https://github.com/cowboyinc/commonware-monorepo", rev = "2e9f61fb846eff3c5bc01c65f933bab097f63aba", optional = true }
-ed25519-dalek = { version = "2.2", optional = true }
-cbfs-sdk = { git = "https://github.com/cowboyinc/cbfs.git", rev = "62df120fef358bb2729bc4920fdc41dcbec27f39", optional = true }
-cbfs-hooks = { git = "https://github.com/cowboyinc/cbfs.git", rev = "62df120fef358bb2729bc4920fdc41dcbec27f39", optional = true }
-cbfs-types = { git = "https://github.com/cowboyinc/cbfs.git", rev = "62df120fef358bb2729bc4920fdc41dcbec27f39", optional = true }
-cbfs-transport = { git = "https://github.com/cowboyinc/cbfs.git", rev = "62df120fef358bb2729bc4920fdc41dcbec27f39", optional = true }
-sled = { version = "0.34", optional = true }
-async-trait = { version = "0.1", optional = true }
-cbfs-cli = { git = "https://github.com/cowboyinc/cbfs.git", rev = "62df120fef358bb2729bc4920fdc41dcbec27f39", optional = true }
-cbfs-registry-proto = { git = "https://github.com/cowboyinc/cbfs.git", rev = "62df120fef358bb2729bc4920fdc41dcbec27f39", optional = true }
-anyhow = { version = "1", optional = true }
 hex = "0.4"
-zeroize = { version = "1", optional = true }
-cbssd = { git = "https://github.com/cowboyinc/cbss.git", rev = "dfdc549fc0562186b4b78e9fa56398f4b7969af6", features = ["cowchat-room-release"], optional = true }
 k256 = { version = "0.13", features = ["ecdsa"] }
 
 [dev-dependencies]
-cowchat-client = { workspace = true, features = ["member"] }
+cowchat-client = { workspace = true  }
 tempfile = "3"
 tokio-tungstenite = "0.26"
-
-cbfs-auth = { git = "https://github.com/cowboyinc/cbfs.git", rev = "62df120fef358bb2729bc4920fdc41dcbec27f39" }

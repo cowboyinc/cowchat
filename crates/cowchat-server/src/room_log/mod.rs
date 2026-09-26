@@ -4,21 +4,9 @@
 //! The ingress authenticates the caller before constructing a command. The
 //! reducer checks log order and business invariants again at application time.
 //! Hosted routes remain disabled until ownership and archive gates are wired.
-#[cfg(feature = "cbfs-archive")]
-pub mod cbfs_archive;
-#[cfg(feature = "cbqs")]
-pub mod cbqs;
-#[cfg(feature = "cbfs-archive")]
-pub mod intent;
-#[cfg(feature = "cbfs-archive")]
-pub mod ownership;
-#[cfg(feature = "cbfs-archive")]
-pub mod runtime;
 
 mod key_epoch;
 pub use key_epoch::{RoomKeyCustody, RoomKeyPreparation, RoomKeyState};
-#[cfg(feature = "room-keys")]
-pub(crate) use key_epoch::{MAX_DURABLE_ROOM_GRANTS, MAX_DURABLE_ROOM_MEMBERS};
 
 use chrono::{DateTime, Utc};
 use cowchat_core::ChatMessage;
@@ -479,6 +467,3 @@ impl OwnerState {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(all(test, feature = "cbqs-test"))]
-mod cbqs_tests;

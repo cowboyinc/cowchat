@@ -72,8 +72,6 @@ pub struct LeaveOutcome {
 /// — this is the basis for the round-robin turn token. The token holder for each room is
 /// tracked in `turn_holders`; absence means the room is currently empty.
 pub struct Broker {
-    #[cfg(feature = "cbfs-archive")]
-    pub(crate) hosted: std::sync::OnceLock<Arc<crate::hosted::HostedOwner>>,
     /// Serializes room metadata mutations and their corresponding lifecycle
     /// events. Keeping this separate from `room_lifecycle` lets handlers
     /// publish without holding the admission/tombstone lock while still
@@ -103,8 +101,6 @@ impl Broker {
         room_members: Arc<DashMap<String, Vec<String>>>,
     ) -> Self {
         Self {
-            #[cfg(feature = "cbfs-archive")]
-            hosted: std::sync::OnceLock::new(),
             room_mutation: Mutex::new(()),
             agent_lifecycle: Mutex::new(()),
             agents,
@@ -119,11 +115,6 @@ impl Broker {
     }
 
     pub fn is_hosted(&self) -> bool {
-        #[cfg(feature = "cbfs-archive")]
-        {
-            self.hosted.get().is_some()
-        }
-        #[cfg(not(feature = "cbfs-archive"))]
         {
             false
         }

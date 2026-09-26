@@ -90,11 +90,6 @@ fn accessible_room(
     store: &Store,
     broker: &Broker,
 ) -> Option<Room> {
-    #[cfg(feature = "cbfs-archive")]
-    if let Some(hosted) = broker.hosted.get() {
-        return hosted.accessible_room(room_id, api_key, member_address);
-    }
-    #[cfg(not(feature = "cbfs-archive"))]
     let _ = (broker, member_address);
     store
         .get_room(room_id)
@@ -350,13 +345,6 @@ fn bind_tcp_listener(addr: &str) -> io::Result<std::net::TcpListener> {
 
 enum RoomMode {
     Local,
-    #[cfg(feature = "cbfs-archive")]
-    Hosted(Box<crate::room_log::runtime::OwnerRuntime>),
-    #[cfg(feature = "room-keys")]
-    HostedRoomKeys(
-        Box<crate::room_log::runtime::OwnerRuntime>,
-        Box<crate::hosted_bootstrap::HostedRoomKeys>,
-    ),
 }
 
 impl CowchatServer {
@@ -367,25 +355,6 @@ impl CowchatServer {
     /// Explicit hosted startup after provisioning, promotion, fence and recovery.
     /// This initial slice binds the server's authenticated primary credential to
     /// the recovered owner; it has no automatic fallback or public signup.
-    #[cfg(feature = "cbfs-archive")]
-    pub fn new_hosted(
-        config: ServerConfig,
-        runtime: crate::room_log::runtime::OwnerRuntime,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_inner(config, RoomMode::Hosted(Box::new(runtime)))
-    }
-
-    #[cfg(feature = "room-keys")]
-    pub fn new_hosted_with_room_keys(
-        config: ServerConfig,
-        runtime: crate::room_log::runtime::OwnerRuntime,
-        room_keys: crate::hosted_bootstrap::HostedRoomKeys,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_inner(
-            config,
-            RoomMode::HostedRoomKeys(Box::new(runtime), Box::new(room_keys)),
-        )
-    }
 
     fn new_inner(
         mut config: ServerConfig,
@@ -399,18 +368,7 @@ impl CowchatServer {
             )
             .into());
         }
-        #[cfg(feature = "room-keys")]
-        let session_auth = match &mode {
-            RoomMode::HostedRoomKeys(_, room_keys) => Some(Arc::new(
-                crate::session_auth::SessionAuth::new(
-                    room_keys.service_id()?,
-                    room_keys.public_ws_url().to_owned(),
-                )
-                .map_err(io::Error::other)?,
-            )),
-            _ => None,
-        };
-        #[cfg(not(feature = "room-keys"))]
+
         let session_auth = None;
         // Lock the canonical database identity before touching SQLite, auth,
         // webhooks, or any listener path. A losing launch cannot migrate the
@@ -442,35 +400,7 @@ impl CowchatServer {
         let room_members: Arc<DashMap<String, Vec<String>>> = Arc::new(DashMap::new());
         let broker = Arc::new(Broker::new(agents, room_members));
         let api_key = auth::load_or_create_key(&config.auth_key_path)?;
-        #[cfg(all(feature = "cbfs-archive", not(feature = "room-keys")))]
-        if let RoomMode::Hosted(runtime) = mode {
-            let hosted = Arc::new(crate::hosted::HostedOwner::new(*runtime, api_key.clone())?);
-            broker
-                .hosted
-                .set(hosted)
-                .map_err(|_| io::Error::other("hosted owner already configured"))?;
-        }
-        #[cfg(feature = "room-keys")]
-        match mode {
-            RoomMode::Local => {}
-            RoomMode::Hosted(runtime) => {
-                let hosted = Arc::new(crate::hosted::HostedOwner::new(*runtime, api_key.clone())?);
-                broker
-                    .hosted
-                    .set(hosted)
-                    .map_err(|_| io::Error::other("hosted owner already configured"))?;
-            }
-            RoomMode::HostedRoomKeys(runtime, room_keys) => {
-                let hosted = Arc::new(
-                    crate::hosted::HostedOwner::new(*runtime, api_key.clone())?
-                        .with_room_keys(*room_keys),
-                );
-                broker
-                    .hosted
-                    .set(hosted)
-                    .map_err(|_| io::Error::other("hosted owner already configured"))?;
-            }
-        }
+
         let vote_mgr = Arc::new(VoteManager::new(store.clone(), broker.clone()));
         let rate_limiter = Arc::new(RateLimiter::new());
         let reconnect_mgr = Arc::new(ReconnectManager::new());
@@ -505,13 +435,6 @@ impl CowchatServer {
 
     /// Start the server, listening on UDS, TCP, and/or HTTP (as configured).
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        #[cfg(feature = "hosted-bootstrap")]
-        if let Some(hosted) = self.broker.hosted.get() {
-            return tokio::select! {
-                result = self.run_listeners() => result,
-                result = hosted.renew_credentials() => result.map_err(Into::into),
-            };
-        }
         self.run_listeners().await
     }
 

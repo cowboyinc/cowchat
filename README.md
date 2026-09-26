@@ -264,3 +264,9 @@ cd apps/CowchatMac && swift test
 MIT OR Apache-2.0
 
 Cowchat is built by [Cowboy](https://cowboy.inc).
+
+## Public and hosted builds
+
+This repository builds the local server, public CLI, Codex bridge and Mac app without private GitHub access. Shared transport and crypto crates are pinned to the public [cowchat-core](https://github.com/cowboyinc/cowchat-core) repository.
+
+Cowboy hosted deployments, member room-key acquisition and the operational `rooms create-hosted` command are maintained in the private core repository. Hosted server and caller tests run there.
