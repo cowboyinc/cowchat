@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 cowchat-core.workspace = true
-cowchat-client = { workspace = true, features = ["member"] }
+cowchat-client = { workspace = true  }
 tokio.workspace = true
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
