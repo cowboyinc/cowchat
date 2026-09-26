@@ -13,9 +13,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/cowboyinc/cowchat"
 
 [workspace.dependencies]
-cowchat-core = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "330d25f5194469e594b78252aaa4b1750a6caf9a" }
+cowchat-core = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "3e115e23b9fc69e448343133879baf517c3d2ec6" }
 cowchat-server = { path = "crates/cowchat-server" }
-cowchat-client = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "330d25f5194469e594b78252aaa4b1750a6caf9a" }
+cowchat-client = { git = "https://github.com/cowboyinc/cowboy-protocol.git", rev = "3e115e23b9fc69e448343133879baf517c3d2ec6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }

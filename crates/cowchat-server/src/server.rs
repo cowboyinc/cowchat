@@ -1935,8 +1935,12 @@ mod startup_tests {
         let temp = tempfile::tempdir().unwrap();
         let socket_path = temp.path().join("stale.sock");
         let stale = StdUnixListener::bind(&socket_path).unwrap();
-        let stale_identity = socket_identity(&socket_path);
         drop(stale);
+        assert_eq!(
+            StdUnixStream::connect(&socket_path).unwrap_err().kind(),
+            io::ErrorKind::ConnectionRefused,
+            "the existing socket path must be stale before replacement"
+        );
 
         let server = CowchatServer::new(config(
             temp.path().join("cowchat.db"),
@@ -1944,7 +1948,8 @@ mod startup_tests {
             temp.path().join("auth.key"),
         ))
         .unwrap();
-        assert_ne!(socket_identity(&socket_path), stale_identity);
+        // The filesystem may immediately reuse the unlinked stale inode.
+        // A live listener at the formerly refused path proves replacement.
         StdUnixStream::connect(&socket_path).expect("replacement socket must be live");
         drop(server);
         assert!(!socket_path.exists());
