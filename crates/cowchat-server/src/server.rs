@@ -1859,6 +1859,9 @@ mod startup_tests {
         let socket_path = temp.path().join("stale.sock");
         let stale = StdUnixListener::bind(&socket_path).unwrap();
         let stale_identity = socket_identity(&socket_path);
+        // Keep the retired inode allocated so the filesystem cannot immediately
+        // reuse its number for the replacement socket.
+        std::fs::hard_link(&socket_path, temp.path().join("retired.sock")).unwrap();
         drop(stale);
 
         let server = CowchatServer::new(config(
