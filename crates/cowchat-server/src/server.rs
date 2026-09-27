@@ -1863,6 +1863,11 @@ mod startup_tests {
         // reuse its number for the replacement socket.
         std::fs::hard_link(&socket_path, temp.path().join("retired.sock")).unwrap();
         drop(stale);
+        assert_eq!(
+            StdUnixStream::connect(&socket_path).unwrap_err().kind(),
+            io::ErrorKind::ConnectionRefused,
+            "the existing socket path must be stale before replacement"
+        );
 
         let server = CowchatServer::new(config(
             temp.path().join("cowchat.db"),
