@@ -665,28 +665,6 @@ enum RoomAction {
         #[arg(long)]
         encrypted: bool,
     },
-    /// Create an end-to-end encrypted hosted room owned by a member key. The
-    /// service is discovered from the chain's registry. Every pinned key holder
-    /// attests the owner-signed setup; the room key is generated and wrapped
-    /// here and never reaches the server.
-    CreateHosted {
-        /// Room name
-        name: String,
-        /// Chain RPC URL whose registry lists the hosted service. Defaults to
-        /// $COWBOY_RPC_URL.
-        #[arg(long)]
-        rpc_url: Option<String>,
-        /// Operator address of the service to use, when the chain lists several.
-        #[arg(long)]
-        service: Option<String>,
-        /// Additional member address (repeatable). The owner is always a member.
-        #[arg(long = "member")]
-        members: Vec<String>,
-        /// File holding the owner's secp256k1 secret key as hex. The room
-        /// owner is this key's address.
-        #[arg(long)]
-        owner_key_file: PathBuf,
-    },
     /// Get room info
     Info {
         /// Room ID
@@ -1676,53 +1654,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", format_message(&msg));
         }
 
-        Commands::Rooms {
-            action:
-                RoomAction::CreateHosted {
-                    name,
-                    rpc_url,
-                    service,
-                    members,
-                    owner_key_file,
-                },
-        } => {
-            let rpc_url = rpc_url
-                .clone()
-                .or_else(|| std::env::var("COWBOY_RPC_URL").ok())
-                .ok_or("rooms create-hosted needs --rpc-url or $COWBOY_RPC_URL")?;
-            let hosted =
-                cowchat_client::member::discover_hosted_service(&rpc_url, service.as_deref())
-                    .await?;
-            let secret = zeroize::Zeroizing::new(std::fs::read_to_string(owner_key_file)?);
-            let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
-            hex::decode_to_slice(secret.trim().trim_start_matches("0x"), bytes.as_mut_slice())
-                .map_err(|_| "owner key file must hold a 32-byte hex secret key")?;
-            let owner = k256::ecdsa::SigningKey::from_slice(bytes.as_slice())
-                .map_err(|_| "owner key file does not hold a valid secp256k1 key")?;
-            let mut client = CowchatClient::connect_member(
-                &hosted.endpoint,
-                &hosted.service_id,
-                &owner,
-                &cli.name,
-            )
-            .await?;
-            let room = client
-                .create_hosted_room(name, &owner, &hosted.service_id, members)
-                .await?;
-            println!(
-                "Created encrypted hosted room: {} ({})",
-                room.name, room.room_id
-            );
-            println!(
-                "  Service: {} (operator {})",
-                hosted.endpoint, hosted.operator
-            );
-            println!(
-                "  Owner: {}",
-                cowchat_client::member::member_address(&owner)
-            );
-        }
-
         Commands::Rooms { action } => {
             let client = connect(&cli).await?;
             match action {
@@ -1787,7 +1718,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                RoomAction::CreateHosted { .. } => unreachable!("handled above"),
+
                 RoomAction::Info { room_id } => {
                     let resolved = resolve_room_id(&client, room_id).await?;
                     let info = client.room_info(&resolved).await?;
