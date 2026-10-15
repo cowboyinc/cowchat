@@ -947,6 +947,47 @@ fn decrypt_field(secret: Option<&[u8]>, room_id: &str, content: &str) -> String 
     }
 }
 
+/// Seq range the server no longer holds, computed from what came back.
+///
+/// Without `since_seq` the server returns the newest `limit` messages, so a
+/// result that fills the limit has a low-end gap that is not a purge.
+fn purged_range(
+    tip: i64,
+    since_seq: Option<i64>,
+    first_returned: Option<i64>,
+    limit_reached: bool,
+) -> Option<(i64, i64)> {
+    if limit_reached && since_seq.is_none() {
+        return None;
+    }
+    let start = since_seq.map_or(1, |seq| seq + 1);
+    let end = first_returned.map_or(tip, |seq| seq - 1);
+    (end >= start).then_some((start, end))
+}
+
+async fn note_purged_history(
+    client: &CowchatClient,
+    room_id: &str,
+    since_seq: Option<i64>,
+    messages: &[ChatMessage],
+    limit: u32,
+) {
+    let Ok(tip) = client.room_tip(room_id).await else {
+        return;
+    };
+    let first_returned = messages.iter().map(|m| m.seq).min();
+    let limit_reached = messages.len() >= limit as usize;
+    match purged_range(tip, since_seq, first_returned, limit_reached) {
+        Some((a, b)) if a == b => eprintln!(
+            "note: message {a} was purged by the server's retention window; room tip is {tip}"
+        ),
+        Some((a, b)) => eprintln!(
+            "note: messages {a}..{b} were purged by the server's retention window; room tip is {tip}"
+        ),
+        None => {}
+    }
+}
+
 async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>> {
     let key = load_key(&cli.key);
 
@@ -1883,6 +1924,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let messages = client
                 .get_history_filtered(&room_id, *limit, None, since.as_deref(), *since_seq)
                 .await?;
+            if since.is_none() {
+                note_purged_history(&client, &room_id, *since_seq, &messages, *limit).await;
+            }
 
             // Optional kind filters (applied client-side): --kind allow-list,
             // --not-kind exclude-list, both comma/space-separated.
@@ -2537,6 +2581,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let messages = client
                 .get_history_filtered(&room_id, cap, None, None, *since_seq)
                 .await?;
+            note_purged_history(&client, &room_id, *since_seq, &messages, cap).await;
 
             let body = render_export(&messages, *format, *include_thinking, room);
 
@@ -3719,6 +3764,56 @@ mod room_key_tests {
             }
             _ => panic!("expected rooms rename"),
         }
+    }
+}
+
+#[cfg(test)]
+mod purged_range_tests {
+    use super::purged_range;
+
+    #[test]
+    fn empty_result_reports_everything_up_to_tip() {
+        assert_eq!(purged_range(137, None, None, false), Some((1, 137)));
+    }
+
+    #[test]
+    fn low_end_gap_is_reported() {
+        assert_eq!(purged_range(137, None, Some(120), false), Some((1, 119)));
+    }
+
+    #[test]
+    fn single_message_gap() {
+        assert_eq!(purged_range(137, None, Some(2), false), Some((1, 1)));
+    }
+
+    #[test]
+    fn since_seq_with_next_message_present_is_complete() {
+        assert_eq!(purged_range(137, Some(100), Some(101), false), None);
+    }
+
+    #[test]
+    fn full_history_is_complete() {
+        assert_eq!(purged_range(137, None, Some(1), false), None);
+    }
+
+    #[test]
+    fn empty_room_is_complete() {
+        assert_eq!(purged_range(0, None, None, false), None);
+    }
+
+    #[test]
+    fn since_seq_beyond_tip_is_complete() {
+        assert_eq!(purged_range(137, Some(150), None, false), None);
+    }
+
+    #[test]
+    fn newest_first_limit_explains_the_gap() {
+        assert_eq!(purged_range(137, None, Some(88), true), None);
+    }
+
+    #[test]
+    fn since_seq_gap_is_reported_even_when_limit_is_reached() {
+        assert_eq!(purged_range(137, Some(10), Some(60), true), Some((11, 59)));
     }
 }
 

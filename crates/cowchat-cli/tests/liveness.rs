@@ -868,3 +868,45 @@ async fn lantern_flow_reconstructs_and_scores() {
         "both agents scored, got: {cal}"
     );
 }
+
+#[tokio::test]
+async fn export_and_history_name_the_purged_range() {
+    let (_handle, addr, key, tmp) = start_test_server().await;
+    let speaker = CowchatClient::connect_tcp(&addr, &key, "speaker", None, vec![])
+        .await
+        .unwrap();
+    speaker.join_room("lobby").await.unwrap();
+    for content in ["m1", "m2", "m3"] {
+        speaker
+            .send_message("lobby", content, None, vec![])
+            .await
+            .unwrap();
+    }
+
+    let db = rusqlite::Connection::open(tmp.path().join("test.db")).unwrap();
+    let deleted = db
+        .execute(
+            "DELETE FROM messages WHERE room_id = 'lobby' AND seq <= 2",
+            [],
+        )
+        .unwrap();
+    assert_eq!(deleted, 2);
+
+    let expected =
+        "note: messages 1..2 were purged by the server's retention window; room tip is 3\n";
+    for command in ["export", "history"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+            .args(["--tcp", &addr, "--key", &key, command, "lobby"])
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success(), "{command} should succeed");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), expected, "{command}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("m3"),
+            "{command} keeps the surviving message"
+        );
+        assert!(!stdout.contains("note:"), "{command} keeps stdout clean");
+    }
+}
