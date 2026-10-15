@@ -260,7 +260,6 @@ pub async fn handle_frame(
                 task_mgr,
                 reconnect_mgr,
                 agent_api_key,
-                rate_limiter,
                 no_auth,
             )
             .await
@@ -500,26 +499,39 @@ async fn handle_create_room(
         Err(error) => return error,
     };
 
-    // Check room limit (skip in no_auth mode)
+    // Serialize the authoritative parent check, insert, and RoomCreated
+    // publication with rename/destruction.
+    let _room_guard = broker.lock_room_mutation();
+
+    // Count under the guard that create and destroy share, so two concurrent
+    // creates cannot both pass the cap.
     if !no_auth && !agent_api_key.is_empty() {
         let tier = store
             .get_key_tier(agent_api_key)
             .unwrap_or_else(|_| "free".to_string());
         let limits = rate_limiter.limits_for_tier(&tier);
-        if !rate_limiter.check_room_limit(agent_api_key, &limits) {
+        let owned = match store.count_rooms_for_key(agent_api_key) {
+            Ok(owned) => owned,
+            Err(error) => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+                )
+            }
+        };
+        if owned as u64 >= limits.max_rooms {
             return Frame::error(
                 req_id,
                 ErrorPayload::new(
                     ErrorCode::RateLimitRooms,
-                    "Room limit exceeded for this API key",
+                    format!(
+                        "Room limit exceeded for this API key ({owned} of {max} rooms). Destroy a room or start the server with --max-rooms.",
+                        max = limits.max_rooms
+                    ),
                 ),
             );
         }
     }
-
-    // Serialize the authoritative parent check, insert, and RoomCreated
-    // publication with rename/destruction.
-    let _room_guard = broker.lock_room_mutation();
 
     // Parent authorization must be checked under the mutation guard. A check
     // before waiting on destruction could otherwise insert an orphan child
@@ -568,11 +580,6 @@ async fn handle_create_room(
         p.encrypted,
     ) {
         Ok(room) => {
-            // Track in rate limiter
-            if !agent_api_key.is_empty() {
-                rate_limiter.add_room(agent_api_key);
-            }
-
             let event = Frame::event(FrameType::RoomCreated, serde_json::to_value(&room).unwrap());
             broadcast_visible_room_event(broker, reconnect_mgr, store, &room, no_auth, &event);
             Frame::ok(req_id, serde_json::to_value(&room).unwrap())
@@ -817,7 +824,6 @@ async fn handle_destroy_room(
     task_mgr: &Arc<TaskManager>,
     reconnect_mgr: &Arc<ReconnectManager>,
     agent_api_key: &str,
-    rate_limiter: &Arc<RateLimiter>,
     no_auth: bool,
 ) -> Frame {
     let p: DestroyRoomPayload = match serde_json::from_value(payload) {
@@ -883,9 +889,6 @@ async fn handle_destroy_room(
     vote_mgr.forget_room(&room.room_id);
     task_mgr.forget_room(&room.room_id);
     reconnect_mgr.forget_room(&room.room_id);
-    if let Some(owner_key) = room.owner_key.as_deref() {
-        rate_limiter.remove_room(owner_key);
-    }
 
     let event = Frame::event(
         FrameType::RoomDestroyed,
@@ -3004,7 +3007,6 @@ mod room_lifecycle_tests {
         let vote_mgr = Arc::new(VoteManager::new(store.clone(), broker.clone()));
         let task_mgr = Arc::new(TaskManager::new(store.clone()));
         let reconnect_mgr = Arc::new(ReconnectManager::new());
-        let rate_limiter = Arc::new(RateLimiter::new(None));
 
         let failed = handle_destroy_room(
             Some("destroy-failed"),
@@ -3016,7 +3018,6 @@ mod room_lifecycle_tests {
             &task_mgr,
             &reconnect_mgr,
             "owner-key",
-            &rate_limiter,
             false,
         )
         .await;
@@ -3038,7 +3039,6 @@ mod room_lifecycle_tests {
             &task_mgr,
             &reconnect_mgr,
             "owner-key",
-            &rate_limiter,
             false,
         )
         .await;

@@ -24,7 +24,6 @@ pub struct KeyUsage {
     pub agent_count: AtomicU64,
     pub msg_count: AtomicU64,
     pub msg_window_start: std::sync::Mutex<Instant>,
-    pub room_count: AtomicU64,
 }
 
 impl KeyUsage {
@@ -33,7 +32,6 @@ impl KeyUsage {
             agent_count: AtomicU64::new(0),
             msg_count: AtomicU64::new(0),
             msg_window_start: std::sync::Mutex::new(Instant::now()),
-            room_count: AtomicU64::new(0),
         }
     }
 }
@@ -186,11 +184,6 @@ impl RateLimiter {
         usage.msg_count.load(Ordering::Relaxed) < limits.max_messages_per_minute
     }
 
-    pub fn check_room_limit(&self, api_key: &str, limits: &TierLimits) -> bool {
-        let usage = self.get_or_create(api_key);
-        usage.room_count.load(Ordering::Relaxed) < limits.max_rooms
-    }
-
     pub fn increment_message(&self, api_key: &str) {
         let usage = self.get_or_create(api_key);
         usage.msg_count.fetch_add(1, Ordering::Relaxed);
@@ -206,20 +199,6 @@ impl RateLimiter {
             let current = usage.agent_count.load(Ordering::Relaxed);
             if current > 0 {
                 usage.agent_count.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn add_room(&self, api_key: &str) {
-        let usage = self.get_or_create(api_key);
-        usage.room_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn remove_room(&self, api_key: &str) {
-        if let Some(usage) = self.usage.get(api_key) {
-            let current = usage.room_count.load(Ordering::Relaxed);
-            if current > 0 {
-                usage.room_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
     }
@@ -251,18 +230,5 @@ mod tests {
         assert!(!rl.try_register_upload("key-a"));
         // A different key has its own budget.
         assert!(rl.try_register_upload("key-b"));
-    }
-
-    #[test]
-    fn destroyed_room_releases_room_quota() {
-        let rl = RateLimiter::new(None);
-        let limits = TierLimits {
-            max_rooms: 1,
-            ..TierLimits::free()
-        };
-        rl.add_room("key");
-        assert!(!rl.check_room_limit("key", &limits));
-        rl.remove_room("key");
-        assert!(rl.check_room_limit("key", &limits));
     }
 }

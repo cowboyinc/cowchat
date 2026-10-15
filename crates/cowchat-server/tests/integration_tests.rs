@@ -4415,7 +4415,10 @@ async fn room_cap_counts_rooms_the_key_owns_across_restart() {
             .await
             .unwrap_err(),
     );
-    assert_eq!(message, "Room limit exceeded for this API key");
+    assert_eq!(
+        message,
+        "Room limit exceeded for this API key (2 of 2 rooms). Destroy a room or start the server with --max-rooms."
+    );
     drop(owner);
     handle.abort();
     let _ = handle.await;
@@ -4448,7 +4451,10 @@ async fn max_rooms_override_replaces_tier_default() {
             .await
             .unwrap_err(),
     );
-    assert_eq!(message, "Room limit exceeded for this API key");
+    assert_eq!(
+        message,
+        "Room limit exceeded for this API key (1 of 1 rooms). Destroy a room or start the server with --max-rooms."
+    );
     handle.abort();
 
     let default = tempfile::TempDir::new().unwrap();
