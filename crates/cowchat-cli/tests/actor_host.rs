@@ -85,6 +85,7 @@ async fn actor_host_fizzbuzz_recovers_pending_work_after_sigkill() {
         http_allowed_origins: vec![],
         trusted_proxy_ips: vec![],
         blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
+        max_rooms: None,
     };
     let server = CowchatServer::new(config).unwrap();
     let key = server.api_key().to_owned();

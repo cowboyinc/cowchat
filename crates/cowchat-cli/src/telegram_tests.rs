@@ -124,6 +124,7 @@ async fn encrypted_bridge_recovers_append_and_retries_telegram_without_advancing
         http_allowed_origins: vec![],
         trusted_proxy_ips: vec![],
         blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
+        max_rooms: None,
     })
     .unwrap();
     let key = server.api_key().to_owned();

@@ -116,6 +116,9 @@ pub struct ServerConfig {
     pub trusted_proxy_ips: Vec<std::net::IpAddr>,
     /// Blob attachments are deleted once their room has been idle this long.
     pub blob_idle_expiry_seconds: u64,
+    /// Per-API-key room cap for every key. `None` keeps each tier's default
+    /// (`TierLimits::free()` 50, `TierLimits::pro()` 500).
+    pub max_rooms: Option<u64>,
 }
 
 pub struct CowchatServer {
@@ -402,7 +405,7 @@ impl CowchatServer {
         let api_key = auth::load_or_create_key(&config.auth_key_path)?;
 
         let vote_mgr = Arc::new(VoteManager::new(store.clone(), broker.clone()));
-        let rate_limiter = Arc::new(RateLimiter::new());
+        let rate_limiter = Arc::new(RateLimiter::new(config.max_rooms));
         let reconnect_mgr = Arc::new(ReconnectManager::new());
         let task_mgr = Arc::new(TaskManager::new(store.clone()));
         let webhook_mgr = Arc::new(crate::webhooks::WebhookManager::new(
@@ -1624,6 +1627,7 @@ mod startup_tests {
             http_allowed_origins: vec![],
             trusted_proxy_ips: vec![],
             blob_idle_expiry_seconds: DEFAULT_BLOB_IDLE_EXPIRY_SECS,
+            max_rooms: None,
         }
     }
 

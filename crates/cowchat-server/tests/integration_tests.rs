@@ -47,6 +47,7 @@ async fn start_test_server_with_keyless_local(
         http_allowed_origins: vec![],
         trusted_proxy_ips: vec![],
         blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
+        max_rooms: None,
     };
 
     let server = CowchatServer::new(config).unwrap();
@@ -1025,6 +1026,7 @@ async fn test_open_vote_and_ballots_survive_server_restart() {
         http_allowed_origins: vec![],
         trusted_proxy_ips: vec![],
         blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
+        max_rooms: None,
     })
     .unwrap();
     let restarted_handle = tokio::spawn(async move {
@@ -3063,6 +3065,7 @@ async fn test_agent_id_ownership_survives_server_restart() {
         http_allowed_origins: vec![],
         trusted_proxy_ips: vec![],
         blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
+        max_rooms: None,
     })
     .unwrap();
     let restarted_handle = tokio::spawn(async move {
@@ -3863,6 +3866,7 @@ async fn start_test_server_with_http() -> (
         http_allowed_origins: vec![],
         trusted_proxy_ips: vec![],
         blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
+        max_rooms: None,
     };
 
     let server = CowchatServer::new(config).unwrap();
@@ -4351,4 +4355,113 @@ async fn dormant_actor_stays_addressable_in_its_room_roster() {
         .iter()
         .any(|a| a.agent_id == actor_id));
     server.abort();
+}
+
+async fn start_room_cap_server(
+    dir: &std::path::Path,
+    socket: &str,
+    max_rooms: Option<u64>,
+) -> (tokio::task::JoinHandle<()>, String, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    let server = CowchatServer::new(ServerConfig {
+        socket_path: dir.join(socket),
+        tcp_addr: Some(addr.clone()),
+        http_addr: None,
+        db_path: dir.join("test.db"),
+        auth_key_path: dir.join("auth.key"),
+        no_auth: false,
+        allow_keyless_local: false,
+        allow_private_webhooks: true,
+        http_signup_enabled: false,
+        http_admin_secret: None,
+        http_allowed_origins: vec![],
+        trusted_proxy_ips: vec![],
+        blob_idle_expiry_seconds: cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
+        max_rooms,
+    })
+    .unwrap();
+    let key = server.api_key().to_string();
+    let handle = tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+    sleep(Duration::from_millis(100)).await;
+    (handle, addr, key)
+}
+
+fn expect_room_limit(error: cowchat_client::ClientError) -> String {
+    match error {
+        cowchat_client::ClientError::Server { code, message } => {
+            assert_eq!(code, cowchat_core::ErrorCode::RateLimitRooms);
+            message
+        }
+        other => panic!("expected rate_limit_rooms, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn room_cap_counts_rooms_the_key_owns_across_restart() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (handle, addr, key) = start_room_cap_server(tmp.path(), "first.sock", Some(2)).await;
+    let owner = CowchatClient::connect_tcp(&addr, &key, "owner", Some("room-owner"), vec![])
+        .await
+        .unwrap();
+    let first = owner.create_room("cap-one", None, None).await.unwrap();
+    owner.create_room("cap-two", None, None).await.unwrap();
+    let message = expect_room_limit(
+        owner
+            .create_room("cap-three", None, None)
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(
+        message,
+        "Room limit exceeded for this API key (2 of 2 rooms). Destroy a room or start the server with --max-rooms."
+    );
+    drop(owner);
+    handle.abort();
+    let _ = handle.await;
+
+    let (handle, addr, key) = start_room_cap_server(tmp.path(), "second.sock", Some(2)).await;
+    let owner = CowchatClient::connect_tcp(&addr, &key, "owner", Some("room-owner"), vec![])
+        .await
+        .unwrap();
+    expect_room_limit(
+        owner
+            .create_room("cap-three", None, None)
+            .await
+            .unwrap_err(),
+    );
+    owner.destroy_room(&first.room_id).await.unwrap();
+    let third = owner.create_room("cap-three", None, None).await.unwrap();
+    assert_eq!(third.name, "cap-three");
+    handle.abort();
+}
+
+#[tokio::test]
+async fn max_rooms_override_replaces_tier_default() {
+    let capped = tempfile::TempDir::new().unwrap();
+    let (handle, addr, key) = start_room_cap_server(capped.path(), "capped.sock", Some(1)).await;
+    let owner = connect_agent(&addr, &key, "owner").await;
+    owner.create_room("only-one", None, None).await.unwrap();
+    let message = expect_room_limit(
+        owner
+            .create_room("one-too-many", None, None)
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(
+        message,
+        "Room limit exceeded for this API key (1 of 1 rooms). Destroy a room or start the server with --max-rooms."
+    );
+    handle.abort();
+
+    let default = tempfile::TempDir::new().unwrap();
+    let (handle, addr, key) = start_room_cap_server(default.path(), "default.sock", None).await;
+    let owner = connect_agent(&addr, &key, "owner").await;
+    owner.create_room("only-one", None, None).await.unwrap();
+    let second = owner.create_room("one-too-many", None, None).await.unwrap();
+    assert_eq!(second.name, "one-too-many");
+    handle.abort();
 }
