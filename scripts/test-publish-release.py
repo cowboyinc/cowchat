@@ -32,10 +32,37 @@ def add(name):
 if command == 'sleep':
     save(); sys.exit()
 if command == 'curl':
+    from urllib.parse import urlsplit
     if s.get('probe_fail'): die()
-    if 'latest/download' in ' '.join(a) and s.get('change_latest'):
-        s['latest'] = 'v1.0.0'
-    Path(option('-o')).write_text(content('Cowchat-0.9.1.dmg'))
+    urls = [x for x in a if x.startswith(('https://', 'http://'))]
+    if len(urls) != 1: die()
+    url = urlsplit(urls[0])
+    if url.scheme != 'https' or url.netloc != 'github.com' or url.query or url.fragment: die()
+    parts = url.path.split('/')
+    if len(parts) != 7 or parts[:4] != ['', 'cowboyinc', 'cowchat', 'releases']: die()
+    is_latest = parts[4:6] == ['latest', 'download']
+    if not is_latest and parts[4] != 'download': die()
+    if is_latest and s.get('change_latest'):
+        next_release = s.get('next_release')
+        if not next_release:
+            save()
+            raise AssertionError('change_latest requires a next_release fixture')
+        s['other_releases'] = [next_release]
+        s['latest'] = next_release['tag_name']
+    tag = s['latest'] if is_latest else parts[5]
+    candidates = ([release()] if release() else []) + s.get('other_releases', [])
+    remote = next((r for r in candidates if r['tag_name'] == tag), None)
+    if not remote or remote['draft']: die()
+    if is_latest and remote['prerelease']: die()
+    # Faults occur only once public serving begins, after authenticated checks.
+    if s.get('public_missing_alias'):
+        remote['assets'] = [x for x in remote['assets'] if x['name'] != 'Cowchat.dmg']
+    asset = next((x for x in remote['assets'] if x['name'] == parts[6]), None)
+    if not asset or asset['state'] != 'uploaded': die()
+    payload = asset['bytes']
+    if s.get('public_wrong_bytes') == ('latest' if is_latest else 'tag'):
+        payload = 'wrong-public-bytes'
+    Path(option('-o')).write_text(payload)
     save(); sys.exit()
 if a[0] == 'api':
     endpoint = next(x for x in a if x.startswith('repos/'))
@@ -50,7 +77,7 @@ if a[0] == 'api':
         if s.get('latest_fail') or (s.get('latest_fail_after_publish') and release() and not release()['draft']): die()
         print(s['latest'])
     else:
-        rows = [release()] if release() else []
+        rows = ([release()] if release() else []) + s.get('other_releases', [])
         if s['latest'] and not any(x['tag_name'] == s['latest'] for x in rows):
             rows.append({'id': 2, 'tag_name': s['latest'], 'draft': False, 'prerelease': False, 'assets': []})
         print(json.dumps({'unexpected': True} if s.get('wrong_shape') else [rows]))
@@ -121,6 +148,10 @@ class PublisherTests(unittest.TestCase):
         calls = self.data['calls']
         edit = next(i for i, c in enumerate(calls) if c[:3] == ['gh', 'release', 'edit'])
         self.assertEqual(sum('/releases/assets/' in ' '.join(c) for c in calls[:edit]), 6)
+        self.assertEqual([arg for c in calls if c[0] == 'curl' for arg in c if arg.startswith('https://')], [
+            f'https://github.com/cowboyinc/cowchat/releases/download/{TAG}/Cowchat.dmg',
+            'https://github.com/cowboyinc/cowchat/releases/latest/download/Cowchat.dmg',
+        ])
 
     def test_resume_draft(self):
         self.existing(draft=True, alias=False)
@@ -239,10 +270,90 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(probe[probe.index('--connect-timeout')+1], '10')
         self.assertEqual(probe[probe.index('--max-time')+1], '300')
 
+    def public_get(self, url, ok=True):
+        self.state.write_text(json.dumps(self.data))
+        output = self.base/'http-response'
+        output.unlink(missing_ok=True)
+        r = subprocess.run(['curl', '--fail', url, '-o', str(output)],
+                           env=self.env, text=True, capture_output=True)
+        self.data = json.loads(self.state.read_text())
+        self.assertEqual(r.returncode == 0, ok, r.stderr)
+        if not ok:
+            self.assertFalse(output.exists())
+            return None
+        return output.read_text()
+
+    def test_http_reads_remote_bytes_for_tag_and_latest(self):
+        self.existing()
+        alias = next(a for a in self.data['release']['assets'] if a['name'] == 'Cowchat.dmg')
+        alias['bytes'] = 'remote-only-bytes'
+        for path in [f'download/{TAG}', 'latest/download']:
+            with self.subTest(path=path):
+                self.assertEqual(self.public_get(
+                    f'https://github.com/cowboyinc/cowchat/releases/{path}/Cowchat.dmg'),
+                    'remote-only-bytes')
+
+    def test_http_rejects_unknown_urls_and_unpublished_or_missing_assets(self):
+        root = 'https://github.com/cowboyinc/cowchat/releases'
+        for url in [f'{root}/download/v9.9.9/Cowchat.dmg',
+                    f'{root}/download/{TAG}/missing.dmg',
+                    f'{root}/latest/download/missing.dmg',
+                    f'{root}/latest',
+                    f'{root}/latest/download/Cowchat.dmg?unexpected=1',
+                    f'{root.replace("cowboyinc", "other")}/latest/download/Cowchat.dmg',
+                    f'{root.replace("github.com", "example.com")}/latest/download/Cowchat.dmg']:
+            with self.subTest(url=url):
+                self.existing()
+                self.public_get(url, ok=False)
+        for state in ['draft', 'missing', 'incomplete']:
+            with self.subTest(state=state):
+                self.existing(draft=state == 'draft', alias=state != 'missing')
+                self.data['latest'] = TAG
+                if state == 'incomplete':
+                    next(a for a in self.data['release']['assets'] if a['name'] == 'Cowchat.dmg')['state'] = 'starter'
+                for path in [f'download/{TAG}', 'latest/download']:
+                    self.public_get(f'{root}/{path}/Cowchat.dmg', ok=False)
+
+    def test_wrong_byte_response_does_not_corrupt_remote_asset(self):
+        self.existing()
+        self.data['public_wrong_bytes'] = 'latest'
+        root = 'https://github.com/cowboyinc/cowchat/releases'
+        self.assertEqual(self.public_get(f'{root}/latest/download/Cowchat.dmg'), 'wrong-public-bytes')
+        self.assertEqual(self.public_get(f'{root}/download/{TAG}/Cowchat.dmg'), f'dmg-{TAG}')
+        alias = next(a for a in self.data['release']['assets'] if a['name'] == 'Cowchat.dmg')
+        self.assertEqual(alias['bytes'], f'dmg-{TAG}')
+
+    def test_public_asset_disappears_after_authenticated_verification(self):
+        self.data['public_missing_alias'] = True
+        r = self.run_publisher(ok=False)
+        self.assertFalse(self.data['release']['draft'])
+        self.assertIn('release published; public download verification failed', r.stderr)
+        self.assertEqual(len([c for c in self.data['calls'] if c[0] == 'curl']), 5)
+        self.assertNotIn('Cowchat.dmg', [a['name'] for a in self.data['release']['assets']])
+
+    def test_public_wrong_bytes_fail_for_tag_and_stable_url(self):
+        for path in ['tag', 'latest']:
+            with self.subTest(path=path):
+                self.data = {'release': None, 'latest': '', 'calls': [], 'public_wrong_bytes': path}
+                r = self.run_publisher(ok=False)
+                self.assertIn('release published; public download verification failed', r.stderr)
+                self.assertFalse(self.data['release']['draft'])
+                probes = [c for c in self.data['calls'] if c[0] == 'curl']
+                self.assertEqual(len(probes), 5 if path == 'tag' else 6)
+
     def test_latest_changes_during_probe(self):
+        self.data['next_release'] = {
+            'id': 2, 'tag_name': 'v1.0.0', 'draft': False, 'prerelease': False,
+            'assets': [{'id': 100, 'name': 'Cowchat.dmg', 'state': 'uploaded', 'bytes': 'dmg-v1.0.0'}],
+        }
         self.data['change_latest'] = True
         r = self.run_publisher()
         self.assertIn('Latest changed', r.stderr)
+        self.assertEqual(self.data['latest'], 'v1.0.0')
+        probes = [c for c in self.data['calls'] if c[0] == 'curl']
+        # The old release's tag probe succeeds, but five stable-URL responses
+        # contain the new release's different bytes before attribution is skipped.
+        self.assertEqual(len(probes), 6)
 
     def test_workflow_wiring(self):
         workflow = (ROOT/'.github/workflows/release.yml').read_text()
