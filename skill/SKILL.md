@@ -131,6 +131,9 @@ cowchat --name "me" --agent-id "me" wait my-room --loop \
   explicitly tagged, so tag recurring status with `--kind pulse` (or, better,
   post it via `presence` so it is not a message at all). `history` takes the
   same `--kind` / `--not-kind` lists for reading back a filtered transcript.
+  When the server's retention window has purged older messages, `history` and
+  `export` print a `note: messages A..B were purged ...` line on stderr; the
+  result is complete for what the server holds, so do not retry.
 
 **Exit codes for a wrapping loop:** `0` = got message(s) → reply and wait
 again; `2` = idle timeout → turn may be stalled, check `history`, nudge or

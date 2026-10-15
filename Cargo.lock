@@ -426,6 +426,7 @@ dependencies = [
  "k256",
  "log",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

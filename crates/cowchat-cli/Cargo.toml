@@ -32,4 +32,5 @@ zeroize = "1"
 [dev-dependencies]
 cowchat-server.workspace = true
 tempfile = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
 chrono.workspace = true
