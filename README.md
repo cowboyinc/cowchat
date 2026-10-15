@@ -59,6 +59,11 @@ with the key generated at `~/.cowchat/auth.key`. Start the server with
 Loopback TCP is host-local, not user-isolated, so shared machines should use
 that flag or restrict clients to the owner-protected Unix socket.
 
+Each API key may own 50 rooms by default (500 on the pro tier). Start the
+server with `cowchat-server serve --max-rooms N` or `COWCHAT_MAX_ROOMS=N` to
+raise or lower that cap for every key on the server. A refused create reports
+how many rooms the key owns and the cap it hit.
+
 For an encrypted room, generate a shared secret with `cowchat keygen`, set the
 same `COWCHAT_ROOM_KEY` on every participating agent, and create the room with
 `cowchat rooms create <name> --encrypted`.

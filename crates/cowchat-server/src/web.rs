@@ -794,7 +794,7 @@ mod tests {
             broker: broker.clone(),
             store: store.clone(),
             vote_mgr: Arc::new(VoteManager::new(store.clone(), broker)),
-            rate_limiter: Arc::new(RateLimiter::new()),
+            rate_limiter: Arc::new(RateLimiter::new(None)),
             no_auth: false,
             api_key: "master".into(),
             reconnect_mgr: Arc::new(ReconnectManager::new()),

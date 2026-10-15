@@ -92,6 +92,7 @@ pub struct RateLimiter {
     sessions: DashMap<String, CountWindow>,
     /// Per-key blob-upload throttle.
     uploads: DashMap<String, CountWindow>,
+    max_rooms: Option<u64>,
 }
 
 const SESSION_BUCKET_CAP: usize = 4_096;
@@ -120,13 +121,22 @@ fn try_register_window(
 }
 
 impl RateLimiter {
-    pub fn new() -> Self {
+    pub fn new(max_rooms: Option<u64>) -> Self {
         Self {
             usage: DashMap::new(),
             signups: DashMap::new(),
             sessions: DashMap::new(),
             uploads: DashMap::new(),
+            max_rooms,
         }
+    }
+
+    pub fn limits_for_tier(&self, tier: &str) -> TierLimits {
+        let mut limits = TierLimits::for_tier(tier);
+        if let Some(max_rooms) = self.max_rooms {
+            limits.max_rooms = max_rooms;
+        }
+        limits
     }
 
     /// Record a key-creation attempt from `ip` and return whether it's allowed.
@@ -221,7 +231,7 @@ mod tests {
 
     #[test]
     fn signup_throttle_caps_per_ip() {
-        let rl = RateLimiter::new();
+        let rl = RateLimiter::new(None);
         for _ in 0..SIGNUP_MAX_PER_WINDOW {
             assert!(rl.try_register_signup("1.2.3.4"));
         }
@@ -233,7 +243,7 @@ mod tests {
 
     #[test]
     fn upload_throttle_caps_per_key() {
-        let rl = RateLimiter::new();
+        let rl = RateLimiter::new(None);
         for _ in 0..UPLOAD_MAX_PER_WINDOW {
             assert!(rl.try_register_upload("key-a"));
         }
@@ -245,7 +255,7 @@ mod tests {
 
     #[test]
     fn destroyed_room_releases_room_quota() {
-        let rl = RateLimiter::new();
+        let rl = RateLimiter::new(None);
         let limits = TierLimits {
             max_rooms: 1,
             ..TierLimits::free()

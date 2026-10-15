@@ -505,7 +505,7 @@ async fn handle_create_room(
         let tier = store
             .get_key_tier(agent_api_key)
             .unwrap_or_else(|_| "free".to_string());
-        let limits = TierLimits::for_tier(&tier);
+        let limits = rate_limiter.limits_for_tier(&tier);
         if !rate_limiter.check_room_limit(agent_api_key, &limits) {
             return Frame::error(
                 req_id,
@@ -3004,7 +3004,7 @@ mod room_lifecycle_tests {
         let vote_mgr = Arc::new(VoteManager::new(store.clone(), broker.clone()));
         let task_mgr = Arc::new(TaskManager::new(store.clone()));
         let reconnect_mgr = Arc::new(ReconnectManager::new());
-        let rate_limiter = Arc::new(RateLimiter::new());
+        let rate_limiter = Arc::new(RateLimiter::new(None));
 
         let failed = handle_destroy_room(
             Some("destroy-failed"),

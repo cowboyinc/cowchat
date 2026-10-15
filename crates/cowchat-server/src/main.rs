@@ -86,6 +86,11 @@ enum Commands {
         #[arg(long)]
         allow_private_webhooks: bool,
 
+        /// Per-API-key room cap for every key on this server; overrides the
+        /// tier default (free 50, pro 500)
+        #[arg(long, env = "COWCHAT_MAX_ROOMS")]
+        max_rooms: Option<u64>,
+
         /// SQLite database path
         #[arg(long, default_value = default_db_path())]
         db: PathBuf,
@@ -250,6 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     no_auth,
                     require_local_auth,
                     allow_private_webhooks,
+                    max_rooms,
                     db,
                     key_file,
                     app_control_stdin,
@@ -269,6 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         trusted_proxy_ips,
                         blob_idle_expiry_seconds:
                             cowchat_server::server::DEFAULT_BLOB_IDLE_EXPIRY_SECS,
+                        max_rooms,
                     };
 
                     let server = CowchatServer::new(config)?;

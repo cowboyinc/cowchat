@@ -24,7 +24,7 @@ async fn append_handler_retry_has_original_response_without_broadcast_mentions_t
     );
     broker.join_room("sender", "lobby", || true).unwrap();
     broker.join_room("peer", "lobby", || true).unwrap();
-    let limiter = Arc::new(RateLimiter::new());
+    let limiter = Arc::new(RateLimiter::new(None));
     let webhooks = Arc::new(crate::webhooks::WebhookManager::new(store.clone(), true));
     let payload = serde_json::json!({"room_id":"lobby", "message_id":"stable", "content":"hello", "mentions":["peer"]});
     let first = handle_send_message(
