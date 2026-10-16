@@ -991,6 +991,19 @@ async fn handle_send_message(
         }
     };
 
+    if p.metadata
+        .get("display_external")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(
+                ErrorCode::InvalidPayload,
+                "metadata.display_external must be a boolean",
+            ),
+        );
+    }
+
     if p.key_epoch.is_some() {
         return Frame::error(
             req_id,

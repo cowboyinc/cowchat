@@ -222,6 +222,9 @@ enum Commands {
     TelegramBridge(telegram::TelegramArgs),
     /// Send a message to a room
     Send {
+        /// Forward to integrated external channels (default: true). False stays in Cowchat.
+        #[arg(long, action = clap::ArgAction::Set)]
+        display_external: Option<bool>,
         /// Room ID or name
         room: String,
         /// Message content
@@ -392,6 +395,9 @@ enum Commands {
 
     /// Send a PNG chart inline to a local or global room (supports room encryption).
     SendChart {
+        /// Forward to integrated external channels (default: true). False stays in Cowchat.
+        #[arg(long, action = clap::ArgAction::Set)]
+        display_external: Option<bool>,
         /// Room ID or exact name
         room: String,
         /// PNG produced by OpenUI or another chart tool (maximum 256 KiB)
@@ -409,6 +415,9 @@ enum Commands {
     /// referencing it. Needs the HTTP surface (`--url wss://host/ws`);
     /// blobs expire after 72h of room idleness.
     SendFile {
+        /// Forward to integrated external channels (default: true). False stays in Cowchat.
+        #[arg(long, action = clap::ArgAction::Set)]
+        display_external: Option<bool>,
         /// Room ID or name
         room: String,
         /// Path of the file to upload (max 25 MiB)
@@ -1678,6 +1687,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::ActorHost(args) => actor_host::run(&cli, args).await?,
         Commands::TelegramBridge(args) => telegram::run(&cli, args).await?,
         Commands::Send {
+            display_external,
             room,
             message,
             reply_to,
@@ -1695,24 +1705,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 kind.clone()
             };
-            let msg = match &kind {
-                Some(k) => {
-                    client
-                        .send_message_with_metadata(
-                            &room_id,
-                            message,
-                            reply_to.as_deref(),
-                            mentions.clone(),
-                            serde_json::json!({ "kind": k }),
-                        )
-                        .await?
-                }
-                None => {
-                    client
-                        .send_message(&room_id, message, reply_to.as_deref(), mentions.clone())
-                        .await?
-                }
-            };
+            let mut metadata = serde_json::json!({});
+            if let Some(kind) = kind {
+                metadata["kind"] = serde_json::json!(kind);
+            }
+            if let Some(display_external) = display_external {
+                metadata["display_external"] = serde_json::json!(display_external);
+            }
+            let msg = client
+                .send_message_with_metadata(
+                    &room_id,
+                    message,
+                    reply_to.as_deref(),
+                    mentions.clone(),
+                    metadata,
+                )
+                .await?;
             println!("{}", format_message(&msg));
         }
 
@@ -2418,6 +2426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::SendChart {
+            display_external,
             room,
             path,
             openui,
@@ -2430,19 +2439,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let client = connect(&cli).await?;
             let room_id = resolve_room_id(&client, room).await?;
             client.join_room(&room_id).await?;
+            let mut metadata = serde_json::json!({"type":"chart"});
+            if let Some(display_external) = display_external {
+                metadata["display_external"] = serde_json::json!(display_external);
+            }
             let message = client
                 .send_message_with_metadata(
                     &room_id,
                     &content,
                     reply_to.as_deref(),
                     vec![],
-                    serde_json::json!({"type":"chart"}),
+                    metadata,
                 )
                 .await?;
             println!("{}", format_message(&message));
         }
 
-        Commands::SendFile { room, path, note } => {
+        Commands::SendFile {
+            room,
+            path,
+            note,
+            display_external,
+        } => {
             let base = attachment_http_base(cli.url.as_deref())?;
             let bytes =
                 std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -2482,13 +2500,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             }
 
-            let metadata = serde_json::json!({
+            let mut metadata = serde_json::json!({
                 "type": "file",
                 "blob_id": blob["blob_id"],
                 "name": blob["name"],
                 "sha256": blob["sha256"],
                 "size": blob["size"],
             });
+            if let Some(display_external) = display_external {
+                metadata["display_external"] = serde_json::json!(display_external);
+            }
             let content = note.clone().unwrap_or_else(|| file_name.to_string());
             let msg = client
                 .send_message_with_metadata(&room_id, &content, None, vec![], metadata)
@@ -3698,7 +3719,9 @@ mod room_key_tests {
         ])
         .unwrap();
         match cli.command {
-            Commands::SendFile { room, path, note } => {
+            Commands::SendFile {
+                room, path, note, ..
+            } => {
                 assert_eq!(room, "my-room");
                 assert_eq!(path, PathBuf::from("/tmp/report.pdf"));
                 assert_eq!(note.as_deref(), Some("final report"));

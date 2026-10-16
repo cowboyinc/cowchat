@@ -114,3 +114,16 @@ extension SlackAPITests {
         try png.write(to: URL(fileURLWithPath: "/tmp/cowchat-slack-room-settings.png"))
     }
 }
+
+extension SlackAPITests {
+    func testExternalDisplayMetadataDefaultsToTrueAndPreservesFalse() throws {
+        let decoder = JSONDecoder()
+        XCTAssertTrue(try decoder.decode(MessageMetadata.self, from: Data("{}".utf8)).shouldDisplayExternal)
+        let hidden = try decoder.decode(MessageMetadata.self, from: Data(#"{"display_external":false,"type":"chart"}"#.utf8))
+        XCTAssertFalse(hidden.shouldDisplayExternal)
+        let encoded = try JSONEncoder().encode(hidden)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(object["display_external"] as? Bool, false)
+        XCTAssertEqual(object["type"] as? String, "chart")
+    }
+}

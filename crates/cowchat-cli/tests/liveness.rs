@@ -1088,6 +1088,8 @@ async fn inline_charts_round_trip_through_local_and_encrypted_rooms() {
             "--agent-id",
             "artist",
             "send-chart",
+            "--display-external",
+            "false",
             "--openui",
             source.to_str().unwrap(),
             name,
@@ -1114,6 +1116,7 @@ async fn inline_charts_round_trip_through_local_and_encrypted_rooms() {
                 .unwrap(),
         )
         .unwrap();
+        assert_eq!(messages[0].metadata["display_external"], false);
         assert_eq!(received["title"], "Example chart");
         assert_eq!(received["openui"], "root = Stack([])");
         assert_eq!(
@@ -1132,5 +1135,63 @@ async fn inline_charts_round_trip_through_local_and_encrypted_rooms() {
             .unwrap();
         assert_eq!(stored.starts_with("cow1:"), encrypted);
     }
+    server.abort();
+}
+
+#[tokio::test]
+async fn external_visibility_flag_survives_room_history() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let reader = CowchatClient::connect_tcp(&addr, &key, "reader", Some("reader"), vec![])
+        .await
+        .unwrap();
+    for (text, flag) in [
+        ("legacy", None),
+        ("internal", Some("false")),
+        ("external", Some("true")),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command.args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            "writer",
+            "--agent-id",
+            "external-visibility-writer",
+            "send",
+            "lobby",
+            text,
+            "--kind",
+            "fyi",
+        ]);
+        if let Some(flag) = flag {
+            command.args(["--display-external", flag]);
+        }
+        let output = command.output().await.unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let messages = reader.get_history("lobby", 100, None).await.unwrap();
+    assert_eq!(messages.len(), 3);
+    for (message, flag) in messages.iter().zip([None, Some(false), Some(true)]) {
+        assert_eq!(message.metadata["display_external"].as_bool(), flag);
+        assert_eq!(message.metadata["kind"], "fyi");
+    }
+    reader.join_room("lobby").await.unwrap();
+    let error = reader
+        .send_message_with_metadata(
+            "lobby",
+            "bad flag",
+            None,
+            vec![],
+            serde_json::json!({"display_external":"false"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("display_external"));
     server.abort();
 }
