@@ -235,7 +235,9 @@ pub async fn handle_frame(
             )
             .await
         }
-        FrameType::LeaveRoom => handle_leave_room(req_id, frame.payload, agent_id, broker).await,
+        FrameType::LeaveRoom => {
+            handle_leave_room(req_id, frame.payload, agent_id, broker, store).await
+        }
         FrameType::RenameRoom => {
             handle_rename_room(
                 req_id,
@@ -774,6 +776,13 @@ async fn handle_join_room(
         return error;
     }
 
+    if let Err(error) = store.remember_room_voter(&p.room_id, agent_id) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+        );
+    }
+
     if broker.is_agent_in_room(agent_id, &p.room_id) {
         // Idempotent: joining a room you're already in is a no-op success, not
         // an error. (A stable-identity agent that took over a connection keeps
@@ -905,6 +914,7 @@ async fn handle_leave_room(
     payload: serde_json::Value,
     agent_id: &str,
     broker: &Arc<Broker>,
+    store: &Arc<Store>,
 ) -> Frame {
     let p: LeaveRoomPayload = match serde_json::from_value(payload) {
         Ok(p) => p,
@@ -920,6 +930,13 @@ async fn handle_leave_room(
         return Frame::error(
             req_id,
             ErrorPayload::new(ErrorCode::NotInRoom, "Not in this room"),
+        );
+    }
+
+    if let Err(error) = store.forget_room_voter(&p.room_id, agent_id) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
         );
     }
 
@@ -1030,14 +1047,48 @@ async fn handle_send_message(
     // every send, but we do NOT reject sends from non-holders. This avoids the
     // deadlock where the holder is stuck in `wait` and nobody else can speak.
 
+    let is_chart = p.metadata["type"].as_str() == Some("chart");
+    if is_chart {
+        if p.content.len() > 640 * 1024 {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::MessageTooLarge, "Chart message exceeds 640 KiB"),
+            );
+        }
+        // Encrypted charts stay opaque to the server. Plaintext charts must
+        // satisfy the same envelope/image bounds as the clients.
+        if !cowchat_core::crypto::is_ciphertext(&p.content)
+            && crate::chart::Chart::decode(&p.content).is_none()
+        {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, "Invalid chart image envelope"),
+            );
+        }
+    }
+
     // Check size + message rate limit (skip in no_auth mode)
     if !no_auth && !agent_api_key.is_empty() {
         let tier = store
             .get_key_tier(agent_api_key)
             .unwrap_or_else(|_| "free".to_string());
-        let limits = TierLimits::for_tier(&tier);
+        let mut limits = TierLimits::for_tier(&tier);
+        if is_chart {
+            limits.max_message_bytes = 640 * 1024;
+        }
         if let Some(err) = reject_oversized(req_id, &p.content, &limits) {
             return err;
+        }
+        // Charts consume the existing attachment upload allowance (60/hour)
+        // as well as the normal message budget, regardless of encryption.
+        if is_chart && !rate_limiter.try_register_upload(agent_api_key) {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::RateLimitMessages,
+                    "Chart upload limit exceeded (60 per hour)",
+                ),
+            );
         }
         if !rate_limiter.check_message_rate(agent_api_key, &limits) {
             return Frame::error(
@@ -1210,6 +1261,19 @@ async fn handle_get_history(
     agent_api_key: &str,
     no_auth: bool,
 ) -> Frame {
+    let bounded_pages = payload.get("bounded_pages").and_then(|v| v.as_bool()) == Some(true);
+    let before_seq = match payload.get("before_seq") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => match value.as_i64() {
+            Some(seq) => Some(seq),
+            None => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InvalidPayload, "before_seq must be an integer"),
+                )
+            }
+        },
+    };
     let p: GetHistoryPayload = match serde_json::from_value(payload) {
         Ok(p) => p,
         Err(e) => {
@@ -1224,22 +1288,62 @@ async fn handle_get_history(
         return error;
     }
 
-    match store.get_history_filtered(
-        &p.room_id,
-        p.limit,
-        p.before,
-        p.since.as_deref(),
-        p.since_seq,
-    ) {
-        Ok(messages) => Frame {
-            id: Some(uuid::Uuid::new_v4().to_string()),
-            reply_to: req_id.map(String::from),
-            frame_type: FrameType::HistoryResult,
-            payload: serde_json::json!({
-                "room_id": p.room_id,
-                "messages": messages,
-            }),
-        },
+    let forward = before_seq.is_none() && (p.since_seq.is_some() || p.since.is_some());
+    let history = if let Some(before_seq) = before_seq {
+        store.get_history_before_seq(&p.room_id, p.limit, before_seq)
+    } else {
+        store.get_history_filtered(
+            &p.room_id,
+            p.limit,
+            p.before,
+            p.since.as_deref(),
+            p.since_seq,
+        )
+    };
+    match history {
+        Ok(mut messages) => {
+            let total = messages.len();
+            if !forward {
+                messages.reverse();
+            }
+            let mut bytes = 512usize;
+            let mut count = 0;
+            for message in &messages {
+                let size = match serde_json::to_vec(message) {
+                    Ok(body) => body.len() + 1,
+                    Err(error) => {
+                        return Frame::error(
+                            req_id,
+                            ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+                        )
+                    }
+                };
+                if bounded_pages && size + 4096 > crate::server::MAX_FRAME_BYTES {
+                    return Frame::error(
+                        req_id,
+                        ErrorPayload::new(
+                            ErrorCode::InvalidPayload,
+                            "A message exceeds the history frame limit",
+                        ),
+                    );
+                }
+                if bounded_pages && count > 0 && bytes + size > 768 * 1024 {
+                    break;
+                }
+                count += 1;
+                bytes += size;
+            }
+            messages.truncate(count);
+            if !forward {
+                messages.reverse();
+            }
+            Frame {
+                id: Some(uuid::Uuid::new_v4().to_string()),
+                reply_to: req_id.map(String::from),
+                frame_type: FrameType::HistoryResult,
+                payload: serde_json::json!({"room_id":p.room_id,"messages":messages,"has_more":count<total}),
+            }
+        }
         Err(e) => Frame::error(
             req_id,
             ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
@@ -1508,7 +1612,19 @@ async fn handle_create_vote(
     }
 
     let vote_id = uuid::Uuid::new_v4().to_string();
-    let eligible_agents = broker.get_room_members(&p.room_id);
+    let mut eligible_agents = match store.room_voters(&p.room_id) {
+        Ok(agents) => agents,
+        Err(error) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+            )
+        }
+    };
+    // Include live members admitted through non-CLI connection paths too.
+    eligible_agents.extend(broker.get_room_members(&p.room_id));
+    eligible_agents.sort();
+    eligible_agents.dedup();
     let eligible = eligible_agents.len();
 
     let closes_at = p

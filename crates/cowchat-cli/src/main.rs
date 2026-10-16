@@ -1,5 +1,6 @@
 mod actor_host;
 mod bridge;
+mod chart;
 mod telegram;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -151,6 +152,15 @@ fn format_message(msg: &ChatMessage) -> String {
         format!(
             "[{}] #{} * {} {} *",
             ts, msg.seq, msg.agent_name, msg.content
+        )
+    } else if let Some((title, png)) = chart::Chart::decode(&msg.content) {
+        format!(
+            "[{}] #{} {}: [chart] {} ({})",
+            ts,
+            msg.seq,
+            msg.agent_name,
+            title,
+            human_size(png.len() as u64)
         )
     } else if let Some(tag) = file_message_tag(msg) {
         format!("[{}] #{} {}: {}", ts, msg.seq, msg.agent_name, tag)
@@ -380,9 +390,24 @@ enum Commands {
         cursor_file: Option<PathBuf>,
     },
 
+    /// Send a PNG chart inline to a local or global room (supports room encryption).
+    SendChart {
+        /// Room ID or exact name
+        room: String,
+        /// PNG produced by OpenUI or another chart tool (maximum 256 KiB)
+        path: PathBuf,
+        /// OpenUI source for interactive viewing in the Mac app
+        #[arg(long)]
+        openui: Option<PathBuf>,
+        /// Accessible chart title
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        reply_to: Option<String>,
+    },
     /// Upload a file to a room's blob store, then post a file message
-    /// referencing it. Replaces pasting file bodies into chat. Needs the HTTP
-    /// surface (`--url wss://host/ws`); blobs expire after 72h of room idleness.
+    /// referencing it. Needs the HTTP surface (`--url wss://host/ws`);
+    /// blobs expire after 72h of room idleness.
     SendFile {
         /// Room ID or name
         room: String,
@@ -696,7 +721,7 @@ enum RoomAction {
 enum VoteAction {
     /// Create a sealed-ballot vote in a room
     Create {
-        /// Room ID
+        /// Room ID or exact room name
         room: String,
         /// Vote title / question
         title: String,
@@ -902,6 +927,10 @@ fn command_represents_agent_session(command: &Commands) -> bool {
             | Commands::TelegramBridge(_)
             | Commands::Send { .. }
             | Commands::SendFile { .. }
+            | Commands::SendChart { .. }
+            | Commands::Vote {
+                action: VoteAction::Create { .. } | VoteAction::Cast { .. }
+            }
             | Commands::Thinking { .. }
             | Commands::Wait { .. }
             | Commands::Shell { .. }
@@ -2388,6 +2417,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        Commands::SendChart {
+            room,
+            path,
+            openui,
+            title,
+            reply_to,
+        } => {
+            let bytes = std::fs::read(path)?;
+            let source = openui.as_ref().map(std::fs::read_to_string).transpose()?;
+            let content = chart::Chart::encode_openui(title, &bytes, source.as_deref())?;
+            let client = connect(&cli).await?;
+            let room_id = resolve_room_id(&client, room).await?;
+            client.join_room(&room_id).await?;
+            let message = client
+                .send_message_with_metadata(
+                    &room_id,
+                    &content,
+                    reply_to.as_deref(),
+                    vec![],
+                    serde_json::json!({"type":"chart"}),
+                )
+                .await?;
+            println!("{}", format_message(&message));
+        }
+
         Commands::SendFile { room, path, note } => {
             let base = attachment_http_base(cli.url.as_deref())?;
             let bytes =
@@ -2757,11 +2811,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     description,
                     duration,
                 } => {
-                    // Join room first
-                    let _ = client.join_room(room).await;
+                    let room_id = resolve_room_id(&client, room).await?;
+                    client.join_room(&room_id).await?;
                     let info = client
                         .create_vote(
-                            room,
+                            &room_id,
                             title,
                             description.as_deref(),
                             options.clone(),
@@ -2781,6 +2835,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 VoteAction::Cast { vote_id, option } => {
+                    let vote = client.get_vote_status(vote_id).await?;
+                    client.join_room(&vote.room_id).await?;
                     let resp = client.cast_vote(vote_id, *option).await?;
                     let votes_cast = resp.get("votes_cast").and_then(|v| v.as_u64()).unwrap_or(0);
                     let eligible = resp

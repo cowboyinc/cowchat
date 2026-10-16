@@ -204,6 +204,9 @@ struct SlackRoomView: View {
                     .buttonStyle(.borderless)
                     .foregroundStyle(SemanticColor.textError)
                 }
+                Button("Update Slack permissions…", action: connectWorkspace)
+                    .buttonStyle(CowchatPillButtonStyle())
+
             }
         }
     }
@@ -221,15 +224,7 @@ struct SlackRoomView: View {
                     }
                     .controlSize(.large)
                 }
-                Button(workspaces.isEmpty ? "Connect a Slack workspace…" : "Add another workspace…") {
-                    perform {
-                        let authorization: Authorization = try await api.request(["connect"], method: "POST")
-                        guard authorization.url.scheme == "https", authorization.url.host == "slack.com" else {
-                            throw CowchatConnectionError.invalidResponse
-                        }
-                        NSWorkspace.shared.open(authorization.url)
-                    }
-                }
+                Button(workspaces.isEmpty ? "Connect a Slack workspace…" : "Add another workspace…", action: connectWorkspace)
                 .buttonStyle(CowchatPillButtonStyle())
             }
             if !workspaces.isEmpty {
@@ -278,6 +273,16 @@ struct SlackRoomView: View {
         }
     }
 
+    private func connectWorkspace() {
+        perform {
+            let authorization: Authorization = try await api.request(["connect"], method: "POST")
+            guard authorization.url.scheme == "https", authorization.url.host == "slack.com" else {
+                throw CowchatConnectionError.invalidResponse
+            }
+            NSWorkspace.shared.open(authorization.url)
+        }
+    }
+
     private func connectRoom() {
         perform {
             var body: [String: Any] = ["installation_id": workspaceID, "channel_id": channelID]
@@ -304,6 +309,7 @@ struct SlackRoomView: View {
     }
     @MainActor private func refresh() async throws {
         status = try await api.request(["rooms", room.id])
+        store.updateSlackBadge(roomID: room.id, connected: status.connected, profile: boundProfile)
         loaded = true
         if !status.connected {
             let result: WorkspaceList = try await api.request(["workspaces"])

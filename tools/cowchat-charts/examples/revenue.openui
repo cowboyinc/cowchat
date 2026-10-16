@@ -1,0 +1,6 @@
+root = Stack([title, chart])
+title = TextContent("Monthly revenue", "large-heavy")
+chart = BarChart(labels, [s1, s2], "grouped")
+labels = ["January", "February", "March"]
+s1 = Series("Product A", [120, 150, 180])
+s2 = Series("Product B", [90, 110, 140])

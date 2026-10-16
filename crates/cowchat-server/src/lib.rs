@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod broker;
+pub(crate) mod chart;
 pub mod connection;
 pub mod handler;
 

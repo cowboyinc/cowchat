@@ -341,6 +341,7 @@ private struct SidebarRoomRowButton: View {
             RoomRow(
                 room: room,
                 messagePreview: store.roomMessagePreviews[room.id],
+                isSlackConnected: store.slackConnectedRoomIDs.contains(room.id),
                 isSelected: workspace.isSelected(room, on: server),
                 isUnread: store.isUnread(room),
                 isWorking: store.isWorking(room, at: now),
@@ -374,6 +375,7 @@ private struct SidebarRoomRowButton: View {
         let parts = [
             store.isWorking(room, at: now) ? "Agents working" : nil,
             store.isUnread(room) ? "Unread" : nil,
+            store.slackConnectedRoomIDs.contains(room.id) ? "Connected to Slack" : nil,
             workspace.isSelected(room, on: server) ? "selected" : nil,
         ].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
@@ -732,6 +734,7 @@ struct SidebarRowBackground: View {
 private struct RoomRow: View {
     let room: Room
     let messagePreview: String?
+    let isSlackConnected: Bool
     let isSelected: Bool
     let isUnread: Bool
     let isWorking: Bool
@@ -741,6 +744,9 @@ private struct RoomRow: View {
     var body: some View {
         HStack(spacing: 10) {
             RoomAvatar(name: room.name, size: 40, accented: isSelected)
+                .overlay(alignment: .bottomTrailing) {
+                    if isSlackConnected { SlackRoomBadge().offset(x: 3, y: 3) }
+                }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     Text(room.name)
@@ -1803,6 +1809,7 @@ struct ExpandableMessageText: View {
     var textColor: Color
     @State private var isExpanded = false
     @State private var expandedPlan: MessageRenderPlan?
+    private let chart: ChartMessage?
     private let collapsedPreview: MessagePreview.CollapsedPreview
     private let collapsedPlan: MessageRenderPlan
     private let makeRenderPlan: (String) -> MessageRenderPlan
@@ -1816,12 +1823,24 @@ struct ExpandableMessageText: View {
         self.textColor = textColor
         self.makeRenderPlan = makeRenderPlan
 
-        let preview = MessagePreview.collapsedPreview(for: content)
+        let chart = ChartMessage(content: content)
+        self.chart = chart
+        let preview = MessagePreview.collapsedPreview(for: chart?.title ?? content)
         collapsedPreview = preview
         collapsedPlan = makeRenderPlan(preview.source)
     }
 
     var body: some View {
+        Group {
+            if let chart { ChartMessageView(chart: chart) }
+            else if content.hasPrefix(ChartMessage.prefix) {
+                Label("This chart could not be displayed.", systemImage: "photo")
+                    .gallopText(.bodyS, color: SemanticColor.textTertiary)
+            } else { textBody }
+        }
+    }
+
+    private var textBody: some View {
         VStack(alignment: .leading, spacing: 8) {
             if showsResponseControl {
                 Button {

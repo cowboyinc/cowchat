@@ -485,6 +485,32 @@ impl Store {
             }
         }
 
+        // A connection is ephemeral; a voting membership ends only on explicit
+        // leave. Seed old databases from known room participants exactly once.
+        // Creating and seeding the table in one transaction makes this restart-safe.
+        {
+            let tx = conn.unchecked_transaction()?;
+            let existed: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='room_voting_members')",
+                [], |row| row.get(0),
+            )?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS room_voting_members (
+                room_id TEXT NOT NULL REFERENCES rooms(room_id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                PRIMARY KEY(room_id, agent_id)
+            );",
+            )?;
+            if !existed {
+                tx.execute_batch(
+                    "INSERT OR IGNORE INTO room_voting_members(room_id,agent_id)
+                    SELECT DISTINCT m.room_id,m.agent_id FROM messages m
+                    JOIN rooms r ON r.room_id=m.room_id;",
+                )?;
+            }
+            tx.commit()?;
+        }
+
         actor_work::initialize(&conn)?;
         Ok(())
     }
@@ -498,6 +524,34 @@ impl Store {
                 log::debug!("Migration {}.{}: {}", table, column, msg);
             }
         }
+    }
+
+    /// Durable voting membership is independent of connection presence.
+    pub fn remember_room_voter(&self, room: &str, agent: &str) -> Result<(), StoreError> {
+        self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO room_voting_members(room_id,agent_id) VALUES (?1,?2)",
+            params![room, agent],
+        )?;
+        Ok(())
+    }
+
+    pub fn forget_room_voter(&self, room: &str, agent: &str) -> Result<(), StoreError> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM room_voting_members WHERE room_id=?1 AND agent_id=?2",
+            params![room, agent],
+        )?;
+        Ok(())
+    }
+
+    pub fn room_voters(&self, room: &str) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT agent_id FROM room_voting_members WHERE room_id=?1 ORDER BY agent_id",
+        )?;
+        let rows = stmt
+            .query_map([room], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // --- Room operations ---
@@ -907,6 +961,24 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(seq)
+    }
+
+    /// Sequence cursor avoids losing messages with identical timestamps when
+    /// transport-size limits split a backwards history page.
+    pub fn get_history_before_seq(
+        &self,
+        room: &str,
+        limit: u32,
+        before_seq: i64,
+    ) -> Result<Vec<ChatMessage>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT message_id,room_id,agent_id,agent_name,content,reply_to_message,metadata,created_at,seq
+            FROM messages WHERE room_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3")?;
+        let mut rows = stmt
+            .query_map(params![room, before_seq, limit], map_message_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.reverse();
+        Ok(rows)
     }
 
     pub fn get_history(
@@ -2231,6 +2303,10 @@ fn delete_room_artifacts_in_transaction(
     )?;
     tx.execute("DELETE FROM votes WHERE room_id = ?1", params![room_id])?;
     tx.execute(
+        "DELETE FROM room_voting_members WHERE room_id = ?1",
+        params![room_id],
+    )?;
+    tx.execute(
         "DELETE FROM room_tasks WHERE room_id = ?1",
         params![room_id],
     )?;
@@ -2492,6 +2568,51 @@ pub enum StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_voter_seed_is_one_time_and_does_not_undo_leave() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy.db");
+        let store = Store::open(&path).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TABLE room_voting_members;
+             INSERT INTO messages(message_id,room_id,agent_id,agent_name,content,seq)
+             VALUES ('legacy','lobby','bob','Bob','hello',1);",
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.room_voters("lobby").unwrap(), vec!["bob"]);
+        store.forget_room_voter("lobby", "bob").unwrap();
+        drop(store);
+        assert!(Store::open(&path)
+            .unwrap()
+            .room_voters("lobby")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn voting_membership_survives_restart_and_explicit_leave_stays_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voters.db");
+        let store = Store::open(&path).unwrap();
+        store.remember_room_voter("lobby", "bob").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.room_voters("lobby").unwrap(), vec!["bob"]);
+        store.forget_room_voter("lobby", "bob").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(store.room_voters("lobby").unwrap().is_empty());
+        store.remember_room_voter("lobby", "bob").unwrap();
+        store.delete_room_artifacts("lobby").unwrap();
+        assert!(store.room_voters("lobby").unwrap().is_empty());
+    }
 
     #[test]
     fn test_initialize_creates_lobby() {

@@ -19,6 +19,8 @@ private enum MemberRefreshOutcome {
 @MainActor
 final class ChatStore: ObservableObject {
     @Published var rooms: [Room] = []
+    @Published var slackConnectedRoomIDs: Set<String> = []
+    private var slackRefreshTask: Task<Void, Never>?
     @Published var selectedRoomID: String?
     @Published var messages: [ChatMessage] = []
     @Published var roomMembers: [AgentPresence] = []
@@ -842,6 +844,9 @@ final class ChatStore: ObservableObject {
         roomSelectionGeneration += 1
         roomMutationGeneration += 1
 
+        slackRefreshTask?.cancel()
+        slackRefreshTask = nil
+        slackConnectedRoomIDs = []
         rooms = []
         selectedRoomID = nil
         messages = []
@@ -894,6 +899,25 @@ final class ChatStore: ObservableObject {
         )
     }
 
+    private func refreshSlackBadges() {
+        guard connectionProfile.kind == .cowchatCloud else { return }
+        slackRefreshTask?.cancel()
+        let profile = connectionProfile
+        let generation = profileGeneration
+        slackRefreshTask = Task { [weak self] in
+            struct Connections: Decodable { let rooms: [String] }
+            let result = try? await SlackAPI(profile: profile).request(["rooms"]) as Connections
+            guard !Task.isCancelled, let self, self.profileGeneration == generation else { return }
+            if let result { self.slackConnectedRoomIDs = Set(result.rooms) }
+        }
+    }
+
+    func updateSlackBadge(roomID: String, connected: Bool, profile: ConnectionProfile?) {
+        guard profile == connectionProfile else { return }
+        if connected { slackConnectedRoomIDs.insert(roomID) }
+        else { slackConnectedRoomIDs.remove(roomID) }
+    }
+
     func refreshRooms(selectFallbackForMissingSelection: Bool = true) async throws {
         guard !isRefreshingRooms else { return }
         let expectedProfileGeneration = profileGeneration
@@ -919,6 +943,7 @@ final class ChatStore: ObservableObject {
             }
         }
         rooms = refreshed.sorted(by: roomSort)
+        refreshSlackBadges()
         // `list_rooms` is an authoritative server snapshot. It includes this
         // client only when the registration restored membership before the
         // request. A later fresh join deliberately clears this marker because
