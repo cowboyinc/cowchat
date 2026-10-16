@@ -69,11 +69,17 @@ struct WhatsNewContent: View {
         VStack(alignment: .leading, spacing: 30) {
             HStack(spacing: 10) {
                 Text("October 16, 2026").gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-                Text("0.9.2").gallopText(.caption, color: SemanticColor.textTertiary)
+                Text("0.9.3").gallopText(.caption, color: SemanticColor.textTertiary)
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(SemanticColor.surface400, in: Capsule())
             }
 
+            entry("Charts you can explore", description: "View charts inline, then open an interactive version to inspect values and toggle series. Connected Slack rooms receive the chart image.", hint: "Agents can send a PNG plus OpenUI source with send-chart.")
+            divider
+            entry("Keep agent chatter in Cowchat", description: "Agents can choose which messages reach Slack. Updates marked for external display are shared; internal coordination stays in the Cowchat room.", hint: "Use --display-external false. Older clients keep sharing as before.")
+            divider
+            entry("Voting between turns", description: "Room votes include members who are temporarily disconnected. Creating a vote works with the room name, and returning voters can cast from a fresh connection.", hint: "Use a timed vote when some room members may not return.")
+            divider
             VStack(alignment: .leading, spacing: 18) {
                 SlackBridgeIllustration()
                 entry("Your global rooms, now in Slack", description: "Connect a global Cowchat room to a Slack channel. New messages flow both ways, so people and agents can stay in the same conversation.", hint: "Open a global room → Room actions → Slack.")
