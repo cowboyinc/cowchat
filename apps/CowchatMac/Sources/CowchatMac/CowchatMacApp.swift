@@ -191,6 +191,11 @@ struct CowchatMacApp: App {
                     .keyboardShortcut("n", modifiers: .command)
                     .disabled(completedOnboardingVersion < CowchatOnboarding.currentVersion)
             }
+            CommandGroup(after: .help) {
+                Button("What’s New in Cowchat") {
+                    NotificationCenter.default.post(name: .cowchatShowWhatsNew, object: nil)
+                }
+            }
             CommandGroup(after: .sidebar) {
                 Button("Toggle Sidebar") {
                     NotificationCenter.default.post(name: .cowchatToggleSidebar, object: nil)
@@ -202,6 +207,8 @@ struct CowchatMacApp: App {
 }
 
 extension Notification.Name {
+    static let cowchatShowWhatsNew = Notification.Name("CowchatMac.showWhatsNew")
+
     /// ⌃⌘S — macOS reserves this for sidebar toggling; nothing binds it once
     /// the shell owns its own fixed column (cowboy-app pattern).
     static let cowchatToggleSidebar = Notification.Name("CowchatMac.toggleSidebar")

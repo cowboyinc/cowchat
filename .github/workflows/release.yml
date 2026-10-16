@@ -148,8 +148,10 @@ jobs:
           ./build-app.sh
           APP="$HOME/Applications/Cowchat.app"
           codesign --verify --deep --strict "$APP"
-          lipo "$APP/Contents/MacOS/Cowchat" -verify_arch arm64 x86_64
-          lipo "$APP/Contents/Helpers/cowchat-server" -verify_arch arm64 x86_64
+          lipo "$APP/Contents/MacOS/Cowchat" -verify_arch arm64
+          lipo "$APP/Contents/MacOS/Cowchat" -verify_arch x86_64
+          lipo "$APP/Contents/Helpers/cowchat-server" -verify_arch arm64
+          lipo "$APP/Contents/Helpers/cowchat-server" -verify_arch x86_64
           codesign -dv --verbose=4 "$APP" 2>&1 \
             | grep -F 'Authority=Developer ID Application:'
           codesign -dv --verbose=4 "$APP/Contents/Helpers/cowchat-server" 2>&1 \
