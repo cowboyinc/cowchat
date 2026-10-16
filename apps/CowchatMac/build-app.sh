@@ -98,6 +98,12 @@ fi
 
 # Build both supported Mac architectures so a versioned installer is never
 # silently tied to the architecture of the machine that produced it.
+for chart_asset in index.html client.js client.css; do
+    if [ ! -s "$ROOT/Sources/CowchatMac/Bundled/Charts/$chart_asset" ]; then
+        printf 'Missing chart assets. Run pnpm --dir tools/cowchat-charts install --frozen-lockfile and node tools/cowchat-charts/bundle-mac.mjs before packaging.\n' >&2
+        exit 1
+    fi
+done
 swift build -c release --arch arm64 --arch x86_64
 BIN_DIR=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)
 APP_DIR="$BIN_DIR/$APP_NAME"

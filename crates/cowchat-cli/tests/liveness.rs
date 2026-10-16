@@ -911,3 +911,287 @@ async fn export_and_history_name_the_purged_range() {
         assert!(!stdout.contains("note:"), "{command} keeps stdout clean");
     }
 }
+
+#[tokio::test]
+async fn vote_commands_resolve_names_and_include_disconnected_room_members() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let admin = CowchatClient::connect_tcp(&addr, &key, "admin", Some("admin"), vec![])
+        .await
+        .unwrap();
+    let room = admin
+        .create_room("Planning vote", None, None)
+        .await
+        .unwrap();
+    let run = |agent: &str, args: Vec<String>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command.args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            agent,
+            "--agent-id",
+            agent,
+        ]);
+        command.args(args);
+        async move { command.output().await.unwrap() }
+    };
+    let joined = run(
+        "bob",
+        vec!["send".into(), room.name.clone(), "ready".into()],
+    )
+    .await;
+    assert!(
+        joined.status.success(),
+        "{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while admin
+            .list_agents(Some(&room.room_id))
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.agent_id == "bob")
+        {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let created = run(
+        "alice",
+        vec![
+            "vote".into(),
+            "create".into(),
+            room.name.clone(),
+            "Lunch?".into(),
+            "--options".into(),
+            "Soup".into(),
+            "Salad".into(),
+        ],
+    )
+    .await;
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let output = String::from_utf8(created.stdout).unwrap();
+    assert!(output.contains(&format!("Room: {}", room.room_id)));
+    let line = output
+        .lines()
+        .find(|line| line.starts_with("Vote created:"))
+        .unwrap();
+    let vote_id = line.rsplit_once('(').unwrap().1.trim_end_matches(')');
+    assert_eq!(
+        admin
+            .get_vote_status(vote_id)
+            .await
+            .unwrap()
+            .eligible_voters,
+        2
+    );
+    // Each CLI call is a separate connection, with the same durable identity.
+    for (agent, option) in [("alice", "0"), ("bob", "1")] {
+        let cast = run(
+            agent,
+            vec!["vote".into(), "cast".into(), vote_id.into(), option.into()],
+        )
+        .await;
+        assert!(
+            cast.status.success(),
+            "{}",
+            String::from_utf8_lossy(&cast.stderr)
+        );
+    }
+    assert_eq!(admin.get_vote_status(vote_id).await.unwrap().votes_cast, 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn vote_create_reports_room_resolution_failure() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let output = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            "voter",
+            "--agent-id",
+            "voter",
+            "vote",
+            "create",
+            "missing-room",
+            "Lunch?",
+            "--options",
+            "Soup",
+            "Salad",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("missing-room"), "{error}");
+    assert!(!error.contains("NotInRoom"), "{error}");
+    server.abort();
+}
+
+#[tokio::test]
+async fn inline_charts_round_trip_through_local_and_encrypted_rooms() {
+    use base64::Engine;
+    let (server, addr, key, tmp) = start_test_server().await;
+    let envelope = include_str!("../../../test-fixtures/chart-v1.txt");
+    let payload: serde_json::Value =
+        serde_json::from_str(envelope.strip_prefix("cowchat-chart:v1\n").unwrap()).unwrap();
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(payload["png"].as_str().unwrap())
+        .unwrap();
+    let path = tmp.path().join("chart.png");
+    std::fs::write(&path, png).unwrap();
+    let source = tmp.path().join("chart.openui");
+    std::fs::write(&source, "root = Stack([])").unwrap();
+    for encrypted in [false, true] {
+        let mut image = base64::engine::general_purpose::STANDARD
+            .decode(payload["png"].as_str().unwrap())
+            .unwrap();
+        // Padding exercises the encrypted media allowance above the text cap.
+        if encrypted {
+            image.resize(200_000, 0);
+        }
+        std::fs::write(&path, &image).unwrap();
+
+        let mut reader = CowchatClient::connect_tcp(&addr, &key, "reader", Some("reader"), vec![])
+            .await
+            .unwrap();
+        let name = if encrypted {
+            "encrypted chart"
+        } else {
+            "local chart"
+        };
+        let room = reader
+            .create_room_with_options(name, None, None, false, encrypted)
+            .await
+            .unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command.args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            "artist",
+            "--agent-id",
+            "artist",
+            "send-chart",
+            "--display-external",
+            "false",
+            "--openui",
+            source.to_str().unwrap(),
+            name,
+        ]);
+        command.arg(&path).args(["--title", "Example chart"]);
+        command.env_remove("COWCHAT_ROOM_KEY");
+        if encrypted {
+            command.env("COWCHAT_ROOM_KEY", "chart-test-secret");
+            reader.set_room_secret(b"chart-test-secret");
+        }
+        let sent = command.output().await.unwrap();
+        assert!(
+            sent.status.success(),
+            "{}",
+            String::from_utf8_lossy(&sent.stderr)
+        );
+        assert!(String::from_utf8_lossy(&sent.stdout).contains("[chart] Example chart"));
+        let messages = reader.get_history(&room.room_id, 10, None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        let received: serde_json::Value = serde_json::from_str(
+            messages[0]
+                .content
+                .strip_prefix("cowchat-chart:v1\n")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(messages[0].metadata["display_external"], false);
+        assert_eq!(received["title"], "Example chart");
+        assert_eq!(received["openui"], "root = Stack([])");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(received["png"].as_str().unwrap())
+                .unwrap(),
+            image
+        );
+        let db = rusqlite::Connection::open(tmp.path().join("test.db")).unwrap();
+        let stored: String = db
+            .query_row(
+                "SELECT content FROM messages WHERE room_id=?1",
+                [&room.room_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.starts_with("cow1:"), encrypted);
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn external_visibility_flag_survives_room_history() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let reader = CowchatClient::connect_tcp(&addr, &key, "reader", Some("reader"), vec![])
+        .await
+        .unwrap();
+    for (text, flag) in [
+        ("legacy", None),
+        ("internal", Some("false")),
+        ("external", Some("true")),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command.args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            "writer",
+            "--agent-id",
+            "external-visibility-writer",
+            "send",
+            "lobby",
+            text,
+            "--kind",
+            "fyi",
+        ]);
+        if let Some(flag) = flag {
+            command.args(["--display-external", flag]);
+        }
+        let output = command.output().await.unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let messages = reader.get_history("lobby", 100, None).await.unwrap();
+    assert_eq!(messages.len(), 3);
+    for (message, flag) in messages.iter().zip([None, Some(false), Some(true)]) {
+        assert_eq!(message.metadata["display_external"].as_bool(), flag);
+        assert_eq!(message.metadata["kind"], "fyi");
+    }
+    reader.join_room("lobby").await.unwrap();
+    let error = reader
+        .send_message_with_metadata(
+            "lobby",
+            "bad flag",
+            None,
+            vec![],
+            serde_json::json!({"display_external":"false"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("display_external"));
+    server.abort();
+}

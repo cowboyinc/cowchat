@@ -317,17 +317,10 @@ async fn casino_round_broadcast_bets_and_settles() {
         .await
         .unwrap();
 
-    let all = wait_for(&chad, &room, "settlement", |a, c| {
+    wait_for(&chad, &room, "settlement", |a, c| {
         a == "casino" && c.starts_with("settled:r1 price=117")
     })
     .await;
-    assert_eq!(
-        all.iter()
-            .filter(|(a, c)| a.starts_with("bettor-") && c.starts_with("bet:r1:"))
-            .count(),
-        2,
-        "both bettors reacted to the round announcement"
-    );
     // Bets are recorded in the casino's durable state even when they race the
     // settlement price.
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -341,6 +334,14 @@ async fn casino_round_broadcast_bets_and_settles() {
     })
     .await
     .expect("both bets recorded in casino state");
+    let all = chad.get_history(&room, 200, None).await.unwrap();
+    assert_eq!(
+        all.iter()
+            .filter(|m| m.agent_id.starts_with("bettor-") && m.content.starts_with("bet:r1:"))
+            .count(),
+        2,
+        "both bettors reacted to the round announcement"
+    );
     // The room stays quiet afterwards: skips leave no messages behind.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let quiet = chad.get_history(&room, 200, None).await.unwrap();

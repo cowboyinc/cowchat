@@ -358,7 +358,6 @@ impl CowchatServer {
     /// Explicit hosted startup after provisioning, promotion, fence and recovery.
     /// This initial slice binds the server's authenticated primary credential to
     /// the recovered owner; it has no automatic fallback or public signup.
-
     fn new_inner(
         mut config: ServerConfig,
         mode: RoomMode,

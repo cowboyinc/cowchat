@@ -35,11 +35,38 @@ jobs:
           packages=json.load(open(sys.argv[1]))['packages']
           for p in packages:
               source=p['source'] or ''
-              assert not source.startswith('git+') or source.startswith('git+https://github.com/cowboyinc/cowchat-core.git?rev=e440e97167bb0a8874a98197568dcd4e8e229537#'), source
+              assert not source.startswith('git+') or source.startswith('git+https://github.com/cowboyinc/cowchat-core.git?rev=086d7b220682b4e379fa5c0ba49cbe814a045f96#'), source
           PY
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --workspace --all-targets --all-features
       - run: cargo build --locked --release -p cowchat-server -p cowchat-cli -p cowchat-codex
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm install --global pnpm@11.1.2
+      - run: pnpm --dir tools/cowchat-charts install --frozen-lockfile
+        env:
+          OPENUI_TELEMETRY_DISABLED: '1'
+          DO_NOT_TRACK: '1'
+      - run: node tools/cowchat-charts/bundle-mac.mjs
       - if: runner.os == 'macOS'
         working-directory: apps/CowchatMac
         run: swift test && swift build -c release
+  charts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tools/cowchat-charts
+    env:
+      OPENUI_TELEMETRY_DISABLED: '1'
+      DO_NOT_TRACK: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm install --global pnpm@11.1.2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install chromium --with-deps --only-shell
+      - run: pnpm test

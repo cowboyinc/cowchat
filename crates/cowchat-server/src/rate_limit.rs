@@ -154,7 +154,7 @@ impl RateLimiter {
         try_register_window(&self.sessions, ip, SESSION_MAX_PER_WINDOW, SESSION_WINDOW)
     }
 
-    /// Record a blob upload for `api_key` and return whether it's allowed.
+    /// Record a blob or inline-chart upload for `api_key` and return whether it's allowed.
     pub fn try_register_upload(&self, api_key: &str) -> bool {
         try_register_window(&self.uploads, api_key, UPLOAD_MAX_PER_WINDOW, UPLOAD_WINDOW)
     }

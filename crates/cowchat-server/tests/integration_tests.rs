@@ -4465,3 +4465,162 @@ async fn max_rooms_override_replaces_tier_default() {
     assert_eq!(second.name, "one-too-many");
     handle.abort();
 }
+
+#[tokio::test]
+async fn vote_electorate_survives_disconnect_but_does_not_admit_late_joiners() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let alice = CowchatClient::connect_tcp(&addr, &key, "Alice", Some("alice"), vec![])
+        .await
+        .unwrap();
+    let bob = CowchatClient::connect_tcp(&addr, &key, "Bob", Some("bob"), vec![])
+        .await
+        .unwrap();
+    alice.join_room("lobby").await.unwrap();
+    bob.join_room("lobby").await.unwrap();
+    drop(bob);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while alice
+            .list_agents(Some("lobby"))
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.agent_id == "bob")
+        {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let vote = alice
+        .create_vote("lobby", "Choose", None, vec!["A".into(), "B".into()], None)
+        .await
+        .unwrap();
+    assert_eq!(vote.eligible_voters, 2);
+    alice.cast_vote(&vote.vote_id, 0).await.unwrap();
+    assert_eq!(
+        alice.get_vote_status(&vote.vote_id).await.unwrap().status,
+        VoteStatus::Open
+    );
+    let late = CowchatClient::connect_tcp(&addr, &key, "Late", Some("late"), vec![])
+        .await
+        .unwrap();
+    late.join_room("lobby").await.unwrap();
+    assert!(late.cast_vote(&vote.vote_id, 1).await.is_err());
+    let bob = CowchatClient::connect_tcp(&addr, &key, "Bob", Some("bob"), vec![])
+        .await
+        .unwrap();
+    bob.join_room("lobby").await.unwrap();
+    bob.cast_vote(&vote.vote_id, 1).await.unwrap();
+    // Explicit leave changes the next electorate, never the frozen current one.
+    late.leave_room("lobby").await.unwrap();
+    bob.leave_room("lobby").await.unwrap();
+    let next = alice
+        .create_vote("lobby", "Again", None, vec!["A".into(), "B".into()], None)
+        .await
+        .unwrap();
+    assert_eq!(next.eligible_voters, 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn large_message_histories_are_paginated_under_the_transport_frame_limit() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let client = connect_agent(&addr, &key, "large-history").await;
+    client.join_room("lobby").await.unwrap();
+    for _ in 0..20 {
+        client
+            .send_message("lobby", &"x".repeat(60_000), None, vec![])
+            .await
+            .unwrap();
+    }
+    let raw = client
+        .request(
+            FrameType::GetHistory,
+            serde_json::json!({"room_id":"lobby","limit":100,"bounded_pages":true}),
+        )
+        .await
+        .unwrap();
+    assert!(raw.to_line().unwrap().len() < 1024 * 1024);
+    assert_eq!(raw.payload["has_more"], true);
+    let messages = client.get_history("lobby", 100, None).await.unwrap();
+    assert_eq!(
+        messages.iter().map(|m| m.seq).collect::<Vec<_>>(),
+        (1..=20).collect::<Vec<_>>()
+    );
+    let messages = client
+        .get_history_filtered("lobby", 100, None, None, Some(0))
+        .await
+        .unwrap();
+    assert_eq!(
+        messages.iter().map(|m| m.seq).collect::<Vec<_>>(),
+        (1..=20).collect::<Vec<_>>()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn chart_media_allowance_does_not_bypass_text_or_upload_limits() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let client = connect_agent(&addr, &key, "chart-limits").await;
+    client.join_room("lobby").await.unwrap();
+    assert!(client
+        .send_message("lobby", &"x".repeat(70_000), None, vec![])
+        .await
+        .is_err());
+    assert!(client
+        .send_message_with_metadata(
+            "lobby",
+            "not an image",
+            None,
+            vec![],
+            serde_json::json!({"type":"chart"})
+        )
+        .await
+        .is_err());
+    let content = include_str!("../../../test-fixtures/chart-v1.txt");
+    let prepared = client.prepare_message(
+        "lobby",
+        content,
+        None,
+        vec![],
+        serde_json::json!({"type":"chart"}),
+    );
+    let first = client.append_prepared_message(&prepared).await.unwrap();
+    for _ in 1..60 {
+        client
+            .send_message_with_metadata(
+                "lobby",
+                content,
+                None,
+                vec![],
+                serde_json::json!({"type":"chart"}),
+            )
+            .await
+            .unwrap();
+    }
+    // A retry of an acknowledged message is not a new upload allowance.
+    assert_eq!(
+        client
+            .append_prepared_message(&prepared)
+            .await
+            .unwrap()
+            .message_id,
+        first.message_id
+    );
+    assert!(client
+        .send_message_with_metadata(
+            "lobby",
+            content,
+            None,
+            vec![],
+            serde_json::json!({"type":"chart"})
+        )
+        .await
+        .is_err());
+    // Ordinary conversation is still available after the chart quota is spent.
+    client
+        .send_message("lobby", "Still here", None, vec![])
+        .await
+        .unwrap();
+    server.abort();
+}

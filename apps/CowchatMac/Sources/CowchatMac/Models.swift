@@ -145,6 +145,8 @@ struct RoomInvite: Codable, Identifiable, Equatable {
 }
 
 struct MessageMetadata: Codable, Equatable {
+    let displayExternal: Bool?
+    var shouldDisplayExternal: Bool { displayExternal ?? true }
     let type: String?
     let blobID: String?
     let name: String?
@@ -153,16 +155,19 @@ struct MessageMetadata: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case type, name, sha256, size
+        case displayExternal = "display_external"
         case blobID = "blob_id"
     }
 
     init(
+        displayExternal: Bool? = nil,
         type: String? = nil,
         blobID: String? = nil,
         name: String? = nil,
         sha256: String? = nil,
         size: Int? = nil
     ) {
+        self.displayExternal = displayExternal
         self.type = type
         self.blobID = blobID
         self.name = name

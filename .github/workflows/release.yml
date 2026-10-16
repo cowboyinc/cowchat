@@ -84,6 +84,15 @@ jobs:
         with:
           toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm install --global pnpm@11.1.2
+      - run: pnpm --dir tools/cowchat-charts install --frozen-lockfile
+        env:
+          OPENUI_TELEMETRY_DISABLED: '1'
+          DO_NOT_TRACK: '1'
+      - run: node tools/cowchat-charts/bundle-mac.mjs
       - name: Require Apple release credentials
         run: |
           set -euo pipefail
