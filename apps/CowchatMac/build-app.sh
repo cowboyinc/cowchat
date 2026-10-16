@@ -47,7 +47,7 @@ verify_server_binary() {
 			"$verification_phase" "$server_path" >&2
 		exit 1
 	fi
-	if ! lipo "$server_path" -verify_arch arm64 x86_64; then
+	if ! lipo "$server_path" -verify_arch arm64 || ! lipo "$server_path" -verify_arch x86_64; then
 		printf 'Cowchat server helper is not universal (%s).\n' "$verification_phase" >&2
 		exit 1
 	fi
@@ -131,7 +131,7 @@ if [ ! -d "$RESOURCE_BUNDLE" ]; then
 	printf '%s\n' "Missing SwiftPM resource bundle: $RESOURCE_BUNDLE" >&2
 	exit 1
 fi
-if ! lipo "$BIN_DIR/$PRODUCT" -verify_arch arm64 x86_64; then
+if ! lipo "$BIN_DIR/$PRODUCT" -verify_arch arm64 || ! lipo "$BIN_DIR/$PRODUCT" -verify_arch x86_64; then
 	printf '%s\n' 'Release executable is not universal (arm64 + x86_64).' >&2
 	exit 1
 fi
@@ -242,7 +242,7 @@ INSTALL_STAGE=$(mktemp -d "$INSTALL_DIR/.cowchat-install.XXXXXX")
 INSTALL_CANDIDATE="$INSTALL_STAGE/$APP_NAME"
 ditto "$APP_DIR" "$INSTALL_CANDIDATE"
 codesign --verify --deep --strict "$INSTALL_CANDIDATE"
-if ! lipo "$INSTALL_CANDIDATE/Contents/MacOS/Cowchat" -verify_arch arm64 x86_64; then
+if ! lipo "$INSTALL_CANDIDATE/Contents/MacOS/Cowchat" -verify_arch arm64 || ! lipo "$INSTALL_CANDIDATE/Contents/MacOS/Cowchat" -verify_arch x86_64; then
 	printf '%s\n' 'The staged installed app is not universal (arm64 + x86_64).' >&2
 	exit 1
 fi
