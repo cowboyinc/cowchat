@@ -95,97 +95,203 @@ struct SlackRoomView: View {
     private struct Acknowledgement: Decodable {}
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Slack · \(room.name)").font(.headline)
-                Spacer()
-                Button("Done") { dismiss() }
+        VStack(spacing: 0) {
+            CowchatSheetHeader(title: "Slack", subtitle: "Connect \(room.name) to your team’s conversation.") { dismiss() }
+            divider
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    if let errorMessage { notice(errorMessage, error: true) }
+                    if busy && !loaded {
+                        ProgressView("Loading connection…")
+                            .frame(maxWidth: .infinity).padding(.vertical, 50)
+                    } else if loaded && status.connected {
+                        connectedContent
+                    } else if loaded {
+                        setupContent
+                    } else {
+                        Text("Couldn’t load this room’s Slack connection. Try refreshing.")
+                            .gallopText(.bodyM, color: SemanticColor.textSecondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(28)
+                .disabled(busy)
             }
-            if busy { ProgressView().controlSize(.small) }
-            if let errorMessage { Text(errorMessage).foregroundStyle(.red).font(.callout) }
-            if !loaded && !busy { Button("Retry") { perform { try await refresh() } } }
-            if loaded && status.connected {
-                Label("Connected to #\(status.channelName ?? "Slack")", systemImage: "link")
-                Text(status.paused == true ? "Messages are queued while this connection is paused." : "The global server relays messages even when this Mac is offline.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if let error = status.error { Text(error).foregroundStyle(.orange).font(.callout) }
-                if let queued = status.queued, queued > 0 { Text("\(queued) Slack messages waiting").font(.caption) }
-                Text("Disconnecting stops delivery and discards pending messages. Paused messages are retained for seven days.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button(status.paused == true ? "Resume" : "Pause") {
+            divider
+            HStack(spacing: 12) {
+                if busy { ProgressView().controlSize(.small) }
+                Button { perform { try await refresh() } } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(CowchatPillButtonStyle())
+                .disabled(busy)
+                Spacer()
+                if loaded && !status.connected && !workspaces.isEmpty {
+                    Button("Connect this room", action: connectRoom)
+                        .buttonStyle(CowchatPillButtonStyle(prominent: true))
+                        .disabled(busy || workspaceID.isEmpty || channelID.isEmpty || roomLocked)
+                } else {
+                    Button("Done") { dismiss() }
+                        .buttonStyle(CowchatPillButtonStyle(prominent: true))
+                }
+            }
+            .padding(.horizontal, 28).padding(.vertical, 18)
+        }
+        .frame(width: 600, height: 660)
+        .foregroundStyle(SemanticColor.textPrimary)
+        .background(SemanticColor.surface600)
+        .task { boundProfile = store.connectionProfile; perform { try await refresh() } }
+        .onChange(of: store.connectionProfile) { _ in dismiss() }
+        .onChange(of: workspaceID) { _ in
+            channels = []; channelID = ""
+            guard !workspaceID.isEmpty else { return }
+            perform { try await loadChannels() }
+        }
+    }
+
+    private var roomLocked: Bool {
+        room.encrypted && !store.unlockedRoomIDs.contains(room.id)
+    }
+
+    private var divider: some View {
+        Rectangle().fill(SemanticColor.borderDefault).frame(height: 0.5)
+    }
+
+    private var connectedContent: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: status.paused == true ? "pause.circle" : "checkmark.circle.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(status.paused == true ? Color.orange : Color.green)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(status.paused == true ? "Connection paused" : "Connected to Slack")
+                        .gallopText(.h5, color: SemanticColor.textPrimary)
+                    Text("#\(status.channelName ?? "Slack")")
+                        .gallopText(.bodyM, color: SemanticColor.textSecondary)
+                    Text(status.paused == true ? "New messages wait until you resume." : "Messages flow both ways, even when this Mac is offline.")
+                        .gallopText(.bodyS, color: SemanticColor.textTertiary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .gallopCard(cornerRadius: 14)
+
+            if let error = status.error { notice(error, error: true) }
+            if let queued = status.queued, queued > 0 {
+                notice("\(queued) Slack messages waiting to be delivered.")
+            }
+            section("In this conversation") {
+                detail("arrow.left.arrow.right", title: "One shared conversation", text: "New messages in this room and its Slack channel are shared automatically.")
+                detail("at", title: "Address your room bots", text: "Use a bot’s @handle in Slack to address it in this room.")
+            }
+            section("Manage connection") {
+                Text("Paused messages are kept for seven days. Disconnecting stops delivery and discards pending messages.")
+                    .gallopText(.bodyS, color: SemanticColor.textTertiary)
+                HStack(spacing: 12) {
+                    Button(status.paused == true ? "Resume connection" : "Pause connection") {
                         perform {
                             let _: Acknowledgement = try await api.request(["rooms", room.id, "pause"], method: "POST", body: ["paused": status.paused != true])
                             try await refresh()
                         }
                     }
+                    .buttonStyle(CowchatPillButtonStyle())
                     Button("Disconnect", role: .destructive) {
                         perform {
                             let _: Acknowledgement = try await api.request(["rooms", room.id], method: "DELETE")
                             try await refresh()
                         }
                     }
-                    Spacer()
-                    Button("Refresh") { perform { try await refresh() } }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(SemanticColor.textError)
                 }
-            } else if loaded {
-                Text("Connect only this global room to one Slack channel. Other rooms stay disconnected.").font(.callout)
-                HStack {
-                    Button("Connect a Slack workspace…") {
-                        perform {
-                            let authorization: Authorization = try await api.request(["connect"], method: "POST")
-                            guard authorization.url.scheme == "https", authorization.url.host == "slack.com" else {
-                                throw CowchatConnectionError.invalidResponse
-                            }
-                            NSWorkspace.shared.open(authorization.url)
-                        }
-                    }
-                    Button("Refresh") { perform { try await refresh() } }
-                }
+            }
+        }
+    }
+
+    private var setupContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            SlackBridgeIllustration()
+            section("1. Connect your workspace") {
+                Text("Choose a Slack workspace to use with this global room.")
+                    .gallopText(.bodyS, color: SemanticColor.textTertiary)
                 if !workspaces.isEmpty {
                     Picker("Workspace", selection: $workspaceID) {
                         Text("Select a workspace").tag("")
                         ForEach(workspaces) { Text($0.name).tag($0.id) }
                     }
+                    .controlSize(.large)
+                }
+                Button(workspaces.isEmpty ? "Connect a Slack workspace…" : "Add another workspace…") {
+                    perform {
+                        let authorization: Authorization = try await api.request(["connect"], method: "POST")
+                        guard authorization.url.scheme == "https", authorization.url.host == "slack.com" else {
+                            throw CowchatConnectionError.invalidResponse
+                        }
+                        NSWorkspace.shared.open(authorization.url)
+                    }
+                }
+                .buttonStyle(CowchatPillButtonStyle())
+            }
+            if !workspaces.isEmpty {
+                section("2. Choose a channel") {
                     Picker("Channel", selection: $channelID) {
                         Text("Select a channel").tag("")
                         ForEach(channels) { Text("#\($0.name)").tag($0.id) }
                     }
-                    Text("Invite the Cowchat Slack app to the channel first. The Slack user who connected the workspace must belong to it.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("Connecting allows Slack channel members and the server bridge to read new room messages and address room bots. Earlier room history is not exported.")
-                        .font(.callout).fixedSize(horizontal: false, vertical: true)
-                    Button("Connect this room") {
-                        perform {
-                            var body: [String: Any] = ["installation_id": workspaceID, "channel_id": channelID]
-                            guard boundProfile == store.connectionProfile else { throw CowchatConnectionError.notConnected }
-                            if room.encrypted { body["room_secret"] = try store.slackRoomSecret(for: room) }
-                            let _: Acknowledgement = try await api.request(["rooms", room.id], method: "POST", body: body)
-                            try await refresh()
-                        }
-                    }
-                    .disabled(workspaceID.isEmpty || channelID.isEmpty || (room.encrypted && !store.unlockedRoomIDs.contains(room.id)))
-                    if room.encrypted && !store.unlockedRoomIDs.contains(room.id) {
-                        Text("Unlock the room before connecting Slack.").font(.caption)
-                    }
+                    .controlSize(.large)
+                    .disabled(workspaceID.isEmpty)
+                    Text("Invite @Cowchat to the Slack channel first. You must belong to the channel too. Then refresh to see it here.")
+                        .gallopText(.bodyS, color: SemanticColor.textTertiary)
                 }
+                notice("Connecting shares new room messages with Slack channel members and lets them address room bots. Earlier history is not exported. Other rooms stay disconnected.")
+                if roomLocked { notice("Unlock this room before connecting Slack.") }
             }
         }
-        .padding(24).frame(width: 500)
-        .foregroundStyle(SemanticColor.textPrimary)
-        .background(SemanticColor.surface500)
-        .disabled(busy)
-        .task { boundProfile = store.connectionProfile; perform { try await refresh() } }
-        .onChange(of: store.connectionProfile) { _ in dismiss() }
-        .onChange(of: workspaceID) { _ in
-            channels = []; channelID = ""
-            guard !workspaceID.isEmpty else { return }
-            perform {
-                let result: ChannelList = try await api.request(["workspaces", workspaceID, "channels"])
-                channels = result.channels.sorted { $0.name < $1.name }
+    }
+
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
+            content()
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func notice(_ text: String, error: Bool = false) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: error ? "exclamationmark.circle" : "info.circle")
+            Text(text).fixedSize(horizontal: false, vertical: true)
+        }
+        .gallopText(.bodyS, color: error ? SemanticColor.textError : SemanticColor.textTertiary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(SemanticColor.surface400, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func detail(_ icon: String, title: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon).frame(width: 22).foregroundStyle(SemanticColor.iconSecondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).gallopText(.bodyM, color: SemanticColor.textPrimary)
+                Text(text).gallopText(.bodyS, color: SemanticColor.textTertiary)
             }
         }
+    }
+
+    private func connectRoom() {
+        perform {
+            var body: [String: Any] = ["installation_id": workspaceID, "channel_id": channelID]
+            guard boundProfile == store.connectionProfile else { throw CowchatConnectionError.notConnected }
+            if room.encrypted { body["room_secret"] = try store.slackRoomSecret(for: room) }
+            let _: Acknowledgement = try await api.request(["rooms", room.id], method: "POST", body: body)
+            try await refresh()
+        }
+    }
+
+    @MainActor private func loadChannels() async throws {
+        let result: ChannelList = try await api.request(["workspaces", workspaceID, "channels"])
+        channels = result.channels.sorted { $0.name < $1.name }
+        if !channels.contains(where: { $0.id == channelID }) { channelID = "" }
     }
 
     @MainActor private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
@@ -202,6 +308,7 @@ struct SlackRoomView: View {
         if !status.connected {
             let result: WorkspaceList = try await api.request(["workspaces"])
             workspaces = result.workspaces.sorted { $0.name < $1.name }
+            if !workspaceID.isEmpty { try await loadChannels() }
         }
     }
 }

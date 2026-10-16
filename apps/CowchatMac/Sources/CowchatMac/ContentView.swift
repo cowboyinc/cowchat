@@ -32,6 +32,7 @@ struct ContentView: View {
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
     @State private var isSidebarVisible = true
     @State private var isSettingsPresented = false
+    @State private var isWhatsNewPresented = false
     @Environment(\.controlActiveState) private var controlActiveState
 
     init(onShowOnboarding: @escaping () -> Void = {}) {
@@ -130,6 +131,11 @@ struct ContentView: View {
             )
                 .environmentObject(store)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .cowchatShowWhatsNew)) { _ in
+            guard controlActiveState == .key || controlActiveState == .active else { return }
+            isWhatsNewPresented = true
+        }
+        .sheet(isPresented: $isWhatsNewPresented) { WhatsNewView() }
         .sheet(item: $store.roomBeingRenamed) { room in
             RenameRoomView(room: room)
                 .environmentObject(store)
@@ -2265,12 +2271,14 @@ private enum SettingsPage {
     case connection
     case theme
     case roomIcons
+    case whatsNew
 
     var title: String {
         switch self {
         case .connection: return "Connection"
         case .theme: return "Theme"
         case .roomIcons: return "Room icons"
+        case .whatsNew: return "What’s new"
         }
     }
 
@@ -2279,6 +2287,7 @@ private enum SettingsPage {
         case .connection: return "Choose where Cowchat stores and syncs your rooms."
         case .theme: return "Choose how Cowchat appears on this Mac."
         case .roomIcons: return "Every room gets the same icon on every Mac — it is drawn from the room name."
+        case .whatsNew: return "The latest improvements to Cowchat."
         }
     }
 }
@@ -2336,6 +2345,11 @@ private struct SettingsView: View {
                     systemName: "circle.grid.2x2",
                     page: .roomIcons
                 )
+                settingsNavigationRow(
+                    "What’s new",
+                    systemName: "sparkles",
+                    page: .whatsNew
+                )
                 Spacer()
             }
             .frame(width: 230)
@@ -2356,6 +2370,8 @@ private struct SettingsView: View {
                     themeSettings
                 case .roomIcons:
                     roomIconSettings
+                case .whatsNew:
+                    ScrollView { WhatsNewContent() }
                 }
 
                 Spacer()
