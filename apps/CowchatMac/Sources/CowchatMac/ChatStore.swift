@@ -1330,6 +1330,16 @@ final class ChatStore: ObservableObject {
         unlockedRoomIDs.insert(room.id)
     }
 
+    /// Export only the selected room's saved secret, over authenticated HTTPS,
+    /// after the room's Slack settings explain the new plaintext audience.
+    func slackRoomSecret(for room: Room) throws -> String {
+        guard !isLocalConnection, room.encrypted,
+              let secret = roomSecrets[room.id], !secret.isEmpty else {
+            throw CowchatConnectionError.transport("Unlock this global room before connecting Slack.")
+        }
+        return secret
+    }
+
     func forgetRoomSecret(for room: Room) throws {
         try roomCredentialStore.setCredential(nil, for: RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id))
         decryptedDisplayCache.removeAll()

@@ -1040,6 +1040,7 @@ private struct ChatRoomView: View {
     @State private var isDestroyConfirmationPresented = false
     @State private var isDestroyingRoom = false
     @State private var isInvitesPresented = false
+    @State private var isSlackPresented = false
     @State private var isMessageListNearBottom = true
     @State private var newMessageCount = 0
     @State private var hasCopiedQuietRoomPrompt = false
@@ -1140,6 +1141,9 @@ private struct ChatRoomView: View {
             .padding(24).frame(width: 420)
             .onDisappear { roomKeyDraft = ""; roomKeyError = nil }
         }
+        .sheet(isPresented: $isSlackPresented) {
+            SlackRoomView(room: room).environmentObject(store)
+        }
         .sheet(isPresented: $isInvitesPresented) {
             RoomInvitesView(room: room)
                 .environmentObject(store)
@@ -1167,6 +1171,7 @@ private struct ChatRoomView: View {
                     Button("Copy connect prompt") { copyConnectPrompt() }
                     if !store.isLocalConnection {
                         Button("Invites…") { isInvitesPresented = true }
+                        Button("Slack…") { isSlackPresented = true }
                     }
                     Divider()
                     // Rename and destroy are creator-only, so for other
