@@ -62,7 +62,8 @@ grep -q 'with timeout of 30 seconds' "$ROOT/build-dmg.sh"
 grep -q 'Finder automation is unavailable' "$ROOT/build-dmg.sh"
 grep -q 'lipo .* -verify_arch arm64' "$ROOT/build-app.sh"
 grep -q 'lipo .* -verify_arch x86_64' "$ROOT/build-app.sh"
-grep -q 'lipo .* -verify_arch arm64 x86_64' "$ROOT/build-dmg.sh"
+grep -q 'lipo .* -verify_arch arm64' "$ROOT/build-dmg.sh"
+grep -q 'lipo .* -verify_arch x86_64' "$ROOT/build-dmg.sh"
 grep -Fq "Contents/Helpers/\$SERVER_NAME" "$ROOT/build-app.sh"
 grep -Fq "Contents/Helpers/\$SERVER_NAME" "$ROOT/build-dmg.sh"
 grep -Fq "\"\$CARGO_BIN\" build --locked --release --package \"\$SERVER_NAME\"" "$ROOT/build-app.sh"
@@ -385,7 +386,7 @@ SHIM
 cat > "$DMG_SHIMS/lipo" <<'SHIM'
 #!/bin/sh
 case " $* " in
-	*"/Contents/Helpers/cowchat-server -verify_arch arm64 x86_64 "*)
+	*"/Contents/Helpers/cowchat-server -verify_arch "*)
 		if [ "${COWCHAT_TEST_BAD_HELPER_ARCH:-0}" = "1" ]; then exit 79; fi
 		;;
 esac
