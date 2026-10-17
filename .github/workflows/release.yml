@@ -11,6 +11,10 @@ on:
       tag:
         description: "Existing tag to (re)build and release, e.g. v0.4.0"
         required: true
+      promote_latest:
+        description: "Promote only if newer than the current latest release"
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -201,6 +205,9 @@ jobs:
           if-no-files-found: error
 
   release:
+    concurrency:
+      group: cowchat-release-publication
+      cancel-in-progress: false
     needs: [build, mac-app]
     permissions:
       contents: write
@@ -212,10 +219,12 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Publish release and render Homebrew formula + cask
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          PROMOTION_POLICY: ${{ (github.event_name == 'push' || inputs.promote_latest) && 'auto' || 'preserve' }}
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
@@ -235,17 +244,14 @@ jobs:
           VERSION="${TAG#v}"
           DMG=$(shasum -a 256 "dist/Cowchat-${VERSION}.dmg" | awk '{print $1}')
 
-          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/cowchat-*.tar.gz dist/Cowchat-*.dmg \
-              --repo "$REPO" --clobber
-            # --prerelease=false also promotes a tag that an earlier run
-            # published as a prerelease.
-            gh release edit "$TAG" --repo "$REPO" --prerelease=false --latest \
-              --title "Cowchat $TAG" --notes "$NOTES"
-          else
-            gh release create "$TAG" dist/cowchat-*.tar.gz dist/Cowchat-*.dmg --repo "$REPO" \
-              --latest --title "Cowchat $TAG" --notes "$NOTES"
+          RELEASE_NOTES="$NOTES" bash scripts/publish-release.sh "$TAG" "$REPO" dist "$PROMOTION_POLICY" full
+          # A historical rerun must not open a Homebrew downgrade PR.
+          LATEST=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+          if [ "$LATEST" != "$TAG" ]; then
+            echo "update_tap=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "update_tap=true" >> "$GITHUB_OUTPUT"
 
           sed \
             -e "s|@TAG@|${TAG}|g" \
@@ -262,6 +268,7 @@ jobs:
             -e "s|@DMG@|${DMG}|g" \
             .github/cowchat-cask.rb.tmpl > /tmp/cowchat-cask.rb
       - name: Open formula + cask PR against cowboyinc/homebrew-tap
+        if: steps.publish.outputs.update_tap == 'true'
         env:
           GH_TOKEN: ${{ secrets.TAP_PR_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
