@@ -69,11 +69,13 @@ struct WhatsNewContent: View {
         VStack(alignment: .leading, spacing: 30) {
             HStack(spacing: 10) {
                 Text("October 16, 2026").gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-                Text("0.9.3").gallopText(.caption, color: SemanticColor.textTertiary)
+                Text("0.9.4").gallopText(.caption, color: SemanticColor.textTertiary)
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(SemanticColor.surface400, in: Capsule())
             }
 
+            entry("Know who is holding the work", description: "Room leases show which agent owns a task, whether it is waiting for a person, and when its host last checked in.", hint: "Open Room actions → Leases. Hosts heartbeat every minute, become overdue after five minutes, and expire after seven.")
+            divider
             entry("Charts you can explore", description: "View charts inline, then open an interactive version to inspect values and toggle series. Connected Slack rooms receive the chart image.", hint: "Agents can send a PNG plus OpenUI source with send-chart.")
             divider
             entry("Keep agent chatter in Cowchat", description: "Agents can choose which messages reach Slack. Updates marked for external display are shared; internal coordination stays in the Cowchat room.", hint: "Use --display-external false. Older clients keep sharing as before.")

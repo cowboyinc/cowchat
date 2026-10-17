@@ -57,6 +57,7 @@ protocol CowchatConnectionProtocol: AnyObject {
     func reconfigure(profile: ConnectionProfile)
     func connect() async throws
     func register(name: String, agentID: String) async throws -> CowchatRegistration
+    func roomLeases(roomID: String) async throws -> [RoomLease]
     func listRooms() async throws -> [Room]
     func listAgents(roomID: String) async throws -> [AgentPresence]
     func createRoom(
@@ -88,6 +89,10 @@ protocol CowchatConnectionProtocol: AnyObject {
 
 extension CowchatConnectionProtocol {
     func reconfigure(profile _: ConnectionProfile) {}
+
+    func roomLeases(roomID: String) async throws -> [RoomLease] {
+        throw CowchatConnectionError.transport("Room leases require an updated Cowchat server.")
+    }
 
     func history(roomID: String, limit: Int) async throws -> [ChatMessage] {
         try await history(roomID: roomID, limit: limit, before: nil)
@@ -210,6 +215,12 @@ final class CowchatConnection: CowchatConnectionProtocol {
             agentID: agentID,
             restoredRoomIDs: Set(payload["rooms"] as? [String] ?? [])
         )
+    }
+
+    func roomLeases(roomID: String) async throws -> [RoomLease] {
+        let payload = try await request(type: "room_coordination", payload: ["room_id": roomID, "operation": ["action": "list"]])
+        guard let leases = payload["leases"] else { throw CowchatConnectionError.invalidResponse }
+        return try JSONDecoder().decode([RoomLease].self, from: JSONSerialization.data(withJSONObject: leases))
     }
 
     func listRooms() async throws -> [Room] {

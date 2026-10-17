@@ -28,6 +28,7 @@ base64 = "0.22"
 hex = "0.4"
 k256 = { version = "0.13", features = ["ecdsa"] }
 zeroize = "1"
+libc = "0.2"
 
 [dev-dependencies]
 cowchat-server.workspace = true

@@ -207,6 +207,16 @@ pub async fn handle_frame(
 
     match frame.frame_type {
         FrameType::Ping => Frame::pong(req_id),
+        FrameType::RoomCoordination => handle_coordination(
+            req_id,
+            frame.payload,
+            agent_id,
+            agent_name,
+            agent_api_key,
+            no_auth,
+            store,
+            broker,
+        ),
 
         FrameType::CreateRoom => {
             handle_create_room(
@@ -3571,3 +3581,62 @@ mod invite_tests {
 
 #[cfg(test)]
 mod append_tests;
+
+fn handle_coordination(
+    req_id: Option<&str>,
+    payload: serde_json::Value,
+    agent: &str,
+    name: &str,
+    key: &str,
+    no_auth: bool,
+    store: &Arc<Store>,
+    broker: &Arc<Broker>,
+) -> Frame {
+    use crate::store::coordination::{CoordinationError, Request};
+    use sha2::Digest;
+    let request: Request = match serde_json::from_value(payload) {
+        Ok(request) => request,
+        Err(_) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::InvalidPayload,
+                    "Invalid room coordination request",
+                ),
+            )
+        }
+    };
+    if let Err(frame) = authorize_room(req_id, &request.room_id, key, no_auth, store) {
+        return frame;
+    }
+    if request.operation.mutates() && !broker.is_agent_in_room(agent, &request.room_id) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(
+                ErrorCode::NotInRoom,
+                "Join the room before changing its coordination state",
+            ),
+        );
+    }
+    let principal = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
+    match store.coordinate(
+        &request.room_id,
+        &principal,
+        agent,
+        name,
+        request.operation,
+        chrono::Utc::now().timestamp(),
+    ) {
+        Ok(result) => Frame::ok(req_id, result),
+        Err(error) => {
+            let code = match error {
+                CoordinationError::Lost => ErrorCode::AccessDenied,
+                CoordinationError::Conflict | CoordinationError::Invalid(_) => {
+                    ErrorCode::InvalidPayload
+                }
+                CoordinationError::Storage(_) => ErrorCode::InternalError,
+            };
+            Frame::error(req_id, ErrorPayload::new(code, error.to_string()))
+        }
+    }
+}

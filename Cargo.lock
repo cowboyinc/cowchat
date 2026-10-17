@@ -410,7 +410,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cowchat-cli"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -424,6 +424,7 @@ dependencies = [
  "hex",
  "hmac",
  "k256",
+ "libc",
  "log",
  "reqwest",
  "rusqlite",
@@ -438,7 +439,7 @@ dependencies = [
 [[package]]
 name = "cowchat-client"
 version = "0.9.1"
-source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=086d7b220682b4e379fa5c0ba49cbe814a045f96#086d7b220682b4e379fa5c0ba49cbe814a045f96"
+source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=d425a065d140889e2eae4a60c8cbd6ab0863fcb4#d425a065d140889e2eae4a60c8cbd6ab0863fcb4"
 dependencies = [
  "chrono",
  "cowchat-core",
@@ -455,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "cowchat-codex"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -478,7 +479,7 @@ dependencies = [
 [[package]]
 name = "cowchat-core"
 version = "0.9.1"
-source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=086d7b220682b4e379fa5c0ba49cbe814a045f96#086d7b220682b4e379fa5c0ba49cbe814a045f96"
+source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=d425a065d140889e2eae4a60c8cbd6ab0863fcb4#d425a065d140889e2eae4a60c8cbd6ab0863fcb4"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -494,7 +495,7 @@ dependencies = [
 [[package]]
 name = "cowchat-crypto"
 version = "0.9.1"
-source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=086d7b220682b4e379fa5c0ba49cbe814a045f96#086d7b220682b4e379fa5c0ba49cbe814a045f96"
+source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=d425a065d140889e2eae4a60c8cbd6ab0863fcb4#d425a065d140889e2eae4a60c8cbd6ab0863fcb4"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -512,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "cowchat-server"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
