@@ -50,8 +50,6 @@ struct RoomLeasesView: View {
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
-            Text("Heartbeats every minute · Overdue after 5 minutes · Expire after 7 minutes")
-                .font(.caption).foregroundStyle(.secondary)
             if let error {
                 Text(error).foregroundStyle(.red)
                 Text("If this server predates room leases, update it first. Status could not be refreshed.")
@@ -72,8 +70,6 @@ struct RoomLeasesView: View {
                     }
                 }
             }
-            Text("A heartbeat proves the host is alive. Progress and prompt state must be reported by the host.")
-                .font(.caption).foregroundStyle(.secondary)
         }
         .padding(24).frame(width: 640, height: 480)
         .task(id: store.connectionProfile) {
