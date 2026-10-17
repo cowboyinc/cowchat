@@ -135,3 +135,9 @@ After publishing or changing a layout, open its URL and verify the page renders.
 The server validates storage bounds and reserved data shapes; component schemas
 and layout/render budgets are checked by the browser. A successful write alone
 does not confirm that a newly authored layout renders.
+
+Artifact writes require the room owner key or an explicit room grant. Public
+room visibility permits reading, but does not grant artifact editing rights.
+The CLI accepts up to 512 KiB of JSON input; the full stored document must also
+fit within the server’s 512 KiB limit. No-op detection compares exact JSON
+representations, so changing `1` to `1.0` can advance the revision.
