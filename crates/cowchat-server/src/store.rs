@@ -1,6 +1,7 @@
 mod actor_work;
 #[cfg(test)]
 mod actor_work_tests;
+mod artifact;
 pub mod coordination;
 
 use chrono::{DateTime, Utc};
@@ -16,6 +17,7 @@ use crate::connection::{matches_room_owner, LEGACY_UNOWNED_OWNER_KEY};
 
 pub struct Store {
     conn: Mutex<Connection>,
+    pub(crate) artifact_changes: tokio::sync::watch::Sender<()>,
     /// In-memory mirror of `room_grants` (api_key -> granted room_ids).
     /// Consulted on the per-broadcast access hot path so grant checks never
     /// touch SQLite. Hydrated at open, updated on redemption/room destroy.
@@ -141,10 +143,12 @@ impl Store {
             .unwrap_or_else(|| PathBuf::from("blobs"));
         let store = Self {
             conn: Mutex::new(conn),
+            artifact_changes: tokio::sync::watch::channel(()).0,
             grants: DashMap::new(),
             blob_dir,
         };
         store.initialize()?;
+        store.initialize_artifacts()?;
         for candidate in [
             path.to_path_buf(),
             std::path::PathBuf::from(format!("{}-wal", path.display())),
@@ -165,10 +169,12 @@ impl Store {
         let blob_dir = std::env::temp_dir().join(format!("cowchat-blobs-{}", uuid::Uuid::new_v4()));
         let store = Self {
             conn: Mutex::new(conn),
+            artifact_changes: tokio::sync::watch::channel(()).0,
             grants: DashMap::new(),
             blob_dir,
         };
         store.initialize()?;
+        store.initialize_artifacts()?;
         Ok(store)
     }
 
@@ -765,6 +771,7 @@ impl Store {
         drop(conn);
         self.purge_room_grants_from_cache(room_id);
         self.remove_blob_files(&blob_ids);
+        self.artifact_changes.send_replace(());
         Ok(room)
     }
 
@@ -780,6 +787,7 @@ impl Store {
         drop(conn);
         self.purge_room_grants_from_cache(room_id);
         self.remove_blob_files(&blob_ids);
+        self.artifact_changes.send_replace(());
         Ok(())
     }
 
@@ -2282,6 +2290,14 @@ fn delete_room_artifacts_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     room_id: &str,
 ) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "DELETE FROM room_artifact_receipts WHERE room_id = ?1",
+        params![room_id],
+    )?;
+    tx.execute(
+        "DELETE FROM room_artifacts WHERE room_id = ?1",
+        params![room_id],
+    )?;
     tx.execute(
         "DELETE FROM subscription_deliveries
          WHERE subscription_id IN (

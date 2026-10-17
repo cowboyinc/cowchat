@@ -301,6 +301,34 @@ Votes now snapshot durable room members, including disconnected turn-based agent
 Use the same stable identity on every call; creation resolves room names and casting
 rejoins the vote's room. Use `--duration` if some members may not return to vote.
 
+## Live room artifacts
+
+When asked to publish a room dashboard, status page, or artifact, use
+`cowchat artifact`. Keep the normal global `--url`, `--key`, `--name`, and stable
+`--agent-id` flags. Run `artifact get <room>` first and update the existing page.
+A room has one persistent artifact with a stable, unlisted, read-only URL.
+
+Author a Gallop/OpenUI layout once and bind it to JSON properties through `$name`.
+For example, `root = Stack([Card([Heading("Status"), Table([{key:"title",label:"Title"},{key:"status",label:"Status"}], $items)])])`
+with data `{"items":{"core-618":{"title":"Room leases","status":"Queued"}}}`.
+Tables accept keyed objects, so every independently updated item should have a
+stable key. Existing OpenUI charts also accept bindings such as
+`BarChart($revenue.labels, [Series("Revenue", $revenue.values)], "grouped")`.
+
+Publish with `artifact publish <room> --title "Status" --view page.openui --data data.json`.
+Return the resulting `url` to the human. Later updates only need
+`artifact update <room> --json '{"items":{"core-618":{"status":"Merged"}}}'`.
+Objects merge recursively; arrays replace; null removes keys. Do not regenerate
+the layout for ordinary data changes. Use `--if-revision <n>` for contested keys;
+layout replacement requires the current revision from `artifact get`.
+
+Publication exports only the selected artifact layout/data, including from an
+encrypted room. The link does not reveal room history or grant write access.
+Data updates do not create chat/Slack messages. Share the URL through normal
+messaging when requested. `artifact link`, `artifact rotate-link`, and
+`artifact unpublish` manage it. See `docs/room-artifacts.md` and
+`tools/cowchat-artifacts/README.md` for complete commands and renderer schemas.
+
 ## External display
 
 Use `send <room> "agent coordination" --display-external false` to keep chatter
@@ -335,3 +363,15 @@ Executors must enforce generations at the side effect boundary to fence deployme
 Use `lease ready <room> <resource> --commit <full-sha> --verdict ready` for readiness.
 `lease readiness <room> <resource> --commit <full-sha>` marks old verdicts stale.
 See `docs/leases.md` for commands and host integration.
+
+Data reserves the keys `__proto__`, `prototype`, and `constructor` at every
+level. Objects cannot contain a `steps` array, `type: "element"`, a truthy
+`__reactive`, or a `k` matching an OpenUI AST kind (`Comp`, `Str`, `Num`, `Bool`,
+`Null`, `Arr`, `Obj`, `Ref`, `Ph`, `StateRef`, `RuntimeRef`, `BinOp`, `UnaryOp`,
+`Ternary`, `Member`, `Index`, `Assign`). Use names such as `stages` for a list of
+workflow steps. The server rejects these shapes before changing the artifact.
+
+After publishing or changing a layout, open its URL and verify the page renders.
+The server validates storage bounds and reserved data shapes; component schemas
+and layout/render budgets are checked by the browser. A successful write alone
+does not confirm that a newly authored layout renders.

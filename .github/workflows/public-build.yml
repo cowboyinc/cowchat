@@ -70,3 +70,24 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install chromium --with-deps --only-shell
       - run: pnpm test
+  artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tools/cowchat-artifacts
+    env:
+      OPENUI_TELEMETRY_DISABLED: '1'
+      DO_NOT_TRACK: '1'
+      NPM_CONFIG_USERCONFIG: /dev/null
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm install --global pnpm@11.1.2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install chromium --with-deps --only-shell
+      - run: pnpm test
+      - name: Check embedded renderer matches its source
+        run: git diff --exit-code -- ../../crates/cowchat-server/web/artifact.html ../../crates/cowchat-server/web/artifact.js ../../crates/cowchat-server/web/artifact.css

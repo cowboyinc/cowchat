@@ -100,6 +100,23 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents", get(api_list_agents))
         .route("/api/rooms/{room_id}/history", get(api_room_history))
         .route(
+            "/api/rooms/{room_id}/artifact",
+            get(artifact_get)
+                .put(artifact_publish)
+                .patch(artifact_patch)
+                .delete(artifact_unpublish)
+                .layer(DefaultBodyLimit::max(
+                    crate::artifact::MAX_ARTIFACT_BYTES + 128 * 1024,
+                )),
+        )
+        .route(
+            "/api/rooms/{room_id}/artifact/rotate",
+            post(artifact_rotate).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route("/a/{public_id}", get(artifact_shell))
+        .route("/a/{public_id}/snapshot", get(artifact_snapshot))
+        .route("/a/{public_id}/events", get(artifact_events))
+        .route(
             "/api/rooms/{room_id}/blobs",
             // Let bodies just over the cap through the framework limit so the
             // handler can answer the documented JSON 413.
@@ -120,7 +137,15 @@ pub fn router(state: AppState) -> Router {
                     )
                         .into_response();
                 }
-                next.run(request).await
+                let artifact = request.uri().path().starts_with("/a/")
+                    || (request.uri().path().starts_with("/api/rooms/")
+                        && request.uri().path().contains("/artifact"));
+                let response = next.run(request).await;
+                if artifact {
+                    artifact_headers(response)
+                } else {
+                    response
+                }
             },
         ));
     let origins = allowed_origins
@@ -133,7 +158,13 @@ pub fn router(state: AppState) -> Router {
         router.layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(origins)
-                .allow_methods([Method::GET, Method::POST])
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::PATCH,
+                    Method::DELETE,
+                ])
                 .allow_headers([
                     header::CONTENT_TYPE,
                     header::HeaderName::from_static(ADMIN_HEADER),
@@ -589,6 +620,244 @@ async fn api_room_history(
     }
 }
 
+// --- Explicitly published room artifacts ---
+
+fn artifact_headers(mut response: axum::response::Response) -> axum::response::Response {
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        "x-robots-tag",
+        HeaderValue::from_static("noindex, nofollow"),
+    );
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+fn artifact_error(error: crate::artifact::ArtifactError) -> axum::response::Response {
+    use crate::artifact::ArtifactError;
+    let status = match &error {
+        ArtifactError::NotFound => StatusCode::NOT_FOUND,
+        ArtifactError::Conflict => StatusCode::CONFLICT,
+        ArtifactError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        ArtifactError::Invalid(_) => StatusCode::BAD_REQUEST,
+        ArtifactError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    artifact_headers(json_error(status, &error.to_string()))
+}
+
+fn artifact_room_key(
+    state: &AppState,
+    headers: &HeaderMap,
+    room_id: &str,
+) -> Result<String, StatusCode> {
+    let key = authenticated_key(state, headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let accessible = state
+        .store
+        .get_room(room_id)
+        .ok()
+        .flatten()
+        .is_some_and(|room| {
+            crate::connection::can_access_room(&room, &key, state.no_auth, &state.store)
+        });
+    if !accessible {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(key)
+}
+
+async fn artifact_get(
+    State(state): State<AppState>,
+    Path(room): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let key = match artifact_room_key(&state, &headers, &room) {
+        Ok(key) => key,
+        Err(status) => return artifact_headers(status.into_response()),
+    };
+    match state
+        .store
+        .get_authorized_artifact(&room, &key, state.no_auth)
+    {
+        Ok(Some(artifact)) => artifact_headers(Json(artifact).into_response()),
+        Ok(None) => artifact_error(crate::artifact::ArtifactError::NotFound),
+        Err(error) => artifact_error(error),
+    }
+}
+
+async fn artifact_publish(
+    State(state): State<AppState>,
+    Path(room): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::artifact::PublishArtifact>,
+) -> axum::response::Response {
+    let key = match artifact_room_key(&state, &headers, &room) {
+        Ok(key) => key,
+        Err(status) => return artifact_headers(status.into_response()),
+    };
+    match state
+        .store
+        .publish_artifact(&room, &key, state.no_auth, &request)
+    {
+        Ok(artifact) => artifact_headers(Json(artifact).into_response()),
+        Err(error) => artifact_error(error),
+    }
+}
+
+async fn artifact_patch(
+    State(state): State<AppState>,
+    Path(room): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::artifact::PatchArtifact>,
+) -> axum::response::Response {
+    let key = match artifact_room_key(&state, &headers, &room) {
+        Ok(key) => key,
+        Err(status) => return artifact_headers(status.into_response()),
+    };
+    match state
+        .store
+        .patch_artifact(&room, &key, state.no_auth, &request)
+    {
+        Ok(artifact) => artifact_headers(Json(artifact).into_response()),
+        Err(error) => artifact_error(error),
+    }
+}
+
+async fn artifact_rotate(
+    State(state): State<AppState>,
+    Path(room): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::artifact::RotateArtifact>,
+) -> axum::response::Response {
+    let key = match artifact_room_key(&state, &headers, &room) {
+        Ok(key) => key,
+        Err(status) => return artifact_headers(status.into_response()),
+    };
+    match state
+        .store
+        .rotate_artifact(&room, &key, state.no_auth, &request.request_id)
+    {
+        Ok(artifact) => artifact_headers(Json(artifact).into_response()),
+        Err(error) => artifact_error(error),
+    }
+}
+
+async fn artifact_unpublish(
+    State(state): State<AppState>,
+    Path(room): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let key = match artifact_room_key(&state, &headers, &room) {
+        Ok(key) => key,
+        Err(status) => return artifact_headers(status.into_response()),
+    };
+    match state.store.unpublish_artifact(&room, &key, state.no_auth) {
+        Ok(()) => artifact_headers(StatusCode::NO_CONTENT.into_response()),
+        Err(error) => artifact_error(error),
+    }
+}
+
+fn public_snapshot(artifact: crate::artifact::Artifact) -> serde_json::Value {
+    serde_json::json!({"title":artifact.title,"view":artifact.view,"data":artifact.data,"revision":artifact.revision,"updated_at":artifact.updated_at})
+}
+
+async fn artifact_snapshot(
+    State(state): State<AppState>,
+    Path(public_id): Path<String>,
+) -> axum::response::Response {
+    match state.store.get_public_artifact(&public_id) {
+        Ok(Some(artifact)) => artifact_headers(Json(public_snapshot(artifact)).into_response()),
+        Ok(None) => artifact_error(crate::artifact::ArtifactError::NotFound),
+        Err(error) => artifact_error(error),
+    }
+}
+
+async fn artifact_shell(
+    State(state): State<AppState>,
+    Path(public_id): Path<String>,
+) -> axum::response::Response {
+    match state.store.get_public_artifact(&public_id) {
+        Ok(Some(_)) => match WebAssets::get("artifact.html") {
+            Some(asset) => {
+                let mut response = (
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    asset.data.into_owned(),
+                )
+                    .into_response();
+                response.headers_mut().insert("content-security-policy",HeaderValue::from_static("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"));
+                artifact_headers(response)
+            }
+            None => artifact_headers(StatusCode::SERVICE_UNAVAILABLE.into_response()),
+        },
+        Ok(None) => artifact_error(crate::artifact::ArtifactError::NotFound),
+        Err(error) => artifact_error(error),
+    }
+}
+
+async fn artifact_events(
+    State(state): State<AppState>,
+    Path(public_id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    // Subscribe before the first read so a commit between connect and snapshot cannot be lost.
+    let changes = state.store.artifact_changes.subscribe();
+    let artifact = match state.store.get_public_artifact(&public_id) {
+        Ok(Some(artifact)) => artifact,
+        Ok(None) => return artifact_error(crate::artifact::ArtifactError::NotFound),
+        Err(error) => return artifact_error(error),
+    };
+    let initial = Some(artifact.revision);
+    let stream = futures::stream::unfold(
+        (state.store, public_id, changes, initial, 0_u64, false),
+        |(store, id, mut changes, mut pending, mut last, closed)| async move {
+            if closed {
+                return None;
+            }
+            loop {
+                if let Some(revision) = pending.take() {
+                    last = revision;
+                    let event = Event::default()
+                        .event("revision")
+                        .id(revision.to_string())
+                        .data(serde_json::json!({"revision":revision}).to_string());
+                    return Some((
+                        Ok::<_, std::convert::Infallible>(event),
+                        (store, id, changes, pending, last, false),
+                    ));
+                }
+                if changes.changed().await.is_err() {
+                    return None;
+                }
+                match store.get_public_artifact(&id) {
+                    Ok(Some(artifact)) if artifact.revision != last => {
+                        pending = Some(artifact.revision)
+                    }
+                    Ok(Some(_)) => {}
+                    Err(_) => return None,
+                    Ok(None) => {
+                        return Some((
+                            Ok(Event::default().event("revoked").data("{}")),
+                            (store, id, changes, None, last, true),
+                        ))
+                    }
+                }
+            }
+        },
+    );
+    let mut response = artifact_headers(
+        Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response(),
+    );
+    response
+        .headers_mut()
+        .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    response
+}
+
 // --- Blob attachments ---
 
 /// The API key presented in `x-cowchat-key`, if it's valid on this server.
@@ -823,6 +1092,332 @@ mod tests {
             .unwrap();
         });
         (server, addr)
+    }
+
+    #[tokio::test]
+    async fn artifact_http_auth_capability_and_live_isolation() {
+        let state = test_state();
+        for room in ["target", "other"] {
+            state
+                .store
+                .create_room_with_visibility(
+                    room,
+                    room,
+                    None,
+                    None,
+                    Some("author"),
+                    "private",
+                    Some("master"),
+                    false,
+                )
+                .unwrap();
+        }
+        state.store.create_api_key("outsider", None).unwrap();
+        let observed = state.store.clone();
+        let (server, addr) = start_test_web_server(state).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+        let request = serde_json::json!({"title":"Board","view":"root = Stack([])","data":{"items":{"a":1}},"request_id":uuid::Uuid::new_v4()});
+        let url = format!("{base}/api/rooms/target/artifact");
+        assert_eq!(
+            client
+                .put(&url)
+                .json(&request)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for room in ["target", "missing"] {
+            let response = client
+                .put(format!("{base}/api/rooms/{room}/artifact"))
+                .header(API_KEY_HEADER, "outsider")
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let response = client
+            .put(&url)
+            .header(API_KEY_HEADER, "master")
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let first: serde_json::Value = response.json().await.unwrap();
+        let id = first["public_id"].as_str().unwrap();
+        let snapshot = format!("{base}/a/{id}/snapshot");
+        let public: serde_json::Value = client
+            .get(&snapshot)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(public["data"]["items"]["a"], 1);
+        assert!(public.get("room_id").is_none());
+        assert!(public.get("public_id").is_none());
+        assert_eq!(
+            client
+                .patch(&snapshot)
+                .json(&request)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/a/{}/snapshot", uuid::Uuid::new_v4()))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let mut events = client
+            .get(format!("{base}/a/{id}/events"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(events.headers()["x-accel-buffering"], "no");
+        let first_event = events.chunk().await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&first_event).contains("\"revision\":1"));
+        let other = crate::artifact::PublishArtifact {
+            title: "Other".into(),
+            view: "root = Stack([])".into(),
+            data: None,
+            expected_revision: None,
+            request_id: uuid::Uuid::new_v4().to_string(),
+        };
+        observed
+            .publish_artifact("other", "master", false, &other)
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(80), events.chunk())
+                .await
+                .is_err()
+        );
+        let patch =
+            serde_json::json!({"patch":{"items":{"b":2}},"request_id":uuid::Uuid::new_v4()});
+        let changed: serde_json::Value = client
+            .patch(&url)
+            .header(API_KEY_HEADER, "master")
+            .json(&patch)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(changed["revision"], 2);
+        assert_eq!(changed["data"]["items"], serde_json::json!({"a":1,"b":2}));
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.chunk())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&event).contains("\"revision\":2"));
+        let mut reconnect = client
+            .get(format!("{base}/a/{id}/events"))
+            .header("last-event-id", "1")
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&reconnect.chunk().await.unwrap().unwrap())
+                .contains("\"revision\":2")
+        );
+        let rotated: serde_json::Value = client
+            .post(format!("{url}/rotate"))
+            .header(API_KEY_HEADER, "master")
+            .json(&serde_json::json!({"request_id":uuid::Uuid::new_v4()}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.chunk())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&event).contains("revoked"));
+        assert_eq!(
+            client.get(&snapshot).send().await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/a/{id}/events"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let id = rotated["public_id"].as_str().unwrap();
+        observed
+            .destroy_room_authorized("target", "author", "master", false)
+            .unwrap();
+        assert_eq!(
+            client
+                .get(format!("{base}/a/{id}/snapshot"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn artifact_http_rejects_invalid_bounds_and_guards_view_replacement() {
+        let state = test_state();
+        state
+            .store
+            .create_room_with_visibility(
+                "target",
+                "Target",
+                None,
+                None,
+                Some("author"),
+                "private",
+                Some("master"),
+                false,
+            )
+            .unwrap();
+        state.store.create_api_key("guest", None).unwrap();
+        state.store.add_room_grant("guest", "target").unwrap();
+        let (server, addr) = start_test_web_server(state).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/api/rooms/target/artifact");
+        let make = || serde_json::json!({"title":"Board","view":"root = Stack([])","request_id":uuid::Uuid::new_v4()});
+        let result = client
+            .put(&url)
+            .header(API_KEY_HEADER, "guest")
+            .json(&make())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::OK);
+        let result = client
+            .put(&url)
+            .header(API_KEY_HEADER, "guest")
+            .json(&make())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::CONFLICT);
+        let mut replace = make();
+        replace["expected_revision"] = 1.into();
+        assert_eq!(
+            client
+                .put(&url)
+                .header(API_KEY_HEADER, "master")
+                .json(&replace)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        for patch in [
+            serde_json::json!([]),
+            serde_json::json!({"x":vec![0;20_001]}),
+            serde_json::json!({"deploy":{"steps":["build","test"]}}),
+            serde_json::json!({"rows":{"constructor":{"name":"reserved"}}}),
+            serde_json::json!({"row":{"type":"element"}}),
+            serde_json::json!({"row":{"k":"Comp"}}),
+            serde_json::json!({"row":{"__reactive":true}}),
+        ] {
+            let response = client
+                .patch(&url)
+                .header(API_KEY_HEADER, "guest")
+                .json(&serde_json::json!({"patch":patch,"request_id":uuid::Uuid::new_v4()}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let current: serde_json::Value = client
+                .get(&url)
+                .header(API_KEY_HEADER, "guest")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(current["revision"], 1);
+            assert_eq!(current["data"], serde_json::json!({}));
+        }
+        let mut invalid = make();
+        invalid["expected_revision"] = 1.into();
+        invalid["data"] = serde_json::Value::Null;
+        assert_eq!(
+            client
+                .put(&url)
+                .header(API_KEY_HEADER, "guest")
+                .json(&invalid)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        invalid["data"] = serde_json::json!({});
+        invalid["view"] = "x".repeat(crate::artifact::MAX_VIEW_BYTES + 1).into();
+        assert_eq!(
+            client
+                .put(&url)
+                .header(API_KEY_HEADER, "guest")
+                .json(&invalid)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        invalid["view"] = "x".repeat(crate::artifact::MAX_ARTIFACT_BYTES * 2).into();
+        let response = client
+            .put(&url)
+            .header(API_KEY_HEADER, "guest")
+            .json(&invalid)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            client
+                .delete(&url)
+                .header(API_KEY_HEADER, "guest")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            client
+                .get(&url)
+                .header(API_KEY_HEADER, "guest")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        server.abort();
     }
 
     async fn issue_test_session(addr: SocketAddr) -> (SessionProof, String) {
