@@ -50,8 +50,6 @@ struct RoomLeasesView: View {
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
-            Text("Heartbeats every minute · Overdue after 5 minutes · Expire after 7 minutes")
-                .font(.caption).foregroundStyle(.secondary)
             if let error {
                 Text(error).foregroundStyle(.red)
                 Text("If this server predates room leases, update it first. Status could not be refreshed.")
