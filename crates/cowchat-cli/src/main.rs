@@ -1,4 +1,5 @@
 mod actor_host;
+mod artifact;
 mod bridge;
 mod chart;
 mod telegram;
@@ -219,6 +220,8 @@ struct Cli {
 enum Commands {
     /// Durable room leases and commit-specific readiness.
     Lease(leases::Args),
+    /// Publish and update a live room artifact using Gallop and OpenUI.
+    Artifact(artifact::Args),
     /// Run a local signed wake receiver and start the actor program only for work.
     ActorHost(actor_host::ActorHostArgs),
     /// Bridge one explicitly configured Telegram chat to an encrypted room.
@@ -936,6 +939,7 @@ fn command_represents_agent_session(command: &Commands) -> bool {
     matches!(
         command,
         Commands::Lease(_)
+            | Commands::Artifact(_)
             | Commands::ActorHost(_)
             | Commands::TelegramBridge(_)
             | Commands::Send { .. }
@@ -1689,6 +1693,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match &cli.command {
         Commands::Lease(args) => leases::run(&cli, args).await?,
+        Commands::Artifact(args) => artifact::run(&cli, args).await?,
         Commands::ActorHost(args) => actor_host::run(&cli, args).await?,
         Commands::TelegramBridge(args) => telegram::run(&cli, args).await?,
         Commands::Send {

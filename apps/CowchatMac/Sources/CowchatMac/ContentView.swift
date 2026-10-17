@@ -1054,6 +1054,7 @@ private struct ChatRoomView: View {
     @State private var isInvitesPresented = false
     @State private var isSlackPresented = false
     @State private var isLeasesPresented = false
+    @State private var isArtifactPresented = false
     @State private var isMessageListNearBottom = true
     @State private var newMessageCount = 0
     @State private var hasCopiedQuietRoomPrompt = false
@@ -1157,6 +1158,9 @@ private struct ChatRoomView: View {
         .sheet(isPresented: $isLeasesPresented) {
             RoomLeasesView(room: room).environmentObject(store)
         }
+        .sheet(isPresented: $isArtifactPresented) {
+            RoomArtifactView(room: room).environmentObject(store)
+        }
         .sheet(isPresented: $isSlackPresented) {
             SlackRoomView(room: room).environmentObject(store)
         }
@@ -1187,6 +1191,7 @@ private struct ChatRoomView: View {
                     Button("Leases…") { isLeasesPresented = true }
                     Button("Copy connect prompt") { copyConnectPrompt() }
                     if !store.isLocalConnection {
+                        Button("Artifact…") { isArtifactPresented = true }
                         Button("Invites…") { isInvitesPresented = true }
                         Button("Slack…") { isSlackPresented = true }
                     }
