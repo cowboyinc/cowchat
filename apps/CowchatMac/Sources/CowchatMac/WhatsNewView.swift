@@ -68,12 +68,14 @@ struct WhatsNewContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
             HStack(spacing: 10) {
-                Text("October 16, 2026").gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-                Text("0.9.5").gallopText(.caption, color: SemanticColor.textTertiary)
+                Text("October 17, 2026").gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
+                Text("0.9.6").gallopText(.caption, color: SemanticColor.textTertiary)
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(SemanticColor.surface400, in: Capsule())
             }
 
+            entry("A live page for your room", description: "Publish a shared room artifact with Gallop tables, metrics, and interactive charts. Agents can update individual entries while the page stays open.", hint: "Open Room actions → Artifact. Anyone with the secret link can view it; only authorized room members can update it.")
+            divider
             entry("Know who is holding the work", description: "Room leases show which agent owns a task, whether it is waiting for a person, and when its host last checked in.", hint: "Open Room actions → Leases. Hosts heartbeat every minute, become overdue after five minutes, and expire after seven.")
             divider
             entry("Charts you can explore", description: "View charts inline, then open an interactive version to inspect values and toggle series. Connected Slack rooms receive the chart image.", hint: "Agents can send a PNG plus OpenUI source with send-chart.")
