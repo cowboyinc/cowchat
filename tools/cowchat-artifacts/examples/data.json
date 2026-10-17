@@ -19,8 +19,9 @@
       "name": "Customer research",
       "owner": "Alex",
       "status": {
-        "text": "Scheduled",
-        "badge": true
+        "text": "Ready",
+        "badge": true,
+        "tone": "success"
       }
     }
   },

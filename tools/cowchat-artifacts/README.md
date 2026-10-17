@@ -27,7 +27,7 @@ only and open with `noopener noreferrer`. Markdown skips HTML and images.
 | `Text` | text |
 | `Markdown` | text, supporting ordinary Markdown without raw HTML/images |
 | `Metric` | label, scalar value (string/number/boolean/null), optional detail |
-| `Badge` | text (Gallop Chip rendered disabled/read-only) |
+| `Badge` | text, optional tone (`"success"`, `"danger"` or `"neutral"`) (Gallop Chip rendered disabled/read-only) |
 | `Link` | text, absolute HTTP(S) href |
 | `Table` | columns, rows, optional caption |
 
@@ -39,7 +39,7 @@ identity. For incremental updates, bind `Table(columns, $prs)` to data such as
 patch `{"prs":{"core-618":{"status":"Done"}}}` changes just that entry;
 `{"prs":{"core-618":null}}` removes its row. Each cell is a
 scalar or `{text:"Report",href:"https://example.com"}` or
-`{text:"Ready",badge:true}`. Missing cells display an em dash; null/missing rows
+`{text:"Ready",badge:true}`, optionally with `tone:"success"`, `"danger"` or `"neutral"` for a soft green, red or gray pill. Missing cells display an em dash; null/missing rows
 display “No data”. Text values are limited to 16,000 characters by the component
 schemas. The server additionally bounds the entire view and data document.
 
