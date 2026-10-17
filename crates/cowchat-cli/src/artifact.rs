@@ -185,7 +185,6 @@ pub async fn run(cli: &Cli, args: &Args) -> Result<()> {
     };
     let client = connect(cli).await?;
     let room_id = resolve_room_id(&client, room).await?;
-    client.join_room(&room_id).await?;
     let mut segments = vec!["api", "rooms", &room_id, "artifact"];
     if let Some(suffix) = suffix {
         segments.push(suffix);

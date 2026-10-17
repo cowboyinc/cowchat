@@ -25,6 +25,7 @@ async fn artifact_cli_publishes_merges_retries_and_revokes_through_authenticated
         max_rooms: None,
     })
     .unwrap();
+    let store = server.store().clone();
     let key = server.api_key().to_owned();
     let task = tokio::spawn(async move { server.run().await.unwrap() });
     let url = format!("ws://{addr}/ws");
@@ -32,6 +33,14 @@ async fn artifact_cli_publishes_merges_retries_and_revokes_through_authenticated
         .await
         .unwrap();
     owner.create_room("status room", None, None).await.unwrap();
+    let room_id = owner
+        .list_rooms(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|room| room.name == "status room")
+        .unwrap()
+        .room_id;
     let view = dir.path().join("view.openui");
     let data = dir.path().join("data.json");
     std::fs::write(&view, "root = Stack([Text($summary.text)])").unwrap();
@@ -153,6 +162,14 @@ async fn artifact_cli_publishes_merges_retries_and_revokes_through_authenticated
             .unwrap()
             .status(),
         404
+    );
+    assert!(
+        !store
+            .room_voters(&room_id)
+            .unwrap()
+            .iter()
+            .any(|agent| agent == "publisher"),
+        "An artifact-only publisher must not become a room voter"
     );
     task.abort();
 }

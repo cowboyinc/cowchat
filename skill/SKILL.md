@@ -370,3 +370,8 @@ level. Objects cannot contain a `steps` array, `type: "element"`, a truthy
 `Null`, `Arr`, `Obj`, `Ref`, `Ph`, `StateRef`, `RuntimeRef`, `BinOp`, `UnaryOp`,
 `Ternary`, `Member`, `Index`, `Assign`). Use names such as `stages` for a list of
 workflow steps. The server rejects these shapes before changing the artifact.
+
+After publishing or changing a layout, open its URL and verify the page renders.
+The server validates storage bounds and reserved data shapes; component schemas
+and layout/render budgets are checked by the browser. A successful write alone
+does not confirm that a newly authored layout renders.
