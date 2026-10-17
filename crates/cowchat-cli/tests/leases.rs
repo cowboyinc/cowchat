@@ -359,3 +359,50 @@ async fn supervisor_stops_child_after_losing_lease() {
         "The supervised process group must stop after losing ownership"
     );
 }
+
+#[tokio::test]
+async fn normal_exit_stops_background_work_before_releasing_lease() {
+    let net = start_server().await;
+    let owner = CowchatClient::connect_tcp(&net.addr, &net.key, "Owner", Some("owner"), vec![])
+        .await
+        .unwrap();
+    let room = owner
+        .create_room("background-lease-test", None, None)
+        .await
+        .unwrap();
+    let marker = net._dir.path().join("stale-work");
+    let result = cli(&net)
+        .args([
+            "run",
+            &room.room_id,
+            "deploy:test",
+            "--",
+            "sh",
+            "-c",
+            "(sleep 1; touch \"$1\") & exit 0",
+            "background-test",
+        ])
+        .arg(&marker)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        output_status(&net, &room.room_id).await["lease"]["status"],
+        "released"
+    );
+    assert_eq!(
+        output(&net, &["acquire", &room.room_id, "deploy:test"]).await["lease"]["generation"],
+        2
+    );
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        !marker.exists(),
+        "Background work from the old grant continued after release and takeover"
+    );
+}

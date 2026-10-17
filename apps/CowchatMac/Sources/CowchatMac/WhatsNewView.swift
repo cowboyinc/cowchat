@@ -69,7 +69,7 @@ struct WhatsNewContent: View {
         VStack(alignment: .leading, spacing: 30) {
             HStack(spacing: 10) {
                 Text("October 16, 2026").gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-                Text("0.9.4").gallopText(.caption, color: SemanticColor.textTertiary)
+                Text("0.9.5").gallopText(.caption, color: SemanticColor.textTertiary)
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(SemanticColor.surface400, in: Capsule())
             }
