@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const MAX_VIEW_BYTES: u64 = 64 * 1024;
-const MAX_DATA_BYTES: u64 = 256 * 1024;
+const MAX_DATA_BYTES: u64 = 512 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(ClapArgs)]
@@ -100,7 +100,7 @@ fn read_bounded(path: &PathBuf, limit: u64) -> Result<String> {
 
 fn data_object(text: &str) -> Result<Value> {
     if text.len() as u64 > MAX_DATA_BYTES {
-        return Err("artifact data exceeds 256 KiB".into());
+        return Err("artifact data exceeds 512 KiB".into());
     }
     let value: Value = serde_json::from_str(text)?;
     if !value.is_object() {
@@ -189,13 +189,25 @@ pub async fn run(cli: &Cli, args: &Args) -> Result<()> {
     if let Some(suffix) = suffix {
         segments.push(suffix);
     }
+    let retry_identity = body
+        .as_ref()
+        .and_then(|body| body.get("request_id"))
+        .is_some();
     let mut result = request(
         method,
         endpoint(&base, &segments)?,
         &load_key(&cli.key),
         body,
     )
-    .await?;
+    .await
+    .map_err(|error| -> Box<dyn std::error::Error> {
+        if retry_identity {
+            format!("{error}; request_id={request_id} (reuse --request-id for the same operation)")
+                .into()
+        } else {
+            error
+        }
+    })?;
     if let Some(id) = result.get("public_id").and_then(Value::as_str) {
         let id = Uuid::parse_str(id)?.to_string();
         let url = endpoint(&base, &["a", &id])?;

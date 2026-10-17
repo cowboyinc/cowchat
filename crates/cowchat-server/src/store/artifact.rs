@@ -50,7 +50,7 @@ impl Store {
     ) -> Result<Option<Artifact>, ArtifactError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        authorize_artifact_room(&tx, room, key, no_auth)?;
+        authorize_artifact_room(&tx, room, key, no_auth, ArtifactAccess::Read)?;
         Ok(tx.query_row("SELECT room_id,title,view,data,revision,updated_at,public_id FROM room_artifacts WHERE room_id=?1", [room], map_artifact).optional()?)
     }
 
@@ -158,7 +158,7 @@ impl Store {
     ) -> Result<(), ArtifactError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        authorize_artifact_room(&tx, room, key, no_auth)?;
+        authorize_artifact_room(&tx, room, key, no_auth, ArtifactAccess::Write)?;
         take_artifact_write_slot(&tx, key)?;
         tx.execute("DELETE FROM room_artifacts WHERE room_id=?1", [room])?;
         tx.commit()?;
@@ -178,7 +178,7 @@ impl Store {
     ) -> Result<Artifact, ArtifactError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        authorize_artifact_room(&tx, room, key, no_auth)?;
+        authorize_artifact_room(&tx, room, key, no_auth, ArtifactAccess::Write)?;
         // Cleanup is bounded by the indexed retention timestamp. Receipts never replay writes.
         tx.execute(
             "DELETE FROM room_artifact_receipts WHERE created_at < unixepoch()-604800",
@@ -232,11 +232,17 @@ fn write_artifact(tx: &Transaction<'_>, artifact: &Artifact) -> Result<(), Artif
     Ok(())
 }
 
+enum ArtifactAccess {
+    Read,
+    Write,
+}
+
 fn authorize_artifact_room(
     tx: &Transaction<'_>,
     room: &str,
     key: &str,
     no_auth: bool,
+    access: ArtifactAccess,
 ) -> Result<(), ArtifactError> {
     let room = query_room_by_id(tx, room)?.ok_or(ArtifactError::NotFound)?;
     let grant = tx.query_row(
@@ -244,13 +250,18 @@ fn authorize_artifact_room(
         params![room.room_id, key],
         |r| r.get::<_, bool>(0),
     )?;
-    if crate::connection::can_access_room_parts(
-        &room.visibility,
-        room.owner_key.as_deref(),
-        key,
-        no_auth,
-    ) || grant
-    {
+    let allowed = match access {
+        ArtifactAccess::Read => crate::connection::can_access_room_parts(
+            &room.visibility,
+            room.owner_key.as_deref(),
+            key,
+            no_auth,
+        ),
+        ArtifactAccess::Write => {
+            crate::connection::matches_room_owner(room.owner_key.as_deref(), key, no_auth)
+        }
+    };
+    if allowed || grant {
         Ok(())
     } else {
         Err(ArtifactError::NotFound)

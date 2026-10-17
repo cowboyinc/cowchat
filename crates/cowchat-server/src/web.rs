@@ -1280,6 +1280,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_artifact_reads_do_not_grant_mutation_authority() {
+        let state = test_state();
+        state
+            .store
+            .create_room_with_visibility(
+                "public-target",
+                "Public",
+                None,
+                None,
+                Some("author"),
+                "public",
+                Some("master"),
+                false,
+            )
+            .unwrap();
+        for key in ["outsider", "writer"] {
+            state.store.create_api_key(key, None).unwrap();
+        }
+        let observed = state.store.clone();
+        let (server, addr) = start_test_web_server(state).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/api/rooms/public-target/artifact");
+        let publication = || {
+            serde_json::json!({"title":"Board", "view":"root = Stack([])",
+            "data":{"count":1},"request_id":uuid::Uuid::new_v4()})
+        };
+        let rejected = client
+            .put(&url)
+            .header(API_KEY_HEADER, "outsider")
+            .json(&publication())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            rejected.status(),
+            StatusCode::NOT_FOUND,
+            "Public visibility must not allow creating an artifact"
+        );
+        assert!(observed.get_artifact("public-target").unwrap().is_none());
+        let first: serde_json::Value = client
+            .put(&url)
+            .header(API_KEY_HEADER, "master")
+            .json(&publication())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .get(&url)
+                .header(API_KEY_HEADER, "outsider")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let mut replacement = publication();
+        replacement["expected_revision"] = 1.into();
+        let attempts = [
+            client.put(&url).json(&replacement),
+            client.patch(&url).json(
+                &serde_json::json!({"patch":{"intruder":true},"request_id":uuid::Uuid::new_v4()}),
+            ),
+            client
+                .post(format!("{url}/rotate"))
+                .json(&serde_json::json!({"request_id":uuid::Uuid::new_v4()})),
+            client.delete(&url),
+        ];
+        for attempt in attempts {
+            assert_eq!(
+                attempt
+                    .header(API_KEY_HEADER, "outsider")
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        let unchanged = observed.get_artifact("public-target").unwrap().unwrap();
+        assert_eq!(unchanged.revision, 1);
+        assert_eq!(unchanged.public_id, first["public_id"].as_str().unwrap());
+        assert_eq!(unchanged.data, serde_json::json!({"count":1}));
+        observed.add_room_grant("writer", "public-target").unwrap();
+        assert_eq!(
+            client
+                .patch(&url)
+                .header(API_KEY_HEADER, "writer")
+                .json(&serde_json::json!({"patch":{"count":2},"request_id":uuid::Uuid::new_v4()}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .post(format!("{url}/rotate"))
+                .header(API_KEY_HEADER, "writer")
+                .json(&serde_json::json!({"request_id":uuid::Uuid::new_v4()}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .delete(&url)
+                .header(API_KEY_HEADER, "writer")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            client
+                .put(&url)
+                .header(API_KEY_HEADER, "writer")
+                .json(&publication())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn artifact_http_rejects_invalid_bounds_and_guards_view_replacement() {
         let state = test_state();
         state
