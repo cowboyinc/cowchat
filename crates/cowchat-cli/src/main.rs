@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 mod lantern;
+mod leases;
 
 /// `metadata.kind` marking the last message of a conversation. `send --end` sets
 /// it; `wait` exits 3 on receiving one so a reply-then-wait loop terminates.
@@ -216,6 +217,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Durable room leases and commit-specific readiness.
+    Lease(leases::Args),
     /// Run a local signed wake receiver and start the actor program only for work.
     ActorHost(actor_host::ActorHostArgs),
     /// Bridge one explicitly configured Telegram chat to an encrypted room.
@@ -932,7 +935,8 @@ fn resolve_agent_id(cli: &Cli) -> Option<String> {
 fn command_represents_agent_session(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::ActorHost(_)
+        Commands::Lease(_)
+            | Commands::ActorHost(_)
             | Commands::TelegramBridge(_)
             | Commands::Send { .. }
             | Commands::SendFile { .. }
@@ -1684,6 +1688,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     require_stable_named_agent(&cli)?;
 
     match &cli.command {
+        Commands::Lease(args) => leases::run(&cli, args).await?,
         Commands::ActorHost(args) => actor_host::run(&cli, args).await?,
         Commands::TelegramBridge(args) => telegram::run(&cli, args).await?,
         Commands::Send {

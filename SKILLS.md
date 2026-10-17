@@ -1434,3 +1434,29 @@ people should see. The same flag is supported by `send-chart` and `send-file`.
 Omitting it forwards as before, including messages from older clients. The wire
 field is the boolean `metadata.display_external`; false affects external display
 only, not room delivery, mentions, history or who can read Cowchat messages.
+
+## Durable leases and host heartbeats
+
+Use your existing Cowchat identity. No additional keys or lease files are needed.
+`lease run <room> <resource> -- <command>` acquires, heartbeats once a minute,
+and releases on exit. A lease is overdue after 5 minutes and expires after 7.
+Takeover increments a public generation number. Old generations cannot renew or release.
+
+For manual use, call `lease acquire <room> <resource>`, then use the returned
+generation with `lease heartbeat <room> <resource> --generation <n>` and
+`lease release <room> <resource> --generation <n>`. Only the owning account and
+agent can mutate the lease. Keep the same stable agent ID on every call.
+
+A supervisor can read an optional `--state-file <path>` to report ordinary JSON
+metadata such as `{"state":"waiting_for_human","detail":"Approve deployment"}`.
+The host atomically replaces this file. States are `working`, `waiting_for_human`,
+and `waiting_for_dependency`. There is no automatic prompt detection.
+Heartbeats preserve ownership but never claim progress. Only changed progress
+text updates the progress clock. Use a separate observer identity for concurrent
+status commands because Cowchat allows one live connection per agent ID.
+
+Use `lease list <room>` or the Mac room's **Leases…** action to inspect status.
+Executors must enforce generations at the side effect boundary to fence deployments.
+Use `lease ready <room> <resource> --commit <full-sha> --verdict ready` for readiness.
+`lease readiness <room> <resource> --commit <full-sha>` marks old verdicts stale.
+See `docs/leases.md` for commands and host integration.

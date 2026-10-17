@@ -1,6 +1,7 @@
 mod actor_work;
 #[cfg(test)]
 mod actor_work_tests;
+pub mod coordination;
 
 use chrono::{DateTime, Utc};
 use cowchat_core::{ChatMessage, Room};
@@ -512,6 +513,7 @@ impl Store {
         }
 
         actor_work::initialize(&conn)?;
+        coordination::initialize(&conn)?;
         Ok(())
     }
 
@@ -2302,6 +2304,8 @@ fn delete_room_artifacts_in_transaction(
         params![room_id],
     )?;
     tx.execute("DELETE FROM votes WHERE room_id = ?1", params![room_id])?;
+    tx.execute("DELETE FROM room_leases WHERE room=?1", params![room_id])?;
+    tx.execute("DELETE FROM room_readiness WHERE room=?1", params![room_id])?;
     tx.execute(
         "DELETE FROM room_voting_members WHERE room_id = ?1",
         params![room_id],

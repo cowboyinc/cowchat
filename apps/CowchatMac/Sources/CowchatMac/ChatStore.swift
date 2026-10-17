@@ -899,6 +899,13 @@ final class ChatStore: ObservableObject {
         )
     }
 
+    func roomLeases(roomID: String) async throws -> [RoomLease] {
+        let profile = connectionProfile
+        let leases = try await connection.roomLeases(roomID: roomID)
+        guard profile == connectionProfile else { throw CancellationError() }
+        return leases
+    }
+
     private func refreshSlackBadges() {
         guard connectionProfile.kind == .cowchatCloud else { return }
         slackRefreshTask?.cancel()
