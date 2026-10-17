@@ -49,6 +49,8 @@ test('live Gallop table and OpenUI chart update from snapshots, reconnect, and c
     const shapesBefore = await page.locator('.artifact-content svg').first().locator('path').evaluateAll(nodes => nodes.map(node => node.getAttribute('d')));
     const chip = page.locator('.artifact-badge').first();
     assert.equal(await chip.evaluate(node => getComputedStyle(node).display), 'inline-flex');
+    const toned = page.locator('.artifact-badge.artifact-tone-success').first();
+    assert.notEqual(await toned.evaluate(node => getComputedStyle(node).backgroundColor), await chip.evaluate(node => getComputedStyle(node).backgroundColor), 'a success tone colours its pill');
     await page.screenshot({path:'/tmp/cowchat-artifact-before.png',fullPage:true});
     snapshot = {...snapshot, revision:2, data:{...snapshot.data, work:{...snapshot.data.work,report:{name:'Release review',owner:'Taylor',status:{text:'Done',badge:true}}}, revenue:{labels:['July','August','September'],values:[64,19,95]}}};
     for (const stream of streams) stream.write('event: revision\ndata: {"revision":2}\n\n');

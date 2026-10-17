@@ -24,13 +24,15 @@ const Text = define('Text', { text }, ({ props }) => <p className="artifact-text
 const MarkdownBlock = define('Markdown', { text }, ({ props }) => <div className="artifact-markdown"><Markdown skipHtml
   disallowedElements={['img', 'input', 'form', 'iframe', 'script', 'style']}
   components={{ a: ({ href, children }) => safeHref(href) ? <a href={safeHref(href)} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span> }}>{props.text}</Markdown></div>);
-const Badge = define('Badge', { text }, ({ props }) => <Chip disabled className="artifact-badge">{props.text}</Chip>);
+const tone = z.enum(['success', 'danger', 'neutral']).optional();
+const badge = (label, t) => <Chip disabled className={`artifact-badge${t ? ` artifact-tone-${t}` : ''}`}>{label}</Chip>;
+const Badge = define('Badge', { text, tone }, ({ props }) => badge(props.text, props.tone));
 const Link = define('Link', { text, href: text }, ({ props }) => safeHref(props.href)
   ? <a href={safeHref(props.href)} target="_blank" rel="noopener noreferrer">{props.text} <span aria-hidden="true">↗</span></a>
   : <span>{props.text}</span>);
 const Metric = define('Metric', { label: text, value: scalar.nullish(), detail: text.nullish() }, ({ props }) =>
   <div className="artifact-metric"><span className="metric-label">{props.label}</span><strong>{show(props.value)}</strong>{props.detail && <span className="metric-detail">{props.detail}</span>}</div>);
-const cell = z.union([scalar, z.object({ text, href: text.optional(), badge: z.boolean().optional() })]);
+const cell = z.union([scalar, z.object({ text, href: text.optional(), badge: z.boolean().optional(), tone })]);
 const row = z.record(z.string(), cell);
 const Table = define('Table', {
   columns: z.array(z.object({ key: z.string().min(1).max(100), label: text })).min(1).max(20),
@@ -45,7 +47,7 @@ const Table = define('Table', {
   <tbody>{rows.map(([key, row]) => <tr key={key}>{props.columns.map(column => {
     const value = row[column.key];
     const content = value && typeof value === 'object' ? value : null;
-    return <td key={column.key}>{content ? content.badge ? <Chip disabled className="artifact-badge">{content.text}</Chip>
+    return <td key={column.key}>{content ? content.badge ? badge(content.text, content.tone)
       : safeHref(content.href) ? <a href={safeHref(content.href)} target="_blank" rel="noopener noreferrer">{content.text} ↗</a> : content.text : show(value)}</td>;
   })}</tr>)}</tbody>
   </table>{!rows.length && <p className="artifact-empty">No data</p>}</div>;
