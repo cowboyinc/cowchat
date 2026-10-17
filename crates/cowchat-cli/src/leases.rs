@@ -195,6 +195,8 @@ async fn supervise(
         cmd.env("COWCHAT_LEASE_STATE_FILE", path);
     }
     let mut child = cmd.spawn()?;
+    // wait() clears child.id(), but background members still need the group stopped.
+    let process_group = if isolated { child.id() } else { None };
     let mut timer = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(60),
         Duration::from_secs(60),
@@ -212,11 +214,9 @@ async fn supervise(
             }
         }
     };
-    if isolated {
-        if let Some(pid) = child.id() {
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            }
+    if let Some(group) = process_group {
+        unsafe {
+            libc::kill(-(group as i32), libc::SIGKILL);
         }
     }
     let _ = child.kill().await;
