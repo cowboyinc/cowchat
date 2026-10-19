@@ -8,9 +8,13 @@ let package = Package(
     products: [
         .executable(name: "CowchatMac", targets: ["CowchatMac"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
+    ],
     targets: [
         .executableTarget(
             name: "CowchatMac",
+            dependencies: [.product(name: "Sparkle", package: "Sparkle")],
             resources: [
                 .process("Resources"),
                 // Directory-preserving copies — GallopIcon/SeasonFonts look up
@@ -23,6 +27,9 @@ let package = Package(
                 .copy("Bundled/Fonts"),
                 .copy("Bundled/Icons"),
                 .copy("Bundled/Charts"),
+            ],
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@loader_path/../Frameworks"]),
             ]
         ),
         .testTarget(name: "CowchatMacTests", dependencies: ["CowchatMac"]),

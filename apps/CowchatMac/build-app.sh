@@ -144,10 +144,34 @@ fi
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" \
-	"$APP_DIR/Contents/Helpers"
+	"$APP_DIR/Contents/Helpers" "$APP_DIR/Contents/Frameworks"
 cp "$BIN_DIR/$PRODUCT" "$APP_DIR/Contents/MacOS/Cowchat"
 cp "$APP_INFO_PLIST" "$APP_DIR/Contents/Info.plist"
 cp -R "$RESOURCE_BUNDLE" "$APP_DIR/Contents/Resources/"
+# SwiftPM supplies a binary artifact; copy the complete framework (including
+# symlinks and Sparkle's installer services), not just its linked executable.
+SPARKLE_FRAMEWORK=$(find "${COWCHAT_SWIFT_ARTIFACTS_DIR:-$ROOT/.build/artifacts}" -type d -path '*/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework' -print)
+if [ -z "$SPARKLE_FRAMEWORK" ] || [ "$(printf '%s\n' "$SPARKLE_FRAMEWORK" | wc -l | tr -d ' ')" != 1 ]; then
+    printf '%s\n' 'Expected exactly one resolved Sparkle macOS framework.' >&2
+    exit 1
+fi
+ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+# The pinned binary distribution includes Sparkle's license and bundled
+# third-party notices alongside the xcframework. Redistribute it in full.
+SPARKLE_LICENSE="$(dirname "$(dirname "$(dirname "$SPARKLE_FRAMEWORK")")")/LICENSE"
+if [ ! -s "$SPARKLE_LICENSE" ]; then
+    printf '%s\n' 'The resolved Sparkle distribution is missing its license notices.' >&2
+    exit 1
+fi
+cp "$SPARKLE_LICENSE" "$APP_DIR/Contents/Resources/Sparkle-LICENSE.txt"
+SPARKLE="$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/B"
+for component in Sparkle Autoupdate Updater.app XPCServices/Installer.xpc XPCServices/Downloader.xpc; do
+    if [ ! -e "$SPARKLE/$component" ]; then
+        printf 'Missing Sparkle component: %s\n' "$component" >&2
+        exit 1
+    fi
+done
+
 SERVER_HELPER="$APP_DIR/Contents/Helpers/$SERVER_NAME"
 lipo "$ARM_SERVER" "$INTEL_SERVER" -create -output "$SERVER_HELPER"
 chmod 755 "$SERVER_HELPER"
@@ -229,6 +253,9 @@ if [ ! -s "$APP_DIR/Contents/Resources/Assets.car" ] || \
 	exit 1
 fi
 
+. "$ROOT/sign-sparkle.sh"
+sign_sparkle_framework "$APP_DIR/Contents/Frameworks/Sparkle.framework" "$SIGNING_IDENTITY"
+
 if [ "$SIGNING_IDENTITY" = "-" ]; then
 	codesign --force --sign - "$SERVER_HELPER" >/dev/null
 	verify_server_signature "$SERVER_HELPER" "built app"
@@ -240,7 +267,7 @@ else
 fi
 codesign --verify --deep --strict "$APP_DIR"
 
-INSTALL_DIR="$HOME/Applications"
+INSTALL_DIR=${COWCHAT_INSTALL_DIR:-"$HOME/Applications"}
 mkdir -p "$INSTALL_DIR"
 INSTALL_DIR=$(CDPATH='' cd -- "$INSTALL_DIR" && pwd)
 INSTALL_APP="$INSTALL_DIR/$APP_NAME"
