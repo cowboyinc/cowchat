@@ -9,8 +9,8 @@ cask "cowchat" do
 
   # The formula of the same name installs the `cowchat` and `cowchat-server`
   # CLIs; this cask installs the app, which carries its own server helper in
-  # Contents/Helpers. They coexist — keep both on the same version so a server
-  # started from the app and one started from the terminal are the same build.
+  # Contents/Helpers. Sparkle updates the app; standalone CLIs use this tap.
+  auto_updates true
   depends_on macos: :ventura
 
   app "Cowchat.app"

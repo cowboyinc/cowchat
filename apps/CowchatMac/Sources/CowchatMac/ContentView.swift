@@ -2315,6 +2315,7 @@ private enum SettingsPage {
     case connection
     case theme
     case roomIcons
+    case updates
     case whatsNew
 
     var title: String {
@@ -2322,6 +2323,7 @@ private enum SettingsPage {
         case .connection: return "Connection"
         case .theme: return "Theme"
         case .roomIcons: return "Room icons"
+        case .updates: return "Updates"
         case .whatsNew: return "What’s new"
         }
     }
@@ -2331,6 +2333,7 @@ private enum SettingsPage {
         case .connection: return "Choose where Cowchat stores and syncs your rooms."
         case .theme: return "Choose how Cowchat appears on this Mac."
         case .roomIcons: return "Every room gets the same icon on every Mac — it is drawn from the room name."
+        case .updates: return "Keep Cowchat up to date."
         case .whatsNew: return "The latest improvements to Cowchat."
         }
     }
@@ -2352,6 +2355,7 @@ enum ThemePreview {
 }
 
 private struct SettingsView: View {
+    @EnvironmentObject private var softwareUpdater: SoftwareUpdater
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var store: ChatStore
     @Binding var isPresented: Bool
@@ -2390,6 +2394,11 @@ private struct SettingsView: View {
                     page: .roomIcons
                 )
                 settingsNavigationRow(
+                    "Updates",
+                    systemName: "arrow.down.circle",
+                    page: .updates
+                )
+                settingsNavigationRow(
                     "What’s new",
                     systemName: "sparkles",
                     page: .whatsNew
@@ -2414,6 +2423,8 @@ private struct SettingsView: View {
                     themeSettings
                 case .roomIcons:
                     roomIconSettings
+                case .updates:
+                    updateSettings
                 case .whatsNew:
                     ScrollView { WhatsNewContent() }
                 }
@@ -2431,6 +2442,34 @@ private struct SettingsView: View {
                 .stroke(SemanticColor.borderDefault, lineWidth: 1)
         }
         .onAppear(perform: loadCloudConfiguration)
+    }
+
+    private var updateSettings: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Cowchat \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+                .gallopText(.bodyMStrong)
+            Toggle("Automatically check for updates", isOn: Binding(
+                get: { softwareUpdater.automaticallyChecksForUpdates },
+                set: { softwareUpdater.setAutomaticallyChecksForUpdates($0) }
+            ))
+            .disabled(!softwareUpdater.isAvailable)
+            Toggle("Download and install updates automatically", isOn: Binding(
+                get: { softwareUpdater.automaticallyDownloadsUpdates },
+                set: { softwareUpdater.setAutomaticallyDownloadsUpdates($0) }
+            ))
+            .disabled(!softwareUpdater.isAvailable || !softwareUpdater.automaticallyChecksForUpdates)
+            Text("Updates include the app and its bundled server. Cowchat waits until you quit or choose to relaunch before installing.")
+                .gallopText(.bodyS, color: SemanticColor.textSecondary)
+            Button("Check for Updates…") { softwareUpdater.checkForUpdates() }
+                .buttonStyle(CowchatPillButtonStyle(prominent: true))
+                .disabled(!softwareUpdater.canCheckForUpdates)
+            if !softwareUpdater.isAvailable {
+                Text("Automatic updates are available in installed release builds.")
+                    .gallopText(.caption, color: SemanticColor.textTertiary)
+            }
+            Text("Standalone command-line tools and separately running servers update through Homebrew or your package manager.")
+                .gallopText(.caption, color: SemanticColor.textTertiary)
+        }
     }
 
     private var settingsHeader: some View {
