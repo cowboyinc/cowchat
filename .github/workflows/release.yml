@@ -224,6 +224,9 @@ jobs:
           }
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
           NOTES='Signed and notarized universal Cowchat.app DMG, plus prebuilt cowchat + cowchat-server binaries (macOS arm64/x86_64, Linux arm64/x86_64). Homebrew: `brew install --cask cowboyinc/tap/cowchat` for the app, `brew install cowboyinc/tap/cowchat` for the CLIs — pending tap merge; this note is updated on promotion.'
+          if [ -f "docs/releases/${TAG#v}.md" ]; then
+            printf -v NOTES '%s\n\n%s' "$(cat "docs/releases/${TAG#v}.md")" "$NOTES"
+          fi
 
           sha() {
             shasum -a 256 "dist/cowchat-${TAG}-$1.tar.gz" | awk '{print $1}'

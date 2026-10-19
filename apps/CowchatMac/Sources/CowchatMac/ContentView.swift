@@ -32,6 +32,7 @@ struct ContentView: View {
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
     @State private var isSidebarVisible = true
     @State private var isSettingsPresented = false
+    @State private var isFriendsPresented = false
     @State private var isWhatsNewPresented = false
     @Environment(\.controlActiveState) private var controlActiveState
 
@@ -82,6 +83,11 @@ struct ContentView: View {
         .toolbarBackground(SemanticColor.surface400, for: .windowToolbar)
         .navigationTitle(store.selectedRoom?.name ?? "Cowchat")
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { isFriendsPresented = true } label: {
+                    Label("Friends & account", systemImage: "person.2")
+                }.help("Friends, agents and account")
+            }
             ToolbarItem(placement: .navigation) {
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
@@ -120,16 +126,21 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 600)
         .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
         .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
+        .sheet(isPresented: $isFriendsPresented) { FriendsView(social: workspace.social) }
         .sheet(
             isPresented: $store.isCreateRoomPresented,
             onDismiss: { store.createRoomParentID = nil }
         ) {
-            CreateRoomView(
-                local: workspace.local,
-                globalOrLocal: workspace.global ?? workspace.local,
-                hasGlobal: workspace.global != nil
-            )
-                .environmentObject(store)
+            if store.connectionProfile.apiKey.hasPrefix("csoc_") {
+                FriendsView(social: workspace.social)
+            } else {
+                CreateRoomView(
+                    local: workspace.local,
+                    globalOrLocal: workspace.global ?? workspace.local,
+                    hasGlobal: workspace.global != nil && workspace.social.savedSession == nil
+                )
+                    .environmentObject(store)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .cowchatShowWhatsNew)) { _ in
             guard controlActiveState == .key || controlActiveState == .active else { return }
@@ -1192,8 +1203,10 @@ private struct ChatRoomView: View {
                     Button("Copy connect prompt") { copyConnectPrompt() }
                     if !store.isLocalConnection {
                         Button("Artifact…") { isArtifactPresented = true }
-                        Button("Invites…") { isInvitesPresented = true }
-                        Button("Slack…") { isSlackPresented = true }
+                        if !store.connectionProfile.apiKey.hasPrefix("csoc_") {
+                            Button("Invites…") { isInvitesPresented = true }
+                            Button("Slack…") { isSlackPresented = true }
+                        }
                     }
                     Divider()
                     // Rename and destroy are creator-only, so for other
@@ -1203,7 +1216,9 @@ private struct ChatRoomView: View {
                         Button("Rename room") { store.presentRename(room) }
                     }
                     Button("Archive room") { Task { await store.archive(room) } }
-                    Button("Create nested room…") { store.presentCreateRoom(parentID: room.id) }
+                    if !store.connectionProfile.apiKey.hasPrefix("csoc_") {
+                        Button("Create nested room…") { store.presentCreateRoom(parentID: room.id) }
+                    }
                     if !store.connectionStatus.isConnected {
                         Button("Reconnect") { store.start() }
                     }

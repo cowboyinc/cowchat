@@ -245,6 +245,13 @@ fn authorize_artifact_room(
     access: ArtifactAccess,
 ) -> Result<(), ArtifactError> {
     let room = query_room_by_id(tx, room)?.ok_or(ArtifactError::NotFound)?;
+    if let Some(allowed) = super::social::room_access(tx, &room.room_id, key)? {
+        return if allowed {
+            Ok(())
+        } else {
+            Err(ArtifactError::NotFound)
+        };
+    }
     let grant = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM room_grants WHERE room_id=?1 AND api_key=?2)",
         params![room.room_id, key],

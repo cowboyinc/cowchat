@@ -85,9 +85,11 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
+    state.broker.bind_access_store(&state.store);
     let allowed_origins = state.allowed_origins.clone();
     let hosted = state.broker.is_hosted();
     let router = Router::new()
+        .merge(crate::social::routes())
         .route("/ws", get(ws_handler))
         .route(
             "/auth/session/challenge",
@@ -447,6 +449,16 @@ async fn redeem_invite(
     headers: HeaderMap,
     body: Option<Json<serde_json::Value>>,
 ) -> impl IntoResponse {
+    if headers
+        .get(API_KEY_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|key| key.starts_with(crate::store::social::PREFIX))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error":"Use account room invitations"})),
+        );
+    }
     let client_ip = signup_bucket(peer, &headers, &state.trusted_proxy_ips);
     if !state.rate_limiter.try_register_signup(&client_ip) {
         return (
@@ -519,7 +531,11 @@ async fn redeem_invite(
     )
 }
 
-fn signup_bucket(peer: SocketAddr, headers: &HeaderMap, trusted_proxies: &[IpAddr]) -> String {
+pub(crate) fn signup_bucket(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    trusted_proxies: &[IpAddr],
+) -> String {
     if trusted_proxies.contains(&peer.ip()) {
         if let Some(value) = headers
             .get("x-forwarded-for")
@@ -544,7 +560,23 @@ async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-async fn api_list_rooms(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+async fn api_list_rooms(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if headers
+        .get(API_KEY_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|key| {
+            key.starts_with(crate::store::social::PREFIX)
+                && (state.no_auth
+                    || state.broker.is_hosted()
+                    || state.api_key.is_empty()
+                    || state.store.social_principal(key).is_none())
+        })
+    {
+        return json_error(StatusCode::UNAUTHORIZED, "Invalid credential");
+    }
     // Without a key: only public rooms. With a valid key: also private rooms
     // owned by, or invite-granted to, that key.
     let key = headers
@@ -556,7 +588,7 @@ async fn api_list_rooms(State(state): State<AppState>, headers: HeaderMap) -> im
         .list_rooms_for_key(key, None)
         .unwrap_or_default();
 
-    Json(serde_json::json!({"rooms": rooms}))
+    Json(serde_json::json!({"rooms": rooms})).into_response()
 }
 
 async fn api_list_agents(
@@ -569,7 +601,10 @@ async fn api_list_agents(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    if key != state.api_key && !state.store.validate_api_key(key).unwrap_or(false) {
+    if (key.starts_with(crate::store::social::PREFIX)
+        && (state.no_auth || state.broker.is_hosted() || state.api_key.is_empty()))
+        || (key != state.api_key && !state.store.validate_api_key(key).unwrap_or(false))
+    {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let agents: Vec<serde_json::Value> = state
@@ -592,11 +627,27 @@ async fn api_list_agents(
 async fn api_room_history(
     State(state): State<AppState>,
     Path(room_id): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let key = headers
+        .get(API_KEY_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    if key.starts_with(crate::store::social::PREFIX)
+        && authenticated_key(&state, &headers).is_none()
+    {
+        return json_error(StatusCode::UNAUTHORIZED, "Invalid credential");
+    }
+    if state.store.social_room_access(&room_id, key) == Some(false) {
+        return json_error(StatusCode::NOT_FOUND, "Room not found");
+    }
     // Only allow history for public rooms via REST API
     let room = state.store.get_room(&room_id).ok().flatten();
     match room {
-        Some(r) if r.visibility == "public" => {
+        Some(r)
+            if r.visibility == "public"
+                || state.store.social_room_access(&room_id, key) == Some(true) =>
+        {
             let messages = state
                 .store
                 .get_history(&room_id, 100, None)
@@ -861,10 +912,17 @@ async fn artifact_events(
 // --- Blob attachments ---
 
 /// The API key presented in `x-cowchat-key`, if it's valid on this server.
-fn authenticated_key(state: &AppState, headers: &HeaderMap) -> Option<String> {
+pub(crate) fn authenticated_key(state: &AppState, headers: &HeaderMap) -> Option<String> {
     let key = headers.get(API_KEY_HEADER)?.to_str().ok()?;
     if key.is_empty() {
         return None;
+    }
+    if key.starts_with(crate::store::social::PREFIX) {
+        return if state.no_auth || state.broker.is_hosted() || state.api_key.is_empty() {
+            None
+        } else {
+            state.store.social_principal(key).map(|_| key.to_string())
+        };
     }
     (key == state.api_key || state.store.validate_api_key(key).unwrap_or(false))
         .then(|| key.to_string())

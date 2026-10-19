@@ -3,6 +3,7 @@ mod actor_work;
 mod actor_work_tests;
 mod artifact;
 pub mod coordination;
+pub mod social;
 
 use chrono::{DateTime, Utc};
 use cowchat_core::{ChatMessage, Room};
@@ -16,6 +17,7 @@ use std::sync::Mutex;
 use crate::connection::{matches_room_owner, LEGACY_UNOWNED_OWNER_KEY};
 
 pub struct Store {
+    pub(crate) social_configuration: std::sync::OnceLock<Option<crate::social::Configuration>>,
     conn: Mutex<Connection>,
     pub(crate) artifact_changes: tokio::sync::watch::Sender<()>,
     /// In-memory mirror of `room_grants` (api_key -> granted room_ids).
@@ -143,12 +145,14 @@ impl Store {
             .unwrap_or_else(|| PathBuf::from("blobs"));
         let store = Self {
             conn: Mutex::new(conn),
+            social_configuration: std::sync::OnceLock::new(),
             artifact_changes: tokio::sync::watch::channel(()).0,
             grants: DashMap::new(),
             blob_dir,
         };
         store.initialize()?;
         store.initialize_artifacts()?;
+        store.initialize_social()?;
         for candidate in [
             path.to_path_buf(),
             std::path::PathBuf::from(format!("{}-wal", path.display())),
@@ -169,12 +173,14 @@ impl Store {
         let blob_dir = std::env::temp_dir().join(format!("cowchat-blobs-{}", uuid::Uuid::new_v4()));
         let store = Self {
             conn: Mutex::new(conn),
+            social_configuration: std::sync::OnceLock::new(),
             artifact_changes: tokio::sync::watch::channel(()).0,
             grants: DashMap::new(),
             blob_dir,
         };
         store.initialize()?;
         store.initialize_artifacts()?;
+        store.initialize_social()?;
         Ok(store)
     }
 
@@ -693,9 +699,10 @@ impl Store {
         if room.room_id == "lobby" || room.created_by.is_none() {
             return Err(RenameRoomError::ProtectedRoom);
         }
-        if room.created_by.as_deref() != Some(agent_id)
-            || !matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth)
-        {
+        if !social::room_owner(&tx, room_id, agent_api_key)?.unwrap_or_else(|| {
+            room.created_by.as_deref() == Some(agent_id)
+                && matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth)
+        }) {
             return Err(RenameRoomError::AccessDenied);
         }
 
@@ -746,14 +753,10 @@ impl Store {
             return Err(DestroyRoomError::ProtectedRoom);
         }
 
-        // The API key (or local keyless boundary) is the bearer authority. The
-        // exact creator ID is an attribution guard within that boundary, not a
-        // separate unforgeable principal; reconnect semantics deliberately let
-        // the bearer assume IDs owned by it. Public visibility never weakens
-        // this mutation check.
-        if room.created_by.as_deref() != Some(agent_id)
-            || !matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth)
-        {
+        if !social::room_owner(&tx, room_id, agent_api_key)?.unwrap_or_else(|| {
+            room.created_by.as_deref() == Some(agent_id)
+                && matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth)
+        }) {
             return Err(DestroyRoomError::AccessDenied);
         }
 
@@ -1210,6 +1213,17 @@ impl Store {
         agent_id: &str,
         owner_key: &str,
     ) -> Result<bool, StoreError> {
+        if !self.social_identity_allowed(agent_id, owner_key) {
+            return Ok(false);
+        }
+        let social_owner = self.social_principal(owner_key).map(|p| {
+            format!(
+                "social-account:{}:{}",
+                p.account_id,
+                p.agent_id.unwrap_or_default()
+            )
+        });
+        let owner_key = social_owner.as_deref().unwrap_or(owner_key);
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
@@ -1406,6 +1420,9 @@ impl Store {
     }
 
     pub fn validate_api_key(&self, api_key: &str) -> Result<bool, StoreError> {
+        if api_key.starts_with(social::PREFIX) {
+            return Ok(self.social_principal(api_key).is_some());
+        }
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM api_keys WHERE api_key = ?1",
@@ -1639,6 +1656,22 @@ impl Store {
             }
         }
 
+        rooms.retain(|room| {
+            social::room_access(&conn, &room.room_id, api_key.unwrap_or(""))
+                .unwrap_or(Some(false))
+                .unwrap_or(true)
+        });
+        if api_key.is_some_and(|key| key.starts_with(social::PREFIX)) {
+            let mut statement=conn.prepare("SELECT room_id,name,description,parent_id,created_by,created_at,visibility,owner_key,encrypted FROM rooms WHERE (?1 IS NULL OR parent_id=?1)")?;
+            rooms = statement
+                .query_map(params![parent_id], map_room_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            rooms.retain(|room| {
+                social::room_access(&conn, &room.room_id, api_key.unwrap_or(""))
+                    .unwrap_or(Some(false))
+                    == Some(true)
+            });
+        }
         Ok(rooms)
     }
 
@@ -2348,6 +2381,17 @@ fn delete_room_artifacts_in_transaction(
         params![room_id],
     )?;
     tx.execute("DELETE FROM blobs WHERE room_id = ?1", params![room_id])?;
+    for table in [
+        "social_room_invitations",
+        "social_admissions",
+        "social_members",
+        "social_rooms",
+    ] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE room_id=?1"),
+            params![room_id],
+        )?;
+    }
     Ok(())
 }
 

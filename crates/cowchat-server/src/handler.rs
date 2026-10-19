@@ -14,7 +14,7 @@ fn truncate_for_log(s: &str, max: usize) -> String {
 }
 
 use crate::broker::Broker;
-use crate::connection::{can_access_room, can_access_room_parts, matches_room_owner};
+use crate::connection::{can_access_room, can_access_room_parts, owns_room};
 use crate::reconnect::ReconnectManager;
 
 fn normalize_room_name(req_id: Option<&str>, name: &str) -> Result<String, Frame> {
@@ -203,8 +203,74 @@ pub async fn handle_frame(
     webhook_mgr: &Arc<crate::webhooks::WebhookManager>,
     reconnect_mgr: &Arc<ReconnectManager>,
 ) -> Frame {
+    broker.bind_access_store(store);
     let req_id = frame.id.as_deref();
 
+    if agent_api_key.starts_with(crate::store::social::PREFIX) {
+        if store.social_principal(agent_api_key).is_none() {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::Unauthorized, "Credential revoked or expired"),
+            );
+        }
+        if matches!(
+            frame.frame_type,
+            FrameType::CreateRoom
+                | FrameType::CreateInvite
+                | FrameType::RedeemInvite
+                | FrameType::RevokeInvite
+                | FrameType::Subscribe
+                | FrameType::SubscribeActor
+                | FrameType::ListInvites
+                | FrameType::ListSubscriptions
+                | FrameType::EnableSubscription
+                | FrameType::Unsubscribe
+                | FrameType::ClaimActorWork
+                | FrameType::CompleteActorWork
+        ) {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::Unauthorized,
+                    "Use human account approval for this operation",
+                ),
+            );
+        }
+        let mut room = frame
+            .payload
+            .get("room_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        {
+            if let Some(id) = frame
+                .payload
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                room = task_mgr.get_task(id).map(|t| t.room_id.clone());
+            }
+            if let Some(id) = frame
+                .payload
+                .get("vote_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                room = vote_mgr
+                    .active_votes
+                    .get(id)
+                    .map(|v| v.room_id.clone())
+                    .or_else(|| store.get_vote_meta(id).ok().flatten().map(|v| v.room_id));
+            }
+        }
+        if room
+            .as_deref()
+            .is_some_and(|id| store.social_room_access(id, agent_api_key) != Some(true))
+        {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::Unauthorized, "Room approval required"),
+            );
+        }
+    }
     match frame.frame_type {
         FrameType::Ping => Frame::pong(req_id),
         FrameType::RoomCoordination => handle_coordination(
@@ -662,8 +728,12 @@ async fn handle_rename_room(
             ErrorPayload::new(ErrorCode::AccessDenied, "System rooms cannot be renamed"),
         );
     }
-    if target.created_by.as_deref() != Some(agent_id)
-        || !matches_room_owner(target.owner_key.as_deref(), agent_api_key, no_auth)
+    if !store
+        .social_room_owner(&target.room_id, agent_api_key)
+        .unwrap_or_else(|| {
+            target.created_by.as_deref() == Some(agent_id)
+                && owns_room(&target, agent_api_key, no_auth, store)
+        })
     {
         return Frame::error(
             req_id,
@@ -861,7 +931,12 @@ async fn handle_destroy_room(
 
     // Snapshot invite grants before destruction purges them, so invited
     // members still receive the RoomDestroyed event.
-    let granted_keys = store.granted_keys_for_room(&p.room_id);
+    let mut granted_keys = store.granted_keys_for_room(&p.room_id);
+    for entry in broker.agents.iter() {
+        if store.social_room_access(&p.room_id, &entry.api_key) == Some(true) {
+            granted_keys.insert(entry.api_key.clone());
+        }
+    }
 
     let destruction = broker
         .destroy_room_with(&p.room_id, || {
@@ -916,7 +991,10 @@ async fn handle_destroy_room(
     broadcast_room_destroyed(broker, &room, &granted_keys, no_auth, &event);
 
     log::info!("Room {} explicitly destroyed by {}", room.room_id, agent_id);
-    Frame::ok(req_id, serde_json::json!({"room_id": room.room_id}))
+    Frame::ok(
+        req_id,
+        serde_json::json!({"room_id": room.room_id,"destroyed":true}),
+    )
 }
 
 async fn handle_leave_room(
@@ -2909,7 +2987,7 @@ async fn handle_revoke_invite(
         .get_room(&invite.room_id)
         .ok()
         .flatten()
-        .is_some_and(|room| matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth));
+        .is_some_and(|room| owns_room(&room, agent_api_key, no_auth, store));
     if !no_auth && !is_creator && !is_room_owner {
         return Frame::error(
             req_id,

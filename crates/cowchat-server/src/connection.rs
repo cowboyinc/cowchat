@@ -20,6 +20,11 @@ pub(crate) fn can_access_room_parts(
     api_key: &str,
     auth_disabled: bool,
 ) -> bool {
+    if api_key.starts_with(crate::store::social::PREFIX)
+        || owner_key.is_some_and(|key| key.starts_with(crate::store::social::OWNER_PREFIX))
+    {
+        return false;
+    }
     if auth_disabled || visibility == "public" {
         return true;
     }
@@ -34,6 +39,11 @@ pub(crate) fn matches_room_owner(
     api_key: &str,
     auth_disabled: bool,
 ) -> bool {
+    if api_key.starts_with(crate::store::social::PREFIX)
+        || owner_key.is_some_and(|key| key.starts_with(crate::store::social::OWNER_PREFIX))
+    {
+        return false;
+    }
     if owner_key == Some(LEGACY_UNOWNED_OWNER_KEY) {
         return false;
     }
@@ -45,14 +55,16 @@ pub(crate) fn matches_room_owner(
 }
 
 /// Full room-access check: owner/visibility rules plus invite-issued grants.
-/// The grant lookup is an in-memory cache read, so this stays safe on the
-/// per-agent broadcast hot path.
+/// Managed collaboration rooms apply account and exact-agent admission first.
 pub(crate) fn can_access_room(
     room: &cowchat_core::Room,
     api_key: &str,
     auth_disabled: bool,
     store: &crate::store::Store,
 ) -> bool {
+    if let Some(allowed) = store.social_room_access(&room.room_id, api_key) {
+        return allowed;
+    }
     can_access_room_parts(
         &room.visibility,
         room.owner_key.as_deref(),
@@ -128,6 +140,17 @@ impl Drop for AgentConnection {
         self.send_task.abort();
         self.receive_task.abort();
     }
+}
+
+pub(crate) fn owns_room(
+    room: &cowchat_core::Room,
+    key: &str,
+    no_auth: bool,
+    store: &crate::store::Store,
+) -> bool {
+    store
+        .social_room_owner(&room.room_id, key)
+        .unwrap_or_else(|| matches_room_owner(room.owner_key.as_deref(), key, no_auth))
 }
 
 #[cfg(test)]

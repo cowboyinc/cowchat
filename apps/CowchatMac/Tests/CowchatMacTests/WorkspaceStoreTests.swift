@@ -272,6 +272,7 @@ final class WorkspaceStoreTests: XCTestCase {
                 preferences: preferences,
                 defaults: defaults,
                 global: global,
+                socialCredentials: InMemoryCredentialStore(),
                 requestAPIKey: requestAPIKey
             ),
             preferences,
