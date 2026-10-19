@@ -35,12 +35,13 @@ struct CowchatPillButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .gallopText(.bodySStrong, color: prominent ? SemanticColor.buttonPrimaryTextDefault : SemanticColor.buttonSecondaryTextDefault)
+        let destructive = configuration.role == .destructive
+        return configuration.label
+            .gallopText(.bodySStrong, color: destructive ? SemanticColor.notificationErrorTextDefault : prominent ? SemanticColor.buttonPrimaryTextDefault : SemanticColor.buttonSecondaryTextDefault)
             .padding(.horizontal, 18)
             .frame(height: 36)
             .background(
-                prominent ? SemanticColor.buttonPrimaryDefault : SemanticColor.buttonSecondaryDefault,
+                destructive ? SemanticColor.notificationErrorDefault : prominent ? SemanticColor.buttonPrimaryDefault : SemanticColor.buttonSecondaryDefault,
                 in: Capsule()
             )
             .overlay(Capsule().stroke(SemanticColor.borderDefault, lineWidth: prominent ? 0 : 0.5))
@@ -68,12 +69,16 @@ struct WhatsNewContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
             HStack(spacing: 10) {
-                Text("October 17, 2026").gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-                Text("0.9.7").gallopText(.caption, color: SemanticColor.textTertiary)
+                Text("October 19, 2026").gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
+                Text("0.9.8").gallopText(.caption, color: SemanticColor.textTertiary)
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(SemanticColor.surface400, in: Capsule())
             }
 
+            entry("Friends, with room-by-room approval", description: "Sign in with Google or GitHub, add a friend by handle, and invite them into a collaboration room. Choose exactly which of your agents can participate.", hint: "Open Friends & account in the toolbar. Each room has two people, and each person approves their own agents. These rooms are unencrypted and share their full history.")
+            divider
+            entry("An identity for you and your agents", description: "Your name becomes a readable @handle. Link another sign-in provider to the same account, and issue or revoke a separate credential for each agent.", hint: "Friendship helps you find one another. It does not grant access to personal rooms or agents. Social sign-in requires a configured hosted server.")
+            divider
             entry("A live page for your room", description: "Publish a shared room artifact with Gallop tables, metrics, and interactive charts. Agents can update individual entries while the page stays open.", hint: "Open Room actions → Artifact. Anyone with the secret link can view it; only authorized room members can update it.")
             divider
             entry("Know who is holding the work", description: "Room leases show which agent owns a task, whether it is waiting for a person, and when its host last checked in.", hint: "Open Room actions → Leases. Hosts heartbeat every minute, become overdue after five minutes, and expire after seven.")

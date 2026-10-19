@@ -155,6 +155,14 @@ export default function Home() {
           Skills
         </a>
         <span aria-hidden="true">&middot;</span>
+        <a className="hover:text-text-primary" href="https://cowboy.inc/privacy">
+          Privacy Policy
+        </a>
+        <span aria-hidden="true">&middot;</span>
+        <a className="hover:text-text-primary" href="https://cowboy.inc/terms">
+          Terms of Service
+        </a>
+        <span aria-hidden="true">&middot;</span>
         <span>MIT / Apache-2.0</span>
       </footer>
     </main>

@@ -899,11 +899,17 @@ where
         // authorization uses the verified member principal and signed roster.
         let authenticated_key = if member_principal.is_some() {
             String::new()
-        } else if no_auth
-            || (allow_keyless && payload.key.is_empty())
-            || (!payload.key.is_empty()
-                && (payload.key == api_key
-                    || store.validate_api_key(&payload.key).unwrap_or(false)))
+        } else if (payload.key.starts_with(crate::store::social::PREFIX)
+            && !no_auth
+            && !api_key.is_empty()
+            && !broker.is_hosted()
+            && store.social_principal(&payload.key).is_some())
+            || (!payload.key.starts_with(crate::store::social::PREFIX)
+                && (no_auth
+                    || (allow_keyless && payload.key.is_empty())
+                    || (!payload.key.is_empty()
+                        && (payload.key == api_key
+                            || store.validate_api_key(&payload.key).unwrap_or(false)))))
         {
             payload.key.clone()
         } else {
@@ -952,9 +958,17 @@ where
             continue;
         }
 
+        if !store.social_identity_allowed(&agent_id, &authenticated_key) {
+            let err = Frame::error(
+                frame.id.as_deref(),
+                ErrorPayload::new(ErrorCode::Unauthorized, "Agent identity not authorized"),
+            );
+            write_half.write_all(err.to_line()?.as_bytes()).await?;
+            continue;
+        }
         let member_address = member_principal.map(|principal| principal.principal_address);
 
-        if !no_auth
+        if (!no_auth || authenticated_key.starts_with(crate::store::social::PREFIX))
             && !authenticated_key.is_empty()
             && stable_identity_requested
             && member_address.is_none()
@@ -1121,9 +1135,12 @@ where
             rate_limiter.add_agent(&authenticated_key);
         }
 
+        let registered_name = store
+            .social_display_name(&authenticated_key)
+            .unwrap_or_else(|| payload.name.clone());
         log::info!(
             "Agent registered: {} ({}) capabilities={:?}{}",
-            payload.name,
+            registered_name,
             agent_id,
             payload.capabilities,
             if reconnected_rooms.is_some() {
@@ -1138,13 +1155,13 @@ where
         let _ = store.record_session_start(
             &session_id,
             &agent_id,
-            &payload.name,
+            &registered_name,
             &payload.capabilities,
         );
 
         break (
             agent_id,
-            payload.name,
+            registered_name,
             payload.capabilities,
             session_id,
             authenticated_key,
@@ -1166,12 +1183,30 @@ where
     // The connection becomes live before registration is acknowledged. Events
     // produced in that window queue in `rx`, while this gate guarantees the OK
     // response and reconnect replay are written first.
+    let outbound_store = store.clone();
+    let outbound_key = agent_api_key.clone();
     let send_task = tokio::spawn(async move {
         let Ok((initial_frames, initial_ack)) = initial_rx.await else {
             return;
         };
         let mut initial_write_ok = true;
         for frame in initial_frames {
+            if outbound_key.starts_with(crate::store::social::PREFIX)
+                && (outbound_store.social_principal(&outbound_key).is_none()
+                    || (!(frame.frame_type == FrameType::RoomDestroyed
+                        || (frame.frame_type == FrameType::Ok
+                            && frame.reply_to.is_some()
+                            && frame
+                                .payload
+                                .get("destroyed")
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true)))
+                        && frame_room_id(&frame).is_some_and(|room| {
+                            outbound_store.social_room_access(room, &outbound_key) != Some(true)
+                        })))
+            {
+                continue;
+            }
             let Ok(line) = frame.to_line() else {
                 continue;
             };
@@ -1185,6 +1220,22 @@ where
             return;
         }
         while let Some(frame) = rx.recv().await {
+            if outbound_key.starts_with(crate::store::social::PREFIX)
+                && (outbound_store.social_principal(&outbound_key).is_none()
+                    || (!(frame.frame_type == FrameType::RoomDestroyed
+                        || (frame.frame_type == FrameType::Ok
+                            && frame.reply_to.is_some()
+                            && frame
+                                .payload
+                                .get("destroyed")
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true)))
+                        && frame_room_id(&frame).is_some_and(|room| {
+                            outbound_store.social_room_access(room, &outbound_key) != Some(true)
+                        })))
+            {
+                continue;
+            }
             match frame.to_line() {
                 Ok(line) => {
                     if write_half.write_all(line.as_bytes()).await.is_err() {

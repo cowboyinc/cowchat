@@ -1,0 +1,891 @@
+use super::Store;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+pub const PREFIX: &str = "csoc_";
+pub const OWNER_PREFIX: &str = "\0cowchat:social:";
+
+#[derive(Clone, Debug)]
+pub struct Principal {
+    pub account_id: String,
+    pub agent_id: Option<String>,
+}
+
+pub fn hash(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+pub fn principal(conn: &Connection, key: &str) -> rusqlite::Result<Option<Principal>> {
+    if !key.starts_with(PREFIX) {
+        return Ok(None);
+    }
+    conn.query_row("SELECT account_id,agent_id FROM social_credentials WHERE digest=?1 AND revoked=0 AND expires>=unixepoch()", [hash(key)], |r| Ok(Principal {account_id:r.get(0)?,agent_id:r.get(1)?})).optional()
+}
+pub fn room_access(conn: &Connection, room: &str, key: &str) -> rusqlite::Result<Option<bool>> {
+    let managed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM social_rooms WHERE room_id=?1)",
+        [room],
+        |r| r.get(0),
+    )?;
+    if !managed {
+        return Ok(key.starts_with(PREFIX).then_some(false));
+    }
+    let Some(p) = principal(conn, key)? else {
+        return Ok(Some(false));
+    };
+    let allowed = if let Some(agent) = p.agent_id {
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_members m ON m.room_id=a.room_id AND m.account_id=?3 JOIN social_agents g ON g.id=a.agent_id WHERE a.room_id=?1 AND a.agent_id=?2 AND g.revoked=0 AND g.owner_id=?3)", params![room,agent,p.account_id],|r|r.get(0))?
+    } else {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM social_members WHERE room_id=?1 AND account_id=?2)",
+            params![room, p.account_id],
+            |r| r.get(0),
+        )?
+    };
+    Ok(Some(allowed))
+}
+pub fn room_owner(conn: &Connection, room: &str, key: &str) -> rusqlite::Result<Option<bool>> {
+    let owner: Option<String> = conn
+        .query_row(
+            "SELECT owner_id FROM social_rooms WHERE room_id=?1",
+            [room],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match owner {
+        Some(owner) => {
+            Ok(Some(principal(conn, key)?.is_some_and(|p| {
+                p.agent_id.is_none() && p.account_id == owner
+            })))
+        }
+        None => Ok(key.starts_with(PREFIX).then_some(false)),
+    }
+}
+fn account(conn: &Connection, id: &str) -> anyhow::Result<Value> {
+    Ok(conn.query_row("SELECT id,handle,display_name FROM social_accounts WHERE id=?1",[id],|r|Ok(json!({"id":r.get::<_,String>(0)?,"handle":r.get::<_,String>(1)?,"display_name":r.get::<_,String>(2)?})))?)
+}
+fn default_handle(conn: &Connection, name: &str) -> rusqlite::Result<String> {
+    let mut base = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    base.truncate(40);
+    base = base.trim_end_matches('-').to_owned();
+    if base.len() < 3 {
+        base = "Cowboy".to_owned();
+    }
+    let mut handle = base.clone();
+    let mut suffix = 0u64;
+    while conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM social_accounts WHERE handle=?1 COLLATE NOCASE)",
+        [&handle],
+        |row| row.get::<_, bool>(0),
+    )? {
+        let ending = format!("-{suffix}");
+        let stem = base[..base.len().min(40 - ending.len())].trim_end_matches('-');
+        handle = format!("{stem}{ending}");
+        suffix += 1;
+    }
+    Ok(handle)
+}
+fn agents(
+    conn: &Connection,
+    owner: Option<&str>,
+    room: Option<&str>,
+    discoverable: bool,
+) -> anyhow::Result<Vec<Value>> {
+    let mut s=conn.prepare("SELECT id,owner_id,name,discoverable FROM social_agents WHERE revoked=0 AND (?1 IS NULL OR owner_id=?1) AND (?2 IS NULL OR id IN (SELECT agent_id FROM social_admissions WHERE room_id=?2)) AND (?3=0 OR discoverable=1) ORDER BY name,id")?;
+    let rows=s.query_map(params![owner,room,discoverable],|r|Ok(json!({"id":r.get::<_,String>(0)?,"owner_id":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"discoverable":r.get::<_,bool>(3)?})))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+fn members(conn: &Connection, room: &str) -> anyhow::Result<Vec<Value>> {
+    let mut s =
+        conn.prepare("SELECT account_id FROM social_members WHERE room_id=?1 ORDER BY account_id")?;
+    let ids = s
+        .query_map([room], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.iter().map(|id| account(conn, id)).collect()
+}
+fn string<'a>(body: &'a Value, key: &str) -> anyhow::Result<&'a str> {
+    body.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("invalid {key}"))
+}
+fn ids(body: &Value, key: &str) -> anyhow::Result<Vec<String>> {
+    match body.get(key) {
+        None => Ok(vec![]),
+        Some(Value::Array(a)) if a.len() <= 100 => a
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow::anyhow!("invalid {key}"))
+            })
+            .collect(),
+        _ => anyhow::bail!("invalid {key}"),
+    }
+}
+fn approve(conn: &Connection, room: &str, owner: &str, ids: &[String]) -> anyhow::Result<()> {
+    for id in ids {
+        let owned: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM social_agents WHERE id=?1 AND owner_id=?2 AND revoked=0)",
+            params![id, owner],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(owned, "not found");
+    }
+    for id in ids {
+        conn.execute(
+            "INSERT OR IGNORE INTO social_admissions(room_id,agent_id) VALUES(?1,?2)",
+            params![room, id],
+        )?;
+    }
+    Ok(())
+}
+fn invitation(conn: &Connection, id: &str) -> anyhow::Result<Value> {
+    let (room,from,to,proposed,status,created):(String,String,String,String,String,String)=conn.query_row("SELECT room_id,from_id,to_id,proposed,status,created_at FROM social_room_invitations WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
+    let name: String = conn.query_row("SELECT name FROM rooms WHERE room_id=?1", [&room], |r| {
+        r.get(0)
+    })?;
+    let wanted: Vec<String> = serde_json::from_str(&proposed)?;
+    let proposed = agents(conn, Some(&to), None, true)?
+        .into_iter()
+        .filter(|a| wanted.iter().any(|id| a["id"] == *id))
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"id":id,"room_id":room,"room_name":name,"from":account(conn,&from)?,"to":account(conn,&to)?,"proposed_agents":proposed,"members":members(conn,&room)?,"agents":agents(conn,None,Some(&room),false)?,"history_policy":"full","encrypted":false,"slack_connected":false,"status":status,"created_at":created}),
+    )
+}
+fn invite(
+    conn: &Connection,
+    room: &str,
+    from: &str,
+    to: &str,
+    proposed: Vec<String>,
+) -> anyhow::Result<Value> {
+    let friends: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM social_friends WHERE a=?1 AND b=?2)",
+        params![from, to],
+        |r| r.get(0),
+    )?;
+    anyhow::ensure!(friends, "not found");
+    let visible = agents(conn, Some(to), None, true)?;
+    anyhow::ensure!(
+        proposed
+            .iter()
+            .all(|id| visible.iter().any(|a| a["id"] == *id)),
+        "not found"
+    );
+    let id = uuid::Uuid::new_v4().to_string();
+    conn.execute("INSERT INTO social_room_invitations(id,room_id,from_id,to_id,proposed) VALUES(?1,?2,?3,?4,?5)",params![id,room,from,to,serde_json::to_string(&proposed)?])?;
+    invitation(conn, &id)
+}
+impl Store {
+    pub(super) fn initialize_social(&self) -> rusqlite::Result<()> {
+        self.conn.lock().unwrap().execute_batch("CREATE TABLE IF NOT EXISTS social_accounts(id TEXT PRIMARY KEY,handle TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS social_accounts_handle_nocase ON social_accounts(handle COLLATE NOCASE);
+CREATE TABLE IF NOT EXISTS social_identities(provider TEXT NOT NULL,subject TEXT NOT NULL,account_id TEXT NOT NULL,label TEXT NOT NULL,PRIMARY KEY(provider,subject));
+CREATE TABLE IF NOT EXISTS social_credentials(digest TEXT PRIMARY KEY,account_id TEXT NOT NULL,agent_id TEXT,revoked INTEGER NOT NULL DEFAULT 0,expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS social_oauth(request_hash TEXT PRIMARY KEY,state_hash TEXT NOT NULL UNIQUE,provider TEXT NOT NULL,challenge TEXT NOT NULL,link_account TEXT,link_digest TEXT,callback_port INTEGER NOT NULL,source_hash TEXT NOT NULL,completion_hash TEXT,provider_subject TEXT,provider_label TEXT,expires INTEGER NOT NULL,claimed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS social_agents(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,name TEXT NOT NULL,discoverable INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS social_friend_requests(id TEXT PRIMARY KEY,from_id TEXT NOT NULL,to_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE UNIQUE INDEX IF NOT EXISTS social_pending_friend ON social_friend_requests(from_id,to_id) WHERE status='pending';
+CREATE TABLE IF NOT EXISTS social_friends(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b));
+CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS social_members(room_id TEXT NOT NULL,account_id TEXT NOT NULL,PRIMARY KEY(room_id,account_id));
+CREATE TABLE IF NOT EXISTS social_admissions(room_id TEXT NOT NULL,agent_id TEXT NOT NULL,PRIMARY KEY(room_id,agent_id));
+CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,from_id TEXT NOT NULL,to_id TEXT NOT NULL,proposed TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);")
+    }
+    pub fn social_principal(&self, key: &str) -> Option<Principal> {
+        principal(&self.conn.lock().unwrap(), key).ok().flatten()
+    }
+    pub fn social_room_access(&self, room: &str, key: &str) -> Option<bool> {
+        room_access(&self.conn.lock().unwrap(), room, key).unwrap_or(Some(false))
+    }
+    pub fn social_room_owner(&self, room: &str, key: &str) -> Option<bool> {
+        room_owner(&self.conn.lock().unwrap(), room, key).unwrap_or(Some(false))
+    }
+    pub fn social_identity_allowed(&self, id: &str, key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        let assigned: Option<String> = conn
+            .query_row("SELECT id FROM social_agents WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()
+            .ok()
+            .flatten();
+        match principal(&conn,key).ok().flatten() {Some(p)=>match p.agent_id {Some(agent)=>agent==id,None=>assigned.is_none()},None=>!key.starts_with(PREFIX)&&assigned.is_none()&&!conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_identities WHERE agent_id=?1 AND owner_key LIKE 'social-account:%')",[id],|r|r.get::<_,bool>(0)).unwrap_or(true)}
+    }
+    pub fn social_display_name(&self, key: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        let p = principal(&conn, key).ok().flatten()?;
+        let (handle, display): (String, String) = conn
+            .query_row(
+                "SELECT handle,display_name FROM social_accounts WHERE id=?1",
+                [&p.account_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()?;
+        let name = if let Some(agent) = p.agent_id {
+            conn.query_row(
+                "SELECT name FROM social_agents WHERE id=?1 AND revoked=0",
+                [agent],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()?
+        } else {
+            display
+        };
+        Some(format!("{name} · @{handle}"))
+    }
+    pub fn social_action(
+        &self,
+        key: &str,
+        method: &str,
+        path: &str,
+        body: &Value,
+    ) -> anyhow::Result<Value> {
+        let mut conn = self.conn.lock().unwrap();
+        let p = principal(&conn, key)?.ok_or_else(|| anyhow::anyhow!("unauthorized"))?;
+        anyhow::ensure!(p.agent_id.is_none(), "human approval required");
+        let tx = conn.transaction()?;
+        let a = &p.account_id;
+        let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
+        let response = match (method, parts.as_slice()) {
+            ("GET", ["me"]) | ("PATCH", ["me"]) => {
+                if method == "PATCH" {
+                    let handle = string(body, "handle")?.trim();
+                    let name = string(body, "display_name")?.trim();
+                    anyhow::ensure!(
+                        (3..=40).contains(&handle.len())
+                            && handle
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                            && !name.is_empty()
+                            && name.chars().count() <= 100
+                            && name.chars().all(display_char),
+                        "invalid profile"
+                    );
+                    tx.execute(
+                        "UPDATE social_accounts SET handle=?1,display_name=?2 WHERE id=?3",
+                        params![handle, name, a],
+                    )?;
+                }
+                let mut s=tx.prepare("SELECT provider,subject,label FROM social_identities WHERE account_id=?1 ORDER BY provider")?;
+                let identities=s.query_map([a],|r|Ok(json!({"provider":r.get::<_,String>(0)?,"subject":r.get::<_,String>(1)?,"label":r.get::<_,String>(2)?})))?.collect::<Result<Vec<_>,_>>()?;
+                json!({"account":account(&tx,a)?,"identities":identities})
+            }
+            ("POST", ["logout"]) => {
+                tx.execute(
+                    "UPDATE social_credentials SET revoked=1 WHERE digest=?1",
+                    [hash(key)],
+                )?;
+                json!({"ok":true})
+            }
+            ("GET", ["friends"]) => {
+                let mut s = tx.prepare("SELECT b FROM social_friends WHERE a=?1 ORDER BY b")?;
+                let friends=s.query_map([a],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?.iter().map(|id|Ok(json!({"account":account(&tx,id)?,"agents":agents(&tx,Some(id),None,true)?}))).collect::<anyhow::Result<Vec<_>>>()?;
+                json!({"friends":friends})
+            }
+            ("DELETE", ["friends", other]) => {
+                tx.execute(
+                    "DELETE FROM social_friends WHERE (a=?1 AND b=?2) OR (a=?2 AND b=?1)",
+                    params![a, other],
+                )?;
+                tx.execute("UPDATE social_friend_requests SET status='declined' WHERE status='pending' AND ((from_id=?1 AND to_id=?2) OR (from_id=?2 AND to_id=?1))",params![a,other])?;
+                tx.execute("UPDATE social_room_invitations SET status='declined' WHERE status='pending' AND ((from_id=?1 AND to_id=?2) OR (from_id=?2 AND to_id=?1))",params![a,other])?;
+                json!({"ok":true})
+            }
+            ("POST", ["friend-requests"]) => {
+                bounded(&tx,"SELECT COUNT(*) FROM social_friend_requests WHERE from_id=?1 AND status='pending'",a,100)?;
+                let to: String = tx
+                    .query_row(
+                        "SELECT id FROM social_accounts WHERE handle=?1 COLLATE NOCASE",
+                        [string(body, "handle")?.trim()],
+                        |r| r.get(0),
+                    )
+                    .map_err(|_| anyhow::anyhow!("not found"))?;
+                anyhow::ensure!(&to != a, "invalid recipient");
+                let already: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM social_friends WHERE a=?1 AND b=?2)",
+                    params![a, to],
+                    |r| r.get(0),
+                )?;
+                anyhow::ensure!(!already, "already friends");
+                let id = uuid::Uuid::new_v4().to_string();
+                tx.execute("INSERT OR IGNORE INTO social_friend_requests(id,from_id,to_id) VALUES(?1,?2,?3)",params![id,a,to])?;
+                let id:String=tx.query_row("SELECT id FROM social_friend_requests WHERE from_id=?1 AND to_id=?2 AND status='pending'",params![a,to],|r|r.get(0))?;
+                json!({"request":friend_request(&tx,&id)?})
+            }
+            ("GET", ["friend-requests"]) => {
+                let mut s=tx.prepare("SELECT id FROM social_friend_requests WHERE from_id=?1 OR to_id=?1 ORDER BY created_at DESC,id")?;
+                let values = s
+                    .query_map([a], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+                    .iter()
+                    .map(|id| friend_request(&tx, id))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                json!({"requests":values})
+            }
+            ("POST", ["friend-requests", id, action])
+                if *action == "accept" || *action == "decline" =>
+            {
+                let from:String=tx.query_row("SELECT from_id FROM social_friend_requests WHERE id=?1 AND to_id=?2 AND status='pending'",params![id,a],|r|r.get(0)).map_err(|_|anyhow::anyhow!("not found"))?;
+                let status = if *action == "accept" {
+                    "accepted"
+                } else {
+                    "declined"
+                };
+                tx.execute(
+                    "UPDATE social_friend_requests SET status=?1 WHERE id=?2",
+                    params![status, id],
+                )?;
+                if *action == "accept" {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO social_friends(a,b) VALUES(?1,?2),(?2,?1)",
+                        params![a, from],
+                    )?;
+                }
+                json!({"ok":true})
+            }
+            ("GET", ["agents"]) => json!({"agents":agents(&tx,Some(a),None,false)?}),
+            ("POST", ["agents"]) => {
+                bounded(
+                    &tx,
+                    "SELECT COUNT(*) FROM social_agents WHERE owner_id=?1 AND revoked=0",
+                    a,
+                    100,
+                )?;
+                let name = string(body, "name")?.trim();
+                anyhow::ensure!(
+                    !name.is_empty()
+                        && name.chars().count() <= 100
+                        && name.chars().all(display_char),
+                    "invalid name"
+                );
+                let id = uuid::Uuid::new_v4().to_string();
+                let discoverable = match body.get("discoverable") {
+                    None => true,
+                    Some(value) => value
+                        .as_bool()
+                        .ok_or_else(|| anyhow::anyhow!("invalid discoverable"))?,
+                };
+                tx.execute(
+                    "INSERT INTO social_agents(id,owner_id,name,discoverable) VALUES(?1,?2,?3,?4)",
+                    params![id, a, name, discoverable],
+                )?;
+                let key = credential(&tx, a, Some(&id))?;
+                json!({"agent":{"id":id,"owner_id":a,"name":name,"discoverable":discoverable},"api_key":key})
+            }
+            ("DELETE", ["agents", id]) => {
+                let n = tx.execute(
+                    "UPDATE social_agents SET revoked=1 WHERE id=?1 AND owner_id=?2",
+                    params![id, a],
+                )?;
+                anyhow::ensure!(n > 0, "not found");
+                tx.execute(
+                    "UPDATE social_credentials SET revoked=1 WHERE agent_id=?1",
+                    [id],
+                )?;
+                tx.execute("DELETE FROM social_admissions WHERE agent_id=?1", [id])?;
+                json!({"ok":true})
+            }
+            ("POST", ["rooms"]) => {
+                bounded(
+                    &tx,
+                    "SELECT COUNT(*) FROM social_rooms WHERE owner_id=?1",
+                    a,
+                    100,
+                )?;
+                let name = super::normalize_room_name(string(body, "name")?)
+                    .map_err(anyhow::Error::msg)?;
+                let room = uuid::Uuid::new_v4().to_string();
+                tx.execute("INSERT INTO rooms(room_id,name,visibility,owner_key,encrypted,created_by) VALUES(?1,?2,'private',?3,0,?4)",params![room,name,format!("{OWNER_PREFIX}{a}"),a])?;
+                tx.execute(
+                    "INSERT INTO social_rooms(room_id,owner_id) VALUES(?1,?2)",
+                    params![room, a],
+                )?;
+                tx.execute(
+                    "INSERT INTO social_members(room_id,account_id) VALUES(?1,?2)",
+                    params![room, a],
+                )?;
+                approve(&tx, &room, a, &ids(body, "agent_ids")?)?;
+                let invitation = invite(
+                    &tx,
+                    &room,
+                    a,
+                    string(body, "friend_id")?,
+                    ids(body, "proposed_agent_ids")?,
+                )?;
+                json!({"room_id":room,"invitation":invitation})
+            }
+            ("GET", ["rooms"]) => {
+                let mut s=tx.prepare("SELECT r.room_id,r.name,s.owner_id FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id JOIN social_members m ON m.room_id=r.room_id WHERE m.account_id=?1 ORDER BY r.name")?;
+                let rooms=s.query_map([a],|r|Ok(json!({"room_id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"owner_id":r.get::<_,String>(2)?})))?.collect::<Result<Vec<_>,_>>()?;
+                json!({"rooms":rooms})
+            }
+            ("GET", ["room-invitations"]) => {
+                let mut s=tx.prepare("SELECT id FROM social_room_invitations WHERE status='pending' AND (to_id=?1 OR from_id=?1) ORDER BY created_at DESC,id")?;
+                let values = s
+                    .query_map([a], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+                    .iter()
+                    .map(|id| invitation(&tx, id))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                json!({"invitations":values})
+            }
+            ("POST", ["room-invitations", id, action])
+                if *action == "accept" || *action == "decline" =>
+            {
+                let room:String=tx.query_row("SELECT room_id FROM social_room_invitations WHERE id=?1 AND to_id=?2 AND status='pending'",params![id,a],|r|r.get(0)).map_err(|_|anyhow::anyhow!("not found"))?;
+                if *action == "accept" {
+                    let still_friends:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM social_friends f JOIN social_room_invitations i ON i.from_id=f.a AND i.to_id=f.b WHERE i.id=?1)",[id],|r|r.get(0))?;
+                    anyhow::ensure!(still_friends, "not found");
+                    tx.execute(
+                        "INSERT OR IGNORE INTO social_members(room_id,account_id) VALUES(?1,?2)",
+                        params![room, a],
+                    )?;
+                    approve(&tx, &room, a, &ids(body, "agent_ids")?)?;
+                }
+                tx.execute(
+                    "UPDATE social_room_invitations SET status=?1 WHERE id=?2",
+                    params![
+                        if *action == "accept" {
+                            "accepted"
+                        } else {
+                            "declined"
+                        },
+                        id
+                    ],
+                )?;
+                if *action == "accept" {
+                    json!({"room_id":room})
+                } else {
+                    json!({"ok":true})
+                }
+            }
+            ("GET", ["rooms", room, "participants"]) => {
+                anyhow::ensure!(room_access(&tx, room, key)? == Some(true), "not found");
+                let (name,owner):(String,String)=tx.query_row("SELECT r.name,s.owner_id FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id WHERE r.room_id=?1",[room],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                json!({"room_id":room,"name":name,"owner_id":owner,"history_policy":"full","encrypted":false,"slack_connected":false,"members":members(&tx,room)?,"agents":agents(&tx,None,Some(room),false)?})
+            }
+            ("POST", ["rooms", _, "invitations"]) => {
+                anyhow::bail!("Additional people are not supported in v1")
+            }
+            ("POST", ["rooms", room, "agents"]) => {
+                anyhow::ensure!(room_access(&tx, room, key)? == Some(true), "not found");
+                approve(&tx, room, a, &ids(body, "agent_ids")?)?;
+                json!({"ok":true})
+            }
+            ("DELETE", ["rooms", room, "agents", agent]) => {
+                anyhow::ensure!(room_access(&tx, room, key)? == Some(true), "not found");
+                let owned: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM social_agents WHERE id=?1 AND owner_id=?2)",
+                    params![agent, a],
+                    |r| r.get(0),
+                )?;
+                anyhow::ensure!(
+                    owned || room_owner(&tx, room, key)? == Some(true),
+                    "not found"
+                );
+                tx.execute(
+                    "DELETE FROM social_admissions WHERE room_id=?1 AND agent_id=?2",
+                    params![room, agent],
+                )?;
+                json!({"ok":true})
+            }
+            ("DELETE", ["rooms", room, "membership"]) => {
+                anyhow::ensure!(room_access(&tx, room, key)? == Some(true), "not found");
+                anyhow::ensure!(
+                    room_owner(&tx, room, key)? != Some(true),
+                    "owner cannot leave"
+                );
+                tx.execute(
+                    "DELETE FROM social_members WHERE room_id=?1 AND account_id=?2",
+                    params![room, a],
+                )?;
+                tx.execute("DELETE FROM social_admissions WHERE room_id=?1 AND agent_id IN (SELECT id FROM social_agents WHERE owner_id=?2)",params![room,a])?;
+                tx.execute("UPDATE social_room_invitations SET status='declined' WHERE room_id=?1 AND status='pending' AND (from_id=?2 OR to_id=?2)",params![room,a])?;
+                json!({"ok":true})
+            }
+            _ => anyhow::bail!("not found"),
+        };
+        tx.commit()?;
+        Ok(response)
+    }
+}
+fn friend_request(conn: &Connection, id: &str) -> anyhow::Result<Value> {
+    let (from, to, status, created): (String, String, String, String) = conn.query_row(
+        "SELECT from_id,to_id,status,created_at FROM social_friend_requests WHERE id=?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    Ok(
+        json!({"id":id,"from":account(conn,&from)?,"to":account(conn,&to)?,"status":status,"created_at":created}),
+    )
+}
+pub fn credential(conn: &Connection, account: &str, agent: Option<&str>) -> anyhow::Result<String> {
+    let token = format!(
+        "{PREFIX}{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    conn.execute("INSERT INTO social_credentials(digest,account_id,agent_id,expires) VALUES(?1,?2,?3,unixepoch()+?4)",params![hash(&token),account,agent,if agent.is_some(){365*86400}else{30*86400}])?;
+    Ok(token)
+}
+impl Store {
+    pub fn social_oauth_start(
+        &self,
+        provider: &str,
+        challenge: &str,
+        key: Option<&str>,
+        callback_port: u16,
+        source: &str,
+    ) -> anyhow::Result<(String, String)> {
+        use base64::Engine;
+        anyhow::ensure!(callback_port >= 1024, "invalid callback_port");
+        anyhow::ensure!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(challenge)?
+                .len()
+                == 32,
+            "invalid code_challenge"
+        );
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM social_oauth WHERE expires<unixepoch()", [])?;
+        let count: i64 = tx.query_row("SELECT COUNT(*) FROM social_oauth", [], |r| r.get(0))?;
+        anyhow::ensure!(count < 1000, "too many sign-in attempts");
+        let per_source: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM social_oauth WHERE source_hash=?1",
+            [hash(source)],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(per_source < 20, "too many sign-in attempts");
+        let link = if let Some(key) = key {
+            let p = principal(&tx, key)?.ok_or_else(|| anyhow::anyhow!("unauthorized"))?;
+            anyhow::ensure!(p.agent_id.is_none(), "human approval required");
+            Some(p.account_id)
+        } else {
+            None
+        };
+        let request = uuid::Uuid::new_v4().to_string();
+        let state = format!(
+            "{request}.{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        tx.execute("INSERT INTO social_oauth(request_hash,state_hash,provider,challenge,link_account,link_digest,callback_port,source_hash,expires) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,unixepoch()+600)",params![hash(&request),hash(&state),provider,challenge,link,key.map(hash),callback_port,hash(source)])?;
+        tx.commit()?;
+        Ok((request, state))
+    }
+    pub fn social_oauth_claim(&self, provider: &str, state: &str) -> anyhow::Result<()> {
+        let n=self.conn.lock().unwrap().execute("UPDATE social_oauth SET claimed=1 WHERE state_hash=?1 AND provider=?2 AND expires>=unixepoch() AND claimed=0 AND (link_digest IS NULL OR EXISTS(SELECT 1 FROM social_credentials c WHERE c.digest=social_oauth.link_digest AND c.revoked=0 AND c.expires>=unixepoch()))",params![hash(state),provider])?;
+        anyhow::ensure!(n == 1, "invalid or expired sign-in");
+        Ok(())
+    }
+    pub fn social_oauth_complete(
+        &self,
+        provider: &str,
+        state: &str,
+        subject: &str,
+        label: &str,
+    ) -> anyhow::Result<(u16, String)> {
+        anyhow::ensure!(
+            !subject.is_empty() && subject.len() <= 256,
+            "invalid provider identity"
+        );
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let port:u16=tx.query_row("SELECT callback_port FROM social_oauth WHERE state_hash=?1 AND provider=?2 AND expires>=unixepoch() AND claimed=1 AND completion_hash IS NULL AND (link_digest IS NULL OR EXISTS(SELECT 1 FROM social_credentials c WHERE c.digest=social_oauth.link_digest AND c.revoked=0 AND c.expires>=unixepoch()))",params![hash(state),provider],|r|r.get(0))?;
+        let completion = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        tx.execute("UPDATE social_oauth SET provider_subject=?1,provider_label=?2,completion_hash=?3 WHERE state_hash=?4",params![subject,label.chars().filter(|c|!c.is_control()).take(100).collect::<String>(),hash(&completion),hash(state)])?;
+        tx.commit()?;
+        Ok((port, completion))
+    }
+    pub fn social_oauth_exchange(
+        &self,
+        request: &str,
+        verifier: &str,
+        completion: &str,
+    ) -> anyhow::Result<Value> {
+        use base64::Engine;
+        anyhow::ensure!(
+            (43..=128).contains(&verifier.len())
+                && verifier
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)),
+            "invalid code_verifier"
+        );
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()));
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let (provider,subject,label,link):(String,String,String,Option<String>)=tx.query_row("SELECT provider,provider_subject,provider_label,link_account FROM social_oauth WHERE request_hash=?1 AND challenge=?2 AND completion_hash=?3 AND expires>=unixepoch() AND provider_subject IS NOT NULL AND (link_digest IS NULL OR EXISTS(SELECT 1 FROM social_credentials c WHERE c.digest=social_oauth.link_digest AND c.revoked=0 AND c.expires>=unixepoch()))",params![hash(request),challenge,hash(completion)],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|_|anyhow::anyhow!("invalid or expired sign-in"))?;
+        let provider = provider.as_str();
+        let subject = subject.as_str();
+        let label = label.as_str();
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT account_id FROM social_identities WHERE provider=?1 AND subject=?2",
+                params![provider, subject],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let id = match (link, existing) {
+            (Some(link), Some(existing)) => {
+                anyhow::ensure!(link == existing, "identity already linked");
+                link
+            }
+            (Some(link), None) => link,
+            (None, Some(existing)) => existing,
+            (None, None) => {
+                let id = uuid::Uuid::new_v4().to_string();
+                let handle = default_handle(&tx, label)?;
+                tx.execute(
+                    "INSERT INTO social_accounts(id,handle,display_name) VALUES(?1,?2,?3)",
+                    params![
+                        id,
+                        handle,
+                        label
+                            .chars()
+                            .filter(|c| display_char(*c))
+                            .take(100)
+                            .collect::<String>()
+                    ],
+                )?;
+                id
+            }
+        };
+        tx.execute("INSERT OR IGNORE INTO social_identities(provider,subject,account_id,label) VALUES(?1,?2,?3,?4)",params![provider,subject,id,label.chars().filter(|c|!c.is_control()).take(100).collect::<String>()])?;
+        let key = credential(&tx, &id, None)?;
+        tx.execute(
+            "DELETE FROM social_oauth WHERE request_hash=?1",
+            [hash(request)],
+        )?;
+        let response = json!({"status":"complete","device_key":key,"account":account(&tx,&id)?});
+        tx.commit()?;
+        Ok(response)
+    }
+}
+
+fn bounded(conn: &Connection, sql: &str, account: &str, limit: i64) -> anyhow::Result<()> {
+    let count: i64 = conn.query_row(sql, [account], |r| r.get(0))?;
+    anyhow::ensure!(count < limit, "account limit reached");
+    Ok(())
+}
+fn display_char(c: char) -> bool {
+    !c.is_control()
+        && !matches!(c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}'|'\u{200e}'|'\u{200f}'|'\u{061c}')
+}
+
+#[cfg(test)]
+impl Store {
+    pub(crate) fn social_assert_hash_only(&self) {
+        let conn = self.conn.lock().unwrap();
+        for (table, column) in [
+            ("social_credentials", "digest"),
+            ("social_oauth", "request_hash"),
+            ("agent_identities", "owner_key"),
+            ("rooms", "owner_key"),
+            ("room_grants", "api_key"),
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} WHERE CAST({column} AS TEXT) LIKE '%csoc_%'"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "raw credential in {table}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    fn login(store: &Store, subject: &str) -> (String, Value) {
+        login_named(store, subject, subject)
+    }
+    fn login_named(store: &Store, subject: &str, name: &str) -> (String, Value) {
+        let verifier = "v".repeat(64);
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()));
+        let (request, state) = store
+            .social_oauth_start("github", &challenge, None, 49233, "test-source")
+            .unwrap();
+        store.social_oauth_claim("github", &state).unwrap();
+        let (_, code) = store
+            .social_oauth_complete("github", &state, subject, name)
+            .unwrap();
+        let response = store
+            .social_oauth_exchange(&request, &verifier, &code)
+            .unwrap();
+        (
+            response["device_key"].as_str().unwrap().to_owned(),
+            response["account"].clone(),
+        )
+    }
+    #[test]
+    fn name_based_handles_preserve_case_and_disambiguate_from_zero() {
+        let store = Store::open_in_memory().unwrap();
+        let (key, first) = login_named(&store, "first", "Chad DePue");
+        assert_eq!(first["handle"], "Chad-DePue");
+        let (_, second) = login_named(&store, "second", "Chad DePue");
+        assert_eq!(second["handle"], "Chad-DePue-0");
+        let (_, third) = login_named(&store, "third", "Chad DePue");
+        assert_eq!(third["handle"], "Chad-DePue-1");
+        let (_, fourth) = login_named(&store, "fourth", "CHAD DEPUE");
+        assert_eq!(fourth["handle"], "CHAD-DEPUE-2");
+        let (_, returning) = login_named(&store, "first", "Changed Name");
+        assert_eq!(returning["id"], first["id"]);
+        assert_eq!(returning["handle"], "Chad-DePue");
+        let updated = store
+            .social_action(
+                &key,
+                "PATCH",
+                "me",
+                &json!({"handle":"Chad-DePue","display_name":"Chad DePue"}),
+            )
+            .unwrap();
+        assert_eq!(updated["account"]["handle"], "Chad-DePue");
+        let (other_key, _) = login_named(&store, "other", "Other Person");
+        let request = store
+            .social_action(
+                &other_key,
+                "POST",
+                "friend-requests",
+                &json!({"handle":"cHaD-dEpUe"}),
+            )
+            .unwrap();
+        assert_eq!(request["request"]["to"]["id"], first["id"]);
+        assert!(store
+            .social_action(
+                &other_key,
+                "PATCH",
+                "me",
+                &json!({"handle":"chad-depue","display_name":"Other Person"})
+            )
+            .is_err());
+    }
+    #[test]
+    fn default_handles_are_bounded_and_do_not_replace_chosen_handles() {
+        let store = Store::open_in_memory().unwrap();
+        let (_, first) = login_named(&store, "long-first", &"A".repeat(100));
+        let (_, second) = login_named(&store, "long-second", &"A".repeat(100));
+        assert_eq!(first["handle"], "A".repeat(40));
+        assert_eq!(second["handle"], format!("{}-0", "A".repeat(38)));
+        let (_, fallback) = login_named(&store, "fallback", "🐄");
+        assert_eq!(fallback["handle"], "Cowboy");
+        let (key, _) = login_named(&store, "custom", "Some Name");
+        store
+            .social_action(
+                &key,
+                "PATCH",
+                "me",
+                &json!({"handle":"My-Chosen-Handle","display_name":"Some Name"}),
+            )
+            .unwrap();
+        let (_, returning) = login_named(&store, "custom", "Different Name");
+        assert_eq!(returning["handle"], "My-Chosen-Handle");
+    }
+    #[test]
+    fn restart_preserves_admissions_expiry_and_atomic_friend_revocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("social.sqlite");
+        let (ak, bk, agent_key, agent_id, rid);
+        {
+            let store = Store::open(&db).unwrap();
+            let (a, alice) = login(&store, "alice");
+            let (b, bob) = login(&store, "bob");
+            ak = a;
+            bk = b;
+            let request = store
+                .social_action(
+                    &ak,
+                    "POST",
+                    "friend-requests",
+                    &json!({"handle":bob["handle"]}),
+                )
+                .unwrap();
+            let request = request["request"]["id"].as_str().unwrap();
+            store
+                .social_action(
+                    &bk,
+                    "POST",
+                    &format!("friend-requests/{request}/accept"),
+                    &json!({}),
+                )
+                .unwrap();
+            let agent = store
+                .social_action(&ak, "POST", "agents", &json!({"name":"stable agent"}))
+                .unwrap();
+            agent_key = agent["api_key"].as_str().unwrap().to_owned();
+            agent_id = agent["agent"]["id"].as_str().unwrap().to_owned();
+            let room = store
+                .social_action(
+                    &ak,
+                    "POST",
+                    "rooms",
+                    &json!({"name":"durable","friend_id":bob["id"],"agent_ids":[agent_id]}),
+                )
+                .unwrap();
+            rid = room["room_id"].as_str().unwrap().to_owned();
+            assert!(store.claim_agent_identity(&agent_id, &agent_key).unwrap());
+            let invitation = room["invitation"]["id"].as_str().unwrap();
+            store
+                .social_action(
+                    &ak,
+                    "DELETE",
+                    &format!("friends/{}", bob["id"].as_str().unwrap()),
+                    &json!({}),
+                )
+                .unwrap();
+            assert!(store
+                .social_action(
+                    &bk,
+                    "POST",
+                    &format!("room-invitations/{invitation}/accept"),
+                    &json!({"agent_ids":[]})
+                )
+                .is_err());
+            assert_ne!(alice["id"], bob["id"]);
+            store.social_assert_hash_only();
+        }
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.social_room_access(&rid, &agent_key), Some(true));
+        assert_eq!(store.social_room_access(&rid, &bk), Some(false));
+        assert!(store.claim_agent_identity(&agent_id, &agent_key).unwrap());
+        assert!(!store.social_identity_allowed(&agent_id, &ak));
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE social_credentials SET expires=unixepoch()-1 WHERE digest=?1",
+                [hash(&agent_key)],
+            )
+            .unwrap();
+        assert!(store.social_principal(&agent_key).is_none());
+        assert_eq!(store.social_room_access(&rid, &agent_key), Some(false));
+        let verifier = "q".repeat(64);
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()));
+        let (_, state) = store
+            .social_oauth_start("github", &challenge, Some(&ak), 49233, "test-source")
+            .unwrap();
+        store
+            .social_action(&ak, "POST", "logout", &json!({}))
+            .unwrap();
+        assert!(store.social_oauth_claim("github", &state).is_err());
+    }
+}

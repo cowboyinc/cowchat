@@ -54,8 +54,34 @@ final class WorkspaceStore: ObservableObject {
     }
 
     private let preferences: ConnectionProfilePreferences
+    private let socialCredentials: any CowchatCredentialStore
     private let defaults: UserDefaults
     private let requestAPIKey: (URL) async throws -> String
+
+    lazy var social: SocialStore = {
+        let endpoint = URL(string: configuredGlobalValues().url) ?? URL(string: ConnectionProfile.defaultGlobalURLString)!
+        let social = SocialStore(endpoint: endpoint, credentials: socialCredentials)
+        social.onSessionChanged = { [weak self] session in self?.useSocialSession(session) }
+        social.onRoomsChanged = { [weak self] in
+            guard let self, self.social.savedSession != nil else { return }
+            Task { try? await self.global?.refreshRooms() }
+        }
+        return social
+    }()
+
+    private func useSocialSession(_ session: SocialSession?) {
+        global?.shutdownForRemoval()
+        global = nil
+        if activeServer == .global { activeServer = .local }
+        if let session, let profile = try? ConnectionProfile.socialSession(session) {
+            let store = ChatStore(connection: CowchatConnection(profile: profile), defaults: defaults, connectionProfile: profile)
+            global = store
+            store.start()
+        } else if preferences.isGlobalEnabled() {
+            global = Self.makeGlobalStore(preferences: preferences, defaults: defaults)
+            global?.start()
+        }
+    }
 
     var activeStore: ChatStore {
         switch activeServer {
@@ -71,10 +97,12 @@ final class WorkspaceStore: ObservableObject {
         preferences: ConnectionProfilePreferences,
         defaults: UserDefaults = .standard,
         global: ChatStore? = nil,
+        socialCredentials: any CowchatCredentialStore = KeychainCowchatCredentialStore(),
         requestAPIKey: @escaping (URL) async throws -> String = WorkspaceStore.requestAPIKeyOverHTTP
     ) {
         self.local = local
         self.preferences = preferences
+        self.socialCredentials = socialCredentials
         self.defaults = defaults
         self.global = global
         self.requestAPIKey = requestAPIKey
@@ -120,7 +148,7 @@ final class WorkspaceStore: ObservableObject {
 
     func start() {
         local.start()
-        global?.start()
+        if let session = social.savedSession { useSocialSession(session) } else { global?.start() }
     }
 
     func shutdownForAppTermination() async {
@@ -245,6 +273,10 @@ final class WorkspaceStore: ObservableObject {
 
     @discardableResult
     func saveGlobalConfiguration(url: String, apiKey: String) -> Bool {
+        guard social.savedSession == nil else {
+            globalSetupError = "Sign out of your Cowchat account before switching to an API-key connection. Your previous API-key connection is saved."
+            return false
+        }
         globalSetupError = nil
         do {
             let candidate = try ConnectionProfile.cowchatCloud(urlString: url, apiKey: apiKey)
@@ -253,10 +285,12 @@ final class WorkspaceStore: ObservableObject {
                     globalSetupError = global.errorMessage
                     return false
                 }
+                social.configureEndpoint(candidate.endpointURL!)
                 return true
             }
             let saved = try preferences.save(candidate)
             attachGlobalStore(profile: saved, configurationError: nil)
+            social.configureEndpoint(saved.endpointURL!)
             return true
         } catch {
             globalSetupError = error.localizedDescription
@@ -267,6 +301,7 @@ final class WorkspaceStore: ObservableObject {
     func disableGlobalRooms() {
         globalSetupError = nil
         preferences.setGlobalEnabled(false)
+        if social.savedSession != nil { Task { await social.signOut() } }
         if activeServer == .global { activeServer = .local }
         global?.shutdownForRemoval()
         global = nil
