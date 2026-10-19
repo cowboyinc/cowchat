@@ -45,7 +45,7 @@ struct FriendsView: View {
                     SocialPersonAvatar(name: social.account?.displayName ?? "Account")
                     VStack(alignment: .leading, spacing: 2) {
                         Text(social.account?.displayName ?? "Account").gallopText(.bodyMStrong)
-                        Text("@" + (social.account?.handle ?? "") + " · " + (social.endpoint.host ?? "Cowchat Global"))
+                        Text("@\(social.account?.handle ?? "") · \(social.endpoint.host ?? "Cowchat Global")")
                             .gallopText(.caption, color: SemanticColor.textSecondary)
                             .lineLimit(1).truncationMode(.middle)
                             .help(social.endpoint.host ?? "Cowchat Global")
