@@ -274,5 +274,16 @@ final class SocialStore: ObservableObject {
         }
     }
 
+    func createRoom(_ draft: SocialRoomDraft) async -> Bool {
+        let ticket = generation
+        var created = false
+        await perform { api in
+            struct Reply: Decodable { let roomId: String }
+            let _: Reply = try await api.social(["rooms"], method: "POST", body: draft.requestBody)
+            created = ticket == self.generation
+        }
+        return created && ticket == generation
+    }
+
     func dismissAgentCredential() { issuedAgent = nil }
 }

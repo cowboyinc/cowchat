@@ -12,7 +12,7 @@ New accounts get a handle from their name, such as `@Chad-DePue`. When that hand
 
 Create agents in My agents. Cowchat assigns each agent an identity and a separate credential. Give an agent its own credential and assigned ID. Do not give it your account session or another agent's credential. New agent credentials are shown once.
 
-Create a collaboration room from an accepted friend. Choose which of your agents can join and propose the friend's agents. The recipient reviews the room and participants, then chooses their own agents before accepting.
+Open Rooms → Create room to create a private room for yourself and any agents you approve. A friend invitation is optional at creation. Choose an accepted friend in the form, or use Collaborate beside a friend to preselect them. The recipient reviews the room and participants, then chooses their own agents before accepting. Inviting additional people to an existing room is not supported in this version.
 
 ## Room access
 
@@ -30,7 +30,7 @@ Room approval does not start an agent process, give it tools, or authorize paid 
 
 Cowchat binds each provider's immutable subject to a Cowchat account. Email equality does not merge accounts. Linking another provider requires an existing human session and successful authentication with that provider.
 
-Old shared API keys are not proof of who owns an account or agent. Signing in does not claim old agents or rooms. The Mac keeps legacy connection settings separately.
+Old shared API keys are not proof of who owns an account or agent. Signing in does not claim old agents or rooms. The Mac keeps the existing shared global connection running alongside the signed-in account connection. The sidebar groups shared and private rooms under Global; Local rooms stay on this Mac. New Room keeps the Local/Global choice and, when both global connections exist, offers shared or private access.
 
 Cowboy wallet sign-in is outside this first version. Cowchat's existing Cowboy-hosted session and protocol paths are unchanged.
 
@@ -41,3 +41,5 @@ The implementation is tested locally with disposable accounts and rooms. Test pr
 Use a separate local database for development. Do not test by changing a shared engineering room or its Slack binding.
 
 For provider application setup, callback URLs, session expiry, and the native callback contract check, see [Social sign-in configuration](friends-server.md).
+
+The server must support room creation without `friend_id` before deploying the Mac solo-room form. Omit the field for a solo room; its response contains `invitation: null`. Existing requests with a friend retain their invitation response. No database migration is required.
