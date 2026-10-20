@@ -89,6 +89,53 @@ fn default_handle(conn: &Connection, name: &str) -> rusqlite::Result<String> {
     }
     Ok(handle)
 }
+fn starter_stem(name: &str) -> String {
+    let mut stem = String::new();
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            stem.push(c);
+        } else if !stem.is_empty() && !stem.ends_with('_') {
+            stem.push('_');
+        }
+        if stem.chars().count() >= 70 {
+            break;
+        }
+    }
+    let stem = stem.trim_end_matches('_');
+    if stem.is_empty() {
+        "Cowboy".to_owned()
+    } else {
+        stem.to_owned()
+    }
+}
+fn setup(conn: &Connection, account: &str) -> anyhow::Result<Value> {
+    let row: Option<(String, String, String, String)> = conn
+        .query_row(
+            "SELECT agent_id,agent_name,room_id,room_name FROM social_setup WHERE account_id=?1",
+            [account],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((agent_id, agent_name, room_id, room_name)) = row else {
+        return Ok(json!({"setup":null}));
+    };
+    let agent = agents(conn, Some(account), None, false)?
+        .into_iter()
+        .find(|g| g["id"] == agent_id);
+    let room: Option<Value> = conn.query_row(
+        "SELECT r.room_id,r.name,s.owner_id FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id JOIN social_members m ON m.room_id=r.room_id AND m.account_id=?2 WHERE r.room_id=?1",
+        params![room_id,account], |r| Ok(json!({"room_id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"owner_id":r.get::<_,String>(2)?}))).optional()?;
+    let admitted = agent.is_some()
+        && room.is_some()
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM social_admissions WHERE room_id=?1 AND agent_id=?2)",
+            params![room_id, agent_id],
+            |r| r.get::<_, bool>(0),
+        )?;
+    Ok(
+        json!({"setup":{"agent_id":agent_id,"agent_name":agent_name,"room_id":room_id,"room_name":room_name,"agent":agent,"room":room,"bot_admitted":admitted}}),
+    )
+}
 fn agents(
     conn: &Connection,
     owner: Option<&str>,
@@ -188,6 +235,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS social_accounts_handle_nocase ON social_accoun
 CREATE TABLE IF NOT EXISTS social_identities(provider TEXT NOT NULL,subject TEXT NOT NULL,account_id TEXT NOT NULL,label TEXT NOT NULL,PRIMARY KEY(provider,subject));
 CREATE TABLE IF NOT EXISTS social_credentials(digest TEXT PRIMARY KEY,account_id TEXT NOT NULL,agent_id TEXT,revoked INTEGER NOT NULL DEFAULT 0,expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS social_oauth(request_hash TEXT PRIMARY KEY,state_hash TEXT NOT NULL UNIQUE,provider TEXT NOT NULL,challenge TEXT NOT NULL,link_account TEXT,link_digest TEXT,callback_port INTEGER NOT NULL,source_hash TEXT NOT NULL,completion_hash TEXT,provider_subject TEXT,provider_label TEXT,expires INTEGER NOT NULL,claimed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS social_setup(account_id TEXT PRIMARY KEY,agent_id TEXT NOT NULL,agent_name TEXT NOT NULL,room_id TEXT NOT NULL,room_name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS social_agents(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,name TEXT NOT NULL,discoverable INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS social_friend_requests(id TEXT PRIMARY KEY,from_id TEXT NOT NULL,to_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE UNIQUE INDEX IF NOT EXISTS social_pending_friend ON social_friend_requests(from_id,to_id) WHERE status='pending';
@@ -253,6 +301,65 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
         let a = &p.account_id;
         let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
         let response = match (method, parts.as_slice()) {
+            ("GET", ["setup"]) => setup(&tx, a)?,
+            ("POST", ["setup"]) => {
+                let established = setup(&tx, a)?;
+                if established["setup"].is_null() {
+                    let name = string(body, "display_name")?.trim();
+                    anyhow::ensure!(
+                        !name.is_empty()
+                            && name.chars().count() <= 100
+                            && name.chars().all(display_char),
+                        "invalid display_name"
+                    );
+                    bounded(
+                        &tx,
+                        "SELECT COUNT(*) FROM social_agents WHERE owner_id=?1 AND revoked=0",
+                        a,
+                        100,
+                    )?;
+                    bounded(
+                        &tx,
+                        "SELECT COUNT(*) FROM social_rooms WHERE owner_id=?1",
+                        a,
+                        100,
+                    )?;
+                    let stem = starter_stem(name);
+                    let agent_name = format!("{stem}_bot");
+                    let base = format!("{stem}_Home");
+                    let mut room_name = base.clone();
+                    let mut suffix = 0u64;
+                    while tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM rooms WHERE name=?1)",
+                        [&room_name],
+                        |r| r.get::<_, bool>(0),
+                    )? {
+                        room_name = format!("{base}_{suffix}");
+                        suffix += 1;
+                    }
+                    let agent = uuid::Uuid::new_v4().to_string();
+                    let room = uuid::Uuid::new_v4().to_string();
+                    tx.execute(
+                        "UPDATE social_accounts SET display_name=?1 WHERE id=?2",
+                        params![name, a],
+                    )?;
+                    tx.execute("INSERT INTO social_agents(id,owner_id,name,discoverable) VALUES(?1,?2,?3,0)",params![agent,a,agent_name])?;
+                    tx.execute("INSERT INTO rooms(room_id,name,visibility,owner_key,encrypted,created_by) VALUES(?1,?2,'private',?3,0,?4)",params![room,room_name,format!("{OWNER_PREFIX}{a}"),a])?;
+                    tx.execute(
+                        "INSERT INTO social_rooms(room_id,owner_id) VALUES(?1,?2)",
+                        params![room, a],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO social_members(room_id,account_id) VALUES(?1,?2)",
+                        params![room, a],
+                    )?;
+                    approve(&tx, &room, a, std::slice::from_ref(&agent))?;
+                    tx.execute("INSERT INTO social_setup(account_id,agent_id,agent_name,room_id,room_name) VALUES(?1,?2,?3,?4,?5)",params![a,agent,agent_name,room,room_name])?;
+                    setup(&tx, a)?
+                } else {
+                    established
+                }
+            }
             ("GET", ["me"]) | ("PATCH", ["me"]) => {
                 if method == "PATCH" {
                     let handle = string(body, "handle")?.trim();
@@ -357,7 +464,15 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                     a,
                     100,
                 )?;
-                let name = string(body, "name")?.trim();
+                let default_name = format!(
+                    "{}_bot",
+                    starter_stem(account(&tx, a)?["display_name"].as_str().unwrap())
+                );
+                let name = if body.get("name").is_none() {
+                    default_name.as_str()
+                } else {
+                    string(body, "name")?.trim()
+                };
                 anyhow::ensure!(
                     !name.is_empty()
                         && name.chars().count() <= 100
@@ -377,6 +492,19 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 )?;
                 let key = credential(&tx, a, Some(&id))?;
                 json!({"agent":{"id":id,"owner_id":a,"name":name,"discoverable":discoverable},"api_key":key})
+            }
+            ("POST", ["agents", id, "credentials"]) => {
+                let agent = agents(&tx, Some(a), None, false)?
+                    .into_iter()
+                    .find(|g| g["id"] == *id)
+                    .ok_or_else(|| anyhow::anyhow!("not found"))?;
+                let active: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM social_credentials WHERE agent_id=?1 AND revoked=0 AND expires>=unixepoch()",
+                    [id], |row| row.get(0),
+                )?;
+                anyhow::ensure!(active < 20, "credential limit reached");
+                let key = credential(&tx, a, Some(id))?;
+                json!({"agent":agent,"api_key":key})
             }
             ("DELETE", ["agents", id]) => {
                 let n = tx.execute(
@@ -740,6 +868,376 @@ mod tests {
             response["device_key"].as_str().unwrap().to_owned(),
             response["account"].clone(),
         )
+    }
+    #[test]
+    fn setup_is_durable_private_credentialless_and_never_repairs_revocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("setup.db");
+        let store = Store::open(&path).unwrap();
+        let (key, owner) = login(&store, "owner");
+        let (other, _) = login(&store, "other");
+        assert_eq!(
+            store
+                .social_action(&key, "GET", "setup", &json!({}))
+                .unwrap(),
+            json!({"setup":null})
+        );
+        let initial = store
+            .social_action(
+                &key,
+                "POST",
+                "setup",
+                &json!({"display_name":" Chad DePue "}),
+            )
+            .unwrap();
+        let data = &initial["setup"];
+        assert_eq!(data["agent_name"], "Chad_DePue_bot");
+        assert_eq!(data["room_name"], "Chad_DePue_Home");
+        assert_eq!(data["agent"]["discoverable"], false);
+        assert_eq!(data["bot_admitted"], true);
+        assert!(!initial.to_string().contains("api_key"));
+        let room = data["room_id"].as_str().unwrap();
+        let agent = data["agent_id"].as_str().unwrap();
+        assert_eq!(store.social_room_access(room, &other), Some(false));
+        assert_eq!(
+            store
+                .social_action(&other, "GET", "rooms", &json!({}))
+                .unwrap()["rooms"],
+            json!([])
+        );
+        assert_eq!(
+            store.social_action(&key, "GET", "me", &json!({})).unwrap()["account"]["display_name"],
+            "Chad DePue"
+        );
+        assert_eq!(
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM social_credentials WHERE agent_id=?1",
+                    [agent],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .social_action(&key, "POST", "setup", &json!({"display_name":null}))
+                .unwrap(),
+            initial
+        );
+        let endpoint = format!("agents/{agent}/credentials");
+        assert!(store
+            .social_action(&other, "POST", &endpoint, &json!({}))
+            .is_err());
+        let credential1 = store
+            .social_action(&key, "POST", &endpoint, &json!({}))
+            .unwrap();
+        let credential2 = store
+            .social_action(&key, "POST", &endpoint, &json!({}))
+            .unwrap();
+        let k1 = credential1["api_key"].as_str().unwrap();
+        assert!(store.social_principal(k1).is_some());
+        assert!(store
+            .social_principal(credential2["api_key"].as_str().unwrap())
+            .is_some());
+        assert!(store.social_action(k1, "GET", "setup", &json!({})).is_err());
+        assert!(store
+            .social_action(k1, "POST", &endpoint, &json!({}))
+            .is_err());
+        store
+            .social_action(
+                &key,
+                "DELETE",
+                &format!("rooms/{room}/agents/{agent}"),
+                &json!({}),
+            )
+            .unwrap();
+        let no_admission = store
+            .social_action(&key, "POST", "setup", &json!({}))
+            .unwrap();
+        assert_eq!(no_admission["setup"]["bot_admitted"], false);
+        store
+            .social_action(&key, "DELETE", &format!("agents/{agent}"), &json!({}))
+            .unwrap();
+        assert!(store
+            .social_action(&key, "POST", &endpoint, &json!({}))
+            .is_err());
+        assert!(store.social_principal(k1).is_none());
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM social_members WHERE room_id=?1 AND account_id=?2",
+                params![room, owner["id"].as_str().unwrap()],
+            )
+            .unwrap();
+        let unavailable = store
+            .social_action(&key, "POST", "setup", &json!({}))
+            .unwrap();
+        assert!(unavailable["setup"]["agent"].is_null());
+        assert!(unavailable["setup"]["room"].is_null());
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM rooms WHERE room_id=?1", [room])
+            .unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .social_action(&key, "POST", "setup", &json!({}))
+                .unwrap(),
+            unavailable
+        );
+    }
+    #[test]
+    fn connect_limits_active_credentials_without_rotating_or_reviving_agents() {
+        let store = Store::open_in_memory().unwrap();
+        let (key, _) = login(&store, "owner");
+        let initial = store
+            .social_action(&key, "POST", "setup", &json!({"display_name":"Owner"}))
+            .unwrap();
+        let id = initial["setup"]["agent_id"].as_str().unwrap();
+        let endpoint = format!("agents/{id}/credentials");
+        let mut keys = Vec::new();
+        for _ in 0..20 {
+            let issued = store
+                .social_action(&key, "POST", &endpoint, &json!({}))
+                .unwrap();
+            keys.push(issued["api_key"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(
+            store
+                .social_action(&key, "POST", &endpoint, &json!({}))
+                .unwrap_err()
+                .to_string(),
+            "credential limit reached"
+        );
+        assert!(keys.iter().all(|key| store.social_principal(key).is_some()));
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE social_credentials SET expires=unixepoch()-1 WHERE digest=?1",
+                [hash(&keys[0])],
+            )
+            .unwrap();
+        let replacement = store
+            .social_action(&key, "POST", &endpoint, &json!({}))
+            .unwrap();
+        assert!(store
+            .social_principal(replacement["api_key"].as_str().unwrap())
+            .is_some());
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE social_credentials SET revoked=1 WHERE digest=?1",
+                [hash(&keys[1])],
+            )
+            .unwrap();
+        let replacement2 = store
+            .social_action(&key, "POST", &endpoint, &json!({}))
+            .unwrap();
+        assert!(store
+            .social_principal(replacement2["api_key"].as_str().unwrap())
+            .is_some());
+        assert!(keys[2..]
+            .iter()
+            .all(|key| store.social_principal(key).is_some()));
+        store
+            .social_action(&key, "DELETE", &format!("agents/{id}"), &json!({}))
+            .unwrap();
+        assert_eq!(
+            store
+                .social_action(&key, "POST", &endpoint, &json!({}))
+                .unwrap_err()
+                .to_string(),
+            "not found"
+        );
+        assert!(keys.iter().all(|key| store.social_principal(key).is_none()));
+        assert!(store
+            .social_action(&key, "POST", "setup", &json!({}))
+            .unwrap()["setup"]["agent"]
+            .is_null());
+    }
+    #[test]
+    fn concurrent_setup_and_failed_commit_do_not_duplicate_or_leave_partial_resources() {
+        let store = std::sync::Arc::new(Store::open_in_memory().unwrap());
+        let (key, _) = login(&store, "concurrent");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads = (0..8)
+            .map(|_| {
+                let store = store.clone();
+                let key = key.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .social_action(
+                            &key,
+                            "POST",
+                            "setup",
+                            &json!({"display_name":"Concurrent User"}),
+                        )
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(results.iter().all(|result| result == &results[0]));
+        assert_eq!(
+            store
+                .social_action(&key, "GET", "agents", &json!({}))
+                .unwrap()["agents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .social_action(&key, "GET", "rooms", &json!({}))
+                .unwrap()["rooms"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let (failed, failed_account) = login(&store, "failed");
+        store.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_setup BEFORE INSERT ON social_setup BEGIN SELECT RAISE(ABORT,'injected setup failure'); END;").unwrap();
+        assert!(store
+            .social_action(&failed, "POST", "setup", &json!({"display_name":"Changed"}))
+            .is_err());
+        assert_eq!(
+            store
+                .social_action(&failed, "GET", "setup", &json!({}))
+                .unwrap(),
+            json!({"setup":null})
+        );
+        assert_eq!(
+            store
+                .social_action(&failed, "GET", "agents", &json!({}))
+                .unwrap()["agents"],
+            json!([])
+        );
+        assert_eq!(
+            store
+                .social_action(&failed, "GET", "rooms", &json!({}))
+                .unwrap()["rooms"],
+            json!([])
+        );
+        assert_eq!(
+            store
+                .social_action(&failed, "GET", "me", &json!({}))
+                .unwrap()["account"],
+            failed_account
+        );
+        let conn = store.conn.lock().unwrap();
+        for table in [
+            "rooms",
+            "social_agents",
+            "social_rooms",
+            "social_members",
+            "social_admissions",
+            "social_setup",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                count,
+                if table == "rooms" { 2 } else { 1 },
+                "partial write in {table}"
+            );
+        }
+    }
+    #[test]
+    fn setup_collision_quota_rollback_and_default_names() {
+        let store = Store::open_in_memory().unwrap();
+        let (key, account) = login(&store, "one");
+        let (other, _) = login(&store, "two");
+        store
+            .social_action(&other, "POST", "rooms", &json!({"name":"Chad_DePue_Home"}))
+            .unwrap();
+        let created = store
+            .social_action(&key, "POST", "setup", &json!({"display_name":"Chad DePue"}))
+            .unwrap();
+        assert_eq!(created["setup"]["room_name"], "Chad_DePue_Home_0");
+        let default = store
+            .social_action(&key, "POST", "agents", &json!({}))
+            .unwrap();
+        assert_eq!(default["agent"]["name"], "Chad_DePue_bot");
+        assert_eq!(starter_stem(" /🦄 "), "Cowboy");
+        assert_eq!(starter_stem("Éléonore 王"), "Éléonore_王");
+        let other_id = store
+            .social_action(&other, "GET", "me", &json!({}))
+            .unwrap()["account"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for index in 0..100 {
+            store.conn.lock().unwrap().execute("INSERT INTO social_agents(id,owner_id,name,discoverable) VALUES(?1,?2,'full',0)",params![format!("full-{index}"),other_id]).unwrap();
+        }
+        assert!(store
+            .social_action(
+                &other,
+                "POST",
+                "setup",
+                &json!({"display_name":"Should roll back"})
+            )
+            .is_err());
+        assert_eq!(
+            store
+                .social_action(&other, "GET", "setup", &json!({}))
+                .unwrap(),
+            json!({"setup":null})
+        );
+        assert_eq!(
+            store
+                .social_action(&other, "GET", "me", &json!({}))
+                .unwrap()["account"]["display_name"],
+            "two"
+        );
+        let conn = store.conn.lock().unwrap();
+        conn.execute("DELETE FROM social_agents WHERE owner_id=?1", [&other_id])
+            .unwrap();
+        for index in 0..100 {
+            conn.execute(
+                "INSERT INTO social_rooms(room_id,owner_id) VALUES(?1,?2)",
+                params![format!("quota-{index}"), other_id],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        assert!(store
+            .social_action(
+                &other,
+                "POST",
+                "setup",
+                &json!({"display_name":"Should roll back"})
+            )
+            .is_err());
+        assert_eq!(
+            store
+                .social_action(&other, "GET", "agents", &json!({}))
+                .unwrap()["agents"],
+            json!([])
+        );
+        assert_eq!(
+            store.social_action(&key, "GET", "me", &json!({})).unwrap()["account"]["id"],
+            account["id"]
+        );
     }
     #[test]
     fn solo_room_admits_only_creator_and_approved_owned_agents() {

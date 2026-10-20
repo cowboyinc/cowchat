@@ -129,7 +129,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         .map(|c| c.providers.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     providers.sort();
-    Json(json!({"providers":providers,"cowboy_login":false}))
+    Json(json!({"providers":providers,"cowboy_login":false,"setup_version":1}))
 }
 async fn action(
     State(state): State<AppState>,
@@ -606,6 +606,143 @@ mod tests {
                 .unwrap();
         let response=frame(&mut socket,FrameType::Register,json!({"name":"test-agent","agent_id":id,"key":key,"capabilities":[],"reconnect":true,"protocol_version":cowchat_core::PROTOCOL_VERSION})).await;
         (socket, response)
+    }
+    #[tokio::test]
+    async fn starter_setup_and_credentials_are_private_over_http_and_websocket() {
+        let (state, base, tasks) = fixture().await;
+        let alice = login(&base, "github", "1", None).await;
+        let bob = login(&base, "google", "2", None).await;
+        let ak = alice["device_key"].as_str().unwrap();
+        let bk = bob["device_key"].as_str().unwrap();
+        let client = reqwest::Client::new();
+        let capabilities: Value = client
+            .get(format!("{base}/social/v1/capabilities"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(capabilities["setup_version"], 1);
+        assert_eq!(
+            call(&base, ak, "GET", "setup", json!({})).await,
+            json!({"setup":null})
+        );
+        let initial = call(
+            &base,
+            ak,
+            "POST",
+            "setup",
+            json!({"display_name":"Chad DePue"}),
+        )
+        .await;
+        assert!(!initial.to_string().contains("api_key"));
+        assert_eq!(call(&base, ak, "POST", "setup", json!({})).await, initial);
+        let room = initial["setup"]["room_id"].as_str().unwrap();
+        let agent = initial["setup"]["agent_id"].as_str().unwrap();
+        let endpoint = format!("agents/{agent}/credentials");
+        let issued = call(&base, ak, "POST", &endpoint, json!({})).await;
+        let bot_key = issued["api_key"].as_str().unwrap();
+        for (key, path, method) in [
+            (bk, endpoint.as_str(), "POST"),
+            (bot_key, endpoint.as_str(), "POST"),
+            (bot_key, "setup", "GET"),
+            (bot_key, "setup", "POST"),
+        ] {
+            let denied = client
+                .request(method.parse().unwrap(), format!("{base}/social/v1/{path}"))
+                .header("x-cowchat-key", key)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert!(!denied.status().is_success());
+        }
+        let (mut bot, ok) = connect(&base, bot_key, agent).await;
+        assert_eq!(ok.frame_type, FrameType::Ok);
+        assert_eq!(
+            frame(&mut bot, FrameType::JoinRoom, json!({"room_id":room}))
+                .await
+                .frame_type,
+            FrameType::Ok
+        );
+        let (mut stranger, ok) = connect(&base, bk, "stranger-device").await;
+        assert_eq!(ok.frame_type, FrameType::Ok);
+        assert_eq!(
+            frame(&mut stranger, FrameType::JoinRoom, json!({"room_id":room}))
+                .await
+                .frame_type,
+            FrameType::Error
+        );
+        for operation in [FrameType::RoomInfo, FrameType::GetHistory] {
+            assert_eq!(
+                frame(&mut stranger, operation, json!({"room_id":room}))
+                    .await
+                    .frame_type,
+                FrameType::Error
+            );
+        }
+        let visible = frame(&mut stranger, FrameType::ListRooms, json!({})).await;
+        assert!(!visible.payload.to_string().contains("Chad_DePue_Home"));
+        let unrelated = call(&base, bk, "POST", "agents", json!({"name":"unrelated"})).await;
+        let (mut stranger_bot, ok) = connect(
+            &base,
+            unrelated["api_key"].as_str().unwrap(),
+            unrelated["agent"]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(ok.frame_type, FrameType::Ok);
+        assert_eq!(
+            frame(
+                &mut stranger_bot,
+                FrameType::JoinRoom,
+                json!({"room_id":room})
+            )
+            .await
+            .frame_type,
+            FrameType::Error
+        );
+        assert_eq!(
+            frame(
+                &mut stranger_bot,
+                FrameType::RoomInfo,
+                json!({"room_id":room})
+            )
+            .await
+            .frame_type,
+            FrameType::Error
+        );
+        for path in [
+            format!("/api/rooms/{room}/history"),
+            format!("/api/rooms/{room}/artifact"),
+            format!("/social/v1/rooms/{room}/participants"),
+        ] {
+            let denied = client
+                .get(format!("{base}{path}"))
+                .header("x-cowchat-key", bk)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        }
+        let listed: Value = client
+            .get(format!("{base}/api/rooms"))
+            .header("x-cowchat-key", bk)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(!listed.to_string().contains("Chad_DePue_Home"));
+        assert_eq!(
+            call(&base, bk, "GET", "rooms", json!({})).await["rooms"],
+            json!([])
+        );
+        state.store.social_assert_hash_only();
+        for task in tasks {
+            task.abort();
+        }
     }
     #[tokio::test]
     async fn oauth_friends_room_consent_and_revocation_over_http_and_websocket() {
