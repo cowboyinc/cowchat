@@ -27,6 +27,150 @@ private final class SocialFixtureProtocol: URLProtocol {
 
 final class SocialTests: XCTestCase {
     @MainActor
+    func testSetupRecoveryProfilePersistenceAndExplicitCredential() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        let store = fixture.store()
+        await store.loadSetup()
+        XCTAssertTrue(store.setupLoaded)
+        XCTAssertNil(store.setup)
+        XCTAssertTrue(store.setupSupported)
+        fixture.loseNextSetupReply = true
+        let lost = await store.establishSetup(displayName: "Chad DePue")
+        XCTAssertFalse(lost)
+        XCTAssertNil(store.setup)
+        await store.loadSetup()
+        XCTAssertEqual(store.setup?.agentId, "starter-agent")
+        XCTAssertEqual(store.setup?.roomId, "starter-home")
+        XCTAssertEqual(store.account?.displayName, "Chad DePue")
+        XCTAssertEqual(store.savedSession?.account, store.account)
+        let restored = fixture.store()
+        XCTAssertEqual(restored.account?.displayName, "Chad DePue")
+        await restored.loadSetup()
+        XCTAssertEqual(restored.setup?.roomId, store.setup?.roomId)
+        XCTAssertEqual(fixture.setupPosts, 1)
+        XCTAssertEqual(fixture.credentialPosts, 0)
+        await store.connectAgent("starter-agent")
+        XCTAssertEqual(store.issuedAgent?.apiKey, "csoc_agent_fixture")
+        XCTAssertEqual(fixture.credentialPosts, 1)
+        try render(CowchatSetupWizard(social: restored, initialStep: .name, name: "Chad DePue", onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-name")
+        try render(CowchatSetupWizard(social: restored, initialStep: .friends, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-friends")
+        try render(CowchatSetupWizard(social: restored, initialStep: .ready, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-ready")
+    }
+
+    @MainActor
+    func testSetupLoadsDuringColdStartRefresh() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        let store = fixture.store()
+        let received = expectation(description: "Cold refresh capability request")
+        let release = DispatchSemaphore(value: 0)
+        fixture.beforeFirstCapabilitiesReply = { received.fulfill(); _ = release.wait(timeout: .now() + 3) }
+        let refresh = Task { await store.refresh() }
+        await fulfillment(of: [received], timeout: 2)
+        let load = Task { await store.loadSetup() }
+        try await Task.sleep(nanoseconds: 10_000_000)
+        release.signal()
+        await refresh.value
+        await load.value
+        XCTAssertTrue(store.setupSupported)
+        XCTAssertTrue(store.setupLoaded)
+        XCTAssertNil(store.setup)
+    }
+
+    @MainActor
+    func testSetupUnsupportedHasNoProvisioningFallbackAndCancellationDiscardsReply() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        fixture.supported = false
+        let store = fixture.store()
+        await store.loadSetup()
+        XCTAssertFalse(store.setupSupported)
+        let created = await store.establishSetup(displayName: "Chad")
+        XCTAssertFalse(created)
+        XCTAssertEqual(fixture.setupPosts, 0)
+        fixture.supported = true
+        await store.loadSetup()
+        let received = expectation(description: "Setup request started")
+        let release = DispatchSemaphore(value: 0)
+        fixture.beforeSetupReply = { received.fulfill(); _ = release.wait(timeout: .now() + 3) }
+        let pending = Task { await store.establishSetup(displayName: "Chad DePue") }
+        await fulfillment(of: [received], timeout: 2)
+        store.cancelSignIn()
+        release.signal()
+        let late = await pending.value
+        XCTAssertFalse(late)
+        XCTAssertNil(store.setup)
+        XCTAssertFalse(store.setupLoaded)
+        XCTAssertFalse(store.busy)
+        XCTAssertNil(store.issuedAgent)
+        fixture.beforeSetupReply = nil
+        await store.loadSetup()
+        let next = await store.establishSetup(displayName: "Chad DePue")
+        XCTAssertTrue(next)
+        fixture.supported = false
+        let unsupported = fixture.store()
+        await unsupported.loadSetup()
+        try render(CowchatSetupWizard(social: unsupported, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-unsupported")
+        let signedOut = SocialStore(endpoint: fixture.endpoint, credentials: SocialMemoryCredentials(), session: fixture.session)
+        await signedOut.refresh()
+        try render(CowchatSetupWizard(social: signedOut, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-welcome")
+    }
+
+    private final class SetupFixture {
+        let endpoint = URL(string: "wss://fixture.example/ws")!
+        let credentials = SocialMemoryCredentials()
+        let session: URLSession
+        var established = false
+        var supported = true
+        var setupPosts = 0
+        var credentialPosts = 0
+        var loseNextSetupReply = false
+        var beforeSetupReply: (() -> Void)?
+        var beforeFirstCapabilitiesReply: (() -> Void)?
+        var capabilityReads = 0
+        let agent = #"{"id":"starter-agent","owner_id":"me","name":"Chad_DePue_bot","discoverable":false}"#
+        var setupJSON: String {
+            established ? "{\"setup\":{\"agent_id\":\"starter-agent\",\"agent_name\":\"Chad_DePue_bot\",\"room_id\":\"starter-home\",\"room_name\":\"Chad_DePue_Home\",\"agent\":\(agent),\"room\":{\"room_id\":\"starter-home\",\"name\":\"Chad_DePue_Home\",\"owner_id\":\"me\"},\"bot_admitted\":true}}" : "{\"setup\":null}"
+        }
+        init() throws {
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = [SocialFixtureProtocol.self]
+            session = URLSession(configuration: config)
+            let account = SocialAccount(id: "me", handle: "chad", displayName: "Chad")
+            credentials.value = try JSONEncoder().encode(SocialSession(endpoint: endpoint, deviceKey: "csoc_setup_fixture", account: account)).base64EncodedString()
+            SocialFixtureProtocol.handler = { request in
+                switch request.url!.lastPathComponent {
+                case "capabilities":
+                    self.capabilityReads += 1
+                    if self.capabilityReads == 1 { self.beforeFirstCapabilitiesReply?() }
+                    return (200, self.supported ? #"{"providers":["google"],"setup_version":1}"# : #"{"providers":["google"]}"#)
+                case "setup":
+                    if request.httpMethod == "POST" {
+                        XCTAssertEqual(try SocialTests.body(request)["display_name"] as? String, "Chad DePue")
+                        self.setupPosts += 1
+                        self.established = true
+                        self.beforeSetupReply?()
+                        if self.loseNextSetupReply { self.loseNextSetupReply = false; throw URLError(.networkConnectionLost) }
+                    }
+                    return (200, self.setupJSON)
+                case "credentials":
+                    XCTAssertEqual(request.url!.path, "/social/v1/agents/starter-agent/credentials")
+                    self.credentialPosts += 1
+                    return (200, "{\"agent\":\(self.agent),\"api_key\":\"csoc_agent_fixture\"}")
+                case "me": return (200, "{\"account\":{\"id\":\"me\",\"handle\":\"chad\",\"display_name\":\"\(self.established ? "Chad DePue" : "Chad")\"},\"identities\":[]}")
+                default:
+                    let path = request.url!.lastPathComponent
+                    let key = path == "friend-requests" ? "requests" : path == "room-invitations" ? "invitations" : path
+                    return (200, "{\"\(key)\":[]}")
+                }
+            }
+        }
+        @MainActor func store() -> SocialStore { SocialStore(endpoint: endpoint, credentials: credentials, session: session) }
+        func close() { session.invalidateAndCancel(); SocialFixtureProtocol.handler = nil }
+    }
+
+    @MainActor
     func testRoomCreationSupportsSoloAndFriendInvitesAndPreservesFailures() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [SocialFixtureProtocol.self]
@@ -666,7 +810,7 @@ final class SocialTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for scheme in [ColorScheme.light, .dark] {
             let view = NSHostingView(rootView: content.preferredColorScheme(scheme))
-            view.frame = NSRect(x: 0, y: 0, width: 700, height: 650)
+            view.frame = NSRect(x: 0, y: 0, width: name.hasPrefix("mac-wizard") ? 1000 : 700, height: 650)
             let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
             window.contentView = view

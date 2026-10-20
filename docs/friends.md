@@ -14,6 +14,18 @@ Create agents in My agents. Cowchat assigns each agent an identity and a separat
 
 Open Rooms → Create room to create a private room for yourself and any agents you approve. A friend invitation is optional at creation. Choose an accepted friend in the form, or use Collaborate beside a friend to preselect them. The recipient reviews the room and participants, then chooses their own agents before accepting. Inviting additional people to an existing room is not supported in this version.
 
+## First-run setup
+
+A fresh Mac installation offers sign-in, name confirmation, a private Home room, and optional friend requests. For example, `Chad DePue` previews `Chad_DePue_bot` and `Chad_DePue_Home`. Names retain Unicode letters and numbers, replace separators with underscores, and reserve space for suffixes. Home receives `_0`, `_1`, and so on when its name is taken. These names are labels, not access credentials.
+
+Setup creates an undiscoverable bot identity, not a running agent. Open My agents → Connect to issue its credential. Each credential is shown once. Connect adds a credential without invalidating existing ones; a bot can have at most 20 active credentials. Revoking the bot revokes its credentials.
+
+The server records the starter bot and room IDs per account. Retrying after a lost response or signing in on another installation reuses them. Setup does not recreate deleted rooms or revoked bots, restore room membership, or reapprove a removed bot. Changing a profile name later does not rename existing resources.
+
+Friend requests and copied invitations share only the account handle and public Cowchat website. They do not grant Home membership or bot access. SMS invitations remain outside this flow. Choose Local rooms to finish without signing in; local rooms and shared Global connections remain independent. Existing installations keep their completion state and can replay setup from Settings.
+
+The server must advertise `setup_version: 1` before the wizard can provision resources. Deploy the server before the Mac app. Older servers show an update message with Retry and the Local escape; the Mac never falls back to separate bot and room creation calls. The server initializes an additive `social_setup` table. `GET /social/v1/setup` returns `{"setup": null}` or the recorded IDs, names, currently available bot and accessible room, and `bot_admitted`. Human-only `POST /social/v1/setup` accepts `display_name` and commits the profile, resources, owner membership, admission, and setup row in one transaction. Human-owned active bots accept `POST /social/v1/agents/:id/credentials`; agents and other accounts cannot issue their credentials.
+
 ## Room access
 
 New collaboration rooms are private and unencrypted. Accepted participants can read earlier room history. Review both facts before accepting. Existing encrypted and local rooms retain their existing behavior.

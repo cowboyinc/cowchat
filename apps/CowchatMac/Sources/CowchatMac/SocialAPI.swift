@@ -59,7 +59,35 @@ struct SocialMe: Decodable {
     let account: SocialAccount
     let identities: [Identity]
 }
-struct SocialCapabilities: Decodable { let providers: [String] }
+struct SocialCapabilities: Decodable { let providers: [String]; let setupVersion: Int? }
+struct SocialSetup: Decodable {
+    let agentId: String
+    let agentName: String
+    let roomId: String
+    let roomName: String
+    let agent: SocialAgent?
+    let room: SocialRoom?
+    let botAdmitted: Bool
+}
+struct SocialSetupReply: Decodable { let setup: SocialSetup? }
+
+enum SocialStarterNames {
+    static func stem(_ name: String) -> String {
+        var value = ""
+        for scalar in name.unicodeScalars {
+            if scalar.properties.isAlphabetic || scalar.properties.numericType != nil {
+                value.unicodeScalars.append(scalar)
+            } else if !value.isEmpty && !value.hasSuffix("_") {
+                value += "_"
+            }
+            if value.unicodeScalars.count >= 70 { break }
+        }
+        value = value.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        return value.isEmpty ? "Cowboy" : value
+    }
+    static func bot(_ name: String) -> String { stem(name) + "_bot" }
+    static func home(_ name: String) -> String { stem(name) + "_Home" }
+}
 struct SocialAcknowledgement: Decodable { let ok: Bool }
 struct SocialAgents: Decodable { let agents: [SocialAgent] }
 struct SocialFriends: Decodable { let friends: [SocialFriend] }

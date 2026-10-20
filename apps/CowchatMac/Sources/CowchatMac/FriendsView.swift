@@ -124,8 +124,9 @@ struct FriendsView: View {
         .background(SemanticColor.surface500)
         .tint(SemanticColor.buttonPrimaryDefault)
         .buttonStyle(CowchatPillButtonStyle())
-        .task { await social.refresh() }
+        .task { await social.refresh(); if agentName.isEmpty { agentName = SocialStarterNames.bot(social.account?.displayName ?? "Cowboy") } }
         .onDisappear { social.cancelSignIn(); social.dismissAgentCredential() }
+        .onChange(of: social.account?.id) { _ in agentName = SocialStarterNames.bot(social.account?.displayName ?? "Cowboy") }
         .onChange(of: social.phase) { phase in
             guard phase != .signedIn else { return }
             invitation = nil
@@ -253,15 +254,19 @@ struct FriendsView: View {
                 Label("Give your agent an identity", systemImage: "cpu").gallopText(.bodyMStrong)
                 HStack {
                     TextField("Agent name", text: $agentName).textFieldStyle(.roundedBorder)
-                    Button("Create agent") { Task { await social.createAgent(name: agentName); agentName = "" } }.disabled(agentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || social.busy)
+                    Button("Create agent") { Task { await social.createAgent(name: agentName); agentName = SocialStarterNames.bot(social.account?.displayName ?? "Cowboy") } }.disabled(agentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || social.busy)
                 }
-                Text("Friends can discover these agents and suggest them for rooms. Only you can approve their participation. Each agent gets its own credential.").gallopText(.caption, color: SemanticColor.textSecondary)
+                Text("Friends can discover agents marked discoverable and suggest them for rooms. Only you can approve their participation. Each agent gets its own credential.").gallopText(.caption, color: SemanticColor.textSecondary)
             }.gallopCard(cornerRadius: 14)
             ForEach(social.agents) { agent in
                 HStack {
                     SocialIconBadge(symbol: "cpu")
-                    Text(agent.name).gallopText(.bodyMStrong)
+                    VStack(alignment: .leading) {
+                        Text(agent.name).gallopText(.bodyMStrong)
+                        if !agent.discoverable { Text("Private identity").gallopText(.caption, color: SemanticColor.textSecondary) }
+                    }
                     Spacer()
+                    Button("Connect") { Task { await social.connectAgent(agent.id) } }.disabled(social.busy)
                     Button("Revoke agent", role: .destructive) { Task { await social.perform { api in let _: SocialAcknowledgement = try await api.social(["agents", agent.id], method: "DELETE") } } }
                 }.gallopCard(cornerRadius: 14)
             }

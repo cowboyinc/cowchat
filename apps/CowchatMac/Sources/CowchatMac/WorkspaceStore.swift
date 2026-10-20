@@ -99,6 +99,19 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    func openStarterHome(roomID: String, session: SocialSession) async -> Bool {
+        guard social.savedSession?.scopeId == session.scopeId,
+              social.savedSession?.deviceKey == session.deviceKey,
+              let store = accountGlobal else { return false }
+        do { try await store.refreshRooms() } catch { return false }
+        guard social.savedSession?.scopeId == session.scopeId,
+              social.savedSession?.deviceKey == session.deviceKey,
+              accountGlobal === store,
+              let room = store.rooms.first(where: { $0.id == roomID }) else { return false }
+        await select(room: room, on: .accountGlobal)
+        return social.savedSession?.scopeId == session.scopeId && accountGlobal === store
+    }
+
     var isGlobalEnabled: Bool { global != nil }
 
     init(

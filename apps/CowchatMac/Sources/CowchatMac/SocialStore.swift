@@ -27,6 +27,9 @@ final class SocialStore: ObservableObject {
     @Published private(set) var account: SocialAccount?
     @Published private(set) var providers: [String] = []
     @Published private(set) var serverNeedsUpdate = false
+    @Published private(set) var setupSupported = false
+    @Published private(set) var setup: SocialSetup?
+    @Published private(set) var setupLoaded = false
     @Published private(set) var identities: [SocialMe.Identity] = []
     @Published private(set) var oauthFlow: OAuthFlow?
     @Published private(set) var friends: [SocialFriend] = []
@@ -75,6 +78,7 @@ final class SocialStore: ObservableObject {
         self.endpoint = endpoint
         providers = []
         serverNeedsUpdate = false
+        setupSupported = false
         errorMessage = nil
     }
 
@@ -118,11 +122,13 @@ final class SocialStore: ObservableObject {
     private func refreshOnce() async {
         guard oauthFlow == nil, !Task.isCancelled else { return }
         let ticket = generation
+        let accountAtStart = account
         do {
             let boundAPI = try boundAPI()
             let capabilities: SocialCapabilities = try await boundAPI.social(["capabilities"])
             guard ticket == generation, !Task.isCancelled else { return }
             serverNeedsUpdate = false
+            setupSupported = capabilities.setupVersion == 1
             providers = capabilities.providers.filter { ["github", "google"].contains($0) }
             errorMessage = nil
             guard savedSession != nil else { return }
@@ -138,7 +144,7 @@ final class SocialStore: ObservableObject {
             guard ticket == generation, !Task.isCancelled else { return }
             let roomList: SocialRooms = try await boundAPI.social(["rooms"])
             guard ticket == generation, !Task.isCancelled else { return }
-            account = me.account
+            if account == accountAtStart { try saveAccount(me.account) }
             identities = me.identities
             friends = friendList.friends
             requests = requestList.requests.filter { $0.status == "pending" }
@@ -226,6 +232,9 @@ final class SocialStore: ObservableObject {
 
     func cancelSignIn() {
         generation = UUID()
+        busy = false
+        setup = nil
+        setupLoaded = false
         oauthCallback?.cancel()
         oauthCallback = nil
         loginTask?.cancel()
@@ -263,6 +272,78 @@ final class SocialStore: ObservableObject {
             await refresh()
             onRoomsChanged?()
         } catch { if ticket == generation { errorMessage = error.localizedDescription } }
+    }
+
+    private func saveAccount(_ account: SocialAccount) throws {
+        guard let old = savedSession, old.account != account else { return }
+        let saved = SocialSession(endpoint: old.endpoint, deviceKey: old.deviceKey, account: account, scopeId: old.scopeId)
+        try credentials.setCredential(try JSONEncoder().encode(saved).base64EncodedString(), for: Self.credentialAccount)
+        savedSession = saved
+        self.account = account
+    }
+
+    func loadSetup() async {
+        let ticket = generation
+        do {
+            let api = try boundAPI()
+            let capabilities: SocialCapabilities = try await api.social(["capabilities"])
+            guard ticket == generation, !Task.isCancelled else { return }
+            setupSupported = capabilities.setupVersion == 1
+            serverNeedsUpdate = false
+            providers = capabilities.providers.filter { ["github", "google"].contains($0) }
+            guard phase == .signedIn, setupSupported else { return }
+            let result: SocialSetupReply = try await api.social(["setup"])
+            guard ticket == generation, !Task.isCancelled else { return }
+            let me: SocialMe = try await api.social(["me"])
+            guard ticket == generation, !Task.isCancelled else { return }
+            try saveAccount(me.account)
+            setup = result.setup
+            setupLoaded = true
+            errorMessage = nil
+        } catch {
+            guard ticket == generation, !Task.isCancelled else { return }
+            if case SocialAPIError.friendsUnavailable = error {
+                serverNeedsUpdate = true
+                setupSupported = false
+            } else { errorMessage = error.localizedDescription }
+        }
+    }
+
+    func establishSetup(displayName: String) async -> Bool {
+        guard setupSupported else { return false }
+        let ticket = generation
+        var succeeded = false
+        await perform { api in
+            let reply: SocialSetupReply = try await api.social(["setup"], method: "POST", body: ["display_name": displayName])
+            guard ticket == self.generation else { return }
+            let me: SocialMe = try await api.social(["me"])
+            guard ticket == self.generation else { return }
+            try self.saveAccount(me.account)
+            self.setup = reply.setup
+            self.setupLoaded = true
+            succeeded = reply.setup != nil
+        }
+        return succeeded && ticket == generation
+    }
+
+    func requestFriend(handle: String) async -> Bool {
+        let ticket = generation
+        var succeeded = false
+        await perform { api in
+            struct Reply: Decodable { let request: SocialFriendRequest }
+            let _: Reply = try await api.social(["friend-requests"], method: "POST", body: ["handle": SocialAPI.normalizedHandle(handle)])
+            succeeded = ticket == self.generation
+        }
+        return succeeded && ticket == generation
+    }
+
+    func connectAgent(_ id: String) async {
+        let ticket = generation
+        await perform { api in
+            let created: SocialCreatedAgent = try await api.social(["agents", id, "credentials"], method: "POST")
+            guard ticket == self.generation else { return }
+            self.issuedAgent = created
+        }
     }
 
     func createAgent(name: String) async {
