@@ -27,6 +27,67 @@ private final class SocialFixtureProtocol: URLProtocol {
 
 final class SocialTests: XCTestCase {
     @MainActor
+    func testNativeNotificationSettingsRendering() throws {
+        let suite = "CowchatNotificationSettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let notifications = SocialNotifications(defaults: defaults)
+        try render(VStack(alignment: .leading, spacing: 24) {
+            Text("Notifications").gallopText(.h3)
+            SocialNotificationSettings(notifications: notifications)
+            Spacer()
+        }.padding(28).background(SemanticColor.surface600), name: "mac-notification-settings")
+    }
+
+    @MainActor
+    func testAppMonitoringPublishesAcceptedRequestsWithoutOpeningFriendsAndStops() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SocialFixtureProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel(); SocialFixtureProtocol.handler = nil }
+        let credentials = SocialMemoryCredentials()
+        let endpoint = URL(string: "wss://fixture.example/ws")!
+        let account = SocialAccount(id: "me", handle: "chad", displayName: "Chad")
+        credentials.value = try JSONEncoder().encode(SocialSession(endpoint: endpoint, deviceKey: "csoc_fixture", account: account)).base64EncodedString()
+        SocialFixtureProtocol.handler = { request in
+            let body: String
+            switch request.url!.lastPathComponent {
+            case "capabilities": body = #"{"providers":["google"]}"#
+            case "me": body = #"{"account":{"id":"me","handle":"chad","display_name":"Chad"},"identities":[]}"#
+            case "friends": body = #"{"friends":[]}"#
+            case "friend-requests": body = #"{"requests":[{"id":"accepted","from":{"id":"me","handle":"chad","display_name":"Chad"},"to":{"id":"peer","handle":"renzo","display_name":"Renzo"},"status":"accepted"}]}"#
+            case "agents": body = #"{"agents":[]}"#
+            case "room-invitations": body = #"{"invitations":[]}"#
+            case "rooms": body = #"{"rooms":[]}"#
+            default: throw CowchatConnectionError.invalidResponse
+            }
+            return (200, body)
+        }
+        let store = SocialStore(endpoint: endpoint, credentials: credentials, session: session)
+        let polled = expectation(description: "App lifetime polling emits complete snapshots")
+        var snapshots = 0
+        store.onSnapshot = { snapshot in
+            snapshots += 1
+            XCTAssertEqual(snapshot.requests.first?.status, "accepted")
+            XCTAssertEqual(snapshot.session.account.id, "me")
+            if snapshots == 2 { polled.fulfill() }
+        }
+        store.startMonitoring(interval: .milliseconds(10))
+        store.startMonitoring(interval: .milliseconds(10))
+        await fulfillment(of: [polled], timeout: 2)
+        store.stopMonitoring()
+        let stoppedAt = snapshots
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(snapshots, stoppedAt)
+        XCTAssertTrue(store.requests.isEmpty)
+        XCTAssertNil(store.errorMessage)
+        let resumed = expectation(description: "Polling can restart after cancellation")
+        store.onSnapshot = { _ in resumed.fulfill(); store.stopMonitoring() }
+        store.startMonitoring(interval: .milliseconds(10))
+        await fulfillment(of: [resumed], timeout: 2)
+    }
+
+    @MainActor
     func testOlderServerWebsiteFallbackShowsUpdateRequiredAndRecovers() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [SocialFixtureProtocol.self]

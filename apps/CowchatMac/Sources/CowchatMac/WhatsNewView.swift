@@ -70,11 +70,13 @@ struct WhatsNewContent: View {
         VStack(alignment: .leading, spacing: 30) {
             HStack(spacing: 10) {
                 Text("October 19, 2026").gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-                Text("0.9.10").gallopText(.caption, color: SemanticColor.textTertiary)
+                Text("0.9.11").gallopText(.caption, color: SemanticColor.textTertiary)
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(SemanticColor.surface400, in: Capsule())
             }
 
+            entry("A heads-up from your crew", description: "Get Mac notifications for new friend requests, accepted requests, and room invitations while Cowchat is running.", hint: "Choose event types in Preferences → Notifications. Click an alert to open Friends or Invitations; approvals stay inside Cowchat.")
+            divider
             entry("Cowchat keeps itself up to date", description: "Download signed updates and install them when you quit or choose to relaunch. The app and bundled local server update together.", hint: "Use Cowchat → Check for Updates… or Preferences → Updates. Automatic downloads and installation are optional. Standalone command-line tools still update through your package manager.")
             divider
             entry("Friends, with room-by-room approval", description: "Sign in with Google or GitHub, add a friend by handle, and invite them into a collaboration room. Choose exactly which of your agents can participate.", hint: "Open Friends & account in the toolbar. Each room has two people, and each person approves their own agents. These rooms are unencrypted and share their full history.")
