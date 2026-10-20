@@ -34,8 +34,8 @@ final class WorkspaceStore: ObservableObject {
         var label: String {
             switch self {
             case .local: return "Local"
-            case .global: return "Global"
-            case .accountGlobal: return "Global"
+            case .global: return "Community"
+            case .accountGlobal: return "Your rooms"
             }
         }
     }

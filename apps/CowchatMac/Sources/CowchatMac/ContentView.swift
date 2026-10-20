@@ -207,6 +207,7 @@ private struct SidebarView: View {
     @Binding var isSidebarVisible: Bool
     @Binding var isSettingsPresented: Bool
     @State private var isArchiveExpanded = false
+    @State private var isRoomBrowserPresented = false
     @FocusState private var isSearchFocused: Bool
     /// Once per process: the launch-focus clear must not repeat on sidebar re-mounts.
     private static var didClearLaunchFocus = false
@@ -224,6 +225,18 @@ private struct SidebarView: View {
             searchField
                 .padding(.horizontal, 12)
                 .padding(.bottom, 14)
+
+            Button { isRoomBrowserPresented = true } label: {
+                Label("Find a room", systemImage: "magnifyingglass")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .gallopText(.bodySStrong, color: SemanticColor.textSecondary)
+            .padding(.horizontal, 18)
+            .padding(.bottom, 12)
+            .sheet(isPresented: $isRoomBrowserPresented) {
+                RoomBrowserView(workspace: workspace)
+            }
 
             SidebarRoomLists(
                 local: workspace.local,
@@ -511,7 +524,7 @@ private struct SidebarRoomLists: View {
 
     private func sectionHeader(for server: WorkspaceStore.Server, store: ChatStore) -> some View {
         HStack(spacing: 6) {
-            Text(server == .local ? "Local" : server == .global ? "Global · Shared rooms" : "Global · Private rooms")
+            Text(server == .local ? "Local" : server == .global ? "Community rooms" : "Your rooms")
                 .gallopText(.caption, color: SemanticColor.textTertiary)
             if !store.connectionStatus.isConnected {
                 Text(store.connectionStatus.label)
@@ -685,9 +698,9 @@ private struct SidebarFooter: View {
                 Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 3) {
                     statusRow(label: "Local", store: local)
                     if hasGlobal {
-                        statusRow(label: "Global · Shared", store: globalOrLocal)
+                        statusRow(label: "Community", store: globalOrLocal)
                     }
-                    if hasAccountGlobal { statusRow(label: "Global · Private", store: accountOrLocal) }
+                    if hasAccountGlobal { statusRow(label: "Your rooms", store: accountOrLocal) }
                 }
                 .contentShape(Rectangle())
             }
@@ -2565,25 +2578,25 @@ private struct SettingsView: View {
             if let accountGlobal = workspace.accountGlobal {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Global private rooms").gallopText(.bodyMStrong)
+                        Text("Your rooms").gallopText(.bodyMStrong)
                         Spacer()
                         ServerStatusBadge(store: accountGlobal)
                     }
-                    Text("Signed-in rooms for you, your friends and approved agents. Your shared global connection stays separate.")
+                    Text("Your Home and rooms shared with friends. Only invited people and approved agents can join.")
                         .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 }.gallopCard(cornerRadius: 14)
             }
 
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("Global shared rooms")
+                    Text("Community rooms")
                         .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                     Spacer()
                     if let global = workspace.global {
                         ServerStatusBadge(store: global)
                     }
                 }
-                Text("Cowboy runs a shared Cowchat server for everyone. Connect and its rooms appear in the sidebar alongside your local rooms — a key is created for you automatically, or paste your own.")
+                Text("Browse community rooms such as cowboy-junction with Find a room in the sidebar. These rooms use a separate connection. You can manage its server and API key here.")
                     .gallopText(.bodyM, color: SemanticColor.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
                 TextField(ConnectionProfile.defaultGlobalURLString, text: $cloudURL)
@@ -2646,7 +2659,7 @@ private struct SettingsView: View {
                 HStack(spacing: 10) {
                     Spacer()
                     if workspace.isGlobalEnabled {
-                        Button("Disconnect shared rooms") { workspace.disableGlobalRooms() }
+                        Button("Disconnect community rooms") { workspace.disableGlobalRooms() }
                             .buttonStyle(.plain)
                             .gallopText(.bodyMStrong, color: SemanticColor.buttonSecondaryTextDefault)
                             .padding(.horizontal, 20)
@@ -2656,7 +2669,7 @@ private struct SettingsView: View {
                                 Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                             }
                             .fixedSize()
-                            .macAccessibleAction(label: "Disconnect shared rooms") {
+                            .macAccessibleAction(label: "Disconnect community rooms") {
                                 workspace.disableGlobalRooms()
                             }
                     }
@@ -3073,7 +3086,7 @@ private struct GlobalServerNotice: View {
 }
 
 private struct RoomCreationSheet: View {
-    private enum Location: String, CaseIterable { case local = "Local", global = "Global" }
+    private enum Location: String, CaseIterable { case local = "Local", global = "Online" }
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var store: ChatStore
     @State private var location: Location
@@ -3103,9 +3116,9 @@ private struct RoomCreationSheet: View {
                         Text("Local · This Mac").gallopText(.bodySStrong)
                     }
                     if location == .global, workspace.global != nil, workspace.accountGlobal != nil {
-                        Picker("Global room access", selection: $preferPrivate) {
-                            Text("Private · You and friends").tag(true)
-                            Text("Shared · Existing connection").tag(false)
+                        Picker("Room audience", selection: $preferPrivate) {
+                            Text("You and friends").tag(true)
+                            Text("Community").tag(false)
                         }.pickerStyle(.segmented)
                     }
                 }
@@ -3114,7 +3127,7 @@ private struct RoomCreationSheet: View {
             if usePrivateGlobal, store.createRoomParentID == nil {
                 SocialRoomCreationView(social: workspace.social)
             } else if location == .global && !hasGlobal {
-                Text("The global connection was disconnected. Choose Local to create a room on this Mac.")
+                Text("The online connection was disconnected. Choose Local to create a room on this Mac.")
                     .gallopText(.bodyM).padding(28)
                 Button("Create a local room") { location = .local }.padding(.bottom, 28)
             } else {
@@ -3183,7 +3196,7 @@ private struct CreateRoomView: View {
                         }
                             ?? (targetServer == .local
                                 ? "Create a conversation on this Mac's local Cowchat server."
-                                : "Create a conversation on the global Cowchat server.")
+                                : "Create a conversation on the community Cowchat server.")
                     )
                         .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 }

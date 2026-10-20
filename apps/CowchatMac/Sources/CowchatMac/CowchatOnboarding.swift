@@ -163,7 +163,7 @@ struct CowchatSetupWizard: View {
                 Label(SocialStarterNames.home(name), systemImage: "house").gallopText(.bodyMStrong)
                 Text("Home may receive a number if that name is already taken.").gallopText(.caption, color: SemanticColor.textSecondary)
             }.frame(maxWidth: .infinity, alignment: .leading).gallopCard(cornerRadius: 14)
-            Text("We’ll create a bot identity for your existing agent and a private Global Home. This does not start an agent. This Home is private but not end-to-end encrypted. Cowchat also supports end-to-end encrypted rooms.")
+            Text("We’ll create a bot identity for your existing agent and a private Home. This does not start an agent. This Home is private but not end-to-end encrypted. Cowchat also supports end-to-end encrypted rooms.")
                 .gallopText(.bodyS, color: SemanticColor.textSecondary).fixedSize(horizontal: false, vertical: true)
             Button(social.busy ? "Getting things ready…" : "Create my Home") {
                 Task { if await social.establishSetup(displayName: name, handle: social.handleAvailabilitySupported ? SocialAPI.normalizedHandle(handle) : nil) { step = .friends } }
@@ -217,7 +217,7 @@ struct CowchatSetupWizard: View {
                             let opened = await onOpenHome(setup, session)
                             if social.savedSession?.scopeId == session.scopeId {
                                 opening = false
-                                if !opened { navigationError = "Home could not be opened. Try again, or open your Global rooms." }
+                                if !opened { navigationError = "Home could not be opened. Try again, or open your rooms." }
                             }
                         }
                     }.buttonStyle(CowchatPillButtonStyle(prominent: true)).disabled(opening)
@@ -225,7 +225,7 @@ struct CowchatSetupWizard: View {
                     Text("Your original Home is unavailable. Setup keeps your current access decisions.").gallopText(.bodyS, color: SemanticColor.textSecondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Button("Invite friends") { step = .friends }.buttonStyle(CowchatPillButtonStyle())
-                Button("Open Global rooms") { onOpenRooms() }.buttonStyle(CowchatPillButtonStyle())
+                Button("Open my rooms") { onOpenRooms() }.buttonStyle(CowchatPillButtonStyle())
             }
         }
     }
