@@ -20,15 +20,14 @@ enum GlobalSignupError: LocalizedError, Equatable {
     }
 }
 
-/// Owns one always-on local `ChatStore` and, when global rooms are enabled, a
-/// second store connected to the global server. Both stay connected at once;
-/// the sidebar shows their rooms side by side and the chat pane binds to
-/// whichever server owns the current selection.
+/// Keeps local, shared global, and account global connections independent.
+/// Room identifiers are scoped to the store that owns them.
 @MainActor
 final class WorkspaceStore: ObservableObject {
     enum Server: String, CaseIterable, Identifiable {
         case local
         case global
+        case accountGlobal
 
         var id: String { rawValue }
 
@@ -36,6 +35,7 @@ final class WorkspaceStore: ObservableObject {
             switch self {
             case .local: return "Local"
             case .global: return "Global"
+            case .accountGlobal: return "Global"
             }
         }
     }
@@ -43,6 +43,7 @@ final class WorkspaceStore: ObservableObject {
     let local: ChatStore
     let notifications: SocialNotifications
     @Published private(set) var global: ChatStore?
+    @Published private(set) var accountGlobal: ChatStore?
     @Published private(set) var activeServer: Server = .local
     /// Inline error for the global-server settings card. Connection failures
     /// live on the store; this only carries save/enable problems.
@@ -51,6 +52,7 @@ final class WorkspaceStore: ObservableObject {
         didSet {
             local.searchText = searchText
             global?.searchText = searchText
+            accountGlobal?.searchText = searchText
         }
     }
 
@@ -58,6 +60,7 @@ final class WorkspaceStore: ObservableObject {
     private let socialCredentials: any CowchatCredentialStore
     private let defaults: UserDefaults
     private let requestAPIKey: (URL) async throws -> String
+    private let makeAccountStore: (ConnectionProfile) -> ChatStore
 
     lazy var social: SocialStore = {
         let endpoint = URL(string: configuredGlobalValues().url) ?? URL(string: ConnectionProfile.defaultGlobalURLString)!
@@ -69,22 +72,22 @@ final class WorkspaceStore: ObservableObject {
         social.onSnapshot = { [weak self] snapshot in self?.notifications.receive(snapshot) }
         social.onRoomsChanged = { [weak self] in
             guard let self, self.social.savedSession != nil else { return }
-            Task { try? await self.global?.refreshRooms() }
+            Task { try? await self.accountGlobal?.refreshRooms() }
         }
         return social
     }()
 
-    private func useSocialSession(_ session: SocialSession?) {
-        global?.shutdownForRemoval()
-        global = nil
-        if activeServer == .global { activeServer = .local }
+    func useSocialSession(_ session: SocialSession?) {
+        accountGlobal?.shutdownForRemoval()
+        accountGlobal = nil
         if let session, let profile = try? ConnectionProfile.socialSession(session) {
-            let store = ChatStore(connection: CowchatConnection(profile: profile), defaults: defaults, connectionProfile: profile)
-            global = store
+            let store = makeAccountStore(profile)
+            store.searchText = searchText
+            accountGlobal = store
             store.start()
-        } else if preferences.isGlobalEnabled() {
-            global = Self.makeGlobalStore(preferences: preferences, defaults: defaults)
-            global?.start()
+        }
+        if activeServer == .accountGlobal, accountGlobal == nil {
+            activeServer = global == nil ? .local : .global
         }
     }
 
@@ -92,6 +95,7 @@ final class WorkspaceStore: ObservableObject {
         switch activeServer {
         case .local: return local
         case .global: return global ?? local
+        case .accountGlobal: return accountGlobal ?? local
         }
     }
 
@@ -102,6 +106,8 @@ final class WorkspaceStore: ObservableObject {
         preferences: ConnectionProfilePreferences,
         defaults: UserDefaults = .standard,
         global: ChatStore? = nil,
+        accountGlobal: ChatStore? = nil,
+        makeAccountStore: ((ConnectionProfile) -> ChatStore)? = nil,
         socialCredentials: any CowchatCredentialStore = KeychainCowchatCredentialStore(),
         requestAPIKey: @escaping (URL) async throws -> String = WorkspaceStore.requestAPIKeyOverHTTP
     ) {
@@ -111,6 +117,10 @@ final class WorkspaceStore: ObservableObject {
         self.socialCredentials = socialCredentials
         self.defaults = defaults
         self.global = global
+        self.accountGlobal = accountGlobal
+        self.makeAccountStore = makeAccountStore ?? { profile in
+            ChatStore(connection: CowchatConnection(profile: profile), defaults: defaults, connectionProfile: profile)
+        }
         self.requestAPIKey = requestAPIKey
     }
 
@@ -156,7 +166,8 @@ final class WorkspaceStore: ObservableObject {
         local.start()
         notifications.setSession(social.savedSession)
         social.startMonitoring()
-        if let session = social.savedSession { useSocialSession(session) } else { global?.start() }
+        global?.start()
+        if let session = social.savedSession { useSocialSession(session) }
     }
 
     func shutdownForAppTermination() async {
@@ -168,6 +179,7 @@ final class WorkspaceStore: ObservableObject {
         switch server {
         case .local: return local
         case .global: return global
+        case .accountGlobal: return accountGlobal
         }
     }
 
@@ -282,13 +294,13 @@ final class WorkspaceStore: ObservableObject {
 
     @discardableResult
     func saveGlobalConfiguration(url: String, apiKey: String) -> Bool {
-        guard social.savedSession == nil else {
-            globalSetupError = "Sign out of your Cowchat account before switching to an API-key connection. Your previous API-key connection is saved."
-            return false
-        }
         globalSetupError = nil
         do {
             let candidate = try ConnectionProfile.cowchatCloud(urlString: url, apiKey: apiKey)
+            if let session = social.savedSession, candidate.endpointURL != session.endpoint {
+                globalSetupError = "Sign out of your Cowchat account before switching servers. Your shared global connection is unchanged."
+                return false
+            }
             if let global {
                 guard global.saveAndUseCowchatCloud(url: url, apiKey: apiKey) else {
                     globalSetupError = global.errorMessage
@@ -310,8 +322,7 @@ final class WorkspaceStore: ObservableObject {
     func disableGlobalRooms() {
         globalSetupError = nil
         preferences.setGlobalEnabled(false)
-        if social.savedSession != nil { Task { await social.signOut() } }
-        if activeServer == .global { activeServer = .local }
+        if activeServer == .global { activeServer = accountGlobal == nil ? .local : .accountGlobal }
         global?.shutdownForRemoval()
         global = nil
     }
@@ -325,6 +336,7 @@ final class WorkspaceStore: ObservableObject {
             connectionConfigurationError: configurationError
         )
         global = store
+        store.searchText = searchText
         store.start()
     }
 

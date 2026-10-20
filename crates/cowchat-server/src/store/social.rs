@@ -400,6 +400,16 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 )?;
                 let name = super::normalize_room_name(string(body, "name")?)
                     .map_err(anyhow::Error::msg)?;
+                let friend = match body.get("friend_id") {
+                    None => None,
+                    Some(Value::String(id)) if !id.trim().is_empty() => Some(id.as_str()),
+                    _ => anyhow::bail!("invalid friend_id"),
+                };
+                let proposed = ids(body, "proposed_agent_ids")?;
+                anyhow::ensure!(
+                    friend.is_some() || proposed.is_empty(),
+                    "proposed_agent_ids requires friend_id"
+                );
                 let room = uuid::Uuid::new_v4().to_string();
                 tx.execute("INSERT INTO rooms(room_id,name,visibility,owner_key,encrypted,created_by) VALUES(?1,?2,'private',?3,0,?4)",params![room,name,format!("{OWNER_PREFIX}{a}"),a])?;
                 tx.execute(
@@ -411,13 +421,9 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                     params![room, a],
                 )?;
                 approve(&tx, &room, a, &ids(body, "agent_ids")?)?;
-                let invitation = invite(
-                    &tx,
-                    &room,
-                    a,
-                    string(body, "friend_id")?,
-                    ids(body, "proposed_agent_ids")?,
-                )?;
+                let invitation = friend
+                    .map(|friend| invite(&tx, &room, a, friend, proposed))
+                    .transpose()?;
                 json!({"room_id":room,"invitation":invitation})
             }
             ("GET", ["rooms"]) => {
@@ -734,6 +740,201 @@ mod tests {
             response["device_key"].as_str().unwrap().to_owned(),
             response["account"].clone(),
         )
+    }
+    #[test]
+    fn solo_room_admits_only_creator_and_approved_owned_agents() {
+        let store = Store::open_in_memory().unwrap();
+        let (key, owner) = login(&store, "owner");
+        let (other_key, _) = login(&store, "other");
+        let approved = store
+            .social_action(&key, "POST", "agents", &json!({"name":"approved"}))
+            .unwrap();
+        let unapproved = store
+            .social_action(&key, "POST", "agents", &json!({"name":"unapproved"}))
+            .unwrap();
+        let foreign = store
+            .social_action(&other_key, "POST", "agents", &json!({"name":"foreign"}))
+            .unwrap();
+        let response = store
+            .social_action(
+                &key,
+                "POST",
+                "rooms",
+                &json!({"name":"solo","agent_ids":[approved["agent"]["id"]]}),
+            )
+            .unwrap();
+        assert!(response["invitation"].is_null());
+        let room = response["room_id"].as_str().unwrap();
+        assert_eq!(store.social_room_owner(room, &key), Some(true));
+        assert_eq!(store.social_room_owner(room, &other_key), Some(false));
+        for (credential, allowed) in [
+            (key.as_str(), true),
+            (approved["api_key"].as_str().unwrap(), true),
+            (unapproved["api_key"].as_str().unwrap(), false),
+            (other_key.as_str(), false),
+            (foreign["api_key"].as_str().unwrap(), false),
+        ] {
+            assert_eq!(store.social_room_access(room, credential), Some(allowed));
+        }
+        let participants = store
+            .social_action(
+                &key,
+                "GET",
+                &format!("rooms/{room}/participants"),
+                &json!({}),
+            )
+            .unwrap();
+        assert_eq!(participants["members"], json!([owner]));
+        assert_eq!(participants["agents"], json!([approved["agent"]]));
+        assert_eq!(
+            store
+                .social_action(&key, "GET", "room-invitations", &json!({}))
+                .unwrap(),
+            json!({"invitations":[]})
+        );
+        let conn = store.conn.lock().unwrap();
+        let (visibility, owner_key, encrypted): (String, String, bool) = conn
+            .query_row(
+                "SELECT visibility,owner_key,encrypted FROM rooms WHERE room_id=?1",
+                [room],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(visibility, "private");
+        assert_eq!(
+            owner_key,
+            format!("{OWNER_PREFIX}{}", owner["id"].as_str().unwrap())
+        );
+        assert!(!encrypted);
+        drop(conn);
+        assert!(store
+            .social_action(
+                approved["api_key"].as_str().unwrap(),
+                "POST",
+                "rooms",
+                &json!({"name":"agent-created"})
+            )
+            .is_err());
+    }
+    #[test]
+    fn invalid_room_creation_rolls_back_every_record() {
+        let store = Store::open_in_memory().unwrap();
+        let (key, _) = login(&store, "owner");
+        let (other_key, _) = login(&store, "other");
+        let owned = store
+            .social_action(&key, "POST", "agents", &json!({"name":"owned"}))
+            .unwrap();
+        let foreign = store
+            .social_action(&other_key, "POST", "agents", &json!({"name":"foreign"}))
+            .unwrap();
+        let before: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM rooms", [], |row| row.get(0))
+            .unwrap();
+        let invalid_fields = [
+            json!({"friend_id":null}),
+            json!({"friend_id":""}),
+            json!({"friend_id":"  "}),
+            json!({"friend_id":42}),
+            json!({"friend_id":false}),
+            json!({"friend_id":[]}),
+            json!({"friend_id":{}}),
+            json!({"friend_id":"not-a-friend"}),
+            json!({"proposed_agent_ids":null}),
+            json!({"proposed_agent_ids":"bad"}),
+            json!({"proposed_agent_ids":[42]}),
+            json!({"proposed_agent_ids":["someone"]}),
+            json!({"agent_ids":[owned["agent"]["id"],foreign["agent"]["id"]]}),
+        ];
+        for mut body in invalid_fields {
+            body["name"] = json!("invalid");
+            assert!(
+                store.social_action(&key, "POST", "rooms", &body).is_err(),
+                "accepted {body}"
+            );
+            let conn = store.conn.lock().unwrap();
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM rooms", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, before, "room leaked for {body}");
+            for table in [
+                "social_rooms",
+                "social_members",
+                "social_admissions",
+                "social_room_invitations",
+            ] {
+                let count: i64 = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(count, 0, "{table} leaked for {body}");
+            }
+        }
+    }
+    #[test]
+    fn room_with_friend_keeps_pending_invitation_and_admission_approval() {
+        let store = Store::open_in_memory().unwrap();
+        let (key, _) = login(&store, "owner");
+        let (friend_key, friend) = login(&store, "friend");
+        let request = store
+            .social_action(
+                &key,
+                "POST",
+                "friend-requests",
+                &json!({"handle":friend["handle"]}),
+            )
+            .unwrap();
+        store
+            .social_action(
+                &friend_key,
+                "POST",
+                &format!(
+                    "friend-requests/{}/accept",
+                    request["request"]["id"].as_str().unwrap()
+                ),
+                &json!({}),
+            )
+            .unwrap();
+        let agent = store
+            .social_action(
+                &friend_key,
+                "POST",
+                "agents",
+                &json!({"name":"friend agent"}),
+            )
+            .unwrap();
+        let room = store.social_action(&key, "POST", "rooms", &json!({"name":"shared","friend_id":friend["id"],"proposed_agent_ids":[agent["agent"]["id"]]})).unwrap();
+        let room_id = room["room_id"].as_str().unwrap();
+        assert_eq!(room["invitation"]["status"], "pending");
+        assert_eq!(room["invitation"]["to"], friend);
+        assert_eq!(
+            room["invitation"]["proposed_agents"],
+            json!([agent["agent"]])
+        );
+        assert_eq!(store.social_room_access(room_id, &friend_key), Some(false));
+        assert_eq!(
+            store.social_room_access(room_id, agent["api_key"].as_str().unwrap()),
+            Some(false)
+        );
+        store
+            .social_action(
+                &friend_key,
+                "POST",
+                &format!(
+                    "room-invitations/{}/accept",
+                    room["invitation"]["id"].as_str().unwrap()
+                ),
+                &json!({"agent_ids":[agent["agent"]["id"]]}),
+            )
+            .unwrap();
+        assert_eq!(store.social_room_access(room_id, &friend_key), Some(true));
+        assert_eq!(
+            store.social_room_access(room_id, agent["api_key"].as_str().unwrap()),
+            Some(true)
+        );
     }
     #[test]
     fn name_based_handles_preserve_case_and_disambiguate_from_zero() {

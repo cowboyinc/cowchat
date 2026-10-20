@@ -10,10 +10,7 @@ struct FriendsView: View {
     @State private var profileName = ""
     @State private var handle = ""
     @State private var agentName = ""
-    @State private var roomName = ""
-    @State private var friendID = ""
-    @State private var selectedAgents: Set<String> = []
-    @State private var proposedAgents: Set<String> = []
+    @State private var roomDraft: SocialRoomDraft?
     @State private var participants: SocialParticipants?
     @State private var invitation: SocialRoomInvitation?
     @State private var consentingAgents: Set<String> = []
@@ -134,7 +131,10 @@ struct FriendsView: View {
             invitation = nil
             participants = nil
             consentingAgents = []
-            friendID = ""
+            roomDraft = nil
+        }
+        .sheet(item: $roomDraft) { draft in
+            SocialRoomCreationView(social: social, draft: draft) { page = .rooms }
         }
         .sheet(isPresented: $isEditingProfile) {
             SocialProfileEditor(
@@ -224,7 +224,7 @@ struct FriendsView: View {
                         Text("@\(friend.account.handle) · \(friend.agents.count) discoverable \(friend.agents.count == 1 ? "agent" : "agents")").gallopText(.caption, color: SemanticColor.textSecondary)
                     }
                     Spacer()
-                    Button { friendID = friend.id; selectedAgents = []; proposedAgents = []; roomName = "" } label: {
+                    Button { roomDraft = SocialRoomDraft(friendID: friend.id) } label: {
                         Label { Text("Collaborate") } icon: { CowchatCollaborateIcon() }
                     }.buttonStyle(CowchatPillButtonStyle(prominent: true))
                     Menu {
@@ -244,28 +244,7 @@ struct FriendsView: View {
             if !social.friends.isEmpty {
                 Text("Removing a friend keeps already approved rooms. Leave those rooms separately to stop sharing them.").gallopText(.caption, color: SemanticColor.textSecondary)
             }
-            if let friend = social.friends.first(where: { $0.id == friendID }) { collaborationForm(friend) }
         }
-    }
-
-    private func collaborationForm(_ friend: SocialFriend) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("New room with @\(friend.account.handle)").gallopText(.bodyM)
-            TextField("Room name", text: $roomName).textFieldStyle(.roundedBorder)
-            agentPicker("Approve your agents", agents: social.agents, selection: $selectedAgents)
-            agentPicker("Suggest their agents", agents: friend.agents, selection: $proposedAgents)
-            Text("Your friend must approve their own agents. Messages are unencrypted. Accepted participants can read all prior room history. This does not wake agents or authorize tool use.").gallopText(.caption, color: SemanticColor.textSecondary)
-            HStack {
-                Button("Cancel") { friendID = "" }
-                Button("Create room & invite") {
-                    Task { await social.perform { api in
-                        struct Reply: Decodable { let roomId: String; let invitation: SocialRoomInvitation }
-                        let _: Reply = try await api.social(["rooms"], method: "POST", body: ["name": roomName, "friend_id": friend.id, "agent_ids": Array(selectedAgents), "proposed_agent_ids": Array(proposedAgents)])
-                        friendID = ""
-                    } }
-                }.buttonStyle(CowchatPillButtonStyle(prominent: true)).disabled(roomName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || social.busy)
-            }
-        }.gallopCard(cornerRadius: 14)
     }
 
     private var agentsPage: some View {
@@ -310,8 +289,15 @@ struct FriendsView: View {
 
     private var roomsPage: some View {
         Group {
+            HStack {
+                Text("Your global rooms").gallopText(.bodyMStrong)
+                Spacer()
+                Button { roomDraft = SocialRoomDraft() } label: {
+                    Label("Create room", systemImage: "plus")
+                }.buttonStyle(CowchatPillButtonStyle(prominent: true)).disabled(social.busy)
+            }
             if social.rooms.isEmpty {
-                SocialEmptyState(symbol: "bubble.left.and.bubble.right", title: "Make room for your crew", detail: "Create a room with a friend or accept an invitation. You choose which of your agents can join.")
+                SocialEmptyState(symbol: "bubble.left.and.bubble.right", title: "Make room for your crew", detail: "Create a private global room for you and your agents, or choose a friend to invite when you create it.")
             }
             ForEach(social.rooms) { room in
                 HStack {
@@ -355,7 +341,7 @@ struct FriendsView: View {
                         }
                     }
                 }
-                agentPicker("Approve additional agents", agents: social.agents.filter { own in !room.agents.contains(where: { $0.id == own.id }) }, selection: $consentingAgents)
+                SocialAgentSelection(title: "Approve additional agents", agents: social.agents.filter { own in !room.agents.contains(where: { $0.id == own.id }) }, selection: $consentingAgents)
                 Button("Add selected agents") { Task { await social.perform { api in
                     let _: SocialAcknowledgement = try await api.social(["rooms", room.roomId, "agents"], method: "POST", body: ["agent_ids": Array(consentingAgents)])
                     consentingAgents = []
@@ -386,18 +372,6 @@ struct FriendsView: View {
             }
         }.padding(24).frame(width: 570).background(SemanticColor.surface500)
         .buttonStyle(CowchatPillButtonStyle())
-    }
-
-    private func agentPicker(_ title: String, agents: [SocialAgent], selection: Binding<Set<String>>) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).gallopText(.caption, color: SemanticColor.textSecondary)
-            if agents.isEmpty { Text("No available agents.").gallopText(.caption, color: SemanticColor.textTertiary) }
-            ForEach(agents) { agent in
-                Toggle(agent.name, isOn: Binding(get: { selection.wrappedValue.contains(agent.id) }, set: { value in
-                    if value { selection.wrappedValue.insert(agent.id) } else { selection.wrappedValue.remove(agent.id) }
-                })).toggleStyle(.checkbox)
-            }
-        }
     }
 
     private func requestAction(_ id: String, _ action: String) {

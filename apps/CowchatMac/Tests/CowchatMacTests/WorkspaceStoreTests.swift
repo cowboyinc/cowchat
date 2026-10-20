@@ -51,6 +51,118 @@ private final class InMemoryCredentialStore: CowchatCredentialStore {
 
 final class WorkspaceStoreTests: XCTestCase {
     @MainActor
+    func testAccountSignInAndSignOutPreserveSharedGlobalConnection() async {
+        let fixture = makeWorkspace(withGlobal: true)
+        defer { fixture.cleanup() }
+        let workspace = fixture.workspace
+        let shared = workspace.global
+        await workspace.select(room: makeRoom(id: "shared", name: "shared"), on: .global)
+        workspace.useSocialSession(makeSession())
+        XCTAssertTrue(workspace.global === shared)
+        XCTAssertEqual(workspace.activeServer, .global)
+        XCTAssertNotNil(workspace.accountGlobal)
+        workspace.activate(server: .accountGlobal)
+
+        workspace.useSocialSession(nil)
+
+        XCTAssertNil(workspace.accountGlobal)
+        XCTAssertTrue(workspace.global === shared)
+        XCTAssertEqual(workspace.activeServer, .global)
+        XCTAssertTrue(workspace.activeStore === shared)
+        XCTAssertTrue(fixture.preferences.isGlobalEnabled())
+    }
+
+    @MainActor
+    func testAccountSignOutWithoutSharedGlobalFallsBackToLocal() {
+        let fixture = makeWorkspace(withGlobal: false)
+        defer { fixture.cleanup() }
+        fixture.workspace.useSocialSession(makeSession())
+        fixture.workspace.activate(server: .accountGlobal)
+
+        fixture.workspace.useSocialSession(nil)
+
+        XCTAssertEqual(fixture.workspace.activeServer, .local)
+        XCTAssertTrue(fixture.workspace.activeStore === fixture.workspace.local)
+    }
+
+    @MainActor
+    func testDisconnectingSharedGlobalPreservesSignedInAccount() {
+        let fixture = makeWorkspace(withGlobal: true, withAccountSession: true)
+        defer { fixture.cleanup() }
+        let workspace = fixture.workspace
+        workspace.useSocialSession(workspace.social.savedSession)
+        let accountStore = workspace.accountGlobal
+        workspace.activate(server: .global)
+
+        workspace.disableGlobalRooms()
+
+        XCTAssertNil(workspace.global)
+        XCTAssertNotNil(workspace.social.savedSession)
+        XCTAssertEqual(workspace.social.phase, .signedIn)
+        XCTAssertTrue(workspace.accountGlobal === accountStore)
+        XCTAssertEqual(workspace.activeServer, .accountGlobal)
+        XCTAssertTrue(workspace.activeStore === accountStore)
+        XCTAssertFalse(fixture.preferences.isGlobalEnabled())
+    }
+
+    @MainActor
+    func testSearchTextFansOutToAllThreeStoresAndNewAccountStore() {
+        let fixture = makeWorkspace(withGlobal: true)
+        defer { fixture.cleanup() }
+        let workspace = fixture.workspace
+        workspace.searchText = "before sign in"
+        workspace.useSocialSession(makeSession())
+        XCTAssertEqual(workspace.accountGlobal?.searchText, "before sign in")
+        workspace.searchText = "deploy"
+
+        for server in WorkspaceStore.Server.allCases {
+            XCTAssertEqual(workspace.store(for: server)?.searchText, "deploy")
+        }
+    }
+
+    @MainActor
+    func testOverlappingRoomIDsRemainScopedToEachConnection() async {
+        let fixture = makeWorkspace(withGlobal: true)
+        defer { fixture.cleanup() }
+        let workspace = fixture.workspace
+        workspace.useSocialSession(makeSession())
+        let room = makeRoom(id: "same-id", name: "design")
+
+        for selectedServer in WorkspaceStore.Server.allCases {
+            await workspace.select(room: room, on: selectedServer)
+            XCTAssertTrue(workspace.activeStore === workspace.store(for: selectedServer))
+            for server in WorkspaceStore.Server.allCases {
+                XCTAssertEqual(workspace.isSelected(room, on: server), server == selectedServer)
+            }
+        }
+    }
+
+    @MainActor
+    func testSignedInAccountAllowsSameServerSharedKeyButRejectsServerSwitch() {
+        let fixture = makeWorkspace(withGlobal: true, withAccountSession: true)
+        defer { fixture.cleanup() }
+        let workspace = fixture.workspace
+        workspace.useSocialSession(workspace.social.savedSession)
+        let accountStore = workspace.accountGlobal
+
+        XCTAssertTrue(workspace.saveGlobalConfiguration(url: "wss://cloud.invalid/ws", apiKey: "replacement"))
+        XCTAssertTrue(workspace.accountGlobal === accountStore)
+        XCTAssertEqual(workspace.social.savedSession?.endpoint.absoluteString, "wss://cloud.invalid/ws")
+        XCTAssertFalse(workspace.saveGlobalConfiguration(url: "wss://other.invalid/ws", apiKey: "other"))
+        XCTAssertEqual(workspace.global?.connectionProfile.endpointURL?.absoluteString, "wss://cloud.invalid/ws")
+        XCTAssertEqual(try fixture.preferences.loadConfiguredCloudProfile()?.apiKey, "replacement")
+        XCTAssertNotNil(workspace.globalSetupError)
+    }
+
+    private func makeSession() -> SocialSession {
+        SocialSession(
+            endpoint: URL(string: "wss://cloud.invalid/ws")!,
+            deviceKey: "csoc_fixture",
+            account: SocialAccount(id: "fixture-account", handle: "fixture", displayName: "Fixture")
+        )
+    }
+
+    @MainActor
     func testSelectingARoomActivatesItsServer() async throws {
         let fixture = makeWorkspace(withGlobal: true)
         defer { fixture.cleanup() }
@@ -233,6 +345,7 @@ final class WorkspaceStoreTests: XCTestCase {
     @MainActor
     private func makeWorkspace(
         withGlobal: Bool,
+        withAccountSession: Bool = false,
         requestAPIKey: @escaping (URL) async throws -> String = { _ in
             throw GlobalSignupError.signupClosed
         }
@@ -264,7 +377,15 @@ final class WorkspaceStoreTests: XCTestCase {
                 connectionProfile: profile,
                 connectionPreferences: preferences
             )
+            _ = try! preferences.save(profile)
             preferences.setGlobalEnabled(true)
+        }
+        let socialCredentials = InMemoryCredentialStore()
+        if withAccountSession {
+            try! socialCredentials.setCredential(
+                try! JSONEncoder().encode(makeSession()).base64EncodedString(),
+                for: "cowchat-social-session-v1"
+            )
         }
         return (
             WorkspaceStore(
@@ -272,7 +393,10 @@ final class WorkspaceStoreTests: XCTestCase {
                 preferences: preferences,
                 defaults: defaults,
                 global: global,
-                socialCredentials: InMemoryCredentialStore(),
+                makeAccountStore: { profile in
+                    ChatStore(connection: StubConnection(), defaults: defaults, connectionProfile: profile)
+                },
+                socialCredentials: socialCredentials,
                 requestAPIKey: requestAPIKey
             ),
             preferences,

@@ -27,6 +27,78 @@ private final class SocialFixtureProtocol: URLProtocol {
 
 final class SocialTests: XCTestCase {
     @MainActor
+    func testRoomCreationSupportsSoloAndFriendInvitesAndPreservesFailures() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SocialFixtureProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel(); SocialFixtureProtocol.handler = nil }
+        let credentials = SocialMemoryCredentials()
+        let endpoint = URL(string: "wss://fixture.example/ws")!
+        let account = SocialAccount(id: "me", handle: "chad", displayName: "Chad")
+        credentials.value = try JSONEncoder().encode(SocialSession(endpoint: endpoint, deviceKey: "csoc_fixture", account: account)).base64EncodedString()
+        var postCount = 0
+        var roomList: [[String: String]] = []
+        SocialFixtureProtocol.handler = { request in
+            if request.httpMethod == "POST" {
+                XCTAssertEqual(request.url?.path, "/social/v1/rooms")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-cowchat-key"), "csoc_fixture")
+                let body = try Self.body(request)
+                postCount += 1
+                if postCount == 3 { return (500, #"{"error":"Room creation unavailable"}"#) }
+                if postCount == 1 {
+                    XCTAssertNil(body["friend_id"])
+                    XCTAssertEqual(body["name"] as? String, "Solo room")
+                    XCTAssertEqual(body["agent_ids"] as? [String], ["mine"])
+                    XCTAssertEqual(body["proposed_agent_ids"] as? [String], [])
+                } else {
+                    XCTAssertEqual(body["friend_id"] as? String, "friend")
+                    XCTAssertEqual(body["proposed_agent_ids"] as? [String], ["theirs"])
+                }
+                let id = "room-\(postCount)"
+                roomList.append(["room_id": id, "name": body["name"] as! String, "owner_id": "me"])
+                let invitation = postCount == 1 ? "null" : "{\"id\":\"invite\"}"
+                return (200, "{\"room_id\":\"\(id)\",\"invitation\":\(invitation)}")
+            }
+            switch request.url!.lastPathComponent {
+            case "capabilities": return (200, #"{"providers":["google"]}"#)
+            case "me": return (200, #"{"account":{"id":"me","handle":"chad","display_name":"Chad"},"identities":[]}"#)
+            case "friends": return (200, #"{"friends":[{"account":{"id":"friend","handle":"renzo","display_name":"Renzo"},"agents":[]}] }"#)
+            case "friend-requests": return (200, #"{"requests":[]}"#)
+            case "agents": return (200, #"{"agents":[]}"#)
+            case "room-invitations": return (200, #"{"invitations":[]}"#)
+            case "rooms": return (200, String(data: try JSONSerialization.data(withJSONObject: ["rooms": roomList]), encoding: .utf8)!)
+            default: throw CowchatConnectionError.invalidResponse
+            }
+        }
+        let store = SocialStore(endpoint: endpoint, credentials: credentials, session: session)
+        await store.refresh()
+        var changes = 0
+        store.onRoomsChanged = { changes += 1 }
+        var draft = SocialRoomDraft(name: "  Solo room  ", agentIDs: ["mine"])
+        let soloCreated = await store.createRoom(draft)
+        XCTAssertTrue(soloCreated)
+        XCTAssertEqual(store.rooms.first?.id, "room-1")
+        draft.name = "Shared room"
+        draft.friendID = "friend"
+        draft.proposedAgentIDs = ["theirs"]
+        let sharedCreated = await store.createRoom(draft)
+        XCTAssertTrue(sharedCreated)
+        XCTAssertEqual(store.rooms.count, 2)
+        let failed = await store.createRoom(draft)
+        XCTAssertFalse(failed)
+        XCTAssertEqual(changes, 2)
+        XCTAssertEqual(store.rooms.count, 2)
+        XCTAssertTrue(store.errorMessage?.contains("Room creation unavailable") == true)
+        try render(FriendsView(social: store, initialSection: .rooms), name: "mac-rooms-populated-create-action")
+        roomList = []
+        let emptyStore = SocialStore(endpoint: endpoint, credentials: credentials, session: session)
+        await emptyStore.refresh()
+        try render(FriendsView(social: emptyStore, initialSection: .rooms), name: "mac-rooms-empty-create-action")
+        try render(SocialRoomCreationView(social: emptyStore), name: "mac-room-create-solo")
+        try render(SocialRoomCreationView(social: emptyStore, draft: draft), name: "mac-room-create-friend")
+    }
+
+    @MainActor
     func testNativeNotificationSettingsRendering() throws {
         let suite = "CowchatNotificationSettings.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

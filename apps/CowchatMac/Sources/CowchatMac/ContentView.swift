@@ -146,16 +146,8 @@ struct ContentView: View {
             isPresented: $store.isCreateRoomPresented,
             onDismiss: { store.createRoomParentID = nil; presentPendingFriendsSection() }
         ) {
-            if store.connectionProfile.apiKey.hasPrefix("csoc_") {
-                FriendsView(social: workspace.social)
-            } else {
-                CreateRoomView(
-                    local: workspace.local,
-                    globalOrLocal: workspace.global ?? workspace.local,
-                    hasGlobal: workspace.global != nil && workspace.social.savedSession == nil
-                )
-                    .environmentObject(store)
-            }
+            RoomCreationSheet(initialSource: workspace.activeServer)
+                .environmentObject(store)
         }
         .onReceive(NotificationCenter.default.publisher(for: .cowchatShowWhatsNew)) { _ in
             guard controlActiveState == .key || controlActiveState == .active else { return }
@@ -236,6 +228,8 @@ private struct SidebarView: View {
             SidebarRoomLists(
                 local: workspace.local,
                 globalOrLocal: workspace.global ?? workspace.local,
+                accountOrLocal: workspace.accountGlobal ?? workspace.local,
+                hasAccountGlobal: workspace.accountGlobal != nil,
                 hasGlobal: workspace.global != nil
             )
 
@@ -244,6 +238,8 @@ private struct SidebarView: View {
             ArchiveSection(
                 local: workspace.local,
                 globalOrLocal: workspace.global ?? workspace.local,
+                accountOrLocal: workspace.accountGlobal ?? workspace.local,
+                hasAccountGlobal: workspace.accountGlobal != nil,
                 hasGlobal: workspace.global != nil,
                 isExpanded: $isArchiveExpanded
             )
@@ -252,6 +248,8 @@ private struct SidebarView: View {
             SidebarFooter(
                 local: workspace.local,
                 globalOrLocal: workspace.global ?? workspace.local,
+                accountOrLocal: workspace.accountGlobal ?? workspace.local,
+                hasAccountGlobal: workspace.accountGlobal != nil,
                 hasGlobal: workspace.global != nil,
                 isSettingsPresented: $isSettingsPresented
             )
@@ -418,27 +416,27 @@ private struct SidebarRoomRowButton: View {
     }
 }
 
-/// The scrolling room table: a Local section and, with global rooms on, a
-/// Global section. `globalOrLocal` duplicates `local` when global is off —
-/// @ObservedObject cannot hold an Optional, and observing local twice is free.
 private struct SidebarRoomLists: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
+    @ObservedObject var accountOrLocal: ChatStore
+    let hasAccountGlobal: Bool
     let hasGlobal: Bool
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: anyAgentsThinking ? 10 : 60)) { timeline in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if visibleRoomsEmpty {
-                        if isSearchActive {
-                            emptyRoomsState
-                        }
+                    if visibleRoomsEmpty && isSearchActive {
+                        emptyRoomsState
                     } else {
                         section(for: .local, store: local, at: timeline.date)
                         if hasGlobal {
                             section(for: .global, store: globalOrLocal, at: timeline.date)
+                        }
+                        if hasAccountGlobal {
+                            section(for: .accountGlobal, store: accountOrLocal, at: timeline.date)
                         }
                     }
                 }
@@ -455,7 +453,7 @@ private struct SidebarRoomLists: View {
         // hits. The global server has no nav row; its lobby stays listed.
         let searching = !workspace.searchText
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let source = searching || server == .global
+        let source = searching || server != .local
             ? store.unarchivedRooms
             : store.unarchivedRooms.filter {
                 $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
@@ -470,11 +468,13 @@ private struct SidebarRoomLists: View {
     private var anyAgentsThinking: Bool {
         !local.lastThinkingAt.isEmpty
             || (hasGlobal && !globalOrLocal.lastThinkingAt.isEmpty)
+            || (hasAccountGlobal && !accountOrLocal.lastThinkingAt.isEmpty)
     }
 
     private var visibleRoomsEmpty: Bool {
         baseRooms(in: local, server: .local).isEmpty
             && (!hasGlobal || baseRooms(in: globalOrLocal, server: .global).isEmpty)
+            && (!hasAccountGlobal || baseRooms(in: accountOrLocal, server: .accountGlobal).isEmpty)
     }
 
     /// Item D (quiet empty state): the sidebar only shows an explicit empty
@@ -486,6 +486,7 @@ private struct SidebarRoomLists: View {
 
     private var isSearchingMessages: Bool {
         local.isSearchingMessages || (hasGlobal && globalOrLocal.isSearchingMessages)
+            || (hasAccountGlobal && accountOrLocal.isSearchingMessages)
     }
 
     @ViewBuilder
@@ -495,10 +496,7 @@ private struct SidebarRoomLists: View {
         at now: Date
     ) -> some View {
         let rooms = baseRooms(in: store, server: server)
-        if hasGlobal {
-            // Always shown while two servers exist, even over an empty
-            // list — a connecting/failed global server announces itself
-            // here, not only in the footer.
+        if hasGlobal || hasAccountGlobal {
             sectionHeader(for: server, store: store)
         }
         if !rooms.isEmpty {
@@ -513,7 +511,7 @@ private struct SidebarRoomLists: View {
 
     private func sectionHeader(for server: WorkspaceStore.Server, store: ChatStore) -> some View {
         HStack(spacing: 6) {
-            Text(server.label)
+            Text(server == .local ? "Local" : server == .global ? "Global · Shared rooms" : "Global · Private rooms")
                 .gallopText(.caption, color: SemanticColor.textTertiary)
             if !store.connectionStatus.isConnected {
                 Text(store.connectionStatus.label)
@@ -561,6 +559,8 @@ private struct ArchiveSection: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
+    @ObservedObject var accountOrLocal: ChatStore
+    let hasAccountGlobal: Bool
     let hasGlobal: Bool
     @Binding var isExpanded: Bool
 
@@ -582,10 +582,20 @@ private struct ArchiveSection: View {
         )
     }
 
-    private var entries: [(server: WorkspaceStore.Server, store: ChatStore, room: Room)] {
-        var all = archivedRooms(in: local).map { (server: WorkspaceStore.Server.local, store: local, room: $0) }
+    private struct Entry: Identifiable {
+        let server: WorkspaceStore.Server
+        let store: ChatStore
+        let room: Room
+        var id: String { server.rawValue + "." + room.id }
+    }
+
+    private var entries: [Entry] {
+        var all = archivedRooms(in: local).map { Entry(server: .local, store: local, room: $0) }
         if hasGlobal {
-            all += archivedRooms(in: globalOrLocal).map { (server: .global, store: globalOrLocal, room: $0) }
+            all += archivedRooms(in: globalOrLocal).map { Entry(server: .global, store: globalOrLocal, room: $0) }
+        }
+        if hasAccountGlobal {
+            all += archivedRooms(in: accountOrLocal).map { Entry(server: .accountGlobal, store: accountOrLocal, room: $0) }
         }
         return all
     }
@@ -640,7 +650,7 @@ private struct ArchiveSection: View {
                     // Rows are a fixed 54pt; cap the reveal at ~4.5 rows.
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            ForEach(entries, id: \.room.id) { entry in
+                            ForEach(entries) { entry in
                                 SidebarRoomRowButton(
                                     store: entry.store,
                                     room: entry.room,
@@ -662,6 +672,8 @@ private struct ArchiveSection: View {
 private struct SidebarFooter: View {
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
+    @ObservedObject var accountOrLocal: ChatStore
+    let hasAccountGlobal: Bool
     let hasGlobal: Bool
     @Binding var isSettingsPresented: Bool
 
@@ -670,13 +682,12 @@ private struct SidebarFooter: View {
             Button {
                 isSettingsPresented = true
             } label: {
-                // A Grid keeps the status column aligned — "Local" and
-                // "Global" set different label widths.
                 Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 3) {
                     statusRow(label: "Local", store: local)
                     if hasGlobal {
-                        statusRow(label: "Global", store: globalOrLocal)
+                        statusRow(label: "Global · Shared", store: globalOrLocal)
                     }
+                    if hasAccountGlobal { statusRow(label: "Global · Private", store: accountOrLocal) }
                 }
                 .contentShape(Rectangle())
             }
@@ -700,7 +711,7 @@ private struct SidebarFooter: View {
             )
         }
         .padding(.horizontal, 12)
-        .frame(height: 58)
+        .frame(height: hasGlobal && hasAccountGlobal ? 72 : 58)
     }
 
     private func statusRow(label: String, store: ChatStore) -> some View {
@@ -719,11 +730,13 @@ private struct SidebarFooter: View {
     private var anyServerDisconnected: Bool {
         !local.connectionStatus.isConnected
             || (hasGlobal && !globalOrLocal.connectionStatus.isConnected)
+            || (hasAccountGlobal && !accountOrLocal.connectionStatus.isConnected)
     }
 
     private func reconnectDisconnectedServers() {
         var stores = [local]
         if hasGlobal { stores.append(globalOrLocal) }
+        if hasAccountGlobal { stores.append(accountOrLocal) }
         for store in stores where !store.connectionStatus.isConnected {
             store.reconnect()
         }
@@ -2549,9 +2562,21 @@ private struct SettingsView: View {
                     .stroke(SemanticColor.borderDefault, lineWidth: 1)
             }
 
+            if let accountGlobal = workspace.accountGlobal {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Global private rooms").gallopText(.bodyMStrong)
+                        Spacer()
+                        ServerStatusBadge(store: accountGlobal)
+                    }
+                    Text("Signed-in rooms for you, your friends and approved agents. Your shared global connection stays separate.")
+                        .gallopText(.bodyM, color: SemanticColor.textTertiary)
+                }.gallopCard(cornerRadius: 14)
+            }
+
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("Global server")
+                    Text("Global shared rooms")
                         .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                     Spacer()
                     if let global = workspace.global {
@@ -2621,7 +2646,7 @@ private struct SettingsView: View {
                 HStack(spacing: 10) {
                     Spacer()
                     if workspace.isGlobalEnabled {
-                        Button("Leave global rooms") { workspace.disableGlobalRooms() }
+                        Button("Disconnect shared rooms") { workspace.disableGlobalRooms() }
                             .buttonStyle(.plain)
                             .gallopText(.bodyMStrong, color: SemanticColor.buttonSecondaryTextDefault)
                             .padding(.horizontal, 20)
@@ -2631,7 +2656,7 @@ private struct SettingsView: View {
                                 Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                             }
                             .fixedSize()
-                            .macAccessibleAction(label: "Leave global rooms") {
+                            .macAccessibleAction(label: "Disconnect shared rooms") {
                                 workspace.disableGlobalRooms()
                             }
                     }
@@ -2758,7 +2783,7 @@ private struct SettingsView: View {
     /// Previews use this Mac's own rooms so the choice is made against the
     /// names that will actually sit in the sidebar.
     private var iconSampleNames: [String] {
-        let live = (workspace.local.rooms + (workspace.global?.rooms ?? []))
+        let live = (workspace.local.rooms + (workspace.global?.rooms ?? []) + (workspace.accountGlobal?.rooms ?? []))
             .map(\.name).prefix(3)
         return live.isEmpty ? ["Lobby", "harness-signing", "canyon-deploy"] : Array(live)
     }
@@ -3047,12 +3072,70 @@ private struct GlobalServerNotice: View {
     }
 }
 
+private struct RoomCreationSheet: View {
+    private enum Location: String, CaseIterable { case local = "Local", global = "Global" }
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @EnvironmentObject private var store: ChatStore
+    @State private var location: Location
+    @State private var preferPrivate: Bool
+
+    init(initialSource: WorkspaceStore.Server) {
+        _location = State(initialValue: initialSource == .local ? .local : .global)
+        _preferPrivate = State(initialValue: initialSource != .global)
+    }
+
+    private var hasGlobal: Bool { workspace.global != nil || workspace.accountGlobal != nil }
+    private var usePrivateGlobal: Bool {
+        location == .global && workspace.accountGlobal != nil && (workspace.global == nil || preferPrivate)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if store.createRoomParentID == nil {
+                VStack(alignment: .leading, spacing: 12) {
+                    if hasGlobal {
+                        Picker("Room location", selection: $location) {
+                            ForEach(Location.allCases, id: \.self) { location in
+                                Text(location.rawValue).tag(location)
+                            }
+                        }.pickerStyle(.segmented)
+                    } else {
+                        Text("Local · This Mac").gallopText(.bodySStrong)
+                    }
+                    if location == .global, workspace.global != nil, workspace.accountGlobal != nil {
+                        Picker("Global room access", selection: $preferPrivate) {
+                            Text("Private · You and friends").tag(true)
+                            Text("Shared · Existing connection").tag(false)
+                        }.pickerStyle(.segmented)
+                    }
+                }
+                .padding(.horizontal, 28).padding(.top, 20).padding(.bottom, 8)
+            }
+            if usePrivateGlobal, store.createRoomParentID == nil {
+                SocialRoomCreationView(social: workspace.social)
+            } else if location == .global && !hasGlobal {
+                Text("The global connection was disconnected. Choose Local to create a room on this Mac.")
+                    .gallopText(.bodyM).padding(28)
+                Button("Create a local room") { location = .local }.padding(.bottom, 28)
+            } else {
+                CreateRoomView(
+                    local: workspace.local,
+                    globalOrLocal: workspace.global ?? workspace.local,
+                    hasGlobal: workspace.global != nil,
+                    source: location == .local ? .local : .global
+                )
+            }
+        }.background(SemanticColor.surface600)
+    }
+}
+
 private struct CreateRoomView: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var store: ChatStore
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
     let hasGlobal: Bool
+    var source: WorkspaceStore.Server? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var description = ""
@@ -3077,13 +3160,14 @@ private struct CreateRoomView: View {
     /// whichever server owns the current selection.
     private var targetServer: WorkspaceStore.Server {
         if parentRoom != nil { return workspace.activeServer }
-        return chosenServer ?? workspace.activeServer
+        return source ?? chosenServer ?? workspace.activeServer
     }
 
     private var targetStore: ChatStore {
         switch targetServer {
         case .local: return local
         case .global: return hasGlobal ? globalOrLocal : local
+        case .accountGlobal: return workspace.accountGlobal ?? local
         }
     }
 
@@ -3113,9 +3197,9 @@ private struct CreateRoomView: View {
             }
 
             VStack(spacing: 12) {
-                if hasGlobal, parentRoom == nil {
+                if hasGlobal, parentRoom == nil, source == nil {
                     Picker("Server", selection: serverSelection) {
-                        ForEach(WorkspaceStore.Server.allCases) { server in
+                        ForEach([WorkspaceStore.Server.local, .global]) { server in
                             Text(server.label).tag(server)
                         }
                     }
