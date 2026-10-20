@@ -33,6 +33,8 @@ struct ContentView: View {
     @State private var isSidebarVisible = true
     @State private var isSettingsPresented = false
     @State private var isFriendsPresented = false
+    @State private var friendsSection = SocialSection.friends
+    @State private var pendingFriendsSection: SocialSection?
     @State private var isWhatsNewPresented = false
     @Environment(\.controlActiveState) private var controlActiveState
 
@@ -84,7 +86,7 @@ struct ContentView: View {
         .navigationTitle(store.selectedRoom?.name ?? "Cowchat")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button { isFriendsPresented = true } label: {
+                Button { friendsSection = .friends; isFriendsPresented = true } label: {
                     Label("Friends & account", systemImage: "person.2")
                 }.help("Friends, agents and account")
             }
@@ -126,10 +128,23 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 600)
         .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
         .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
-        .sheet(isPresented: $isFriendsPresented) { FriendsView(social: workspace.social) }
+        .sheet(isPresented: $isFriendsPresented, onDismiss: presentPendingFriendsSection) {
+            FriendsView(social: workspace.social, initialSection: friendsSection).id(friendsSection)
+        }
+        .onReceive(workspace.notifications.$destination.receive(on: RunLoop.main)) { section in
+            guard let section, workspace.notifications.consumeDestination(section) else { return }
+            pendingFriendsSection = section
+            let dismissingSheet = isSettingsPresented || store.isCreateRoomPresented || isWhatsNewPresented || store.roomBeingRenamed != nil || isFriendsPresented
+            isSettingsPresented = false
+            store.isCreateRoomPresented = false
+            isWhatsNewPresented = false
+            store.roomBeingRenamed = nil
+            isFriendsPresented = false
+            if !dismissingSheet { presentPendingFriendsSection() }
+        }
         .sheet(
             isPresented: $store.isCreateRoomPresented,
-            onDismiss: { store.createRoomParentID = nil }
+            onDismiss: { store.createRoomParentID = nil; presentPendingFriendsSection() }
         ) {
             if store.connectionProfile.apiKey.hasPrefix("csoc_") {
                 FriendsView(social: workspace.social)
@@ -146,12 +161,12 @@ struct ContentView: View {
             guard controlActiveState == .key || controlActiveState == .active else { return }
             isWhatsNewPresented = true
         }
-        .sheet(isPresented: $isWhatsNewPresented) { WhatsNewView() }
-        .sheet(item: $store.roomBeingRenamed) { room in
+        .sheet(isPresented: $isWhatsNewPresented, onDismiss: presentPendingFriendsSection) { WhatsNewView() }
+        .sheet(item: $store.roomBeingRenamed, onDismiss: presentPendingFriendsSection) { room in
             RenameRoomView(room: room)
                 .environmentObject(store)
         }
-        .sheet(isPresented: $isSettingsPresented) {
+        .sheet(isPresented: $isSettingsPresented, onDismiss: presentPendingFriendsSection) {
             SettingsView(
                 isPresented: $isSettingsPresented,
                 onShowOnboarding: onShowOnboarding
@@ -182,6 +197,16 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: store.roomReadyNotice?.id)
         .animation(.easeInOut(duration: 0.2), value: store.secondAgentHintRoom?.id)
+    }
+
+    private func presentPendingFriendsSection() {
+        guard let section = pendingFriendsSection, workspace.social.phase == .signedIn else {
+            pendingFriendsSection = nil
+            return
+        }
+        pendingFriendsSection = nil
+        friendsSection = section
+        isFriendsPresented = true
     }
 }
 
@@ -2316,6 +2341,7 @@ private enum SettingsPage {
     case theme
     case roomIcons
     case updates
+    case notifications
     case whatsNew
 
     var title: String {
@@ -2324,6 +2350,7 @@ private enum SettingsPage {
         case .theme: return "Theme"
         case .roomIcons: return "Room icons"
         case .updates: return "Updates"
+        case .notifications: return "Notifications"
         case .whatsNew: return "What’s new"
         }
     }
@@ -2334,6 +2361,7 @@ private enum SettingsPage {
         case .theme: return "Choose how Cowchat appears on this Mac."
         case .roomIcons: return "Every room gets the same icon on every Mac — it is drawn from the room name."
         case .updates: return "Keep Cowchat up to date."
+        case .notifications: return "Choose what gets your attention on this Mac."
         case .whatsNew: return "The latest improvements to Cowchat."
         }
     }
@@ -2394,6 +2422,11 @@ private struct SettingsView: View {
                     page: .roomIcons
                 )
                 settingsNavigationRow(
+                    "Notifications",
+                    systemName: "bell",
+                    page: .notifications
+                )
+                settingsNavigationRow(
                     "Updates",
                     systemName: "arrow.down.circle",
                     page: .updates
@@ -2425,6 +2458,8 @@ private struct SettingsView: View {
                     roomIconSettings
                 case .updates:
                     updateSettings
+                case .notifications:
+                    SocialNotificationSettings(notifications: workspace.notifications)
                 case .whatsNew:
                     ScrollView { WhatsNewContent() }
                 }

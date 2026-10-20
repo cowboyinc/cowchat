@@ -18,6 +18,11 @@ struct FriendsView: View {
     @State private var invitation: SocialRoomInvitation?
     @State private var consentingAgents: Set<String> = []
 
+    init(social: SocialStore, initialSection: SocialSection = .friends) {
+        self.social = social
+        _page = State(initialValue: initialSection)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 14) {
@@ -550,7 +555,7 @@ private struct CowchatCollaborateIcon: View {
     }
 }
 
-private enum SocialSection: String, CaseIterable {
+enum SocialSection: String, CaseIterable {
     case friends = "Friends"
     case agents = "My agents"
     case invitations = "Invitations"

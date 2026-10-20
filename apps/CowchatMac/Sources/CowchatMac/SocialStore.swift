@@ -43,8 +43,12 @@ final class SocialStore: ObservableObject {
     private var generation = UUID()
     private var loginTask: Task<Void, Never>?
     private var oauthCallback: SocialOAuthCallback?
+    private enum RefreshState { case idle, running, queued }
+    private var refreshState = RefreshState.idle
+    private var monitoringTask: Task<Void, Never>?
     var onSessionChanged: ((SocialSession?) -> Void)?
     var onRoomsChanged: (() -> Void)?
+    var onSnapshot: ((SocialNotificationSnapshot) -> Void)?
     private static let credentialAccount = "cowchat-social-session-v1"
 
     init(endpoint: URL, credentials: any CowchatCredentialStore = KeychainCowchatCredentialStore(), session: URLSession = SocialAPI.secureSession) {
@@ -86,28 +90,54 @@ final class SocialStore: ObservableObject {
     private func boundAPI() throws -> SocialAPI { try SocialAPI(endpoint: endpoint, key: savedSession?.deviceKey, session: session) }
 
     func refresh() async {
-        guard oauthFlow == nil else { return }
+        guard refreshState == .idle else { refreshState = .queued; return }
+        defer { refreshState = .idle }
+        repeat {
+            refreshState = .running
+            await refreshOnce()
+        } while refreshState == .queued && !Task.isCancelled
+    }
+
+    func startMonitoring(interval: Duration = .seconds(30)) {
+        guard monitoringTask == nil else { return }
+        monitoringTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if let self, self.savedSession != nil, !self.busy { await self.refresh() }
+                do { try await Task.sleep(for: interval) } catch { break }
+            }
+        }
+    }
+
+    func stopMonitoring() {
+        monitoringTask?.cancel()
+        monitoringTask = nil
+    }
+
+    deinit { monitoringTask?.cancel() }
+
+    private func refreshOnce() async {
+        guard oauthFlow == nil, !Task.isCancelled else { return }
         let ticket = generation
         do {
             let boundAPI = try boundAPI()
             let capabilities: SocialCapabilities = try await boundAPI.social(["capabilities"])
-            guard ticket == generation else { return }
+            guard ticket == generation, !Task.isCancelled else { return }
             serverNeedsUpdate = false
             providers = capabilities.providers.filter { ["github", "google"].contains($0) }
             errorMessage = nil
             guard savedSession != nil else { return }
             let me: SocialMe = try await boundAPI.social(["me"])
-            guard ticket == generation else { return }
+            guard ticket == generation, !Task.isCancelled else { return }
             let friendList: SocialFriends = try await boundAPI.social(["friends"])
-            guard ticket == generation else { return }
+            guard ticket == generation, !Task.isCancelled else { return }
             let requestList: SocialRequests = try await boundAPI.social(["friend-requests"])
-            guard ticket == generation else { return }
+            guard ticket == generation, !Task.isCancelled else { return }
             let agentList: SocialAgents = try await boundAPI.social(["agents"])
-            guard ticket == generation else { return }
+            guard ticket == generation, !Task.isCancelled else { return }
             let invitationList: SocialInvitations = try await boundAPI.social(["room-invitations"])
-            guard ticket == generation else { return }
+            guard ticket == generation, !Task.isCancelled else { return }
             let roomList: SocialRooms = try await boundAPI.social(["rooms"])
-            guard ticket == generation else { return }
+            guard ticket == generation, !Task.isCancelled else { return }
             account = me.account
             identities = me.identities
             friends = friendList.friends
@@ -116,8 +146,11 @@ final class SocialStore: ObservableObject {
             invitations = invitationList.invitations.filter { $0.status == "pending" && $0.to.id == me.account.id }
             rooms = roomList.rooms
             errorMessage = nil
+            if let savedSession {
+                onSnapshot?(SocialNotificationSnapshot(session: savedSession, requests: requestList.requests, invitations: invitationList.invitations))
+            }
         } catch {
-            guard ticket == generation else { return }
+            guard ticket == generation, !Task.isCancelled else { return }
             if case SocialAPIError.friendsUnavailable = error {
                 serverNeedsUpdate = true
                 providers = []

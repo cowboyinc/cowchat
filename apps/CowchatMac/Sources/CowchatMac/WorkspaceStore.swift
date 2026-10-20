@@ -41,6 +41,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     let local: ChatStore
+    let notifications: SocialNotifications
     @Published private(set) var global: ChatStore?
     @Published private(set) var activeServer: Server = .local
     /// Inline error for the global-server settings card. Connection failures
@@ -61,7 +62,11 @@ final class WorkspaceStore: ObservableObject {
     lazy var social: SocialStore = {
         let endpoint = URL(string: configuredGlobalValues().url) ?? URL(string: ConnectionProfile.defaultGlobalURLString)!
         let social = SocialStore(endpoint: endpoint, credentials: socialCredentials)
-        social.onSessionChanged = { [weak self] session in self?.useSocialSession(session) }
+        social.onSessionChanged = { [weak self] session in
+            self?.notifications.setSession(session)
+            self?.useSocialSession(session)
+        }
+        social.onSnapshot = { [weak self] snapshot in self?.notifications.receive(snapshot) }
         social.onRoomsChanged = { [weak self] in
             guard let self, self.social.savedSession != nil else { return }
             Task { try? await self.global?.refreshRooms() }
@@ -101,6 +106,7 @@ final class WorkspaceStore: ObservableObject {
         requestAPIKey: @escaping (URL) async throws -> String = WorkspaceStore.requestAPIKeyOverHTTP
     ) {
         self.local = local
+        self.notifications = SocialNotifications(defaults: defaults)
         self.preferences = preferences
         self.socialCredentials = socialCredentials
         self.defaults = defaults
@@ -148,10 +154,13 @@ final class WorkspaceStore: ObservableObject {
 
     func start() {
         local.start()
+        notifications.setSession(social.savedSession)
+        social.startMonitoring()
         if let session = social.savedSession { useSocialSession(session) } else { global?.start() }
     }
 
     func shutdownForAppTermination() async {
+        social.stopMonitoring()
         await local.shutdownOwnedLocalServerForAppTermination()
     }
 
