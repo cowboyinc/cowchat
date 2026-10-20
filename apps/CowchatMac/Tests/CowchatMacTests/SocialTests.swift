@@ -26,6 +26,86 @@ private final class SocialFixtureProtocol: URLProtocol {
 }
 
 final class SocialTests: XCTestCase {
+    func testFriendInvitationRoutesRejectSpoofedAndMalformedLinks() throws {
+        let production = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "cowchat://friend/Chad-DePue")!))
+        XCTAssertEqual(production.slug, "Chad-DePue")
+        XCTAssertTrue(production.matches(URL(string: ConnectionProfile.defaultGlobalURLString)!))
+        XCTAssertEqual(FriendInvitationRoute.parse(URL(string: "https://chat.cowchat.cowboy.inc/friends/Chad-DePue")!), production)
+        for value in ["cowchat://friend/a", "cowchat://friend/Chad/extra", "cowchat://friend/Chad#fragment", "cowchat://friend/Chad?token=secret", "cowchat://friend/Chad?server=wss://one/ws&server=wss://two/ws", "cowchat://user@friend/Chad", "cowchat://friend:443/Chad", "cowchat://friend/Chad?server=http://evil.test/ws", "https://user@chat.cowchat.cowboy.inc/friends/Chad", "https://chat.cowchat.cowboy.inc/friends/Chad?foo=bar", "https://chat.cowchat.cowboy.inc/friends/Chad/", "http://chat.cowchat.cowboy.inc/friends/Chad", "cowchat://friend/Chad%2FDePue"] {
+            XCTAssertNil(FriendInvitationRoute.parse(try XCTUnwrap(URL(string: value))), value)
+        }
+        let foreign = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "https://evil.test/friends/Chad")!))
+        XCTAssertFalse(foreign.matches(production.endpoint))
+        let custom = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "cowchat://friend/Chad?server=wss%3A%2F%2Fcustom.test%3A9443%2Fws")!))
+        XCTAssertTrue(custom.matches(URL(string: "wss://custom.test:9443/ws")!))
+        XCTAssertFalse(custom.matches(URL(string: "wss://custom.test/ws")!))
+    }
+
+    @MainActor
+    func testWizardAvailabilityLinksAndExplicitFriendRequestAreSessionFenced() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        let store = fixture.store()
+        await store.loadSetup()
+        XCTAssertTrue(store.handleAvailabilitySupported)
+        let available = try await store.checkHandle("Chad-DePue")
+        XCTAssertTrue(available.available)
+        await store.loadFriendLink()
+        let link = try XCTUnwrap(store.friendLink)
+        XCTAssertEqual(link.url.absoluteString, "https://fixture.example/friends/chad")
+        let invitation = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "https://fixture.example/friends/Friend")!))
+        let preview = try await store.previewFriend(invitation)
+        XCTAssertEqual(preview.account.id, "friend")
+        let snapshot = FriendInvitationConfirmationSnapshot(invitation: invitation, scopeID: try XCTUnwrap(store.savedSession?.scopeId), preview: preview)
+        XCTAssertTrue(snapshot.matches(invitation: invitation, scopeID: store.savedSession?.scopeId))
+        let replacement = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "https://fixture.example/friends/Another")!))
+        XCTAssertFalse(snapshot.matches(invitation: replacement, scopeID: store.savedSession?.scopeId))
+        XCTAssertFalse(snapshot.matches(invitation: invitation, scopeID: "new-account-session"))
+        let stale = FriendInvitationConfirmationSnapshot(invitation: invitation, scopeID: "old-account-session", preview: preview)
+        let staleSent = await store.requestFriend(confirmation: stale)
+        XCTAssertFalse(staleSent)
+        XCTAssertEqual(fixture.friendPosts, 0)
+        let foreign = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "https://foreign.test/friends/Friend")!))
+        do { _ = try await store.previewFriend(foreign); XCTFail("Foreign endpoint was accepted") } catch {}
+        let foreignSent = await store.requestFriend(invitation: foreign)
+        XCTAssertFalse(foreignSent)
+        XCTAssertEqual(fixture.friendPosts, 0)
+        let sent = await store.requestFriend(confirmation: snapshot)
+        XCTAssertTrue(sent)
+        XCTAssertEqual(fixture.friendPosts, 1)
+        let received = expectation(description: "Availability started")
+        let release = DispatchSemaphore(value: 0)
+        fixture.beforeAvailability = { received.fulfill(); _ = release.wait(timeout: .now() + 3) }
+        let check = Task { try await store.checkHandle("Another") }
+        await fulfillment(of: [received], timeout: 2)
+        store.cancelSignIn()
+        release.signal()
+        do { _ = try await check.value; XCTFail("Stale session response accepted") } catch {}
+        XCTAssertNil(store.friendLink)
+        fixture.beforeAvailability = nil
+        await store.loadFriendLink()
+        try render(CowchatSetupWizard(social: store, initialStep: .friends, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-share-link")
+        try render(FriendInvitationConfirmation(social: store, invitation: invitation, onDismiss: {}), name: "mac-wizard-friend-confirmation")
+    }
+
+    @MainActor
+    func testFriendLinkFailureSurvivesBackgroundRefreshAndCanRetry() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        let store = fixture.store()
+        await store.loadSetup()
+        fixture.failLink = true
+        await store.loadFriendLink()
+        let failure = try XCTUnwrap(store.friendLinkFailure)
+        XCTAssertNil(store.friendLink)
+        await store.refresh()
+        XCTAssertEqual(store.friendLinkFailure, failure)
+        fixture.failLink = false
+        await store.loadFriendLink()
+        XCTAssertNotNil(store.friendLink)
+        XCTAssertNil(store.friendLinkFailure)
+    }
+
     @MainActor
     func testSetupRecoveryProfilePersistenceAndExplicitCredential() async throws {
         let fixture = try SetupFixture()
@@ -122,6 +202,9 @@ final class SocialTests: XCTestCase {
         let credentials = SocialMemoryCredentials()
         let session: URLSession
         var established = false
+        var friendPosts = 0
+        var failLink = false
+        var beforeAvailability: (() -> Void)?
         var supported = true
         var setupPosts = 0
         var credentialPosts = 0
@@ -144,7 +227,17 @@ final class SocialTests: XCTestCase {
                 case "capabilities":
                     self.capabilityReads += 1
                     if self.capabilityReads == 1 { self.beforeFirstCapabilitiesReply?() }
-                    return (200, self.supported ? #"{"providers":["google"],"setup_version":1}"# : #"{"providers":["google"]}"#)
+                    return (200, self.supported ? #"{"providers":["google"],"setup_version":1,"handle_availability":true,"setup_handle":true,"friend_links":true}"# : #"{"providers":["google"]}"#)
+                case "availability":
+                    self.beforeAvailability?()
+                    return (200, #"{"handle":"Chad-DePue","available":true,"valid":true}"#)
+                case "friend-link":
+                    if self.failLink { throw URLError(.networkConnectionLost) }
+                    return (200, #"{"slug":"chad","url":"https://fixture.example/friends/chad"}"#)
+                case "Friend": return (200, #"{"account":{"id":"friend","handle":"Friend","display_name":"Your Friend"},"relationship":"none"}"#)
+                case "request":
+                    self.friendPosts += 1
+                    return (200, #"{"request":{"id":"request","from":{"id":"me","handle":"chad","display_name":"Chad"},"to":{"id":"friend","handle":"Friend","display_name":"Your Friend"},"status":"pending"}}"#)
                 case "setup":
                     if request.httpMethod == "POST" {
                         XCTAssertEqual(try SocialTests.body(request)["display_name"] as? String, "Chad DePue")

@@ -77,6 +77,21 @@ final class WorkspaceStore: ObservableObject {
         return social
     }()
 
+    @Published private(set) var pendingFriendInvitation: FriendInvitationRoute?
+    private static let pendingFriendInvitationKey = "CowchatMac.pendingFriendInvitation"
+
+    func receiveFriendInvitation(_ url: URL) {
+        guard let invitation = FriendInvitationRoute.parse(url) else { return }
+        pendingFriendInvitation = invitation
+        defaults.set(try? JSONEncoder().encode(invitation), forKey: Self.pendingFriendInvitationKey)
+    }
+
+    func clearFriendInvitation(_ invitation: FriendInvitationRoute) {
+        guard pendingFriendInvitation == invitation else { return }
+        pendingFriendInvitation = nil
+        defaults.removeObject(forKey: Self.pendingFriendInvitationKey)
+    }
+
     func useSocialSession(_ session: SocialSession?) {
         accountGlobal?.shutdownForRemoval()
         accountGlobal = nil
@@ -129,6 +144,11 @@ final class WorkspaceStore: ObservableObject {
         self.preferences = preferences
         self.socialCredentials = socialCredentials
         self.defaults = defaults
+        if let data = defaults.data(forKey: Self.pendingFriendInvitationKey),
+           let pending = try? JSONDecoder().decode(FriendInvitationRoute.self, from: data),
+           FriendInvitationRoute.validSlug(pending.slug), FriendInvitationRoute.normalizeEndpoint(pending.endpoint) != nil {
+            pendingFriendInvitation = pending
+        }
         self.global = global
         self.accountGlobal = accountGlobal
         self.makeAccountStore = makeAccountStore ?? { profile in

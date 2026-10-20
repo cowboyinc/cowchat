@@ -59,7 +59,39 @@ struct SocialMe: Decodable {
     let account: SocialAccount
     let identities: [Identity]
 }
-struct SocialCapabilities: Decodable { let providers: [String]; let setupVersion: Int? }
+struct SocialCapabilities: Decodable {
+    let providers: [String]
+    let setupVersion: Int?
+    let handleAvailability: Bool?
+    let friendLinks: Bool?
+    let setupHandle: Bool?
+}
+struct SocialHandleAvailability: Decodable { let handle: String; let available: Bool; let valid: Bool }
+struct SocialFriendLink: Decodable, Equatable { let slug: String; let url: URL }
+enum SocialFriendLinkState: Equatable {
+    case idle, loading, loaded(SocialFriendLink), failed(String)
+}
+enum SocialFriendRelationship: String, Decodable {
+    case `self`, friends
+    case outgoingPending = "outgoing_pending"
+    case incomingPending = "incoming_pending"
+    case none
+}
+struct SocialFriendLinkPreview: Decodable { let account: SocialAccount; let relationship: SocialFriendRelationship }
+enum SocialHandleCheck: Equatable {
+    case idle, checking(String), available(String), unavailable(String), invalid(String), failed(String)
+    func permits(_ input: String) -> Bool { self == .available(input) }
+    var message: String {
+        switch self {
+        case .idle: return "Choose your public username."
+        case .checking: return "Checking username…"
+        case .available: return "Username available."
+        case .unavailable: return "That username is taken. Try another."
+        case .invalid: return "Use 3–40 letters, numbers, hyphens or underscores."
+        case .failed: return "Could not check. Edit the username to try again."
+        }
+    }
+}
 struct SocialSetup: Decodable {
     let agentId: String
     let agentName: String

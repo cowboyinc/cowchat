@@ -64,6 +64,86 @@ pub fn room_owner(conn: &Connection, room: &str, key: &str) -> rusqlite::Result<
 fn account(conn: &Connection, id: &str) -> anyhow::Result<Value> {
     Ok(conn.query_row("SELECT id,handle,display_name FROM social_accounts WHERE id=?1",[id],|r|Ok(json!({"id":r.get::<_,String>(0)?,"handle":r.get::<_,String>(1)?,"display_name":r.get::<_,String>(2)?})))?)
 }
+fn valid_handle(handle: &str) -> bool {
+    (3..=40).contains(&handle.len())
+        && handle
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+fn available_handle(conn: &Connection, handle: &str, account: &str) -> anyhow::Result<bool> {
+    Ok(!conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM social_accounts WHERE handle=?1 COLLATE NOCASE AND id<>?2)",
+        params![handle, account],
+        |r| r.get::<_, bool>(0),
+    )?)
+}
+fn validate_profile(
+    conn: &Connection,
+    account: &str,
+    handle: &str,
+    name: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        valid_handle(handle)
+            && !name.is_empty()
+            && name.chars().count() <= 100
+            && name.chars().all(display_char),
+        "invalid profile"
+    );
+    anyhow::ensure!(
+        available_handle(conn, handle, account)?,
+        "handle_unavailable"
+    );
+    Ok(())
+}
+fn link_target(conn: &Connection, slug: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(valid_handle(slug), "not found");
+    conn.query_row("SELECT a.id FROM social_friend_links l JOIN social_accounts a ON a.id=l.account_id WHERE l.slug=?1 COLLATE NOCASE",[slug],|r|r.get(0)).optional()?.ok_or_else(||anyhow::anyhow!("not found"))
+}
+fn relationship(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> anyhow::Result<(&'static str, Option<String>)> {
+    if from == to {
+        return Ok(("self", None));
+    }
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM social_friends WHERE a=?1 AND b=?2)",
+        params![from, to],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(("friends", None));
+    }
+    for (a, b, status) in [
+        (from, to, "outgoing_pending"),
+        (to, from, "incoming_pending"),
+    ] {
+        if let Some(id) = conn.query_row("SELECT id FROM social_friend_requests WHERE from_id=?1 AND to_id=?2 AND status='pending'",params![a,b],|r|r.get::<_,String>(0)).optional()? { return Ok((status,Some(id))); }
+    }
+    Ok(("none", None))
+}
+fn request_friend(conn: &Connection, from: &str, to: &str) -> anyhow::Result<Value> {
+    let (status, pending) = relationship(conn, from, to)?;
+    anyhow::ensure!(status != "self", "invalid recipient");
+    anyhow::ensure!(status != "friends", "already friends");
+    anyhow::ensure!(status != "incoming_pending", "incoming_pending");
+    if let Some(id) = pending {
+        return Ok(json!({"request":friend_request(conn,&id)?,"relationship":status}));
+    }
+    bounded(
+        conn,
+        "SELECT COUNT(*) FROM social_friend_requests WHERE from_id=?1 AND status='pending'",
+        from,
+        100,
+    )?;
+    let id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO social_friend_requests(id,from_id,to_id) VALUES(?1,?2,?3)",
+        params![id, from, to],
+    )?;
+    Ok(json!({"request":friend_request(conn,&id)?,"relationship":"outgoing_pending"}))
+}
 fn default_handle(conn: &Connection, name: &str) -> rusqlite::Result<String> {
     let mut base = name
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -232,6 +312,7 @@ impl Store {
     pub(super) fn initialize_social(&self) -> rusqlite::Result<()> {
         self.conn.lock().unwrap().execute_batch("CREATE TABLE IF NOT EXISTS social_accounts(id TEXT PRIMARY KEY,handle TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS social_accounts_handle_nocase ON social_accounts(handle COLLATE NOCASE);
+CREATE TABLE IF NOT EXISTS social_friend_links(account_id TEXT PRIMARY KEY,slug TEXT NOT NULL COLLATE NOCASE UNIQUE);
 CREATE TABLE IF NOT EXISTS social_identities(provider TEXT NOT NULL,subject TEXT NOT NULL,account_id TEXT NOT NULL,label TEXT NOT NULL,PRIMARY KEY(provider,subject));
 CREATE TABLE IF NOT EXISTS social_credentials(digest TEXT PRIMARY KEY,account_id TEXT NOT NULL,agent_id TEXT,revoked INTEGER NOT NULL DEFAULT 0,expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS social_oauth(request_hash TEXT PRIMARY KEY,state_hash TEXT NOT NULL UNIQUE,provider TEXT NOT NULL,challenge TEXT NOT NULL,link_account TEXT,link_digest TEXT,callback_port INTEGER NOT NULL,source_hash TEXT NOT NULL,completion_hash TEXT,provider_subject TEXT,provider_label TEXT,expires INTEGER NOT NULL,claimed INTEGER NOT NULL DEFAULT 0);
@@ -244,6 +325,11 @@ CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT N
 CREATE TABLE IF NOT EXISTS social_members(room_id TEXT NOT NULL,account_id TEXT NOT NULL,PRIMARY KEY(room_id,account_id));
 CREATE TABLE IF NOT EXISTS social_admissions(room_id TEXT NOT NULL,agent_id TEXT NOT NULL,PRIMARY KEY(room_id,agent_id));
 CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,from_id TEXT NOT NULL,to_id TEXT NOT NULL,proposed TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);")
+    }
+    pub fn social_friend_link_account(&self, slug: &str) -> anyhow::Result<Value> {
+        let conn = self.conn.lock().unwrap();
+        let target = link_target(&conn, slug)?;
+        account(&conn, &target)
     }
     pub fn social_principal(&self, key: &str) -> Option<Principal> {
         principal(&self.conn.lock().unwrap(), key).ok().flatten()
@@ -301,6 +387,50 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
         let a = &p.account_id;
         let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
         let response = match (method, parts.as_slice()) {
+            ("POST", ["handles", "availability"]) => {
+                let handle = string(body, "handle")?.trim();
+                let valid = valid_handle(handle);
+                json!({"handle":handle,"valid":valid,"available":valid && available_handle(&tx,handle,a)?})
+            }
+            ("POST", ["me", "friend-link"]) => {
+                let existing: Option<String> = tx
+                    .query_row(
+                        "SELECT slug FROM social_friend_links WHERE account_id=?1",
+                        [a],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let slug = if let Some(existing) = existing {
+                    existing
+                } else {
+                    let base: String =
+                        tx.query_row("SELECT handle FROM social_accounts WHERE id=?1", [a], |r| {
+                            r.get(0)
+                        })?;
+                    let mut slug = base.clone();
+                    let mut suffix = 0u64;
+                    while tx.query_row("SELECT EXISTS(SELECT 1 FROM social_friend_links WHERE slug=?1 COLLATE NOCASE)",[&slug],|r|r.get::<_,bool>(0))? {
+                        let ending = format!("-{suffix}");
+                        slug = format!("{}{}",&base[..base.len().min(40-ending.len())],ending);
+                        suffix += 1;
+                    }
+                    tx.execute(
+                        "INSERT INTO social_friend_links(account_id,slug) VALUES(?1,?2)",
+                        params![a, slug],
+                    )?;
+                    slug
+                };
+                json!({"slug":slug})
+            }
+            ("GET", ["friend-links", slug]) => {
+                let to = link_target(&tx, slug)?;
+                let (status, request_id) = relationship(&tx, a, &to)?;
+                json!({"account":account(&tx,&to)?,"relationship":status,"request_id":request_id})
+            }
+            ("POST", ["friend-links", slug, "request"]) => {
+                let to = link_target(&tx, slug)?;
+                request_friend(&tx, a, &to)?
+            }
             ("GET", ["setup"]) => setup(&tx, a)?,
             ("POST", ["setup"]) => {
                 let established = setup(&tx, a)?;
@@ -312,6 +442,14 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                             && name.chars().all(display_char),
                         "invalid display_name"
                     );
+                    if body.get("handle").is_some() {
+                        let handle = string(body, "handle")?.trim();
+                        validate_profile(&tx, a, handle, name)?;
+                        tx.execute(
+                            "UPDATE social_accounts SET handle=?1 WHERE id=?2",
+                            params![handle, a],
+                        )?;
+                    }
                     bounded(
                         &tx,
                         "SELECT COUNT(*) FROM social_agents WHERE owner_id=?1 AND revoked=0",
@@ -364,16 +502,7 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 if method == "PATCH" {
                     let handle = string(body, "handle")?.trim();
                     let name = string(body, "display_name")?.trim();
-                    anyhow::ensure!(
-                        (3..=40).contains(&handle.len())
-                            && handle
-                                .bytes()
-                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                            && !name.is_empty()
-                            && name.chars().count() <= 100
-                            && name.chars().all(display_char),
-                        "invalid profile"
-                    );
+                    validate_profile(&tx, a, handle, name)?;
                     tx.execute(
                         "UPDATE social_accounts SET handle=?1,display_name=?2 WHERE id=?3",
                         params![handle, name, a],
@@ -405,25 +534,15 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 json!({"ok":true})
             }
             ("POST", ["friend-requests"]) => {
-                bounded(&tx,"SELECT COUNT(*) FROM social_friend_requests WHERE from_id=?1 AND status='pending'",a,100)?;
                 let to: String = tx
                     .query_row(
                         "SELECT id FROM social_accounts WHERE handle=?1 COLLATE NOCASE",
                         [string(body, "handle")?.trim()],
                         |r| r.get(0),
                     )
-                    .map_err(|_| anyhow::anyhow!("not found"))?;
-                anyhow::ensure!(&to != a, "invalid recipient");
-                let already: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM social_friends WHERE a=?1 AND b=?2)",
-                    params![a, to],
-                    |r| r.get(0),
-                )?;
-                anyhow::ensure!(!already, "already friends");
-                let id = uuid::Uuid::new_v4().to_string();
-                tx.execute("INSERT OR IGNORE INTO social_friend_requests(id,from_id,to_id) VALUES(?1,?2,?3)",params![id,a,to])?;
-                let id:String=tx.query_row("SELECT id FROM social_friend_requests WHERE from_id=?1 AND to_id=?2 AND status='pending'",params![a,to],|r|r.get(0))?;
-                json!({"request":friend_request(&tx,&id)?})
+                    .optional()?
+                    .ok_or_else(|| anyhow::anyhow!("not found"))?;
+                request_friend(&tx, a, &to)?
             }
             ("GET", ["friend-requests"]) => {
                 let mut s=tx.prepare("SELECT id FROM social_friend_requests WHERE from_id=?1 OR to_id=?1 ORDER BY created_at DESC,id")?;
@@ -868,6 +987,292 @@ mod tests {
             response["device_key"].as_str().unwrap().to_owned(),
             response["account"].clone(),
         )
+    }
+    #[test]
+    fn friend_alias_is_permanent_idempotent_and_requires_explicit_consent() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("test.db")).unwrap();
+        let (alice, a) = login_named(&store, "alice", "Chad DePue");
+        let (bob, b) = login(&store, "bob");
+        let issue = || {
+            store
+                .social_action(&alice, "POST", "me/friend-link", &json!({}))
+                .unwrap()
+        };
+        let link = issue();
+        assert_eq!(issue(), link);
+        let slug = link["slug"].as_str().unwrap();
+        assert_eq!(slug, "Chad-DePue");
+        store
+            .social_action(
+                &alice,
+                "PATCH",
+                "me",
+                &json!({"handle":"Renamed","display_name":"New name"}),
+            )
+            .unwrap();
+        store
+            .social_action(
+                &bob,
+                "PATCH",
+                "me",
+                &json!({"handle":slug,"display_name":"Bob"}),
+            )
+            .unwrap();
+        let bob_link = store
+            .social_action(&bob, "POST", "me/friend-link", &json!({}))
+            .unwrap();
+        assert_eq!(bob_link["slug"], "Chad-DePue-0");
+        let preview_path = format!("friend-links/{slug}");
+        let preview = store
+            .social_action(&bob, "GET", &preview_path, &json!({}))
+            .unwrap();
+        assert_eq!(preview["account"]["id"], a["id"]);
+        assert_eq!(preview["account"]["handle"], "Renamed");
+        assert_eq!(preview["relationship"], "none");
+        assert_eq!(
+            store
+                .social_action(&bob, "GET", "friend-requests", &json!({}))
+                .unwrap()["requests"],
+            json!([])
+        );
+        let request_path = format!("{preview_path}/request");
+        let sent = store
+            .social_action(&bob, "POST", &request_path, &json!({}))
+            .unwrap();
+        assert_eq!(
+            sent,
+            store
+                .social_action(&bob, "POST", &request_path, &json!({}))
+                .unwrap()
+        );
+        assert_eq!(sent["request"]["from"]["id"], b["id"]);
+        let incoming = store
+            .social_action(
+                &alice,
+                "GET",
+                &format!("friend-links/{}", bob_link["slug"].as_str().unwrap()),
+                &json!({}),
+            )
+            .unwrap();
+        assert_eq!(incoming["relationship"], "incoming_pending");
+        assert!(incoming["request_id"].is_string());
+        assert_eq!(
+            store
+                .social_action(
+                    &alice,
+                    "POST",
+                    &format!(
+                        "friend-links/{}/request",
+                        bob_link["slug"].as_str().unwrap()
+                    ),
+                    &json!({})
+                )
+                .unwrap_err()
+                .to_string(),
+            "incoming_pending"
+        );
+        assert!(store
+            .social_action(&alice, "POST", &request_path, &json!({}))
+            .is_err());
+        assert!(store.social_friend_link_account("unknown").is_err());
+        let conn = store.conn.lock().unwrap();
+        for table in ["social_friends", "social_members", "social_admissions"] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        // Reservations intentionally survive deletion instead of retargeting links.
+        conn.execute(
+            "DELETE FROM social_accounts WHERE id=?1",
+            [a["id"].as_str().unwrap()],
+        )
+        .unwrap();
+        assert!(link_target(&conn, slug).is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM social_friend_links WHERE slug=?1",
+                [slug],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+    #[test]
+    fn availability_and_setup_handle_conflicts_are_atomic() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("test.db")).unwrap();
+        let (alice, _) = login(&store, "alice");
+        let (bob, b) = login(&store, "bob");
+        assert_eq!(
+            store
+                .social_action(
+                    &alice,
+                    "POST",
+                    "handles/availability",
+                    &json!({"handle":"a"})
+                )
+                .unwrap()["valid"],
+            false
+        );
+        assert_eq!(
+            store
+                .social_action(
+                    &alice,
+                    "POST",
+                    "handles/availability",
+                    &json!({"handle":"ALICE"})
+                )
+                .unwrap()["available"],
+            true
+        );
+        assert_eq!(
+            store
+                .social_action(
+                    &bob,
+                    "POST",
+                    "handles/availability",
+                    &json!({"handle":"ALICE"})
+                )
+                .unwrap()["available"],
+            false
+        );
+        let setup = store
+            .social_action(
+                &alice,
+                "POST",
+                "setup",
+                &json!({"display_name":"First","handle":"reserved"}),
+            )
+            .unwrap();
+        let failed = store
+            .social_action(
+                &bob,
+                "POST",
+                "setup",
+                &json!({"display_name":"Changed","handle":"RESERVED"}),
+            )
+            .unwrap_err();
+        assert_eq!(failed.to_string(), "handle_unavailable");
+        assert_eq!(
+            store.social_action(&bob, "GET", "me", &json!({})).unwrap()["account"],
+            b
+        );
+        assert!(store
+            .social_action(&bob, "GET", "setup", &json!({}))
+            .unwrap()["setup"]
+            .is_null());
+        assert_eq!(
+            store
+                .social_action(
+                    &bob,
+                    "PATCH",
+                    "me",
+                    &json!({"display_name":"Changed","handle":"RESERVED"})
+                )
+                .unwrap_err()
+                .to_string(),
+            "handle_unavailable"
+        );
+        assert_eq!(
+            store
+                .social_action(
+                    &alice,
+                    "POST",
+                    "setup",
+                    &json!({"display_name":"Ignored","handle":"ignored"})
+                )
+                .unwrap(),
+            setup
+        );
+        assert_eq!(
+            store
+                .social_action(&alice, "GET", "me", &json!({}))
+                .unwrap()["account"]["handle"],
+            "reserved"
+        );
+        let conn = store.conn.lock().unwrap();
+        for table in ["social_agents", "social_rooms"] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+    }
+    #[test]
+    fn simultaneous_alias_issuance_and_handle_reservation_converge() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(Store::open(&directory.path().join("test.db")).unwrap());
+        let (alice, _) = login(&store, "alice");
+        let (bob, _) = login(&store, "bob");
+        let mut threads = Vec::new();
+        for key in [alice.clone(), alice.clone(), bob.clone(), bob.clone()] {
+            let store = store.clone();
+            threads.push(std::thread::spawn(move || {
+                store
+                    .social_action(&key, "POST", "me/friend-link", &json!({}))
+                    .unwrap()
+            }));
+        }
+        let links = threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(links[0], links[1]);
+        assert_eq!(links[2], links[3]);
+        assert_ne!(links[0], links[2]);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads = [alice, bob]
+            .into_iter()
+            .map(|key| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.social_action(
+                        &key,
+                        "POST",
+                        "setup",
+                        &json!({"display_name":"Winner","handle":"same-handle"}),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| r
+                    .as_ref()
+                    .is_err_and(|e| e.to_string() == "handle_unavailable"))
+                .count(),
+            1
+        );
+        let conn = store.conn.lock().unwrap();
+        for table in [
+            "social_setup",
+            "social_agents",
+            "social_rooms",
+            "social_members",
+            "social_admissions",
+        ] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
     }
     #[test]
     fn setup_is_durable_private_credentialless_and_never_repairs_revocation() {

@@ -49,8 +49,9 @@ struct CowchatSetupWizard: View {
     let onOpenRooms: () -> Void
     @State private var step: WizardStep
     @State private var name: String
-    @State private var friendHandle = ""
-    @State private var sentHandles: [String] = []
+    @State private var handle = ""
+    @State private var handleCheck: SocialHandleCheck = .idle
+    @State private var copiedLink = false
     @State private var opening = false
     @State private var navigationError: String?
 
@@ -62,6 +63,7 @@ struct CowchatSetupWizard: View {
         self.onOpenRooms = onOpenRooms
         _step = State(initialValue: initialStep)
         _name = State(initialValue: name)
+        _handle = State(initialValue: social.account?.handle ?? "")
     }
 
     var body: some View {
@@ -98,7 +100,6 @@ struct CowchatSetupWizard: View {
                     Button("Use Local rooms for now") { social.cancelSignIn(); onLocal() }
                         .buttonStyle(CowchatPillButtonStyle())
                     Spacer()
-                    Text("Local rooms stay on this Mac.").gallopText(.caption, color: SemanticColor.textTertiary)
                 }
             }
             .padding(32)
@@ -109,8 +110,9 @@ struct CowchatSetupWizard: View {
         .onChange(of: social.savedSession?.account.id) { _ in
             step = .login
             name = ""
-            friendHandle = ""
-            sentHandles = []
+            handle = ""
+            handleCheck = .idle
+            copiedLink = false
             navigationError = nil
             opening = false
         }
@@ -119,7 +121,7 @@ struct CowchatSetupWizard: View {
     private var login: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Howdy. Make yourself at home.").gallopText(.h3)
-            Text("Sign in, give your bot a name, and start with a private Global room of your own.")
+            Text("Cowchat lets you communicate with your existing agents. Connect Claude, Codex, or another agent, bring them into rooms, and collaborate with your friends and their agents.")
                 .gallopText(.bodyL, color: SemanticColor.textSecondary).fixedSize(horizontal: false, vertical: true)
             if social.serverNeedsUpdate || (social.phase == .signedIn && !social.setupSupported) {
                 Text("This server needs an update before guided setup is available.").gallopText(.bodyM)
@@ -147,46 +149,56 @@ struct CowchatSetupWizard: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("What should we call you?").gallopText(.h3)
             TextField("Your name", text: $name).textFieldStyle(.roundedBorder).font(.system(size: 20))
+            if social.handleAvailabilitySupported {
+                HStack {
+                    Text("@").gallopText(.bodyL)
+                    TextField("Your username", text: $handle).textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Your username")
+                }
+                Text(handleCheck.message).gallopText(.bodyS, color: SemanticColor.textSecondary)
+                    .task(id: handle + "|" + (social.savedSession?.scopeId ?? "")) { await checkHandle() }
+            }
             VStack(alignment: .leading, spacing: 12) {
                 Label(SocialStarterNames.bot(name), systemImage: "cpu").gallopText(.bodyMStrong)
                 Label(SocialStarterNames.home(name), systemImage: "house").gallopText(.bodyMStrong)
                 Text("Home may receive a number if that name is already taken.").gallopText(.caption, color: SemanticColor.textSecondary)
             }.frame(maxWidth: .infinity, alignment: .leading).gallopCard(cornerRadius: 14)
-            Text("We’ll create a bot identity and your private Global Home. This does not start an agent. Room names are visible to members; access requires approval. Hosted rooms are not end-to-end encrypted.")
+            Text("We’ll create a bot identity for your existing agent and a private Global Home. This does not start an agent. This Home is private but not end-to-end encrypted. Cowchat also supports end-to-end encrypted rooms.")
                 .gallopText(.bodyS, color: SemanticColor.textSecondary).fixedSize(horizontal: false, vertical: true)
             Button(social.busy ? "Getting things ready…" : "Create my Home") {
-                Task { if await social.establishSetup(displayName: name) { step = .friends } }
+                Task { if await social.establishSetup(displayName: name, handle: social.handleAvailabilitySupported ? SocialAPI.normalizedHandle(handle) : nil) { step = .friends } }
             }
             .buttonStyle(CowchatPillButtonStyle(prominent: true))
-            .disabled(social.busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(social.busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (social.handleAvailabilitySupported && !handleCheck.permits(SocialAPI.normalizedHandle(handle))))
         }
     }
 
     private var inviteFriends: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Bring your people.").gallopText(.h3)
-            Text("Add a friend by Cowchat handle. You’ll choose a separate shared room when you collaborate. Friend requests do not grant access to your Home or bot.")
+            Text("Share your invitation link. Your friends can open it in Cowchat and send you a friend request. You choose who to approve. Friendship does not grant access to your Home or bot.")
                 .gallopText(.bodyM, color: SemanticColor.textSecondary).fixedSize(horizontal: false, vertical: true)
+            if let link = social.friendLink {
+                Text(link.url.absoluteString).gallopText(.bodyMStrong).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading).gallopCard(cornerRadius: 14)
+                Button(copiedLink ? "Invitation link copied" : "Copy invitation link") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(link.url.absoluteString, forType: .string)
+                    copiedLink = true
+                }.buttonStyle(CowchatPillButtonStyle(prominent: true))
+            } else if !social.friendLinksSupported {
+                Text("Update your Cowchat server to share invitation links.").gallopText(.bodyS)
+            } else if let failure = social.friendLinkFailure {
+                Text(failure).gallopText(.bodyS, color: SemanticColor.textSecondary)
+                Button("Try loading my invitation again") { Task { await social.loadFriendLink() } }
+            } else { ProgressView("Getting your invitation link…") }
             HStack {
-                TextField("@friend-handle", text: $friendHandle).textFieldStyle(.roundedBorder)
-                Button("Send request") {
-                    let requested = friendHandle
-                    Task {
-                        if await social.requestFriend(handle: requested) {
-                            sentHandles.append("@" + SocialAPI.normalizedHandle(requested))
-                            friendHandle = ""
-                        }
-                    }
-                }.disabled(social.busy || SocialAPI.normalizedHandle(friendHandle).isEmpty)
+                Spacer()
+                Button(copiedLink ? "Continue" : "Skip for now") { step = .ready }
+                    .buttonStyle(CowchatPillButtonStyle()).disabled(social.busy)
             }
-            ForEach(sentHandles, id: \.self) { Text("Request sent to \($0)").gallopText(.bodyS, color: SemanticColor.textSecondary).fixedSize(horizontal: false, vertical: true) }
-            Button("Copy my invitation") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString("Join me on Cowchat. Add @\(social.account?.handle ?? "") as a friend in Friends & agents. https://cowchat.cowboy.inc", forType: .string)
-            }.buttonStyle(CowchatPillButtonStyle())
-            Button(sentHandles.isEmpty ? "Skip for now" : "Continue") { step = .ready }
-                .buttonStyle(CowchatPillButtonStyle(prominent: true)).disabled(social.busy)
         }
+        .task(id: social.savedSession?.scopeId) { await social.loadFriendLink() }
     }
 
     private var ready: some View {
@@ -212,8 +224,26 @@ struct CowchatSetupWizard: View {
                 } else {
                     Text("Your original Home is unavailable. Setup keeps your current access decisions.").gallopText(.bodyS, color: SemanticColor.textSecondary).fixedSize(horizontal: false, vertical: true)
                 }
+                Button("Invite friends") { step = .friends }.buttonStyle(CowchatPillButtonStyle())
                 Button("Open Global rooms") { onOpenRooms() }.buttonStyle(CowchatPillButtonStyle())
             }
+        }
+    }
+
+    private func checkHandle() async {
+        let input = SocialAPI.normalizedHandle(handle)
+        let scope = social.savedSession?.scopeId
+        guard FriendInvitationRoute.validSlug(input) else { handleCheck = .invalid(input); return }
+        handleCheck = .checking(input)
+        do {
+            try await Task.sleep(nanoseconds: 300_000_000)
+            try Task.checkCancellation()
+            let result = try await social.checkHandle(input)
+            guard !Task.isCancelled, input == SocialAPI.normalizedHandle(handle), scope == social.savedSession?.scopeId else { return }
+            handleCheck = !result.valid ? .invalid(input) : result.available ? .available(input) : .unavailable(input)
+        } catch {
+            guard !Task.isCancelled, input == SocialAPI.normalizedHandle(handle), scope == social.savedSession?.scopeId else { return }
+            handleCheck = .failed(input)
         }
     }
 
@@ -223,6 +253,7 @@ struct CowchatSetupWizard: View {
         guard scope == social.savedSession?.scopeId, !Task.isCancelled else { return }
         guard social.phase == .signedIn, social.setupLoaded else { return }
         name = social.account?.displayName ?? ""
+        handle = social.account?.handle ?? ""
         step = social.setup == nil ? .name : .ready
     }
 }

@@ -135,6 +135,15 @@ struct CowchatMacApp: App {
             .environmentObject(softwareUpdater)
             .environmentObject(workspace.activeStore)
             .tint(SemanticColor.buttonPrimaryDefault)
+            .onOpenURL { workspace.receiveFriendInvitation($0) }
+            .sheet(item: Binding(get: {
+                completedOnboardingVersion >= CowchatOnboarding.currentVersion
+                    ? workspace.pendingFriendInvitation : nil
+            }, set: { _ in })) { invitation in
+                FriendInvitationConfirmation(social: workspace.social, invitation: invitation) {
+                    workspace.clearFriendInvitation(invitation)
+                }.id(invitation.id)
+            }
             .task {
                 appDelegate.onTerminationRequested = {
                     await workspace.shutdownForAppTermination()
