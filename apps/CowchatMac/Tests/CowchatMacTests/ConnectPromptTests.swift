@@ -138,6 +138,24 @@ final class ConnectPromptTests: XCTestCase {
         XCTAssertEqual(room.id, "existing-id")
     }
 
+    func testRoomActivityLabelsUseCalendarDaysWeeksMonthsAndYears() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 12)))
+        let cases: [(Calendar.Component, Int, String)] = [
+            (.hour, -2, "today"), (.day, -1, "yesterday"), (.day, -6, "6d ago"),
+            (.day, -7, "1w ago"), (.month, -1, "1m ago"), (.year, -1, "1y ago"),
+            (.day, 1, "today")
+        ]
+        for (component, offset, expected) in cases {
+            let date = try XCTUnwrap(calendar.date(byAdding: component, value: offset, to: now))
+            XCTAssertEqual(RoomDiscovery.activityLabel(date, now: now, calendar: calendar), expected)
+        }
+        XCTAssertNil(RoomDiscovery.activityLabel(nil, now: now, calendar: calendar))
+        let nearMidnight = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 0, minute: 1)))
+        XCTAssertEqual(RoomDiscovery.activityLabel(nearMidnight.addingTimeInterval(-120), now: nearMidnight, calendar: calendar), "yesterday")
+    }
+
     private func makeRoom(id: String, name: String) -> Room {
         Room(
             roomID: id,

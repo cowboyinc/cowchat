@@ -5,18 +5,29 @@ struct RoomBrowserView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var connecting = false
+    @State private var refreshing = false
+    @State private var refreshError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 Text("Find a room").gallopText(.h3)
                 Spacer()
+                Button(refreshing ? "Refreshing…" : "Refresh") { Task { await refreshAll() } }
+                    .disabled(refreshing)
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             Text("Open an existing room, including rooms you archived on this Mac.")
                 .gallopText(.bodyM, color: SemanticColor.textSecondary)
-            TextField("Search rooms, e.g. cowboy-junction", text: $query)
-                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").foregroundStyle(SemanticColor.iconTertiary)
+                TextField("Search rooms, e.g. cowboy-junction", text: $query)
+                    .textFieldStyle(.plain).gallopText(.bodyM)
+            }
+            .padding(.horizontal, 16).frame(height: 44)
+            .background(SemanticColor.textfieldDefault, in: Capsule())
+            .overlay { Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1) }
+            if let refreshError { Text(refreshError).gallopText(.bodyS).foregroundStyle(.red) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if let store = workspace.accountGlobal {
@@ -36,7 +47,21 @@ struct RoomBrowserView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .buttonStyle(CowchatPillButtonStyle())
         .padding(28).frame(width: 560, height: 560)
+    }
+
+    private func refreshAll() async {
+        refreshing = true
+        defer { refreshing = false }
+        var failures: [String] = []
+        for server in WorkspaceStore.Server.allCases {
+            guard let store = workspace.store(for: server) else { continue }
+            if !store.connectionStatus.isConnected { store.reconnect(); continue }
+            do { try await store.refreshRooms() }
+            catch { failures.append("\(server.label): \(error.localizedDescription)") }
+        }
+        refreshError = failures.isEmpty ? nil : failures.joined(separator: "\n")
     }
 
     private func connect() async {
@@ -48,6 +73,21 @@ struct RoomBrowserView: View {
 }
 
 enum RoomDiscovery {
+    static func activityLabel(_ date: Date?, now: Date = Date(), calendar: Calendar = .current) -> String? {
+        guard let date else { return nil }
+        let start = calendar.startOfDay(for: date)
+        let end = calendar.startOfDay(for: now)
+        let days = max(0, calendar.dateComponents([.day], from: start, to: end).day ?? 0)
+        if days == 0 { return "today" }
+        if days == 1 { return "yesterday" }
+        if days < 7 { return "\(days)d ago" }
+        let years = calendar.dateComponents([.year], from: start, to: end).year ?? 0
+        if years > 0 { return "\(years)y ago" }
+        let months = calendar.dateComponents([.month], from: start, to: end).month ?? 0
+        if months > 0 { return "\(months)m ago" }
+        return "\(days / 7)w ago"
+    }
+
     static func matches(_ room: Room, query: String) -> Bool {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if query.isEmpty { return true }
@@ -73,16 +113,12 @@ private struct RoomBrowserSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(server == .local ? "Local" : server == .global ? "Community rooms" : "Your rooms")
-                    .gallopText(.bodyMStrong)
-                Spacer()
-                Button("Refresh") { Task { await refresh() } }.disabled(busy || !store.connectionStatus.isConnected)
-            }
+            Text(server == .local ? "Local" : server == .global ? "Community rooms" : "Your rooms")
+                .gallopText(.bodyMStrong)
             if !store.connectionStatus.isConnected {
                 Text(store.connectionStatus.failureMessage ?? store.connectionStatus.label)
                     .gallopText(.bodyS, color: SemanticColor.textSecondary)
-                Button("Reconnect") { store.reconnect() }
+
             } else if matchingRooms.isEmpty {
                 Text(query.isEmpty ? "No rooms available." : "No matching rooms on this connection.")
                     .gallopText(.bodyS, color: SemanticColor.textSecondary)
@@ -94,7 +130,9 @@ private struct RoomBrowserSection: View {
                             Text(room.name).lineLimit(1)
                             Spacer()
                             if store.isArchived(room) { Text("Archived").gallopText(.caption) }
-                            Image(systemName: "arrow.up.right")
+                            if let activity = RoomDiscovery.activityLabel(room.activityDate) {
+                                Text(activity).gallopText(.caption, color: SemanticColor.textTertiary)
+                            }
                         }.padding(10).contentShape(Rectangle())
                     }.buttonStyle(.plain).disabled(busy || !store.connectionStatus.isConnected)
                         .accessibilityLabel("Open \(room.name) from \(server.label)")
@@ -104,7 +142,11 @@ private struct RoomBrowserSection: View {
                 Text("Missing a room? Invite-only rooms need a room invite or the API key you used before. Manage API keys in Connection settings.")
                     .gallopText(.bodyS, color: SemanticColor.textSecondary)
                 HStack {
-                    SecureField("Room invite token (cinv_…)", text: $invite).textFieldStyle(.roundedBorder)
+                    SecureField("Room invite token (cinv_…)", text: $invite)
+                        .textFieldStyle(.plain).gallopText(.bodyM)
+                        .padding(.horizontal, 14).frame(height: 40)
+                        .background(SemanticColor.textfieldDefault, in: Capsule())
+                        .overlay { Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1) }
                     Button("Add room") { Task { await redeem() } }
                         .disabled(busy || !store.connectionStatus.isConnected || invite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
