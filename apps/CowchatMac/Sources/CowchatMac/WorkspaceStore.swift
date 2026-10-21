@@ -34,8 +34,8 @@ final class WorkspaceStore: ObservableObject {
         var label: String {
             switch self {
             case .local: return "Local"
-            case .global: return "Global"
-            case .accountGlobal: return "Global"
+            case .global: return "Community"
+            case .accountGlobal: return "Your rooms"
             }
         }
     }
@@ -77,6 +77,21 @@ final class WorkspaceStore: ObservableObject {
         return social
     }()
 
+    @Published private(set) var pendingFriendInvitation: FriendInvitationRoute?
+    private static let pendingFriendInvitationKey = "CowchatMac.pendingFriendInvitation"
+
+    func receiveFriendInvitation(_ url: URL) {
+        guard let invitation = FriendInvitationRoute.parse(url) else { return }
+        pendingFriendInvitation = invitation
+        defaults.set(try? JSONEncoder().encode(invitation), forKey: Self.pendingFriendInvitationKey)
+    }
+
+    func clearFriendInvitation(_ invitation: FriendInvitationRoute) {
+        guard pendingFriendInvitation == invitation else { return }
+        pendingFriendInvitation = nil
+        defaults.removeObject(forKey: Self.pendingFriendInvitationKey)
+    }
+
     func useSocialSession(_ session: SocialSession?) {
         accountGlobal?.shutdownForRemoval()
         accountGlobal = nil
@@ -99,6 +114,28 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    func openStarterHome(roomID: String, session: SocialSession) async -> Bool {
+        guard social.savedSession?.scopeId == session.scopeId,
+              social.savedSession?.deviceKey == session.deviceKey,
+              let store = accountGlobal else { return false }
+        do { try await store.refreshRooms() } catch { return false }
+        guard social.savedSession?.scopeId == session.scopeId,
+              social.savedSession?.deviceKey == session.deviceKey,
+              accountGlobal === store,
+              let room = store.rooms.first(where: { $0.id == roomID }) else { return false }
+        await select(room: room, on: .accountGlobal)
+        return social.savedSession?.scopeId == session.scopeId && accountGlobal === store
+    }
+
+    func openCreatedSocialRoom(roomID: String) async -> Bool {
+        guard let store = accountGlobal else { return false }
+        do { try await store.refreshRooms() } catch { return false }
+        guard let room = store.rooms.first(where: { $0.id == roomID }) else { return false }
+        await select(room: room, on: .accountGlobal)
+        store.secondAgentHintRoom = room
+        return true
+    }
+
     var isGlobalEnabled: Bool { global != nil }
 
     init(
@@ -116,6 +153,11 @@ final class WorkspaceStore: ObservableObject {
         self.preferences = preferences
         self.socialCredentials = socialCredentials
         self.defaults = defaults
+        if let data = defaults.data(forKey: Self.pendingFriendInvitationKey),
+           let pending = try? JSONDecoder().decode(FriendInvitationRoute.self, from: data),
+           FriendInvitationRoute.validSlug(pending.slug), FriendInvitationRoute.normalizeEndpoint(pending.endpoint) != nil {
+            pendingFriendInvitation = pending
+        }
         self.global = global
         self.accountGlobal = accountGlobal
         self.makeAccountStore = makeAccountStore ?? { profile in

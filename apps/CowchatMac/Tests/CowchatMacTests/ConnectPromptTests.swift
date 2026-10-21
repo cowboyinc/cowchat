@@ -2,34 +2,15 @@ import XCTest
 @testable import CowchatMac
 
 final class ConnectPromptTests: XCTestCase {
-    func testConnectPromptIncludesActiveTurnListeningContract() {
-        let prompt = ChatStore.connectPromptText(
-            roomName: "design-review",
-            connectionInstruction: "connect to the local server"
-        )
-
+    func testConnectPromptDelegatesCollaborationDetailsToSkill() {
+        let prompt = ChatStore.connectPromptText(roomName: "design-review", connectionInstruction: "connect to the local server")
+        XCTAssertTrue(prompt.contains("https://cowchat.cowboy.inc/skills.txt"))
+        XCTAssertTrue(prompt.contains("follow its agent collaboration instructions"))
         XCTAssertTrue(prompt.contains("“design-review”"))
         XCTAssertTrue(prompt.contains("connect to the local server"))
-        XCTAssertTrue(prompt.contains("one unique, stable `--name` and `--agent-id` pair"))
-        XCTAssertTrue(prompt.contains("same pair on every Cowchat agent command"))
-        XCTAssertTrue(prompt.contains("unique to this server, room, and agent"))
-        XCTAssertTrue(prompt.contains("highest message sequence you actually processed"))
-        XCTAssertTrue(prompt.contains("use `0` if there is no history"))
-        XCTAssertTrue(
-            prompt.contains(#"run `thinking design-review "<one line on what you're doing>"`"#)
-        )
-        XCTAssertTrue(prompt.contains("refresh it roughly every minute"))
-        XCTAssertTrue(prompt.contains("returning `wait --loop --drain --cursor-file <that-file>`"))
-        XCTAssertTrue(prompt.contains("never recompute the floor from the room tip"))
-        XCTAssertTrue(prompt.contains("Do not use `wait --follow`"))
-        XCTAssertTrue(prompt.contains("send your reply, then immediately run the exact same returning wait again"))
-        XCTAssertTrue(prompt.contains("do not end this task while collaboration is active"))
-        XCTAssertTrue(prompt.contains("ordinary Cowchat messages alone cannot resume it automatically"))
-        XCTAssertTrue(prompt.contains("explicitly configured external wake mechanism"))
-        XCTAssertTrue(prompt.contains("https://cowchat.cowboy.inc/skills.txt"))
-        XCTAssertFalse(prompt.contains("cowchat-codex"))
-        XCTAssertFalse(prompt.contains("wake relay"))
-        XCTAssertFalse(prompt.contains("will automatically resume"))
+        XCTAssertTrue(prompt.contains("start collaborating now"))
+        XCTAssertLessThan(prompt.count, 280)
+        XCTAssertFalse(prompt.contains("--cursor-file"))
     }
 
     func testConnectPromptPreservesCloudConnectionInstruction() {
@@ -59,7 +40,7 @@ final class ConnectPromptTests: XCTestCase {
         )
         XCTAssertTrue(instruction.contains(#"{"token":"cinv_abc123"}"#))
         XCTAssertTrue(
-            instruction.contains("--url wss://chat.cowchat.cowboy.inc/ws --key <your api_key>")
+            instruction.contains("--url wss://chat.cowchat.cowboy.inc/ws --key <api_key>")
         )
         XCTAssertTrue(instruction.contains("single-use"))
     }
@@ -145,6 +126,34 @@ final class ConnectPromptTests: XCTestCase {
             store.agentConnectionInstruction(inviteToken: nil),
             "connect to the local server"
         )
+    }
+
+    func testRoomDiscoveryMatchesTypedSeparatorsWithoutChangingRoomIdentity() {
+        let room = makeRoom(id: "existing-id", name: "cowboy-junction")
+        XCTAssertTrue(RoomDiscovery.matches(room, query: " cowboy_JUNCTION "))
+        XCTAssertTrue(RoomDiscovery.matches(room, query: "junction"))
+        XCTAssertTrue(RoomDiscovery.matches(room, query: ""))
+        XCTAssertFalse(RoomDiscovery.matches(room, query: "another-room"))
+        XCTAssertEqual(room.name, "cowboy-junction")
+        XCTAssertEqual(room.id, "existing-id")
+    }
+
+    func testRoomActivityLabelsUseCalendarDaysWeeksMonthsAndYears() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 12)))
+        let cases: [(Calendar.Component, Int, String)] = [
+            (.hour, -2, "today"), (.day, -1, "yesterday"), (.day, -6, "6d ago"),
+            (.day, -7, "1w ago"), (.month, -1, "1m ago"), (.year, -1, "1y ago"),
+            (.day, 1, "today")
+        ]
+        for (component, offset, expected) in cases {
+            let date = try XCTUnwrap(calendar.date(byAdding: component, value: offset, to: now))
+            XCTAssertEqual(RoomDiscovery.activityLabel(date, now: now, calendar: calendar), expected)
+        }
+        XCTAssertNil(RoomDiscovery.activityLabel(nil, now: now, calendar: calendar))
+        let nearMidnight = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 0, minute: 1)))
+        XCTAssertEqual(RoomDiscovery.activityLabel(nearMidnight.addingTimeInterval(-120), now: nearMidnight, calendar: calendar), "yesterday")
     }
 
     private func makeRoom(id: String, name: String) -> Room {

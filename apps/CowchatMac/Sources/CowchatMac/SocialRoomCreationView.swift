@@ -22,15 +22,19 @@ struct SocialRoomCreationView: View {
     @ObservedObject var social: SocialStore
     @Environment(\.dismiss) private var dismiss
     @State private var draft: SocialRoomDraft
-    private let onCreated: () -> Void
+    private let onCreated: (String) -> Void
 
-    init(social: SocialStore, draft: SocialRoomDraft = SocialRoomDraft(), onCreated: @escaping () -> Void = {}) {
+    init(social: SocialStore, draft: SocialRoomDraft = SocialRoomDraft(), onCreated: @escaping (String) -> Void = { _ in }) {
         self.social = social
         _draft = State(initialValue: draft)
         self.onCreated = onCreated
     }
 
     private var friend: SocialFriend? { social.friends.first { $0.id == draft.friendID } }
+    private var friendSelectionLabel: String {
+        guard let friend else { return "Only me" }
+        return "\(friend.account.displayName) (@\(friend.account.handle))"
+    }
     private var canCreate: Bool {
         !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         (draft.friendID == nil || friend != nil) && !social.busy && social.phase == .signedIn
@@ -48,12 +52,27 @@ struct SocialRoomCreationView: View {
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Invite a friend (optional)").gallopText(.bodyMStrong)
-                        Picker("Invite a friend", selection: $draft.friendID) {
-                            Text("Only me").tag(String?.none)
+                        Menu {
+                            Button("Only me") { draft.friendID = nil }
                             ForEach(social.friends) { friend in
-                                Text("\(friend.account.displayName) (@\(friend.account.handle))").tag(Optional(friend.id))
+                                Button("\(friend.account.displayName) (@\(friend.account.handle))") {
+                                    draft.friendID = friend.id
+                                }
                             }
-                        }.labelsHidden()
+                        } label: {
+                            HStack {
+                                Text(friendSelectionLabel).gallopText(.bodyM)
+                                Spacer()
+                                GallopIconView(icon: .chevronDown, fallbackSystemName: "chevron.down")
+                                    .frame(width: 18, height: 18)
+                            }
+                            .padding(.horizontal, 16)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(SemanticColor.textfieldDefault, in: Capsule())
+                            .overlay { Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1) }
+                        }
+                        .menuStyle(.borderlessButton)
+                        .frame(maxWidth: .infinity)
                         if draft.friendID != nil && friend == nil {
                             Text("Choose a current friend or select Only me.")
                                 .gallopText(.bodyS, color: SemanticColor.notificationErrorTextDefault)
@@ -88,7 +107,7 @@ struct SocialRoomCreationView: View {
                 Spacer()
                 Button(draft.friendID == nil ? "Create room" : "Create room & invite") {
                     Task {
-                        if await social.createRoom(draft) { onCreated(); dismiss() }
+                        if let roomID = await social.createRoom(draft) { onCreated(roomID); dismiss() }
                     }
                 }
                 .buttonStyle(CowchatPillButtonStyle(prominent: true))
@@ -113,9 +132,23 @@ struct SocialAgentSelection: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).gallopText(.bodySStrong)
             ForEach(agents) { agent in
-                Toggle(agent.name, isOn: Binding(get: { selection.contains(agent.id) }, set: { selected in
-                    if selected { selection.insert(agent.id) } else { selection.remove(agent.id) }
-                })).toggleStyle(.checkbox)
+                Button {
+                    if selection.contains(agent.id) { selection.remove(agent.id) } else { selection.insert(agent.id) }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: selection.contains(agent.id) ? "checkmark.square.fill" : "square")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(selection.contains(agent.id) ? SemanticColor.buttonPrimaryIconDefault : SemanticColor.iconSecondary)
+                        Text(agent.name).gallopText(.bodyM)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .background(selection.contains(agent.id) ? SemanticColor.surfaceGlassOnDefault : SemanticColor.textfieldDefault, in: Capsule())
+                    .overlay { Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1) }
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selection.contains(agent.id) ? [.isSelected] : [])
             }
         }
     }

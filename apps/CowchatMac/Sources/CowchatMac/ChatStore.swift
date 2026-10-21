@@ -480,7 +480,9 @@ final class ChatStore: ObservableObject {
     /// menu, and the quiet-room call to action.
     nonisolated static func connectPromptText(roomName: String, connectionInstruction: String) -> String {
         """
-        You're going to collaborate with another AI agent in real time over Cowchat. Read the Cowchat skill, \(connectionInstruction), and join the exact room \u{201C}\(roomName)\u{201D}. Choose one unique, stable `--name` and `--agent-id` pair, and pass that same pair on every Cowchat agent command you run. Use one cursor file whose path is unique to this server, room, and agent. Catch up with `history`, record the highest message sequence you actually processed, and seed the cursor file with that number (use `0` if there is no history). Whenever composing a reply will take more than about 30 seconds, first run `thinking \(roomName) "<one line on what you're doing>"` and refresh it roughly every minute until your real message goes out — humans watching the room see your pulse text live, and silence reads as a dead agent. Then keep this task open with the same returning `wait --loop --drain --cursor-file <that-file>` command every turn; never recompute the floor from the room tip after replying. Do not use `wait --follow`, because streamed background output does not return a peer message to this active task. After each wait returns, process the delivered peer messages, send your reply, then immediately run the exact same returning wait again; do not end this task while collaboration is active. Continue until a peer sends `conversation_end` or I explicitly tell you to stop. Once this task ends, ordinary Cowchat messages alone cannot resume it automatically, so do not claim that a later room message will wake you without an explicitly configured external wake mechanism. Start now without waiting for confirmation. https://cowchat.cowboy.inc/skills.txt
+        Read https://cowchat.cowboy.inc/skills.txt and follow its agent collaboration instructions.
+        Join the exact room “\(roomName)” and start collaborating now.
+        \(connectionInstruction)
         """
     }
 
@@ -610,23 +612,18 @@ final class ChatStore: ObservableObject {
         if let inviteToken,
            let redeemURL = WorkspaceStore.inviteRedeemURL(forCloudURLString: endpoint) {
             return """
-            connect to the shared Cowchat server at \(endpoint): redeem your one-time \
-            invite by running `curl -fsS -X POST \(redeemURL.absoluteString) \
-            -H 'Content-Type: application/json' -d '{"token":"\(inviteToken)"}'` — the \
-            `api_key` field of the JSON reply is your key (the invite is single-use; if \
-            it's already spent, ask the sender for a new one) — then pass \
-            `--url \(endpoint) --key <your api_key>` on every cowchat command
+            Server: \(endpoint)
+            Redeem this single-use invite for an API key: `curl -fsS -X POST \(redeemURL.absoluteString) -H 'Content-Type: application/json' -d '{"token":"\(inviteToken)"}'`
+            Use `--url \(endpoint) --key <api_key>` on every command.
             """
         }
         guard let signupURL = WorkspaceStore.signupURL(forCloudURLString: endpoint) else {
             return "connect to the Cowchat server at \(endpoint) using your Cowchat API key"
         }
         return """
-        connect to the shared Cowchat server at \(endpoint): first create your own API key \
-        by running `curl -fsS -X POST \(signupURL.absoluteString)` and reading the `api_key` \
-        field of the JSON reply (if that endpoint refuses, ask the person who sent you this \
-        prompt for a key), then pass `--url \(endpoint) --key <your api_key>` on every \
-        cowchat command
+        Server: \(endpoint)
+        Get an API key: `curl -fsS -X POST \(signupURL.absoluteString)` (if signup is closed, ask for an invite).
+        Use the reply’s `api_key` with `--url \(endpoint) --key <api_key>` on every command.
         """
     }
 

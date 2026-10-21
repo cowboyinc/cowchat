@@ -12,6 +12,8 @@
 	<string>Cowchat</string>
 	<key>CFBundleIdentifier</key>
 	<string>inc.cowboy.cowchat</string>
+	<key>CFBundleURLTypes</key>
+    <array><dict><key>CFBundleURLName</key><string>inc.cowboy.cowchat.friend</string><key>CFBundleURLSchemes</key><array><string>cowchat</string></array></dict></array>
 	<key>CFBundleName</key>
 	<string>Cowchat</string>
 	<key>CFBundlePackageType</key>

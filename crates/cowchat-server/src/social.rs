@@ -92,6 +92,7 @@ fn configuration(state: &AppState) -> Option<Configuration> {
 }
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/friends/{slug}", get(friend_landing))
         .route("/social/v1/capabilities", get(capabilities))
         .route(
             "/social/v1/{*path}",
@@ -106,6 +107,10 @@ fn fail(error: anyhow::Error) -> Response {
     let msg = error.to_string();
     let (status, safe) = if msg == "too many sign-in attempts" {
         (StatusCode::TOO_MANY_REQUESTS, "Too many sign-in attempts")
+    } else if msg == "handle_unavailable" {
+        (StatusCode::CONFLICT, "handle_unavailable")
+    } else if msg == "incoming_pending" {
+        (StatusCode::CONFLICT, "incoming_pending")
     } else if msg == "not found" {
         (StatusCode::NOT_FOUND, "not found")
     } else if msg == "unauthorized" {
@@ -129,7 +134,48 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         .map(|c| c.providers.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     providers.sort();
-    Json(json!({"providers":providers,"cowboy_login":false}))
+    Json(
+        json!({"providers":providers,"cowboy_login":false,"setup_version":1,"handle_availability":true,"friend_links":true,"setup_handle":true}),
+    )
+}
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+async fn friend_landing(State(state): State<AppState>, Path(slug): Path<String>) -> Response {
+    let Some(config) = configuration(&state) else {
+        return disabled();
+    };
+    let Ok(account) = state.store.social_friend_link_account(&slug) else {
+        return fail(anyhow::anyhow!("not found"));
+    };
+    let name = escape_html(account["display_name"].as_str().unwrap_or_default());
+    let handle = escape_html(account["handle"].as_str().unwrap_or_default());
+    let slug = escape_html(&slug);
+    let origin = escape_html(&config.origin);
+    let native = if config.origin == "https://chat.cowchat.cowboy.inc" {
+        format!("cowchat://friend/{slug}")
+    } else {
+        let mut endpoint = url::Url::parse(&config.origin).expect("validated public origin");
+        endpoint.set_scheme("wss").expect("websocket scheme");
+        endpoint.set_path("/ws");
+        let encoded: String =
+            url::form_urlencoded::byte_serialize(endpoint.as_str().as_bytes()).collect();
+        format!("cowchat://friend/{slug}?server={encoded}")
+    };
+    let html = format!(
+        r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect on Cowchat</title><style>body{{margin:0;background:#faf7f2;color:#28241f;font:17px system-ui,sans-serif;display:grid;place-items:center;min-height:100vh}}main{{max-width:480px;margin:24px;padding:40px;background:#fff;border:1px solid #e6ded4;border-radius:24px;box-shadow:0 10px 40px #493d2610}}.mark{{color:#b85626;font-weight:800;letter-spacing:.08em}}h1{{font-size:32px;line-height:1.15}}p{{line-height:1.6;color:#62594f}}a{{color:#99431c}}.button{{display:inline-block;background:#b85626;color:white;padding:13px 20px;border-radius:12px;text-decoration:none;font-weight:650}}.link{{overflow-wrap:anywhere;font-size:14px;padding:12px;background:#faf7f2;border-radius:8px;user-select:all}}</style><main><div class="mark">COWCHAT</div><h1>Connect with {name}</h1><p>@{handle}</p><p>Use Cowchat to communicate with your existing agents. Open the app to preview this person and choose whether to send a friend request.</p><a class="button" href="{native}">Open Cowchat</a><p>New here? <a href="https://github.com/cowboyinc/cowchat/releases/latest">Download Cowchat for Mac</a>, install it, then return to this page and click Open Cowchat.</p><p class="link">{origin}/friends/{slug}</p><p>A friend request requires approval. This link does not grant access to rooms or agents.</p></main></html>"#
+    );
+    let mut response = axum::response::Html(html).into_response();
+    let headers = response.headers_mut();
+    headers.insert("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'".parse().unwrap());
+    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
+    headers.insert("cache-control", "no-store".parse().unwrap());
+    response
 }
 async fn action(
     State(state): State<AppState>,
@@ -138,9 +184,9 @@ async fn action(
     method: Method,
     body: Option<Json<Value>>,
 ) -> Response {
-    if configuration(&state).is_none() {
+    let Some(config) = configuration(&state) else {
         return disabled();
-    }
+    };
     let Some(key) = crate::web::authenticated_key(&state, &headers) else {
         return fail(anyhow::anyhow!("unauthorized"));
     };
@@ -150,7 +196,12 @@ async fn action(
         &path,
         &body.map(|b| b.0).unwrap_or(json!({})),
     ) {
-        Ok(value) => {
+        Ok(mut value) => {
+            if path == "me/friend-link" {
+                if let Some(slug) = value["slug"].as_str() {
+                    value["url"] = json!(format!("{}/friends/{}", config.origin, slug));
+                }
+            }
             if method != Method::GET {
                 for entry in state.broker.agents.iter() {
                     if entry.api_key.starts_with(crate::store::social::PREFIX) {
@@ -606,6 +657,265 @@ mod tests {
                 .unwrap();
         let response=frame(&mut socket,FrameType::Register,json!({"name":"test-agent","agent_id":id,"key":key,"capabilities":[],"reconnect":true,"protocol_version":cowchat_core::PROTOCOL_VERSION})).await;
         (socket, response)
+    }
+    #[tokio::test]
+    async fn invitation_landing_and_handle_endpoints_are_safe() {
+        let (_state, base, tasks) = fixture().await;
+        let alice = login(&base, "github", "801", None).await;
+        let bob = login(&base, "github", "802", None).await;
+        let ak = alice["device_key"].as_str().unwrap();
+        let bk = bob["device_key"].as_str().unwrap();
+        let link = call(&base, ak, "POST", "me/friend-link", json!({})).await;
+        assert_eq!(
+            link["url"],
+            format!(
+                "https://chat.example/friends/{}",
+                link["slug"].as_str().unwrap()
+            )
+        );
+        call(
+            &base,
+            ak,
+            "PATCH",
+            "me",
+            json!({"handle":"safe-handle","display_name":"<script>alert(1)</script> & \"cow\""}),
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let landing = client
+            .get(format!("{base}/friends/{}", link["slug"].as_str().unwrap()))
+            .header("host", "evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(landing.status(), StatusCode::OK);
+        assert_eq!(landing.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(landing.headers()["cache-control"], "no-store");
+        assert!(landing.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("default-src 'none'"));
+        let html = landing.text().await.unwrap();
+        if let Ok(path) = std::env::var("COWCHAT_FRIEND_LINK_FIXTURE") {
+            std::fs::write(path, &html).unwrap();
+        }
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("cowchat://friend/"));
+        assert!(html.contains("server=wss%3A%2F%2Fchat.example%2Fws"));
+        assert!(!html.contains("evil.example"));
+        assert!(html.contains("https://github.com/cowboyinc/cowchat/releases/latest"));
+        assert!(!html.contains(ak));
+        assert!(
+            call(&base, ak, "GET", "friend-requests", json!({})).await["requests"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/friends/missing"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let agent = call(
+            &base,
+            ak,
+            "POST",
+            "agents",
+            json!({"name":"bot","discoverable":false}),
+        )
+        .await;
+        let issued = call(
+            &base,
+            ak,
+            "POST",
+            &format!(
+                "agents/{}/credentials",
+                agent["agent"]["id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await;
+        let bot = issued["api_key"].as_str().unwrap();
+        for key in ["", bot] {
+            let status = client
+                .post(format!("{base}/social/v1/me/friend-link"))
+                .header("x-cowchat-key", key)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert!(status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN);
+        }
+        let conflict = client
+            .patch(format!("{base}/social/v1/me"))
+            .header("x-cowchat-key", bk)
+            .json(&json!({"handle":"SAFE-HANDLE","display_name":"Bob"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            conflict.json::<Value>().await.unwrap(),
+            json!({"error":"handle_unavailable"})
+        );
+        let caps = client
+            .get(format!("{base}/social/v1/capabilities"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(caps["setup_version"], 1);
+        assert_eq!(caps["friend_links"], true);
+        assert_eq!(caps["handle_availability"], true);
+        assert_eq!(caps["setup_handle"], true);
+        for task in tasks {
+            task.abort();
+        }
+    }
+    #[tokio::test]
+    async fn starter_setup_and_credentials_are_private_over_http_and_websocket() {
+        let (state, base, tasks) = fixture().await;
+        let alice = login(&base, "github", "1", None).await;
+        let bob = login(&base, "google", "2", None).await;
+        let ak = alice["device_key"].as_str().unwrap();
+        let bk = bob["device_key"].as_str().unwrap();
+        let client = reqwest::Client::new();
+        let capabilities: Value = client
+            .get(format!("{base}/social/v1/capabilities"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(capabilities["setup_version"], 1);
+        assert_eq!(
+            call(&base, ak, "GET", "setup", json!({})).await,
+            json!({"setup":null})
+        );
+        let initial = call(
+            &base,
+            ak,
+            "POST",
+            "setup",
+            json!({"display_name":"Chad DePue"}),
+        )
+        .await;
+        assert!(!initial.to_string().contains("api_key"));
+        assert_eq!(call(&base, ak, "POST", "setup", json!({})).await, initial);
+        let room = initial["setup"]["room_id"].as_str().unwrap();
+        let agent = initial["setup"]["agent_id"].as_str().unwrap();
+        let endpoint = format!("agents/{agent}/credentials");
+        let issued = call(&base, ak, "POST", &endpoint, json!({})).await;
+        let bot_key = issued["api_key"].as_str().unwrap();
+        for (key, path, method) in [
+            (bk, endpoint.as_str(), "POST"),
+            (bot_key, endpoint.as_str(), "POST"),
+            (bot_key, "setup", "GET"),
+            (bot_key, "setup", "POST"),
+        ] {
+            let denied = client
+                .request(method.parse().unwrap(), format!("{base}/social/v1/{path}"))
+                .header("x-cowchat-key", key)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert!(!denied.status().is_success());
+        }
+        let (mut bot, ok) = connect(&base, bot_key, agent).await;
+        assert_eq!(ok.frame_type, FrameType::Ok);
+        assert_eq!(
+            frame(&mut bot, FrameType::JoinRoom, json!({"room_id":room}))
+                .await
+                .frame_type,
+            FrameType::Ok
+        );
+        let (mut stranger, ok) = connect(&base, bk, "stranger-device").await;
+        assert_eq!(ok.frame_type, FrameType::Ok);
+        assert_eq!(
+            frame(&mut stranger, FrameType::JoinRoom, json!({"room_id":room}))
+                .await
+                .frame_type,
+            FrameType::Error
+        );
+        for operation in [FrameType::RoomInfo, FrameType::GetHistory] {
+            assert_eq!(
+                frame(&mut stranger, operation, json!({"room_id":room}))
+                    .await
+                    .frame_type,
+                FrameType::Error
+            );
+        }
+        let visible = frame(&mut stranger, FrameType::ListRooms, json!({})).await;
+        assert!(!visible.payload.to_string().contains("Chad_DePue_Home"));
+        let unrelated = call(&base, bk, "POST", "agents", json!({"name":"unrelated"})).await;
+        let (mut stranger_bot, ok) = connect(
+            &base,
+            unrelated["api_key"].as_str().unwrap(),
+            unrelated["agent"]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(ok.frame_type, FrameType::Ok);
+        assert_eq!(
+            frame(
+                &mut stranger_bot,
+                FrameType::JoinRoom,
+                json!({"room_id":room})
+            )
+            .await
+            .frame_type,
+            FrameType::Error
+        );
+        assert_eq!(
+            frame(
+                &mut stranger_bot,
+                FrameType::RoomInfo,
+                json!({"room_id":room})
+            )
+            .await
+            .frame_type,
+            FrameType::Error
+        );
+        for path in [
+            format!("/api/rooms/{room}/history"),
+            format!("/api/rooms/{room}/artifact"),
+            format!("/social/v1/rooms/{room}/participants"),
+        ] {
+            let denied = client
+                .get(format!("{base}{path}"))
+                .header("x-cowchat-key", bk)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        }
+        let listed: Value = client
+            .get(format!("{base}/api/rooms"))
+            .header("x-cowchat-key", bk)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(!listed.to_string().contains("Chad_DePue_Home"));
+        assert_eq!(
+            call(&base, bk, "GET", "rooms", json!({})).await["rooms"],
+            json!([])
+        );
+        state.store.social_assert_hash_only();
+        for task in tasks {
+            task.abort();
+        }
     }
     #[tokio::test]
     async fn oauth_friends_room_consent_and_revocation_over_http_and_websocket() {

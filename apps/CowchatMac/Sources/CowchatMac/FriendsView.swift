@@ -3,6 +3,7 @@ import SwiftUI
 
 struct FriendsView: View {
     @ObservedObject var social: SocialStore
+    @EnvironmentObject private var workspace: WorkspaceStore
     @Environment(\.dismiss) private var dismiss
     @State private var page = SocialSection.friends
     @State private var isEditingProfile = false
@@ -124,8 +125,9 @@ struct FriendsView: View {
         .background(SemanticColor.surface500)
         .tint(SemanticColor.buttonPrimaryDefault)
         .buttonStyle(CowchatPillButtonStyle())
-        .task { await social.refresh() }
+        .task { await social.refresh(); if agentName.isEmpty { agentName = SocialStarterNames.bot(social.account?.displayName ?? "Cowboy") } }
         .onDisappear { social.cancelSignIn(); social.dismissAgentCredential() }
+        .onChange(of: social.account?.id) { _ in agentName = SocialStarterNames.bot(social.account?.displayName ?? "Cowboy") }
         .onChange(of: social.phase) { phase in
             guard phase != .signedIn else { return }
             invitation = nil
@@ -134,7 +136,13 @@ struct FriendsView: View {
             roomDraft = nil
         }
         .sheet(item: $roomDraft) { draft in
-            SocialRoomCreationView(social: social, draft: draft) { page = .rooms }
+            SocialRoomCreationView(social: social, draft: draft) { roomID in
+                page = .rooms
+                Task {
+                    _ = await workspace.openCreatedSocialRoom(roomID: roomID)
+                    dismiss()
+                }
+            }
         }
         .sheet(isPresented: $isEditingProfile) {
             SocialProfileEditor(
@@ -221,7 +229,7 @@ struct FriendsView: View {
                     SocialPersonAvatar(name: friend.account.displayName)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(friend.account.displayName).gallopText(.bodyMStrong)
-                        Text("@\(friend.account.handle) · \(friend.agents.count) discoverable \(friend.agents.count == 1 ? "agent" : "agents")").gallopText(.caption, color: SemanticColor.textSecondary)
+                        Text("@\(friend.account.handle) · \(friend.agents.count) \(friend.agents.count == 1 ? "agent" : "agents")").gallopText(.caption, color: SemanticColor.textSecondary)
                     }
                     Spacer()
                     Button { roomDraft = SocialRoomDraft(friendID: friend.id) } label: {
@@ -250,18 +258,30 @@ struct FriendsView: View {
     private var agentsPage: some View {
         Group {
             VStack(alignment: .leading, spacing: 10) {
-                Label("Give your agent an identity", systemImage: "cpu").gallopText(.bodyMStrong)
-                HStack {
-                    TextField("Agent name", text: $agentName).textFieldStyle(.roundedBorder)
-                    Button("Create agent") { Task { await social.createAgent(name: agentName); agentName = "" } }.disabled(agentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || social.busy)
+                Label("Name your agent", systemImage: "cpu").gallopText(.bodyMStrong)
+                HStack(spacing: 12) {
+                    TextField("Agent name", text: $agentName)
+                        .textFieldStyle(.plain).gallopText(.bodyM)
+                        .padding(.horizontal, 16)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(SemanticColor.textfieldDefault, in: Capsule())
+                        .overlay { Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1) }
+                        .layoutPriority(1)
+                    Button("Create agent") { Task { await social.createAgent(name: agentName); agentName = SocialStarterNames.bot(social.account?.displayName ?? "Cowboy") } }.fixedSize().disabled(agentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || social.busy)
                 }
-                Text("Friends can discover these agents and suggest them for rooms. Only you can approve their participation. Each agent gets its own credential.").gallopText(.caption, color: SemanticColor.textSecondary)
+                Text("Your friends can see your agent, and you approve which rooms your agents can join.").gallopText(.caption, color: SemanticColor.textSecondary)
             }.gallopCard(cornerRadius: 14)
             ForEach(social.agents) { agent in
                 HStack {
                     SocialIconBadge(symbol: "cpu")
-                    Text(agent.name).gallopText(.bodyMStrong)
+                    VStack(alignment: .leading) {
+                        Text(agent.name).gallopText(.bodyMStrong)
+                        if social.agents.filter({ $0.name.localizedCaseInsensitiveCompare(agent.name) == .orderedSame }).count > 1 {
+                            Text("ID \(agent.id.prefix(8))").gallopText(.caption, color: SemanticColor.textSecondary)
+                        }
+                    }
                     Spacer()
+                    Button("Connect") { Task { await social.connectAgent(agent.id) } }.disabled(social.busy)
                     Button("Revoke agent", role: .destructive) { Task { await social.perform { api in let _: SocialAcknowledgement = try await api.social(["agents", agent.id], method: "DELETE") } } }
                 }.gallopCard(cornerRadius: 14)
             }

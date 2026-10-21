@@ -26,6 +26,243 @@ private final class SocialFixtureProtocol: URLProtocol {
 }
 
 final class SocialTests: XCTestCase {
+    func testFriendInvitationRoutesRejectSpoofedAndMalformedLinks() throws {
+        let production = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "cowchat://friend/Chad-DePue")!))
+        XCTAssertEqual(production.slug, "Chad-DePue")
+        XCTAssertTrue(production.matches(URL(string: ConnectionProfile.defaultGlobalURLString)!))
+        XCTAssertEqual(FriendInvitationRoute.parse(URL(string: "https://chat.cowchat.cowboy.inc/friends/Chad-DePue")!), production)
+        for value in ["cowchat://friend/a", "cowchat://friend/Chad/extra", "cowchat://friend/Chad#fragment", "cowchat://friend/Chad?token=secret", "cowchat://friend/Chad?server=wss://one/ws&server=wss://two/ws", "cowchat://user@friend/Chad", "cowchat://friend:443/Chad", "cowchat://friend/Chad?server=http://evil.test/ws", "https://user@chat.cowchat.cowboy.inc/friends/Chad", "https://chat.cowchat.cowboy.inc/friends/Chad?foo=bar", "https://chat.cowchat.cowboy.inc/friends/Chad/", "http://chat.cowchat.cowboy.inc/friends/Chad", "cowchat://friend/Chad%2FDePue"] {
+            XCTAssertNil(FriendInvitationRoute.parse(try XCTUnwrap(URL(string: value))), value)
+        }
+        let foreign = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "https://evil.test/friends/Chad")!))
+        XCTAssertFalse(foreign.matches(production.endpoint))
+        let custom = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "cowchat://friend/Chad?server=wss%3A%2F%2Fcustom.test%3A9443%2Fws")!))
+        XCTAssertTrue(custom.matches(URL(string: "wss://custom.test:9443/ws")!))
+        XCTAssertFalse(custom.matches(URL(string: "wss://custom.test/ws")!))
+    }
+
+    @MainActor
+    func testWizardAvailabilityLinksAndExplicitFriendRequestAreSessionFenced() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        let store = fixture.store()
+        await store.loadSetup()
+        XCTAssertTrue(store.handleAvailabilitySupported)
+        let available = try await store.checkHandle("Chad-DePue")
+        XCTAssertTrue(available.available)
+        await store.loadFriendLink()
+        let link = try XCTUnwrap(store.friendLink)
+        XCTAssertEqual(link.url.absoluteString, "https://fixture.example/friends/chad")
+        let invitation = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "https://fixture.example/friends/Friend")!))
+        let preview = try await store.previewFriend(invitation)
+        XCTAssertEqual(preview.account.id, "friend")
+        let snapshot = FriendInvitationConfirmationSnapshot(invitation: invitation, scopeID: try XCTUnwrap(store.savedSession?.scopeId), preview: preview)
+        XCTAssertTrue(snapshot.matches(invitation: invitation, scopeID: store.savedSession?.scopeId))
+        let replacement = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "https://fixture.example/friends/Another")!))
+        XCTAssertFalse(snapshot.matches(invitation: replacement, scopeID: store.savedSession?.scopeId))
+        XCTAssertFalse(snapshot.matches(invitation: invitation, scopeID: "new-account-session"))
+        let stale = FriendInvitationConfirmationSnapshot(invitation: invitation, scopeID: "old-account-session", preview: preview)
+        let staleSent = await store.requestFriend(confirmation: stale)
+        XCTAssertFalse(staleSent)
+        XCTAssertEqual(fixture.friendPosts, 0)
+        let foreign = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "https://foreign.test/friends/Friend")!))
+        do { _ = try await store.previewFriend(foreign); XCTFail("Foreign endpoint was accepted") } catch {}
+        let foreignSent = await store.requestFriend(invitation: foreign)
+        XCTAssertFalse(foreignSent)
+        XCTAssertEqual(fixture.friendPosts, 0)
+        let sent = await store.requestFriend(confirmation: snapshot)
+        XCTAssertTrue(sent)
+        XCTAssertEqual(fixture.friendPosts, 1)
+        let received = expectation(description: "Availability started")
+        let release = DispatchSemaphore(value: 0)
+        fixture.beforeAvailability = { received.fulfill(); _ = release.wait(timeout: .now() + 3) }
+        let check = Task { try await store.checkHandle("Another") }
+        await fulfillment(of: [received], timeout: 2)
+        store.cancelSignIn()
+        release.signal()
+        do { _ = try await check.value; XCTFail("Stale session response accepted") } catch {}
+        XCTAssertNil(store.friendLink)
+        fixture.beforeAvailability = nil
+        await store.loadFriendLink()
+        try render(CowchatSetupWizard(social: store, initialStep: .friends, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-share-link")
+        try render(FriendInvitationConfirmation(social: store, invitation: invitation, onDismiss: {}), name: "mac-wizard-friend-confirmation")
+    }
+
+    @MainActor
+    func testFriendLinkFailureSurvivesBackgroundRefreshAndCanRetry() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        let store = fixture.store()
+        await store.loadSetup()
+        fixture.failLink = true
+        await store.loadFriendLink()
+        let failure = try XCTUnwrap(store.friendLinkFailure)
+        XCTAssertNil(store.friendLink)
+        await store.refresh()
+        XCTAssertEqual(store.friendLinkFailure, failure)
+        fixture.failLink = false
+        await store.loadFriendLink()
+        XCTAssertNotNil(store.friendLink)
+        XCTAssertNil(store.friendLinkFailure)
+    }
+
+    @MainActor
+    func testSetupRecoveryProfilePersistenceAndExplicitCredential() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        let store = fixture.store()
+        await store.loadSetup()
+        XCTAssertTrue(store.setupLoaded)
+        XCTAssertNil(store.setup)
+        XCTAssertTrue(store.setupSupported)
+        fixture.loseNextSetupReply = true
+        let lost = await store.establishSetup(displayName: "Chad DePue")
+        XCTAssertFalse(lost)
+        XCTAssertNil(store.setup)
+        await store.loadSetup()
+        XCTAssertEqual(store.setup?.agentId, "starter-agent")
+        XCTAssertEqual(store.setup?.roomId, "starter-home")
+        XCTAssertEqual(store.account?.displayName, "Chad DePue")
+        XCTAssertEqual(store.savedSession?.account, store.account)
+        let restored = fixture.store()
+        XCTAssertEqual(restored.account?.displayName, "Chad DePue")
+        await restored.loadSetup()
+        XCTAssertEqual(restored.setup?.roomId, store.setup?.roomId)
+        XCTAssertEqual(fixture.setupPosts, 1)
+        XCTAssertEqual(fixture.credentialPosts, 0)
+        await store.connectAgent("starter-agent")
+        XCTAssertEqual(store.issuedAgent?.apiKey, "csoc_agent_fixture")
+        XCTAssertEqual(fixture.credentialPosts, 1)
+        try render(CowchatSetupWizard(social: restored, initialStep: .name, name: "Chad DePue", onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-name")
+        try render(CowchatSetupWizard(social: restored, initialStep: .friends, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-friends")
+        try render(CowchatSetupWizard(social: restored, initialStep: .ready, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-ready")
+    }
+
+    @MainActor
+    func testSetupLoadsDuringColdStartRefresh() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        let store = fixture.store()
+        let received = expectation(description: "Cold refresh capability request")
+        let release = DispatchSemaphore(value: 0)
+        fixture.beforeFirstCapabilitiesReply = { received.fulfill(); _ = release.wait(timeout: .now() + 3) }
+        let refresh = Task { await store.refresh() }
+        await fulfillment(of: [received], timeout: 2)
+        let load = Task { await store.loadSetup() }
+        try await Task.sleep(nanoseconds: 10_000_000)
+        release.signal()
+        await refresh.value
+        await load.value
+        XCTAssertTrue(store.setupSupported)
+        XCTAssertTrue(store.setupLoaded)
+        XCTAssertNil(store.setup)
+    }
+
+    @MainActor
+    func testSetupUnsupportedHasNoProvisioningFallbackAndCancellationDiscardsReply() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        fixture.supported = false
+        let store = fixture.store()
+        await store.loadSetup()
+        XCTAssertFalse(store.setupSupported)
+        let created = await store.establishSetup(displayName: "Chad")
+        XCTAssertFalse(created)
+        XCTAssertEqual(fixture.setupPosts, 0)
+        fixture.supported = true
+        await store.loadSetup()
+        let received = expectation(description: "Setup request started")
+        let release = DispatchSemaphore(value: 0)
+        fixture.beforeSetupReply = { received.fulfill(); _ = release.wait(timeout: .now() + 3) }
+        let pending = Task { await store.establishSetup(displayName: "Chad DePue") }
+        await fulfillment(of: [received], timeout: 2)
+        store.cancelSignIn()
+        release.signal()
+        let late = await pending.value
+        XCTAssertFalse(late)
+        XCTAssertNil(store.setup)
+        XCTAssertFalse(store.setupLoaded)
+        XCTAssertFalse(store.busy)
+        XCTAssertNil(store.issuedAgent)
+        fixture.beforeSetupReply = nil
+        await store.loadSetup()
+        let next = await store.establishSetup(displayName: "Chad DePue")
+        XCTAssertTrue(next)
+        fixture.supported = false
+        let unsupported = fixture.store()
+        await unsupported.loadSetup()
+        try render(CowchatSetupWizard(social: unsupported, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-unsupported")
+        let signedOut = SocialStore(endpoint: fixture.endpoint, credentials: SocialMemoryCredentials(), session: fixture.session)
+        await signedOut.refresh()
+        try render(CowchatSetupWizard(social: signedOut, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-welcome")
+    }
+
+    private final class SetupFixture {
+        let endpoint = URL(string: "wss://fixture.example/ws")!
+        let credentials = SocialMemoryCredentials()
+        let session: URLSession
+        var established = false
+        var friendPosts = 0
+        var failLink = false
+        var beforeAvailability: (() -> Void)?
+        var supported = true
+        var setupPosts = 0
+        var credentialPosts = 0
+        var loseNextSetupReply = false
+        var beforeSetupReply: (() -> Void)?
+        var beforeFirstCapabilitiesReply: (() -> Void)?
+        var capabilityReads = 0
+        let agent = #"{"id":"starter-agent","owner_id":"me","name":"Chad_DePue_bot","discoverable":false}"#
+        var setupJSON: String {
+            established ? "{\"setup\":{\"agent_id\":\"starter-agent\",\"agent_name\":\"Chad_DePue_bot\",\"room_id\":\"starter-home\",\"room_name\":\"Chad_DePue_Home\",\"agent\":\(agent),\"room\":{\"room_id\":\"starter-home\",\"name\":\"Chad_DePue_Home\",\"owner_id\":\"me\"},\"bot_admitted\":true}}" : "{\"setup\":null}"
+        }
+        init() throws {
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = [SocialFixtureProtocol.self]
+            session = URLSession(configuration: config)
+            let account = SocialAccount(id: "me", handle: "chad", displayName: "Chad")
+            credentials.value = try JSONEncoder().encode(SocialSession(endpoint: endpoint, deviceKey: "csoc_setup_fixture", account: account)).base64EncodedString()
+            SocialFixtureProtocol.handler = { request in
+                switch request.url!.lastPathComponent {
+                case "capabilities":
+                    self.capabilityReads += 1
+                    if self.capabilityReads == 1 { self.beforeFirstCapabilitiesReply?() }
+                    return (200, self.supported ? #"{"providers":["google"],"setup_version":1,"handle_availability":true,"setup_handle":true,"friend_links":true}"# : #"{"providers":["google"]}"#)
+                case "availability":
+                    self.beforeAvailability?()
+                    return (200, #"{"handle":"Chad-DePue","available":true,"valid":true}"#)
+                case "friend-link":
+                    if self.failLink { throw URLError(.networkConnectionLost) }
+                    return (200, #"{"slug":"chad","url":"https://fixture.example/friends/chad"}"#)
+                case "Friend": return (200, #"{"account":{"id":"friend","handle":"Friend","display_name":"Your Friend"},"relationship":"none"}"#)
+                case "request":
+                    self.friendPosts += 1
+                    return (200, #"{"request":{"id":"request","from":{"id":"me","handle":"chad","display_name":"Chad"},"to":{"id":"friend","handle":"Friend","display_name":"Your Friend"},"status":"pending"}}"#)
+                case "setup":
+                    if request.httpMethod == "POST" {
+                        XCTAssertEqual(try SocialTests.body(request)["display_name"] as? String, "Chad DePue")
+                        self.setupPosts += 1
+                        self.established = true
+                        self.beforeSetupReply?()
+                        if self.loseNextSetupReply { self.loseNextSetupReply = false; throw URLError(.networkConnectionLost) }
+                    }
+                    return (200, self.setupJSON)
+                case "credentials":
+                    XCTAssertEqual(request.url!.path, "/social/v1/agents/starter-agent/credentials")
+                    self.credentialPosts += 1
+                    return (200, "{\"agent\":\(self.agent),\"api_key\":\"csoc_agent_fixture\"}")
+                case "me": return (200, "{\"account\":{\"id\":\"me\",\"handle\":\"chad\",\"display_name\":\"\(self.established ? "Chad DePue" : "Chad")\"},\"identities\":[]}")
+                default:
+                    let path = request.url!.lastPathComponent
+                    let key = path == "friend-requests" ? "requests" : path == "room-invitations" ? "invitations" : path
+                    return (200, "{\"\(key)\":[]}")
+                }
+            }
+        }
+        @MainActor func store() -> SocialStore { SocialStore(endpoint: endpoint, credentials: credentials, session: session) }
+        func close() { session.invalidateAndCancel(); SocialFixtureProtocol.handler = nil }
+    }
+
     @MainActor
     func testRoomCreationSupportsSoloAndFriendInvitesAndPreservesFailures() async throws {
         let config = URLSessionConfiguration.ephemeral
@@ -76,16 +313,16 @@ final class SocialTests: XCTestCase {
         store.onRoomsChanged = { changes += 1 }
         var draft = SocialRoomDraft(name: "  Solo room  ", agentIDs: ["mine"])
         let soloCreated = await store.createRoom(draft)
-        XCTAssertTrue(soloCreated)
+        XCTAssertEqual(soloCreated, "room-1")
         XCTAssertEqual(store.rooms.first?.id, "room-1")
         draft.name = "Shared room"
         draft.friendID = "friend"
         draft.proposedAgentIDs = ["theirs"]
         let sharedCreated = await store.createRoom(draft)
-        XCTAssertTrue(sharedCreated)
+        XCTAssertEqual(sharedCreated, "room-2")
         XCTAssertEqual(store.rooms.count, 2)
         let failed = await store.createRoom(draft)
-        XCTAssertFalse(failed)
+        XCTAssertNil(failed)
         XCTAssertEqual(changes, 2)
         XCTAssertEqual(store.rooms.count, 2)
         XCTAssertTrue(store.errorMessage?.contains("Room creation unavailable") == true)
@@ -666,7 +903,7 @@ final class SocialTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for scheme in [ColorScheme.light, .dark] {
             let view = NSHostingView(rootView: content.preferredColorScheme(scheme))
-            view.frame = NSRect(x: 0, y: 0, width: 700, height: 650)
+            view.frame = NSRect(x: 0, y: 0, width: name.hasPrefix("mac-wizard") ? 1000 : 700, height: 650)
             let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
             window.contentView = view

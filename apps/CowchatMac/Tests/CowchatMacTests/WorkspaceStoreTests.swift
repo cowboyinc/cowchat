@@ -51,6 +51,47 @@ private final class InMemoryCredentialStore: CowchatCredentialStore {
 
 final class WorkspaceStoreTests: XCTestCase {
     @MainActor
+    func testPendingFriendInvitationPersistsWithoutChangingEndpointOrSending() throws {
+        let fixture = makeWorkspace(withGlobal: true)
+        defer { fixture.cleanup() }
+        let workspace = fixture.workspace
+        let endpoint = workspace.social.endpoint
+        let invitation = URL(string: "cowchat://friend/Chad-DePue")!
+        workspace.receiveFriendInvitation(invitation)
+        let pending = try XCTUnwrap(workspace.pendingFriendInvitation)
+        XCTAssertEqual(workspace.social.endpoint, endpoint)
+        workspace.useSocialSession(makeSession())
+        XCTAssertEqual(workspace.pendingFriendInvitation, pending)
+        workspace.useSocialSession(nil)
+        XCTAssertEqual(workspace.pendingFriendInvitation, pending)
+        workspace.receiveFriendInvitation(URL(string: "cowchat://friend/Chad?evil=1")!)
+        XCTAssertEqual(workspace.pendingFriendInvitation, pending)
+        workspace.clearFriendInvitation(pending)
+        XCTAssertNil(workspace.pendingFriendInvitation)
+    }
+
+    @MainActor
+    func testPendingFriendInvitationRestoresAfterAppRestartAndOnlyExplicitClearRemovesIt() throws {
+        let suite = "FriendInvitationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ConnectionProfilePreferences(defaults: defaults, credentialStore: InMemoryCredentialStore())
+        func make() -> WorkspaceStore {
+            WorkspaceStore(local: ChatStore(connection: StubConnection(), defaults: defaults, connectionProfile: .local), preferences: preferences, defaults: defaults, socialCredentials: InMemoryCredentialStore())
+        }
+        let first = make()
+        first.receiveFriendInvitation(URL(string: "cowchat://friend/Chad-DePue")!)
+        let restored = make()
+        XCTAssertEqual(restored.pendingFriendInvitation, first.pendingFriendInvitation)
+        let old = try XCTUnwrap(restored.pendingFriendInvitation)
+        restored.receiveFriendInvitation(URL(string: "cowchat://friend/Another")!)
+        restored.clearFriendInvitation(old)
+        XCTAssertEqual(make().pendingFriendInvitation?.slug, "Another")
+        restored.clearFriendInvitation(try XCTUnwrap(restored.pendingFriendInvitation))
+        XCTAssertNil(make().pendingFriendInvitation)
+    }
+
+    @MainActor
     func testAccountSignInAndSignOutPreserveSharedGlobalConnection() async {
         let fixture = makeWorkspace(withGlobal: true)
         defer { fixture.cleanup() }
