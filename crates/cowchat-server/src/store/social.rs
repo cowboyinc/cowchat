@@ -199,7 +199,7 @@ fn setup(conn: &Connection, account: &str) -> anyhow::Result<Value> {
     let Some((agent_id, agent_name, room_id, room_name)) = row else {
         return Ok(json!({"setup":null}));
     };
-    let agent = agents(conn, Some(account), None, false)?
+    let agent = agents(conn, Some(account), None)?
         .into_iter()
         .find(|g| g["id"] == agent_id);
     let room: Option<Value> = conn.query_row(
@@ -220,12 +220,27 @@ fn agents(
     conn: &Connection,
     owner: Option<&str>,
     room: Option<&str>,
-    discoverable: bool,
 ) -> anyhow::Result<Vec<Value>> {
-    let mut s=conn.prepare("SELECT id,owner_id,name,discoverable FROM social_agents WHERE revoked=0 AND (?1 IS NULL OR owner_id=?1) AND (?2 IS NULL OR id IN (SELECT agent_id FROM social_admissions WHERE room_id=?2)) AND (?3=0 OR discoverable=1) ORDER BY name,id")?;
-    let rows=s.query_map(params![owner,room,discoverable],|r|Ok(json!({"id":r.get::<_,String>(0)?,"owner_id":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"discoverable":r.get::<_,bool>(3)?})))?;
+    let mut s=conn.prepare("SELECT id,owner_id,name FROM social_agents WHERE revoked=0 AND (?1 IS NULL OR owner_id=?1) AND (?2 IS NULL OR id IN (SELECT agent_id FROM social_admissions WHERE room_id=?2)) ORDER BY name,id")?;
+    let rows=s.query_map(params![owner,room],|r|Ok(json!({"id":r.get::<_,String>(0)?,"owner_id":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"discoverable":true})))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
+fn named_agent(conn: &Connection, owner: &str, name: &str) -> anyhow::Result<Option<String>> {
+    let wanted = name.to_lowercase();
+    let mut statement = conn
+        .prepare("SELECT id,name FROM social_agents WHERE owner_id=?1 AND revoked=0 ORDER BY id")?;
+    let rows = statement.query_map([owner], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (id, existing) = row?;
+        if existing.to_lowercase() == wanted {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
 fn members(conn: &Connection, room: &str) -> anyhow::Result<Vec<Value>> {
     let mut s =
         conn.prepare("SELECT account_id FROM social_members WHERE room_id=?1 ORDER BY account_id")?;
@@ -276,12 +291,12 @@ fn invitation(conn: &Connection, id: &str) -> anyhow::Result<Value> {
         r.get(0)
     })?;
     let wanted: Vec<String> = serde_json::from_str(&proposed)?;
-    let proposed = agents(conn, Some(&to), None, true)?
+    let proposed = agents(conn, Some(&to), None)?
         .into_iter()
         .filter(|a| wanted.iter().any(|id| a["id"] == *id))
         .collect::<Vec<_>>();
     Ok(
-        json!({"id":id,"room_id":room,"room_name":name,"from":account(conn,&from)?,"to":account(conn,&to)?,"proposed_agents":proposed,"members":members(conn,&room)?,"agents":agents(conn,None,Some(&room),false)?,"history_policy":"full","encrypted":false,"slack_connected":false,"status":status,"created_at":created}),
+        json!({"id":id,"room_id":room,"room_name":name,"from":account(conn,&from)?,"to":account(conn,&to)?,"proposed_agents":proposed,"members":members(conn,&room)?,"agents":agents(conn,None,Some(&room))?,"history_policy":"full","encrypted":false,"slack_connected":false,"status":status,"created_at":created}),
     )
 }
 fn invite(
@@ -297,7 +312,7 @@ fn invite(
         |r| r.get(0),
     )?;
     anyhow::ensure!(friends, "not found");
-    let visible = agents(conn, Some(to), None, true)?;
+    let visible = agents(conn, Some(to), None)?;
     anyhow::ensure!(
         proposed
             .iter()
@@ -452,12 +467,6 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                     }
                     bounded(
                         &tx,
-                        "SELECT COUNT(*) FROM social_agents WHERE owner_id=?1 AND revoked=0",
-                        a,
-                        100,
-                    )?;
-                    bounded(
-                        &tx,
                         "SELECT COUNT(*) FROM social_rooms WHERE owner_id=?1",
                         a,
                         100,
@@ -475,13 +484,25 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                         room_name = format!("{base}_{suffix}");
                         suffix += 1;
                     }
-                    let agent = uuid::Uuid::new_v4().to_string();
+                    let existing_agent = named_agent(&tx, a, &agent_name)?;
+                    let agent = if let Some(id) = existing_agent {
+                        id
+                    } else {
+                        bounded(
+                            &tx,
+                            "SELECT COUNT(*) FROM social_agents WHERE owner_id=?1 AND revoked=0",
+                            a,
+                            100,
+                        )?;
+                        let id = uuid::Uuid::new_v4().to_string();
+                        tx.execute("INSERT INTO social_agents(id,owner_id,name,discoverable) VALUES(?1,?2,?3,1)",params![id,a,agent_name])?;
+                        id
+                    };
                     let room = uuid::Uuid::new_v4().to_string();
                     tx.execute(
                         "UPDATE social_accounts SET display_name=?1 WHERE id=?2",
                         params![name, a],
                     )?;
-                    tx.execute("INSERT INTO social_agents(id,owner_id,name,discoverable) VALUES(?1,?2,?3,0)",params![agent,a,agent_name])?;
                     tx.execute("INSERT INTO rooms(room_id,name,visibility,owner_key,encrypted,created_by) VALUES(?1,?2,'private',?3,0,?4)",params![room,room_name,format!("{OWNER_PREFIX}{a}"),a])?;
                     tx.execute(
                         "INSERT INTO social_rooms(room_id,owner_id) VALUES(?1,?2)",
@@ -521,7 +542,14 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             }
             ("GET", ["friends"]) => {
                 let mut s = tx.prepare("SELECT b FROM social_friends WHERE a=?1 ORDER BY b")?;
-                let friends=s.query_map([a],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?.iter().map(|id|Ok(json!({"account":account(&tx,id)?,"agents":agents(&tx,Some(id),None,true)?}))).collect::<anyhow::Result<Vec<_>>>()?;
+                let friends = s
+                    .query_map([a], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+                    .iter()
+                    .map(|id| {
+                        Ok(json!({"account":account(&tx,id)?,"agents":agents(&tx,Some(id),None)?}))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
                 json!({"friends":friends})
             }
             ("DELETE", ["friends", other]) => {
@@ -575,7 +603,7 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 }
                 json!({"ok":true})
             }
-            ("GET", ["agents"]) => json!({"agents":agents(&tx,Some(a),None,false)?}),
+            ("GET", ["agents"]) => json!({"agents":agents(&tx,Some(a),None)?}),
             ("POST", ["agents"]) => {
                 bounded(
                     &tx,
@@ -598,13 +626,9 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                         && name.chars().all(display_char),
                     "invalid name"
                 );
+                anyhow::ensure!(named_agent(&tx, a, name)?.is_none(), "An agent with this name already exists. Use Connect on that agent, or choose another name.");
                 let id = uuid::Uuid::new_v4().to_string();
-                let discoverable = match body.get("discoverable") {
-                    None => true,
-                    Some(value) => value
-                        .as_bool()
-                        .ok_or_else(|| anyhow::anyhow!("invalid discoverable"))?,
-                };
+                let discoverable = true;
                 tx.execute(
                     "INSERT INTO social_agents(id,owner_id,name,discoverable) VALUES(?1,?2,?3,?4)",
                     params![id, a, name, discoverable],
@@ -613,7 +637,7 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 json!({"agent":{"id":id,"owner_id":a,"name":name,"discoverable":discoverable},"api_key":key})
             }
             ("POST", ["agents", id, "credentials"]) => {
-                let agent = agents(&tx, Some(a), None, false)?
+                let agent = agents(&tx, Some(a), None)?
                     .into_iter()
                     .find(|g| g["id"] == *id)
                     .ok_or_else(|| anyhow::anyhow!("not found"))?;
@@ -721,7 +745,7 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             ("GET", ["rooms", room, "participants"]) => {
                 anyhow::ensure!(room_access(&tx, room, key)? == Some(true), "not found");
                 let (name,owner):(String,String)=tx.query_row("SELECT r.name,s.owner_id FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id WHERE r.room_id=?1",[room],|r|Ok((r.get(0)?,r.get(1)?)))?;
-                json!({"room_id":room,"name":name,"owner_id":owner,"history_policy":"full","encrypted":false,"slack_connected":false,"members":members(&tx,room)?,"agents":agents(&tx,None,Some(room),false)?})
+                json!({"room_id":room,"name":name,"owner_id":owner,"history_policy":"full","encrypted":false,"slack_connected":false,"members":members(&tx,room)?,"agents":agents(&tx,None,Some(room))?})
             }
             ("POST", ["rooms", _, "invitations"]) => {
                 anyhow::bail!("Additional people are not supported in v1")
@@ -1275,6 +1299,107 @@ mod tests {
         }
     }
     #[test]
+    fn default_bot_is_reused_and_all_bots_are_visible_only_to_friends() {
+        let store = Store::open_in_memory().unwrap();
+        let (key, owner) = login_named(&store, "owner", "Chad DePue");
+        let (friend_key, friend) = login(&store, "friend");
+        let (stranger, _) = login(&store, "stranger");
+        let agent = store
+            .social_action(&key, "POST", "agents", &json!({"discoverable":false}))
+            .unwrap();
+        let id = agent["agent"]["id"].as_str().unwrap();
+        // Simulate a bot created with the old visibility flag before upgrading.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE social_agents SET discoverable=0 WHERE id=?1", [id])
+            .unwrap();
+        let setup = store
+            .social_action(&key, "POST", "setup", &json!({"display_name":"Chad DePue"}))
+            .unwrap();
+        assert_eq!(setup["setup"]["agent_id"], id);
+        assert_eq!(
+            store
+                .social_action(&key, "GET", "agents", &json!({}))
+                .unwrap()["agents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .social_action(&key, "POST", "agents", &json!({"name":"chad_depue_BOT"}))
+            .is_err());
+        assert_eq!(
+            store
+                .social_action(&friend_key, "GET", "friends", &json!({}))
+                .unwrap()["friends"],
+            json!([])
+        );
+        let request = store
+            .social_action(
+                &key,
+                "POST",
+                "friend-requests",
+                &json!({"handle":friend["handle"]}),
+            )
+            .unwrap();
+        store
+            .social_action(
+                &friend_key,
+                "POST",
+                &format!(
+                    "friend-requests/{}/accept",
+                    request["request"]["id"].as_str().unwrap()
+                ),
+                &json!({}),
+            )
+            .unwrap();
+        let list = store
+            .social_action(&friend_key, "GET", "friends", &json!({}))
+            .unwrap();
+        assert_eq!(list["friends"][0]["account"]["id"], owner["id"]);
+        assert_eq!(list["friends"][0]["agents"][0]["id"], id);
+        assert_eq!(
+            store
+                .social_action(&stranger, "GET", "friends", &json!({}))
+                .unwrap()["friends"],
+            json!([])
+        );
+        assert_eq!(
+            store
+                .social_action(&friend_key, "GET", "rooms", &json!({}))
+                .unwrap()["rooms"],
+            json!([])
+        );
+        assert!(store
+            .social_action(
+                &agent["api_key"].as_str().unwrap(),
+                "GET",
+                "friends",
+                &json!({})
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn unicode_default_names_share_the_same_duplicate_check() {
+        let store = Store::open_in_memory().unwrap();
+        let (key, _) = login_named(&store, "unicode", "Éléonore");
+        let bot = store
+            .social_action(&key, "POST", "agents", &json!({"name":"éléonore_bot"}))
+            .unwrap();
+        let setup = store
+            .social_action(&key, "POST", "setup", &json!({"display_name":"Éléonore"}))
+            .unwrap();
+        assert_eq!(setup["setup"]["agent_id"], bot["agent"]["id"]);
+        assert!(store
+            .social_action(&key, "POST", "agents", &json!({"name":"Éléonore_bot"}))
+            .is_err());
+    }
+
+    #[test]
     fn setup_is_durable_private_credentialless_and_never_repairs_revocation() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("setup.db");
@@ -1298,7 +1423,7 @@ mod tests {
         let data = &initial["setup"];
         assert_eq!(data["agent_name"], "Chad_DePue_bot");
         assert_eq!(data["room_name"], "Chad_DePue_Home");
-        assert_eq!(data["agent"]["discoverable"], false);
+        assert_eq!(data["agent"]["discoverable"], true);
         assert_eq!(data["bot_admitted"], true);
         assert!(!initial.to_string().contains("api_key"));
         let room = data["room_id"].as_str().unwrap();
@@ -1579,10 +1704,9 @@ mod tests {
             .social_action(&key, "POST", "setup", &json!({"display_name":"Chad DePue"}))
             .unwrap();
         assert_eq!(created["setup"]["room_name"], "Chad_DePue_Home_0");
-        let default = store
+        assert!(store
             .social_action(&key, "POST", "agents", &json!({}))
-            .unwrap();
-        assert_eq!(default["agent"]["name"], "Chad_DePue_bot");
+            .is_err());
         assert_eq!(starter_stem(" /🦄 "), "Cowboy");
         assert_eq!(starter_stem("Éléonore 王"), "Éléonore_王");
         let other_id = store

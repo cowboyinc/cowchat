@@ -127,6 +127,15 @@ final class WorkspaceStore: ObservableObject {
         return social.savedSession?.scopeId == session.scopeId && accountGlobal === store
     }
 
+    func openCreatedSocialRoom(roomID: String) async -> Bool {
+        guard let store = accountGlobal else { return false }
+        do { try await store.refreshRooms() } catch { return false }
+        guard let room = store.rooms.first(where: { $0.id == roomID }) else { return false }
+        await select(room: room, on: .accountGlobal)
+        store.secondAgentHintRoom = room
+        return true
+    }
+
     var isGlobalEnabled: Bool { global != nil }
 
     init(

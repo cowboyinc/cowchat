@@ -424,21 +424,21 @@ final class SocialStore: ObservableObject {
     func createAgent(name: String) async {
         let ticket = generation
         await perform { api in
-            let created: SocialCreatedAgent = try await api.social(["agents"], method: "POST", body: ["name": name, "discoverable": true])
+            let created: SocialCreatedAgent = try await api.social(["agents"], method: "POST", body: ["name": name])
             guard ticket == self.generation else { return }
             self.issuedAgent = created
         }
     }
 
-    func createRoom(_ draft: SocialRoomDraft) async -> Bool {
+    func createRoom(_ draft: SocialRoomDraft) async -> String? {
         let ticket = generation
-        var created = false
+        var roomID: String?
         await perform { api in
             struct Reply: Decodable { let roomId: String }
-            let _: Reply = try await api.social(["rooms"], method: "POST", body: draft.requestBody)
-            created = ticket == self.generation
+            let reply: Reply = try await api.social(["rooms"], method: "POST", body: draft.requestBody)
+            roomID = ticket == self.generation ? reply.roomId : nil
         }
-        return created && ticket == generation
+        return roomID
     }
 
     func dismissAgentCredential() { issuedAgent = nil }

@@ -313,16 +313,16 @@ final class SocialTests: XCTestCase {
         store.onRoomsChanged = { changes += 1 }
         var draft = SocialRoomDraft(name: "  Solo room  ", agentIDs: ["mine"])
         let soloCreated = await store.createRoom(draft)
-        XCTAssertTrue(soloCreated)
+        XCTAssertEqual(soloCreated, "room-1")
         XCTAssertEqual(store.rooms.first?.id, "room-1")
         draft.name = "Shared room"
         draft.friendID = "friend"
         draft.proposedAgentIDs = ["theirs"]
         let sharedCreated = await store.createRoom(draft)
-        XCTAssertTrue(sharedCreated)
+        XCTAssertEqual(sharedCreated, "room-2")
         XCTAssertEqual(store.rooms.count, 2)
         let failed = await store.createRoom(draft)
-        XCTAssertFalse(failed)
+        XCTAssertNil(failed)
         XCTAssertEqual(changes, 2)
         XCTAssertEqual(store.rooms.count, 2)
         XCTAssertTrue(store.errorMessage?.contains("Room creation unavailable") == true)

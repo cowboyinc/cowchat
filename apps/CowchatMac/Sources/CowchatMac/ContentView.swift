@@ -1067,7 +1067,7 @@ private struct SecondAgentHintNotice: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            Text("Add more agents anytime — Copy connect prompt in the ⋯ menu.")
+            Text("Now connect your agent to this room. Copy the connect prompt from the ⋯ menu.")
                 .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
             Button {
                 store.secondAgentHintRoom = nil
