@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 struct SocialSession: Codable, Equatable {
+    static let credentialAccount = "cowchat-social-session-v1"
     let endpoint: URL
     let deviceKey: String
     let account: SocialAccount
@@ -64,14 +65,13 @@ final class SocialStore: ObservableObject {
     var onSessionChanged: ((SocialSession?) -> Void)?
     var onRoomsChanged: (() -> Void)?
     var onSnapshot: ((SocialNotificationSnapshot) -> Void)?
-    private static let credentialAccount = "cowchat-social-session-v1"
 
     init(endpoint: URL, credentials: any CowchatCredentialStore = KeychainCowchatCredentialStore(), session: URLSession = SocialAPI.secureSession) {
         self.endpoint = endpoint
         self.credentials = credentials
         self.session = session
         do {
-            if let encoded = try credentials.credential(for: Self.credentialAccount),
+            if let encoded = try credentials.credential(for: SocialSession.credentialAccount),
                let data = Data(base64Encoded: encoded) {
                 let saved = try JSONDecoder().decode(SocialSession.self, from: data)
                 _ = try SocialAPI(endpoint: saved.endpoint, key: saved.deviceKey)
@@ -226,7 +226,7 @@ final class SocialStore: ObservableObject {
                 }
                 let scopeID = previousSession.flatMap { $0.deviceKey == key ? $0.scopeId : nil } ?? UUID().uuidString.lowercased()
                 let saved = SocialSession(endpoint: endpoint, deviceKey: key, account: account, scopeId: scopeID)
-                try credentials.setCredential(try JSONEncoder().encode(saved).base64EncodedString(), for: Self.credentialAccount)
+                try credentials.setCredential(try JSONEncoder().encode(saved).base64EncodedString(), for: SocialSession.credentialAccount)
                 savedSession = saved
                 self.account = account
                 phase = .signedIn
@@ -263,7 +263,7 @@ final class SocialStore: ObservableObject {
         let oldAPI = try? boundAPI()
         cancelSignIn()
         busy = false
-        do { try credentials.setCredential(nil, for: Self.credentialAccount) }
+        do { try credentials.setCredential(nil, for: SocialSession.credentialAccount) }
         catch { errorMessage = error.localizedDescription; return }
         savedSession = nil
         account = nil
@@ -293,7 +293,7 @@ final class SocialStore: ObservableObject {
     private func saveAccount(_ account: SocialAccount) throws {
         guard let old = savedSession, old.account != account else { return }
         let saved = SocialSession(endpoint: old.endpoint, deviceKey: old.deviceKey, account: account, scopeId: old.scopeId)
-        try credentials.setCredential(try JSONEncoder().encode(saved).base64EncodedString(), for: Self.credentialAccount)
+        try credentials.setCredential(try JSONEncoder().encode(saved).base64EncodedString(), for: SocialSession.credentialAccount)
         savedSession = saved
         self.account = account
     }

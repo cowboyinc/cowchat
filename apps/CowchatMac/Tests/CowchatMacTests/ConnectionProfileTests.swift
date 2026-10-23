@@ -8,6 +8,7 @@ private enum TestCredentialStoreFailure: Error, Equatable {
 }
 
 private final class TestCredentialStore: CowchatCredentialStore {
+    func accounts(withPrefix prefix: String) throws -> [String] { credentials.keys.filter { $0.hasPrefix(prefix) } }
     private(set) var credentials: [String: String] = [:]
     private(set) var setCalls: [(credential: String?, account: String)] = []
     private(set) var deletionAttempts: [String: Int] = [:]
