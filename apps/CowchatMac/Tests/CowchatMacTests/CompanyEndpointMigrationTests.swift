@@ -125,6 +125,31 @@ final class CompanyEndpointMigrationTests: XCTestCase {
         }
     }
 
+    func testStartupRecoversNewCredentialWithOldDisplayURLIncludingSocialOnly() async throws {
+        for hasCloud in [true, false] {
+            credentials.values = [:]
+            defaults.removePersistentDomain(forName: suite)
+            _ = try seed(cloud: hasCloud)
+            // Keep the completed journal, then reproduce a crash before the defaults write.
+            credentials.failWrite = hasCloud ? 6 : 4
+            do { _ = try await preferences.migrateCompanyEndpoint(session: session) } catch {}
+            XCTAssertNotNil(credentials.values["company-endpoint-migration-v1"])
+            if hasCloud { defaults.set(old, forKey: "CowchatMac.connection.cloudURL") }
+            else { defaults.removeObject(forKey: "CowchatMac.connection.cloudURL") }
+            credentials.failWrite = nil
+            let restarted = ConnectionProfilePreferences(defaults: defaults, credentialStore: credentials)
+            let cloud = try? restarted.loadConfiguredCloudProfile()
+            if hasCloud { XCTAssertEqual(cloud?.cloudAccountID, id) }
+            else { XCTAssertNil(cloud) }
+            XCTAssertEqual(restarted.loadSavedCloudURL(), new)
+            XCTAssertNil(credentials.values["company-endpoint-migration-v1"])
+            let encoded = try XCTUnwrap(credentials.values[SocialSession.credentialAccount])
+            let social = try JSONDecoder().decode(SocialSession.self, from: XCTUnwrap(Data(base64Encoded: encoded)))
+            XCTAssertEqual(social.endpoint.absoluteString, new)
+            XCTAssertEqual(social.scopeId, socialID)
+        }
+    }
+
     func testOfflineUnauthorizedRedirectAndPublicLookingResponseKeepOldProfile() async throws {
         _ = try seed()
         let before = credentials.values
