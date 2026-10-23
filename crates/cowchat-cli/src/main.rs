@@ -4,7 +4,7 @@ mod bridge;
 mod chart;
 mod telegram;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use cowchat_client::{ClientError, CowchatClient};
 use cowchat_core::{ChatMessage, ErrorCode, FrameType};
 use std::io::Write;
@@ -188,6 +188,8 @@ struct Cli {
 
     /// Connect over WebSocket to a remote server, e.g.
     /// wss://your-server.example/ws. Takes precedence over --tcp/--socket.
+    /// May also be supplied through COWCHAT_URL, used when none of --url,
+    /// --tcp or --socket is given.
     #[arg(long, global = true)]
     url: Option<String>,
 
@@ -928,6 +930,15 @@ fn env_non_empty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
+/// `COWCHAT_URL` stands in for `--url` when the command line names no
+/// connection (`--url`, `--tcp`, an explicit `--socket`), so a host set up
+/// for one remote server needs no flag on every command.
+fn url_from_env(cli: &mut Cli, socket_given: bool, env_url: Option<String>) {
+    if cli.url.is_none() && cli.tcp.is_none() && !socket_given {
+        cli.url = env_url;
+    }
+}
+
 fn resolve_agent_id(cli: &Cli) -> Option<String> {
     cli.agent_id
         .clone()
@@ -1107,7 +1118,7 @@ fn attachment_http_base(ws_url: Option<&str>) -> Result<String, String> {
         Some(url) => Ok(invite_http_base(Some(url))),
         None => Err(
             "attachments need the server's HTTP surface; connect with --url wss://<host>/ws \
-             (local socket/TCP connections don't expose one)"
+             or COWCHAT_URL (local socket/TCP connections don't expose one)"
                 .to_string(),
         ),
     }
@@ -1688,7 +1699,12 @@ async fn run_shell(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
-    let cli = Cli::parse();
+    // parsed by hand to tell an explicit --socket from its default
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let socket_given =
+        matches.value_source("socket") == Some(clap::parser::ValueSource::CommandLine);
+    url_from_env(&mut cli, socket_given, env_non_empty("COWCHAT_URL"));
     require_stable_named_agent(&cli)?;
 
     match &cli.command {
@@ -3582,7 +3598,9 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
 
 #[cfg(test)]
 mod room_key_tests {
-    use super::{invite_http_base, resolve_room_key, Cli, Commands, InviteAction, RoomAction};
+    use super::{
+        invite_http_base, resolve_room_key, url_from_env, Cli, Commands, InviteAction, RoomAction,
+    };
     use clap::Parser;
 
     #[test]
@@ -3697,6 +3715,34 @@ mod room_key_tests {
         assert!(invite_revoke_is_id(&"f".repeat(65)).is_err());
         assert!(invite_revoke_is_id(&format!("{}g", "f".repeat(63))).is_err());
         assert!(invite_revoke_is_id("not-an-invite").is_err());
+    }
+
+    #[test]
+    fn cowchat_url_stands_in_for_url_unless_a_connection_is_named() {
+        let remote = Some("wss://chat.example/ws".to_string());
+        let mut cli = Cli::try_parse_from(["cowchat", "status"]).unwrap();
+        url_from_env(&mut cli, false, remote.clone());
+        assert_eq!(cli.url.as_deref(), Some("wss://chat.example/ws"));
+
+        let mut cli =
+            Cli::try_parse_from(["cowchat", "--url", "wss://other/ws", "status"]).unwrap();
+        url_from_env(&mut cli, false, remote.clone());
+        assert_eq!(cli.url.as_deref(), Some("wss://other/ws"));
+
+        let mut cli =
+            Cli::try_parse_from(["cowchat", "--tcp", "127.0.0.1:9229", "status"]).unwrap();
+        url_from_env(&mut cli, false, remote.clone());
+        assert_eq!(cli.url, None);
+
+        // an explicit --socket is a connection named on the command line
+        let mut cli =
+            Cli::try_parse_from(["cowchat", "--socket", "/tmp/x.sock", "status"]).unwrap();
+        url_from_env(&mut cli, true, remote);
+        assert_eq!(cli.url, None);
+
+        let mut cli = Cli::try_parse_from(["cowchat", "status"]).unwrap();
+        url_from_env(&mut cli, false, None);
+        assert_eq!(cli.url, None);
     }
 
     #[test]
