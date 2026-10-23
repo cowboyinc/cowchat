@@ -4,6 +4,7 @@ import XCTest
 @testable import CowchatMac
 
 private final class SocialMemoryCredentials: CowchatCredentialStore {
+    func accounts(withPrefix prefix: String) throws -> [String] { [] }
     var value: String?
     func credential(for account: String) throws -> String? { value }
     func setCredential(_ credential: String?, for account: String) throws { value = credential }
@@ -30,7 +31,7 @@ final class SocialTests: XCTestCase {
         let production = try XCTUnwrap(FriendInvitationRoute.parse(URL(string: "cowchat://friend/Chad-DePue")!))
         XCTAssertEqual(production.slug, "Chad-DePue")
         XCTAssertTrue(production.matches(URL(string: ConnectionProfile.defaultGlobalURLString)!))
-        XCTAssertEqual(FriendInvitationRoute.parse(URL(string: "https://chat.cowchat.cowboy.inc/friends/Chad-DePue")!), production)
+        XCTAssertEqual(FriendInvitationRoute.parse(URL(string: "https://chat.cowchat.cowboylabs.net/friends/Chad-DePue")!), production)
         for value in ["cowchat://friend/a", "cowchat://friend/Chad/extra", "cowchat://friend/Chad#fragment", "cowchat://friend/Chad?token=secret", "cowchat://friend/Chad?server=wss://one/ws&server=wss://two/ws", "cowchat://user@friend/Chad", "cowchat://friend:443/Chad", "cowchat://friend/Chad?server=http://evil.test/ws", "https://user@chat.cowchat.cowboy.inc/friends/Chad", "https://chat.cowchat.cowboy.inc/friends/Chad?foo=bar", "https://chat.cowchat.cowboy.inc/friends/Chad/", "http://chat.cowchat.cowboy.inc/friends/Chad", "cowchat://friend/Chad%2FDePue"] {
             XCTAssertNil(FriendInvitationRoute.parse(try XCTUnwrap(URL(string: value))), value)
         }
