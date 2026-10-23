@@ -50,8 +50,7 @@ struct ConnectionProfile: Equatable, CustomStringConvertible, CustomDebugStringC
 
     /// Cowboy's hosted global server. The settings UI offers this endpoint by
     /// default; only an API key is required to join.
-    static let legacyGlobalURLString = "wss://chat.cowchat.cowboy.inc/ws"
-    static let defaultGlobalURLString = "wss://chat.cowchat.cowboylabs.net/ws"
+    static let defaultGlobalURLString = "wss://chat.cowchat.cowboy.inc/ws"
 
     static let local = ConnectionProfile(
         kind: .local,
@@ -222,7 +221,6 @@ struct ConnectionProfile: Equatable, CustomStringConvertible, CustomDebugStringC
 protocol CowchatCredentialStore {
     func credential(for account: String) throws -> String?
     func setCredential(_ credential: String?, for account: String) throws
-    func accounts(withPrefix prefix: String) throws -> [String]
 }
 
 enum CowchatCredentialStoreError: LocalizedError, Equatable {
@@ -294,19 +292,6 @@ struct KeychainCowchatCredentialStore: CowchatCredentialStore {
         guard addStatus == errSecSuccess else {
             throw CowchatCredentialStoreError.keychain(addStatus)
         }
-    }
-
-    func accounts(withPrefix prefix: String) throws -> [String] {
-        var query = baseQuery(account: "")
-        query.removeValue(forKey: kSecAttrAccount as String)
-        query[kSecReturnAttributes as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitAll
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return [] }
-        guard status == errSecSuccess else { throw CowchatCredentialStoreError.keychain(status) }
-        guard let items = result as? [[String: Any]] else { throw CowchatCredentialStoreError.invalidCredentialData }
-        return items.compactMap { $0[kSecAttrAccount as String] as? String }.filter { $0.hasPrefix(prefix) }
     }
 
     private func baseQuery(account: String) -> [String: Any] {
@@ -383,9 +368,7 @@ final class ConnectionProfilePreferences {
     }
 
     func loadConfiguredCloudProfile() throws -> ConnectionProfile? {
-        try resumeCompanyMigration()
-        try recoverMissingCompanyURL()
-        return try loadConfiguredCloudProfile(retryingCleanup: true)
+        try loadConfiguredCloudProfile(retryingCleanup: true)
     }
 
     private func loadConfiguredCloudProfile(
@@ -445,7 +428,6 @@ final class ConnectionProfilePreferences {
             retryRetiredCredentialCleanup(excluding: activeAccountID)
             return .local
         case .cowchatCloud:
-            try resumeCompanyMigration()
             guard let endpointURL = profile.endpointURL else {
                 throw ConnectionProfileError.invalidCloudURL
             }
@@ -493,7 +475,6 @@ final class ConnectionProfilePreferences {
     }
 
     func clearCloudConfiguration() throws {
-        try resumeCompanyMigration()
         let accountID = storedCloudAccountID()
         retryPendingCredentialCleanup(excluding: accountID)
         retryRetiredCredentialCleanup(excluding: accountID)
@@ -655,131 +636,5 @@ final class ConnectionProfilePreferences {
             if candidate != previousAccountID { return candidate }
         }
         throw ConnectionProfileError.cloudAccountIDGenerationFailed
-    }
-}
-
-extension ConnectionProfilePreferences {
-    private struct CompanyMigration: Codable {
-        let source: String
-        let destination: String
-        let accountID: String?
-        let cloudBefore: String?
-        let cloudAfter: String?
-        let socialBefore: String?
-        let socialAfter: String?
-        let savedURL: String?
-    }
-
-    private static let companyMigrationAccount = "company-endpoint-migration-v1"
-    private static let companyRollbackKey = "CowchatMac.connection.companyEndpointRollback"
-
-    /// This exception is compiled in; neither a redirect nor preferences can nominate a host.
-    @MainActor
-    @discardableResult
-    func migrateCompanyEndpoint(
-        rollback: Bool = false,
-        automatic: Bool = true,
-        session: URLSession = SocialAPI.secureSession
-    ) async throws -> Bool {
-        try resumeCompanyMigration()
-        try recoverMissingCompanyURL()
-        if automatic && !rollback && defaults.bool(forKey: Self.companyRollbackKey) { return false }
-        let source = rollback ? ConnectionProfile.defaultGlobalURLString : ConnectionProfile.legacyGlobalURLString
-        let destination = rollback ? ConnectionProfile.legacyGlobalURLString : ConnectionProfile.defaultGlobalURLString
-        let accountID = storedCloudAccountID()
-        let cloudBefore = try accountID.flatMap { try credentialStore.credential(for: $0) }
-        let socialBefore = try credentialStore.credential(for: SocialSession.credentialAccount)
-        let savedURL = defaults.string(forKey: Keys.cloudURL)
-        var profiles: [ConnectionProfile] = []
-        var cloudAfter: String?
-        var socialAfter: String?
-        if let accountID, let cloudBefore {
-            guard case let .bound(endpoint, key) = try decodeCredential(cloudBefore),
-                  endpoint.absoluteString == source, savedURL == source else { return false }
-            profiles.append(try ConnectionProfile.cowchatCloud(urlString: source, apiKey: key).persisted(cloudAccountID: accountID))
-            cloudAfter = try encodeCredential(endpointURL: URL(string: destination)!, apiKey: key)
-        } else if accountID != nil || savedURL != nil && savedURL != source {
-            return false
-        }
-        var socialSession: SocialSession?
-        if let socialBefore, let data = Data(base64Encoded: socialBefore),
-           let saved = try? JSONDecoder().decode(SocialSession.self, from: data),
-           saved.endpoint.absoluteString == source {
-            guard saved.deviceKey.hasPrefix("csoc_") else { return false }
-            socialSession = saved
-            profiles.append(try ConnectionProfile.socialSession(saved))
-            let moved = SocialSession(endpoint: URL(string: destination)!, deviceKey: saved.deviceKey, account: saved.account, scopeId: saved.scopeId)
-            socialAfter = try JSONEncoder().encode(moved).base64EncodedString()
-        }
-        guard !profiles.isEmpty else { return false }
-        for profile in profiles {
-            let api = try SocialAPI(endpoint: URL(string: destination)!, key: profile.apiKey, session: session)
-            if let socialSession, profile.apiKey == socialSession.deviceKey {
-                let me: SocialMe = try await api.social(["me"])
-                guard me.account.id == socialSession.account.id else { throw CowchatConnectionError.invalidResponse }
-            } else {
-                struct Agents: Decodable { let agents: [Agent] }
-                struct Agent: Decodable { let agentId: String }
-                let _: Agents = try await api.request(["api", "agents"])
-            }
-        }
-        try Task.checkCancellation()
-        // Network awaits permit UI edits. Never commit over a changed account or session.
-        guard accountID == storedCloudAccountID(), savedURL == defaults.string(forKey: Keys.cloudURL),
-              cloudBefore == (try accountID.flatMap { try credentialStore.credential(for: $0) }),
-              socialBefore == (try credentialStore.credential(for: SocialSession.credentialAccount)) else {
-            throw ConnectionProfileError.cloudEndpointBindingMismatch
-        }
-        for profile in profiles {
-            let moved = try ConnectionProfile.cowchatCloud(urlString: destination, apiKey: profile.apiKey)
-                .persisted(cloudAccountID: profile.cloudAccountID!)
-            let oldPrefix = RoomCrypto.credentialAccount(profile: profile, roomID: "")
-            let newPrefix = RoomCrypto.credentialAccount(profile: moved, roomID: "")
-            for account in try credentialStore.accounts(withPrefix: oldPrefix) {
-                guard let secret = try credentialStore.credential(for: account) else { throw CowchatCredentialStoreError.invalidCredentialData }
-                let target = newPrefix + account.dropFirst(oldPrefix.count)
-                if let existing = try credentialStore.credential(for: target) {
-                    guard existing == secret else { throw ConnectionProfileError.cloudEndpointBindingMismatch }
-                } else {
-                    try credentialStore.setCredential(secret, for: target)
-                }
-            }
-        }
-        let journal = CompanyMigration(source: source, destination: destination, accountID: accountID, cloudBefore: cloudBefore, cloudAfter: cloudAfter, socialBefore: socialBefore, socialAfter: socialAfter, savedURL: savedURL)
-        try credentialStore.setCredential(try JSONEncoder().encode(journal).base64EncodedString(), for: Self.companyMigrationAccount)
-        try resumeCompanyMigration()
-        return true
-    }
-
-    private func recoverMissingCompanyURL() throws {
-        guard defaults.string(forKey: Keys.cloudURL) == nil, let id = storedCloudAccountID(),
-              let value = try credentialStore.credential(for: id),
-              case let .bound(endpoint, _) = try decodeCredential(value),
-              [ConnectionProfile.legacyGlobalURLString, ConnectionProfile.defaultGlobalURLString].contains(endpoint.absoluteString) else { return }
-        // Recover only from the protected endpoint, never from the changed UI default.
-        defaults.set(endpoint.absoluteString, forKey: Keys.cloudURL)
-        try synchronizeDefaultsForCloudAccountID()
-    }
-
-    /// Finish only a Keychain-authenticated transaction whose other records still match.
-    private func resumeCompanyMigration() throws {
-        guard let encoded = try credentialStore.credential(for: Self.companyMigrationAccount) else { return }
-        guard let data = Data(base64Encoded: encoded), let journal = try? JSONDecoder().decode(CompanyMigration.self, from: data),
-              Set([journal.source, journal.destination]) == Set([ConnectionProfile.legacyGlobalURLString, ConnectionProfile.defaultGlobalURLString]),
-              journal.accountID == storedCloudAccountID() else { throw ConnectionProfileError.cloudEndpointBindingMismatch }
-        let savedURL = defaults.string(forKey: Keys.cloudURL)
-        guard savedURL == journal.savedURL || savedURL == journal.destination else { throw ConnectionProfileError.cloudEndpointBindingMismatch }
-        if let id = journal.accountID {
-            let value = try credentialStore.credential(for: id)
-            guard value == journal.cloudBefore || value == journal.cloudAfter else { throw ConnectionProfileError.cloudEndpointBindingMismatch }
-        }
-        let social = try credentialStore.credential(for: SocialSession.credentialAccount)
-        guard social == journal.socialBefore || social == journal.socialAfter else { throw ConnectionProfileError.cloudEndpointBindingMismatch }
-        if let value = journal.socialAfter { try credentialStore.setCredential(value, for: SocialSession.credentialAccount) }
-        if let id = journal.accountID, let value = journal.cloudAfter { try credentialStore.setCredential(value, for: id) }
-        defaults.set(journal.destination, forKey: Keys.cloudURL)
-        defaults.set(journal.destination == ConnectionProfile.legacyGlobalURLString, forKey: Self.companyRollbackKey)
-        try synchronizeDefaultsForCloudAccountID()
-        try credentialStore.setCredential(nil, for: Self.companyMigrationAccount)
     }
 }
