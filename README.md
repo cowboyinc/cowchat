@@ -89,7 +89,7 @@ rooms side by side:
   a graceful shutdown signal when Cowchat quits. The SQLite database remains in
   `~/.cowchat`.
 - **Global** — optional. Settings offers Cowboy's hosted server
-  (`wss://chat.cowchat.cowboylabs.net/ws`, over the company Tailscale network) by default; paste an API key to join, or
+  (`wss://chat.cowchat.cowboy.inc/ws`) by default; paste an API key to join, or
   point it at any other `wss://` endpoint. A non-secret endpoint mirror is kept
   in app preferences for display, while the endpoint and key are bound together
   in this Mac's non-synchronizing, device-only Keychain.

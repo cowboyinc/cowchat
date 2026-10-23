@@ -310,13 +310,11 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
 }
 
 private final class RoomTransitionCredentialStore: CowchatCredentialStore {
-    func accounts(withPrefix prefix: String) throws -> [String] { [] }
     var credential: String?
     var readError: Error?
     var writeError: Error?
 
-    func credential(for account: String) throws -> String? {
-        if account == "company-endpoint-migration-v1" { return nil }
+    func credential(for _: String) throws -> String? {
         if let readError { throw readError }
         return credential
     }

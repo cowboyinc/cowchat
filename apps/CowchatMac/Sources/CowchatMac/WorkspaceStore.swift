@@ -62,11 +62,7 @@ final class WorkspaceStore: ObservableObject {
     private let requestAPIKey: (URL) async throws -> String
     private let makeAccountStore: (ConnectionProfile) -> ChatStore
 
-    private var companyMigrationTask: Task<Void, Never>?
-
-    lazy var social: SocialStore = makeSocialStore()
-
-    private func makeSocialStore() -> SocialStore {
+    lazy var social: SocialStore = {
         let endpoint = URL(string: configuredGlobalValues().url) ?? URL(string: ConnectionProfile.defaultGlobalURLString)!
         let social = SocialStore(endpoint: endpoint, credentials: socialCredentials)
         social.onSessionChanged = { [weak self] session in
@@ -79,7 +75,7 @@ final class WorkspaceStore: ObservableObject {
             Task { try? await self.accountGlobal?.refreshRooms() }
         }
         return social
-    }
+    }()
 
     @Published private(set) var pendingFriendInvitation: FriendInvitationRoute?
     private static let pendingFriendInvitationKey = "CowchatMac.pendingFriendInvitation"
@@ -214,38 +210,9 @@ final class WorkspaceStore: ObservableObject {
         social.startMonitoring()
         global?.start()
         if let session = social.savedSession { useSocialSession(session) }
-        guard companyMigrationTask == nil else { return }
-        companyMigrationTask = Task { [weak self] in
-            await self?.migrateCompanyEndpoint(automatic: true)
-        }
-    }
-
-    /// Also used for an explicit operator rollback; rollback suppresses automatic retry.
-    @discardableResult
-    func migrateCompanyEndpoint(rollback: Bool = false, automatic: Bool = false) async -> Bool {
-        do {
-            guard try await preferences.migrateCompanyEndpoint(rollback: rollback, automatic: automatic) else { return false }
-            global?.shutdownForRemoval()
-            if preferences.isGlobalEnabled() {
-                global = Self.makeGlobalStore(preferences: preferences, defaults: defaults)
-                global?.start()
-            }
-            social.stopMonitoring()
-            social.cancelSignIn()
-            social = makeSocialStore()
-            notifications.setSession(social.savedSession)
-            useSocialSession(social.savedSession)
-            social.startMonitoring()
-            return true
-        } catch {
-            // The destination may be offline or require Tailscale; keep the old connection.
-            if !automatic { globalSetupError = error.localizedDescription }
-            return false
-        }
     }
 
     func shutdownForAppTermination() async {
-        companyMigrationTask?.cancel()
         social.stopMonitoring()
         await local.shutdownOwnedLocalServerForAppTermination()
     }
@@ -293,13 +260,6 @@ final class WorkspaceStore: ObservableObject {
     @discardableResult
     func connectToGlobal(url: String, apiKey: String) async -> Bool {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let configured = configuredGlobalValues()
-        let pair = Set([url, configured.url])
-        if pair == Set([ConnectionProfile.legacyGlobalURLString, ConnectionProfile.defaultGlobalURLString]),
-           trimmedKey == configured.apiKey,
-           !configured.apiKey.isEmpty || social.savedSession?.endpoint.absoluteString == configured.url {
-            return await migrateCompanyEndpoint(rollback: url == ConnectionProfile.legacyGlobalURLString)
-        }
         guard trimmedKey.isEmpty else {
             return saveGlobalConfiguration(url: url, apiKey: trimmedKey)
         }
@@ -448,14 +408,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     private func savedOrDefaultGlobalURL() -> String {
-        if let saved = preferences.loadSavedCloudURL() { return saved }
-        if let encoded = try? socialCredentials.credential(for: SocialSession.credentialAccount),
-           let data = Data(base64Encoded: encoded),
-           let saved = try? JSONDecoder().decode(SocialSession.self, from: data),
-           saved.endpoint.absoluteString == ConnectionProfile.legacyGlobalURLString {
-            return ConnectionProfile.legacyGlobalURLString
-        }
-        return ConnectionProfile.defaultGlobalURLString
+        preferences.loadSavedCloudURL() ?? ConnectionProfile.defaultGlobalURLString
     }
 
 }

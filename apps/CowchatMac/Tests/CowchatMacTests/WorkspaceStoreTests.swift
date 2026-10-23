@@ -40,7 +40,6 @@ private final class StubConnection: CowchatConnectionProtocol {
 }
 
 private final class InMemoryCredentialStore: CowchatCredentialStore {
-    func accounts(withPrefix prefix: String) throws -> [String] { credentials.keys.filter { $0.hasPrefix(prefix) } }
     private var credentials: [String: String] = [:]
 
     func credential(for account: String) throws -> String? { credentials[account] }
