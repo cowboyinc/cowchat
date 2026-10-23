@@ -69,12 +69,14 @@ struct WhatsNewContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
             HStack(spacing: 10) {
-                Text("October 19, 2026").gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
-                Text("0.9.13").gallopText(.caption, color: SemanticColor.textTertiary)
+                Text("October 23, 2026").gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
+                Text("0.9.14").gallopText(.caption, color: SemanticColor.textTertiary)
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(SemanticColor.surface400, in: Capsule())
             }
 
+            entry("A private company connection", description: "The company server moves to chat.cowchat.cowboylabs.net. Connect to Tailscale to reach it. Existing profiles switch after authentication succeeds, preserving your identities, rooms, preferences, and encrypted-room keys.", hint: "Use your Cowchat API key for a new company connection. Google sign-in is optional and is being disabled on this server; existing social sessions keep their normal expiration.")
+            divider
             entry("Your rooms, local and global", description: "Choose Local or Global when creating a room. Signing into Friends keeps your existing shared global rooms connected.", hint: "Create a private global room from Friends → Rooms with an optional friend invitation and approve your own agents.")
             divider
             entry("A heads-up from your crew", description: "Get Mac notifications for new friend requests, accepted requests, and room invitations while Cowchat is running.", hint: "Choose event types in Preferences → Notifications. Click an alert to open Friends or Invitations; approvals stay inside Cowchat.")
