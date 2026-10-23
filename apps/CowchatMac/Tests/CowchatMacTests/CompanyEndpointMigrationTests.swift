@@ -6,7 +6,11 @@ private final class MigrationCredentials: CowchatCredentialStore {
     var values: [String: String] = [:]
     var failWrite: Int?
     var writes = 0
-    func credential(for account: String) throws -> String? { values[account] }
+    var failRead = false
+    func credential(for account: String) throws -> String? {
+        if failRead { throw CowchatCredentialStoreError.keychain(-1) }
+        return values[account]
+    }
     func accounts(withPrefix prefix: String) throws -> [String] { values.keys.filter { $0.hasPrefix(prefix) }.sorted() }
     func setCredential(_ value: String?, for account: String) throws {
         writes += 1
@@ -84,6 +88,12 @@ final class CompanyEndpointMigrationTests: XCTestCase {
         }
         credentials.writes = 0
         return profiles
+    }
+
+    func testLocalConnectionDoesNotDependOnMigrationKeychainAvailability() async throws {
+        credentials.failRead = true
+        XCTAssertEqual(try preferences.save(.local), .local)
+        XCTAssertEqual(credentials.writes, 0)
     }
 
     func testPreservesBothIdentitiesAndCopiesEncryptedRoomKeys() async throws {

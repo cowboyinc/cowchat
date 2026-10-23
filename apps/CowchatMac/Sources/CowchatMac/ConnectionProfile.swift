@@ -438,7 +438,6 @@ final class ConnectionProfilePreferences {
     /// must use the returned value because it contains the stable opaque account ID.
     @discardableResult
     func save(_ profile: ConnectionProfile) throws -> ConnectionProfile {
-        try resumeCompanyMigration()
         switch profile.kind {
         case .local:
             let activeAccountID = storedCloudAccountID()
@@ -446,6 +445,7 @@ final class ConnectionProfilePreferences {
             retryRetiredCredentialCleanup(excluding: activeAccountID)
             return .local
         case .cowchatCloud:
+            try resumeCompanyMigration()
             guard let endpointURL = profile.endpointURL else {
                 throw ConnectionProfileError.invalidCloudURL
             }
