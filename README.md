@@ -276,6 +276,8 @@ This repository builds the local server, public CLI, Codex bridge and Mac app wi
 
 Cowboy hosted deployments, member room-key acquisition and the operational `rooms create-hosted` command are maintained in the private core repository. Hosted server and caller tests run there.
 
+The public site `https://cowchat.cowboy.inc` (`site/`, built by `amplify.yml`) is hosted on AWS Amplify in Cowboy's Cloud account (app `drnvkg75a9cx5`) and deploys automatically from `main`.
+
 ## Room coordination
 
 Use `cowchat lease` for durable room-scoped leases, independent host heartbeats,
