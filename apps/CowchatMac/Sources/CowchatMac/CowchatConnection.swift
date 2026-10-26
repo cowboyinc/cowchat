@@ -57,6 +57,7 @@ protocol CowchatConnectionProtocol: AnyObject {
     func reconfigure(profile: ConnectionProfile)
     func connect() async throws
     func register(name: String, agentID: String) async throws -> CowchatRegistration
+    func roomLeases(roomID: String) async throws -> [RoomLease]
     func listRooms() async throws -> [Room]
     func listAgents(roomID: String) async throws -> [AgentPresence]
     func createRoom(
@@ -88,6 +89,10 @@ protocol CowchatConnectionProtocol: AnyObject {
 
 extension CowchatConnectionProtocol {
     func reconfigure(profile _: ConnectionProfile) {}
+
+    func roomLeases(roomID: String) async throws -> [RoomLease] {
+        throw CowchatConnectionError.transport("Room leases require an updated Cowchat server.")
+    }
 
     func history(roomID: String, limit: Int) async throws -> [ChatMessage] {
         try await history(roomID: roomID, limit: limit, before: nil)
@@ -212,6 +217,12 @@ final class CowchatConnection: CowchatConnectionProtocol {
         )
     }
 
+    func roomLeases(roomID: String) async throws -> [RoomLease] {
+        let payload = try await request(type: "room_coordination", payload: ["room_id": roomID, "operation": ["action": "list"]])
+        guard let leases = payload["leases"] else { throw CowchatConnectionError.invalidResponse }
+        return try JSONDecoder().decode([RoomLease].self, from: JSONSerialization.data(withJSONObject: leases))
+    }
+
     func listRooms() async throws -> [Room] {
         let payload = try await request(type: "list_rooms", payload: [:])
         return try decode([Room].self, from: payload["rooms"] ?? [])
@@ -293,12 +304,29 @@ final class CowchatConnection: CowchatConnectionProtocol {
         before: String? = nil
     ) async throws -> [ChatMessage] {
         var requestPayload: Payload = [
+            "bounded_pages": true,
             "room_id": roomID,
             "limit": limit,
         ]
         if let before { requestPayload["before"] = before }
-        let payload = try await request(type: "get_history", payload: requestPayload)
-        return try decode([ChatMessage].self, from: payload["messages"] ?? [])
+        var messages: [ChatMessage] = []
+        var previousCursor: Int?
+        repeat {
+            try Task.checkCancellation()
+            requestPayload["limit"] = max(0, limit - messages.count)
+            let payload = try await request(type: "get_history", payload: requestPayload)
+            let page = try decode([ChatMessage].self, from: payload["messages"] ?? [])
+            let more = payload["has_more"] as? Bool == true
+            if more && (page.isEmpty || previousCursor.map { page.first!.seq >= $0 } == true) {
+                throw CowchatConnectionError.invalidResponse
+            }
+            messages.insert(contentsOf: page, at: 0)
+            if !more || messages.count >= limit { break }
+            previousCursor = page.first?.seq
+            requestPayload["before"] = nil
+            requestPayload["before_seq"] = previousCursor
+        } while true
+        return messages
     }
 
     func send(roomID: String, content: String) async throws -> ChatMessage {

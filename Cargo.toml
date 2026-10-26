@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.1"
+version = "0.9.13"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cowboyinc/cowchat"
@@ -31,9 +31,9 @@ base64 = "0.22"
 # protocol-compatible commonware family unified in this executable workspace.
 [workspace.dependencies.cowchat-client]
 git = "https://github.com/cowboyinc/cowchat-core.git"
-rev = "e440e97167bb0a8874a98197568dcd4e8e229537"
+rev = "d425a065d140889e2eae4a60c8cbd6ab0863fcb4"
 
 
 [workspace.dependencies.cowchat-core]
 git = "https://github.com/cowboyinc/cowchat-core.git"
-rev = "e440e97167bb0a8874a98197568dcd4e8e229537"
+rev = "d425a065d140889e2eae4a60c8cbd6ab0863fcb4"

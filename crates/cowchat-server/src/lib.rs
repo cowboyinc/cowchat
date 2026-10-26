@@ -4,8 +4,10 @@
     clippy::type_complexity
 )]
 
+pub mod artifact;
 pub mod auth;
 pub mod broker;
+pub(crate) mod chart;
 pub mod connection;
 pub mod handler;
 
@@ -14,6 +16,7 @@ pub mod reconnect;
 pub mod room_log;
 pub mod server;
 pub mod session_auth;
+pub mod social;
 pub mod store;
 pub mod tasks;
 pub mod voting;

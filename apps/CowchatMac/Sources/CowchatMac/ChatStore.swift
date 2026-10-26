@@ -19,6 +19,8 @@ private enum MemberRefreshOutcome {
 @MainActor
 final class ChatStore: ObservableObject {
     @Published var rooms: [Room] = []
+    @Published var slackConnectedRoomIDs: Set<String> = []
+    private var slackRefreshTask: Task<Void, Never>?
     @Published var selectedRoomID: String?
     @Published var messages: [ChatMessage] = []
     @Published var roomMembers: [AgentPresence] = []
@@ -478,7 +480,9 @@ final class ChatStore: ObservableObject {
     /// menu, and the quiet-room call to action.
     nonisolated static func connectPromptText(roomName: String, connectionInstruction: String) -> String {
         """
-        You're going to collaborate with another AI agent in real time over Cowchat. Read the Cowchat skill, \(connectionInstruction), and join the exact room \u{201C}\(roomName)\u{201D}. Choose one unique, stable `--name` and `--agent-id` pair, and pass that same pair on every Cowchat agent command you run. Use one cursor file whose path is unique to this server, room, and agent. Catch up with `history`, record the highest message sequence you actually processed, and seed the cursor file with that number (use `0` if there is no history). Whenever composing a reply will take more than about 30 seconds, first run `thinking \(roomName) "<one line on what you're doing>"` and refresh it roughly every minute until your real message goes out — humans watching the room see your pulse text live, and silence reads as a dead agent. Then keep this task open with the same returning `wait --loop --drain --cursor-file <that-file>` command every turn; never recompute the floor from the room tip after replying. Do not use `wait --follow`, because streamed background output does not return a peer message to this active task. After each wait returns, process the delivered peer messages, send your reply, then immediately run the exact same returning wait again; do not end this task while collaboration is active. Continue until a peer sends `conversation_end` or I explicitly tell you to stop. Once this task ends, ordinary Cowchat messages alone cannot resume it automatically, so do not claim that a later room message will wake you without an explicitly configured external wake mechanism. Start now without waiting for confirmation. https://cowchat.cowboy.inc/skills.txt
+        Read https://cowchat.cowboy.inc/skills.txt and follow its agent collaboration instructions.
+        Join the exact room “\(roomName)” and start collaborating now.
+        \(connectionInstruction)
         """
     }
 
@@ -608,23 +612,18 @@ final class ChatStore: ObservableObject {
         if let inviteToken,
            let redeemURL = WorkspaceStore.inviteRedeemURL(forCloudURLString: endpoint) {
             return """
-            connect to the shared Cowchat server at \(endpoint): redeem your one-time \
-            invite by running `curl -fsS -X POST \(redeemURL.absoluteString) \
-            -H 'Content-Type: application/json' -d '{"token":"\(inviteToken)"}'` — the \
-            `api_key` field of the JSON reply is your key (the invite is single-use; if \
-            it's already spent, ask the sender for a new one) — then pass \
-            `--url \(endpoint) --key <your api_key>` on every cowchat command
+            Server: \(endpoint)
+            Redeem this single-use invite for an API key: `curl -fsS -X POST \(redeemURL.absoluteString) -H 'Content-Type: application/json' -d '{"token":"\(inviteToken)"}'`
+            Use `--url \(endpoint) --key <api_key>` on every command.
             """
         }
         guard let signupURL = WorkspaceStore.signupURL(forCloudURLString: endpoint) else {
             return "connect to the Cowchat server at \(endpoint) using your Cowchat API key"
         }
         return """
-        connect to the shared Cowchat server at \(endpoint): first create your own API key \
-        by running `curl -fsS -X POST \(signupURL.absoluteString)` and reading the `api_key` \
-        field of the JSON reply (if that endpoint refuses, ask the person who sent you this \
-        prompt for a key), then pass `--url \(endpoint) --key <your api_key>` on every \
-        cowchat command
+        Server: \(endpoint)
+        Get an API key: `curl -fsS -X POST \(signupURL.absoluteString)` (if signup is closed, ask for an invite).
+        Use the reply’s `api_key` with `--url \(endpoint) --key <api_key>` on every command.
         """
     }
 
@@ -842,6 +841,9 @@ final class ChatStore: ObservableObject {
         roomSelectionGeneration += 1
         roomMutationGeneration += 1
 
+        slackRefreshTask?.cancel()
+        slackRefreshTask = nil
+        slackConnectedRoomIDs = []
         rooms = []
         selectedRoomID = nil
         messages = []
@@ -894,6 +896,32 @@ final class ChatStore: ObservableObject {
         )
     }
 
+    func roomLeases(roomID: String) async throws -> [RoomLease] {
+        let profile = connectionProfile
+        let leases = try await connection.roomLeases(roomID: roomID)
+        guard profile == connectionProfile else { throw CancellationError() }
+        return leases
+    }
+
+    private func refreshSlackBadges() {
+        guard connectionProfile.kind == .cowchatCloud else { return }
+        slackRefreshTask?.cancel()
+        let profile = connectionProfile
+        let generation = profileGeneration
+        slackRefreshTask = Task { [weak self] in
+            struct Connections: Decodable { let rooms: [String] }
+            let result = try? await SlackAPI(profile: profile).request(["rooms"]) as Connections
+            guard !Task.isCancelled, let self, self.profileGeneration == generation else { return }
+            if let result { self.slackConnectedRoomIDs = Set(result.rooms) }
+        }
+    }
+
+    func updateSlackBadge(roomID: String, connected: Bool, profile: ConnectionProfile?) {
+        guard profile == connectionProfile else { return }
+        if connected { slackConnectedRoomIDs.insert(roomID) }
+        else { slackConnectedRoomIDs.remove(roomID) }
+    }
+
     func refreshRooms(selectFallbackForMissingSelection: Bool = true) async throws {
         guard !isRefreshingRooms else { return }
         let expectedProfileGeneration = profileGeneration
@@ -919,6 +947,7 @@ final class ChatStore: ObservableObject {
             }
         }
         rooms = refreshed.sorted(by: roomSort)
+        refreshSlackBadges()
         // `list_rooms` is an authoritative server snapshot. It includes this
         // client only when the registration restored membership before the
         // request. A later fresh join deliberately clears this marker because
@@ -1328,6 +1357,16 @@ final class ChatStore: ObservableObject {
         decryptedDisplayCache.removeAll()
         roomSecrets[room.id] = secret
         unlockedRoomIDs.insert(room.id)
+    }
+
+    /// Export only the selected room's saved secret, over authenticated HTTPS,
+    /// after the room's Slack settings explain the new plaintext audience.
+    func slackRoomSecret(for room: Room) throws -> String {
+        guard !isLocalConnection, room.encrypted,
+              let secret = roomSecrets[room.id], !secret.isEmpty else {
+            throw CowchatConnectionError.transport("Unlock this global room before connecting Slack.")
+        }
+        return secret
     }
 
     func forgetRoomSecret(for room: Room) throws {

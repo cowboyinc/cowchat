@@ -32,6 +32,10 @@ struct ContentView: View {
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
     @State private var isSidebarVisible = true
     @State private var isSettingsPresented = false
+    @State private var isFriendsPresented = false
+    @State private var friendsSection = SocialSection.friends
+    @State private var pendingFriendsSection: SocialSection?
+    @State private var isWhatsNewPresented = false
     @Environment(\.controlActiveState) private var controlActiveState
 
     init(onShowOnboarding: @escaping () -> Void = {}) {
@@ -81,6 +85,11 @@ struct ContentView: View {
         .toolbarBackground(SemanticColor.surface400, for: .windowToolbar)
         .navigationTitle(store.selectedRoom?.name ?? "Cowchat")
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { friendsSection = .friends; isFriendsPresented = true } label: {
+                    Label("Friends & account", systemImage: "person.2")
+                }.help("Friends, agents and account")
+            }
             ToolbarItem(placement: .navigation) {
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
@@ -119,22 +128,37 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 600)
         .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
         .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
+        .sheet(isPresented: $isFriendsPresented, onDismiss: presentPendingFriendsSection) {
+            FriendsView(social: workspace.social, initialSection: friendsSection).id(friendsSection)
+        }
+        .onReceive(workspace.notifications.$destination.receive(on: RunLoop.main)) { section in
+            guard let section, workspace.notifications.consumeDestination(section) else { return }
+            pendingFriendsSection = section
+            let dismissingSheet = isSettingsPresented || store.isCreateRoomPresented || isWhatsNewPresented || store.roomBeingRenamed != nil || isFriendsPresented
+            isSettingsPresented = false
+            store.isCreateRoomPresented = false
+            isWhatsNewPresented = false
+            store.roomBeingRenamed = nil
+            isFriendsPresented = false
+            if !dismissingSheet { presentPendingFriendsSection() }
+        }
         .sheet(
             isPresented: $store.isCreateRoomPresented,
-            onDismiss: { store.createRoomParentID = nil }
+            onDismiss: { store.createRoomParentID = nil; presentPendingFriendsSection() }
         ) {
-            CreateRoomView(
-                local: workspace.local,
-                globalOrLocal: workspace.global ?? workspace.local,
-                hasGlobal: workspace.global != nil
-            )
+            RoomCreationSheet(initialSource: workspace.activeServer)
                 .environmentObject(store)
         }
-        .sheet(item: $store.roomBeingRenamed) { room in
+        .onReceive(NotificationCenter.default.publisher(for: .cowchatShowWhatsNew)) { _ in
+            guard controlActiveState == .key || controlActiveState == .active else { return }
+            isWhatsNewPresented = true
+        }
+        .sheet(isPresented: $isWhatsNewPresented, onDismiss: presentPendingFriendsSection) { WhatsNewView() }
+        .sheet(item: $store.roomBeingRenamed, onDismiss: presentPendingFriendsSection) { room in
             RenameRoomView(room: room)
                 .environmentObject(store)
         }
-        .sheet(isPresented: $isSettingsPresented) {
+        .sheet(isPresented: $isSettingsPresented, onDismiss: presentPendingFriendsSection) {
             SettingsView(
                 isPresented: $isSettingsPresented,
                 onShowOnboarding: onShowOnboarding
@@ -166,6 +190,16 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: store.roomReadyNotice?.id)
         .animation(.easeInOut(duration: 0.2), value: store.secondAgentHintRoom?.id)
     }
+
+    private func presentPendingFriendsSection() {
+        guard let section = pendingFriendsSection, workspace.social.phase == .signedIn else {
+            pendingFriendsSection = nil
+            return
+        }
+        pendingFriendsSection = nil
+        friendsSection = section
+        isFriendsPresented = true
+    }
 }
 
 private struct SidebarView: View {
@@ -173,6 +207,7 @@ private struct SidebarView: View {
     @Binding var isSidebarVisible: Bool
     @Binding var isSettingsPresented: Bool
     @State private var isArchiveExpanded = false
+    @State private var isRoomBrowserPresented = false
     @FocusState private var isSearchFocused: Bool
     /// Once per process: the launch-focus clear must not repeat on sidebar re-mounts.
     private static var didClearLaunchFocus = false
@@ -191,9 +226,23 @@ private struct SidebarView: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 14)
 
+            Button { isRoomBrowserPresented = true } label: {
+                Label("Find a room", systemImage: "magnifyingglass")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .gallopText(.bodySStrong, color: SemanticColor.textSecondary)
+            .padding(.horizontal, 18)
+            .padding(.bottom, 12)
+            .sheet(isPresented: $isRoomBrowserPresented) {
+                RoomBrowserView(workspace: workspace)
+            }
+
             SidebarRoomLists(
                 local: workspace.local,
                 globalOrLocal: workspace.global ?? workspace.local,
+                accountOrLocal: workspace.accountGlobal ?? workspace.local,
+                hasAccountGlobal: workspace.accountGlobal != nil,
                 hasGlobal: workspace.global != nil
             )
 
@@ -202,6 +251,8 @@ private struct SidebarView: View {
             ArchiveSection(
                 local: workspace.local,
                 globalOrLocal: workspace.global ?? workspace.local,
+                accountOrLocal: workspace.accountGlobal ?? workspace.local,
+                hasAccountGlobal: workspace.accountGlobal != nil,
                 hasGlobal: workspace.global != nil,
                 isExpanded: $isArchiveExpanded
             )
@@ -210,6 +261,8 @@ private struct SidebarView: View {
             SidebarFooter(
                 local: workspace.local,
                 globalOrLocal: workspace.global ?? workspace.local,
+                accountOrLocal: workspace.accountGlobal ?? workspace.local,
+                hasAccountGlobal: workspace.accountGlobal != nil,
                 hasGlobal: workspace.global != nil,
                 isSettingsPresented: $isSettingsPresented
             )
@@ -335,6 +388,7 @@ private struct SidebarRoomRowButton: View {
             RoomRow(
                 room: room,
                 messagePreview: store.roomMessagePreviews[room.id],
+                isSlackConnected: store.slackConnectedRoomIDs.contains(room.id),
                 isSelected: workspace.isSelected(room, on: server),
                 isUnread: store.isUnread(room),
                 isWorking: store.isWorking(room, at: now),
@@ -368,33 +422,34 @@ private struct SidebarRoomRowButton: View {
         let parts = [
             store.isWorking(room, at: now) ? "Agents working" : nil,
             store.isUnread(room) ? "Unread" : nil,
+            store.slackConnectedRoomIDs.contains(room.id) ? "Connected to Slack" : nil,
             workspace.isSelected(room, on: server) ? "selected" : nil,
         ].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 }
 
-/// The scrolling room table: a Local section and, with global rooms on, a
-/// Global section. `globalOrLocal` duplicates `local` when global is off —
-/// @ObservedObject cannot hold an Optional, and observing local twice is free.
 private struct SidebarRoomLists: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
+    @ObservedObject var accountOrLocal: ChatStore
+    let hasAccountGlobal: Bool
     let hasGlobal: Bool
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: anyAgentsThinking ? 10 : 60)) { timeline in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if visibleRoomsEmpty {
-                        if isSearchActive {
-                            emptyRoomsState
-                        }
+                    if visibleRoomsEmpty && isSearchActive {
+                        emptyRoomsState
                     } else {
                         section(for: .local, store: local, at: timeline.date)
                         if hasGlobal {
                             section(for: .global, store: globalOrLocal, at: timeline.date)
+                        }
+                        if hasAccountGlobal {
+                            section(for: .accountGlobal, store: accountOrLocal, at: timeline.date)
                         }
                     }
                 }
@@ -411,7 +466,7 @@ private struct SidebarRoomLists: View {
         // hits. The global server has no nav row; its lobby stays listed.
         let searching = !workspace.searchText
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let source = searching || server == .global
+        let source = searching || server != .local
             ? store.unarchivedRooms
             : store.unarchivedRooms.filter {
                 $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
@@ -426,11 +481,13 @@ private struct SidebarRoomLists: View {
     private var anyAgentsThinking: Bool {
         !local.lastThinkingAt.isEmpty
             || (hasGlobal && !globalOrLocal.lastThinkingAt.isEmpty)
+            || (hasAccountGlobal && !accountOrLocal.lastThinkingAt.isEmpty)
     }
 
     private var visibleRoomsEmpty: Bool {
         baseRooms(in: local, server: .local).isEmpty
             && (!hasGlobal || baseRooms(in: globalOrLocal, server: .global).isEmpty)
+            && (!hasAccountGlobal || baseRooms(in: accountOrLocal, server: .accountGlobal).isEmpty)
     }
 
     /// Item D (quiet empty state): the sidebar only shows an explicit empty
@@ -442,6 +499,7 @@ private struct SidebarRoomLists: View {
 
     private var isSearchingMessages: Bool {
         local.isSearchingMessages || (hasGlobal && globalOrLocal.isSearchingMessages)
+            || (hasAccountGlobal && accountOrLocal.isSearchingMessages)
     }
 
     @ViewBuilder
@@ -451,10 +509,7 @@ private struct SidebarRoomLists: View {
         at now: Date
     ) -> some View {
         let rooms = baseRooms(in: store, server: server)
-        if hasGlobal {
-            // Always shown while two servers exist, even over an empty
-            // list — a connecting/failed global server announces itself
-            // here, not only in the footer.
+        if hasGlobal || hasAccountGlobal {
             sectionHeader(for: server, store: store)
         }
         if !rooms.isEmpty {
@@ -469,7 +524,7 @@ private struct SidebarRoomLists: View {
 
     private func sectionHeader(for server: WorkspaceStore.Server, store: ChatStore) -> some View {
         HStack(spacing: 6) {
-            Text(server.label)
+            Text(server == .local ? "Local" : server == .global ? "Community rooms" : "Your rooms")
                 .gallopText(.caption, color: SemanticColor.textTertiary)
             if !store.connectionStatus.isConnected {
                 Text(store.connectionStatus.label)
@@ -517,6 +572,8 @@ private struct ArchiveSection: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
+    @ObservedObject var accountOrLocal: ChatStore
+    let hasAccountGlobal: Bool
     let hasGlobal: Bool
     @Binding var isExpanded: Bool
 
@@ -538,10 +595,20 @@ private struct ArchiveSection: View {
         )
     }
 
-    private var entries: [(server: WorkspaceStore.Server, store: ChatStore, room: Room)] {
-        var all = archivedRooms(in: local).map { (server: WorkspaceStore.Server.local, store: local, room: $0) }
+    private struct Entry: Identifiable {
+        let server: WorkspaceStore.Server
+        let store: ChatStore
+        let room: Room
+        var id: String { server.rawValue + "." + room.id }
+    }
+
+    private var entries: [Entry] {
+        var all = archivedRooms(in: local).map { Entry(server: .local, store: local, room: $0) }
         if hasGlobal {
-            all += archivedRooms(in: globalOrLocal).map { (server: .global, store: globalOrLocal, room: $0) }
+            all += archivedRooms(in: globalOrLocal).map { Entry(server: .global, store: globalOrLocal, room: $0) }
+        }
+        if hasAccountGlobal {
+            all += archivedRooms(in: accountOrLocal).map { Entry(server: .accountGlobal, store: accountOrLocal, room: $0) }
         }
         return all
     }
@@ -596,7 +663,7 @@ private struct ArchiveSection: View {
                     // Rows are a fixed 54pt; cap the reveal at ~4.5 rows.
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            ForEach(entries, id: \.room.id) { entry in
+                            ForEach(entries) { entry in
                                 SidebarRoomRowButton(
                                     store: entry.store,
                                     room: entry.room,
@@ -618,6 +685,8 @@ private struct ArchiveSection: View {
 private struct SidebarFooter: View {
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
+    @ObservedObject var accountOrLocal: ChatStore
+    let hasAccountGlobal: Bool
     let hasGlobal: Bool
     @Binding var isSettingsPresented: Bool
 
@@ -626,13 +695,12 @@ private struct SidebarFooter: View {
             Button {
                 isSettingsPresented = true
             } label: {
-                // A Grid keeps the status column aligned — "Local" and
-                // "Global" set different label widths.
                 Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 3) {
                     statusRow(label: "Local", store: local)
                     if hasGlobal {
-                        statusRow(label: "Global", store: globalOrLocal)
+                        statusRow(label: "Community", store: globalOrLocal)
                     }
+                    if hasAccountGlobal { statusRow(label: "Your rooms", store: accountOrLocal) }
                 }
                 .contentShape(Rectangle())
             }
@@ -656,7 +724,7 @@ private struct SidebarFooter: View {
             )
         }
         .padding(.horizontal, 12)
-        .frame(height: 58)
+        .frame(height: hasGlobal && hasAccountGlobal ? 72 : 58)
     }
 
     private func statusRow(label: String, store: ChatStore) -> some View {
@@ -675,11 +743,13 @@ private struct SidebarFooter: View {
     private var anyServerDisconnected: Bool {
         !local.connectionStatus.isConnected
             || (hasGlobal && !globalOrLocal.connectionStatus.isConnected)
+            || (hasAccountGlobal && !accountOrLocal.connectionStatus.isConnected)
     }
 
     private func reconnectDisconnectedServers() {
         var stores = [local]
         if hasGlobal { stores.append(globalOrLocal) }
+        if hasAccountGlobal { stores.append(accountOrLocal) }
         for store in stores where !store.connectionStatus.isConnected {
             store.reconnect()
         }
@@ -726,6 +796,7 @@ struct SidebarRowBackground: View {
 private struct RoomRow: View {
     let room: Room
     let messagePreview: String?
+    let isSlackConnected: Bool
     let isSelected: Bool
     let isUnread: Bool
     let isWorking: Bool
@@ -735,6 +806,9 @@ private struct RoomRow: View {
     var body: some View {
         HStack(spacing: 10) {
             RoomAvatar(name: room.name, size: 40, accented: isSelected)
+                .overlay(alignment: .bottomTrailing) {
+                    if isSlackConnected { SlackRoomBadge().offset(x: 3, y: 3) }
+                }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     Text(room.name)
@@ -993,7 +1067,7 @@ private struct SecondAgentHintNotice: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            Text("Add more agents anytime — Copy connect prompt in the ⋯ menu.")
+            Text("Now connect your agent to this room. Copy the connect prompt from the ⋯ menu.")
                 .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
             Button {
                 store.secondAgentHintRoom = nil
@@ -1040,6 +1114,9 @@ private struct ChatRoomView: View {
     @State private var isDestroyConfirmationPresented = false
     @State private var isDestroyingRoom = false
     @State private var isInvitesPresented = false
+    @State private var isSlackPresented = false
+    @State private var isLeasesPresented = false
+    @State private var isArtifactPresented = false
     @State private var isMessageListNearBottom = true
     @State private var newMessageCount = 0
     @State private var hasCopiedQuietRoomPrompt = false
@@ -1140,6 +1217,15 @@ private struct ChatRoomView: View {
             .padding(24).frame(width: 420)
             .onDisappear { roomKeyDraft = ""; roomKeyError = nil }
         }
+        .sheet(isPresented: $isLeasesPresented) {
+            RoomLeasesView(room: room).environmentObject(store)
+        }
+        .sheet(isPresented: $isArtifactPresented) {
+            RoomArtifactView(room: room).environmentObject(store)
+        }
+        .sheet(isPresented: $isSlackPresented) {
+            SlackRoomView(room: room).environmentObject(store)
+        }
         .sheet(isPresented: $isInvitesPresented) {
             RoomInvitesView(room: room)
                 .environmentObject(store)
@@ -1164,9 +1250,14 @@ private struct ChatRoomView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 Spacer()
                 Menu {
+                    Button("Leases…") { isLeasesPresented = true }
                     Button("Copy connect prompt") { copyConnectPrompt() }
                     if !store.isLocalConnection {
-                        Button("Invites…") { isInvitesPresented = true }
+                        Button("Artifact…") { isArtifactPresented = true }
+                        if !store.connectionProfile.apiKey.hasPrefix("csoc_") {
+                            Button("Invites…") { isInvitesPresented = true }
+                            Button("Slack…") { isSlackPresented = true }
+                        }
                     }
                     Divider()
                     // Rename and destroy are creator-only, so for other
@@ -1176,7 +1267,9 @@ private struct ChatRoomView: View {
                         Button("Rename room") { store.presentRename(room) }
                     }
                     Button("Archive room") { Task { await store.archive(room) } }
-                    Button("Create nested room…") { store.presentCreateRoom(parentID: room.id) }
+                    if !store.connectionProfile.apiKey.hasPrefix("csoc_") {
+                        Button("Create nested room…") { store.presentCreateRoom(parentID: room.id) }
+                    }
                     if !store.connectionStatus.isConnected {
                         Button("Reconnect") { store.start() }
                     }
@@ -1792,6 +1885,7 @@ struct ExpandableMessageText: View {
     var textColor: Color
     @State private var isExpanded = false
     @State private var expandedPlan: MessageRenderPlan?
+    private let chart: ChartMessage?
     private let collapsedPreview: MessagePreview.CollapsedPreview
     private let collapsedPlan: MessageRenderPlan
     private let makeRenderPlan: (String) -> MessageRenderPlan
@@ -1805,12 +1899,24 @@ struct ExpandableMessageText: View {
         self.textColor = textColor
         self.makeRenderPlan = makeRenderPlan
 
-        let preview = MessagePreview.collapsedPreview(for: content)
+        let chart = ChartMessage(content: content)
+        self.chart = chart
+        let preview = MessagePreview.collapsedPreview(for: chart?.title ?? content)
         collapsedPreview = preview
         collapsedPlan = makeRenderPlan(preview.source)
     }
 
     var body: some View {
+        Group {
+            if let chart { ChartMessageView(chart: chart) }
+            else if content.hasPrefix(ChartMessage.prefix) {
+                Label("This chart could not be displayed.", systemImage: "photo")
+                    .gallopText(.bodyS, color: SemanticColor.textTertiary)
+            } else { textBody }
+        }
+    }
+
+    private var textBody: some View {
         VStack(alignment: .leading, spacing: 8) {
             if showsResponseControl {
                 Button {
@@ -2260,12 +2366,18 @@ private enum SettingsPage {
     case connection
     case theme
     case roomIcons
+    case updates
+    case notifications
+    case whatsNew
 
     var title: String {
         switch self {
         case .connection: return "Connection"
         case .theme: return "Theme"
         case .roomIcons: return "Room icons"
+        case .updates: return "Updates"
+        case .notifications: return "Notifications"
+        case .whatsNew: return "What’s new"
         }
     }
 
@@ -2274,6 +2386,9 @@ private enum SettingsPage {
         case .connection: return "Choose where Cowchat stores and syncs your rooms."
         case .theme: return "Choose how Cowchat appears on this Mac."
         case .roomIcons: return "Every room gets the same icon on every Mac — it is drawn from the room name."
+        case .updates: return "Keep Cowchat up to date."
+        case .notifications: return "Choose what gets your attention on this Mac."
+        case .whatsNew: return "The latest improvements to Cowchat."
         }
     }
 }
@@ -2294,6 +2409,7 @@ enum ThemePreview {
 }
 
 private struct SettingsView: View {
+    @EnvironmentObject private var softwareUpdater: SoftwareUpdater
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var store: ChatStore
     @Binding var isPresented: Bool
@@ -2331,6 +2447,21 @@ private struct SettingsView: View {
                     systemName: "circle.grid.2x2",
                     page: .roomIcons
                 )
+                settingsNavigationRow(
+                    "Notifications",
+                    systemName: "bell",
+                    page: .notifications
+                )
+                settingsNavigationRow(
+                    "Updates",
+                    systemName: "arrow.down.circle",
+                    page: .updates
+                )
+                settingsNavigationRow(
+                    "What’s new",
+                    systemName: "sparkles",
+                    page: .whatsNew
+                )
                 Spacer()
             }
             .frame(width: 230)
@@ -2351,6 +2482,12 @@ private struct SettingsView: View {
                     themeSettings
                 case .roomIcons:
                     roomIconSettings
+                case .updates:
+                    updateSettings
+                case .notifications:
+                    SocialNotificationSettings(notifications: workspace.notifications)
+                case .whatsNew:
+                    ScrollView { WhatsNewContent() }
                 }
 
                 Spacer()
@@ -2366,6 +2503,34 @@ private struct SettingsView: View {
                 .stroke(SemanticColor.borderDefault, lineWidth: 1)
         }
         .onAppear(perform: loadCloudConfiguration)
+    }
+
+    private var updateSettings: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Cowchat \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+                .gallopText(.bodyMStrong)
+            Toggle("Automatically check for updates", isOn: Binding(
+                get: { softwareUpdater.automaticallyChecksForUpdates },
+                set: { softwareUpdater.setAutomaticallyChecksForUpdates($0) }
+            ))
+            .disabled(!softwareUpdater.isAvailable)
+            Toggle("Download and install updates automatically", isOn: Binding(
+                get: { softwareUpdater.automaticallyDownloadsUpdates },
+                set: { softwareUpdater.setAutomaticallyDownloadsUpdates($0) }
+            ))
+            .disabled(!softwareUpdater.isAvailable || !softwareUpdater.automaticallyChecksForUpdates)
+            Text("Updates include the app and its bundled server. Cowchat waits until you quit or choose to relaunch before installing.")
+                .gallopText(.bodyS, color: SemanticColor.textSecondary)
+            Button("Check for Updates…") { softwareUpdater.checkForUpdates() }
+                .buttonStyle(CowchatPillButtonStyle(prominent: true))
+                .disabled(!softwareUpdater.canCheckForUpdates)
+            if !softwareUpdater.isAvailable {
+                Text("Automatic updates are available in installed release builds.")
+                    .gallopText(.caption, color: SemanticColor.textTertiary)
+            }
+            Text("Standalone command-line tools and separately running servers update through Homebrew or your package manager.")
+                .gallopText(.caption, color: SemanticColor.textTertiary)
+        }
     }
 
     private var settingsHeader: some View {
@@ -2410,16 +2575,28 @@ private struct SettingsView: View {
                     .stroke(SemanticColor.borderDefault, lineWidth: 1)
             }
 
+            if let accountGlobal = workspace.accountGlobal {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Your rooms").gallopText(.bodyMStrong)
+                        Spacer()
+                        ServerStatusBadge(store: accountGlobal)
+                    }
+                    Text("Your Home and rooms shared with friends. Only invited people and approved agents can join.")
+                        .gallopText(.bodyM, color: SemanticColor.textTertiary)
+                }.gallopCard(cornerRadius: 14)
+            }
+
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("Global server")
+                    Text("Community rooms")
                         .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                     Spacer()
                     if let global = workspace.global {
                         ServerStatusBadge(store: global)
                     }
                 }
-                Text("Cowboy runs a shared Cowchat server for everyone. Connect and its rooms appear in the sidebar alongside your local rooms — a key is created for you automatically, or paste your own.")
+                Text("Browse community rooms such as cowboy-junction with Find a room in the sidebar. These rooms use a separate connection. You can manage its server and API key here.")
                     .gallopText(.bodyM, color: SemanticColor.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
                 TextField(ConnectionProfile.defaultGlobalURLString, text: $cloudURL)
@@ -2482,7 +2659,7 @@ private struct SettingsView: View {
                 HStack(spacing: 10) {
                     Spacer()
                     if workspace.isGlobalEnabled {
-                        Button("Leave global rooms") { workspace.disableGlobalRooms() }
+                        Button("Disconnect community rooms") { workspace.disableGlobalRooms() }
                             .buttonStyle(.plain)
                             .gallopText(.bodyMStrong, color: SemanticColor.buttonSecondaryTextDefault)
                             .padding(.horizontal, 20)
@@ -2492,7 +2669,7 @@ private struct SettingsView: View {
                                 Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
                             }
                             .fixedSize()
-                            .macAccessibleAction(label: "Leave global rooms") {
+                            .macAccessibleAction(label: "Disconnect community rooms") {
                                 workspace.disableGlobalRooms()
                             }
                     }
@@ -2619,7 +2796,7 @@ private struct SettingsView: View {
     /// Previews use this Mac's own rooms so the choice is made against the
     /// names that will actually sit in the sidebar.
     private var iconSampleNames: [String] {
-        let live = (workspace.local.rooms + (workspace.global?.rooms ?? []))
+        let live = (workspace.local.rooms + (workspace.global?.rooms ?? []) + (workspace.accountGlobal?.rooms ?? []))
             .map(\.name).prefix(3)
         return live.isEmpty ? ["Lobby", "harness-signing", "canyon-deploy"] : Array(live)
     }
@@ -2908,12 +3085,70 @@ private struct GlobalServerNotice: View {
     }
 }
 
+private struct RoomCreationSheet: View {
+    private enum Location: String, CaseIterable { case local = "Local", global = "Online" }
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @EnvironmentObject private var store: ChatStore
+    @State private var location: Location
+    @State private var preferPrivate: Bool
+
+    init(initialSource: WorkspaceStore.Server) {
+        _location = State(initialValue: initialSource == .local ? .local : .global)
+        _preferPrivate = State(initialValue: initialSource != .global)
+    }
+
+    private var hasGlobal: Bool { workspace.global != nil || workspace.accountGlobal != nil }
+    private var usePrivateGlobal: Bool {
+        location == .global && workspace.accountGlobal != nil && (workspace.global == nil || preferPrivate)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if store.createRoomParentID == nil {
+                VStack(alignment: .leading, spacing: 12) {
+                    if hasGlobal {
+                        Picker("Room location", selection: $location) {
+                            ForEach(Location.allCases, id: \.self) { location in
+                                Text(location.rawValue).tag(location)
+                            }
+                        }.pickerStyle(.segmented)
+                    } else {
+                        Text("Local · This Mac").gallopText(.bodySStrong)
+                    }
+                    if location == .global, workspace.global != nil, workspace.accountGlobal != nil {
+                        Picker("Room audience", selection: $preferPrivate) {
+                            Text("You and friends").tag(true)
+                            Text("Community").tag(false)
+                        }.pickerStyle(.segmented)
+                    }
+                }
+                .padding(.horizontal, 28).padding(.top, 20).padding(.bottom, 8)
+            }
+            if usePrivateGlobal, store.createRoomParentID == nil {
+                SocialRoomCreationView(social: workspace.social)
+            } else if location == .global && !hasGlobal {
+                Text("The online connection was disconnected. Choose Local to create a room on this Mac.")
+                    .gallopText(.bodyM).padding(28)
+                Button("Create a local room") { location = .local }.padding(.bottom, 28)
+            } else {
+                CreateRoomView(
+                    local: workspace.local,
+                    globalOrLocal: workspace.global ?? workspace.local,
+                    hasGlobal: workspace.global != nil,
+                    source: location == .local ? .local : .global
+                )
+            }
+        }.background(SemanticColor.surface600)
+    }
+}
+
 private struct CreateRoomView: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var store: ChatStore
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
     let hasGlobal: Bool
+    var source: WorkspaceStore.Server? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var description = ""
@@ -2938,13 +3173,14 @@ private struct CreateRoomView: View {
     /// whichever server owns the current selection.
     private var targetServer: WorkspaceStore.Server {
         if parentRoom != nil { return workspace.activeServer }
-        return chosenServer ?? workspace.activeServer
+        return source ?? chosenServer ?? workspace.activeServer
     }
 
     private var targetStore: ChatStore {
         switch targetServer {
         case .local: return local
         case .global: return hasGlobal ? globalOrLocal : local
+        case .accountGlobal: return workspace.accountGlobal ?? local
         }
     }
 
@@ -2960,7 +3196,7 @@ private struct CreateRoomView: View {
                         }
                             ?? (targetServer == .local
                                 ? "Create a conversation on this Mac's local Cowchat server."
-                                : "Create a conversation on the global Cowchat server.")
+                                : "Create a conversation on the community Cowchat server.")
                     )
                         .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 }
@@ -2974,9 +3210,9 @@ private struct CreateRoomView: View {
             }
 
             VStack(spacing: 12) {
-                if hasGlobal, parentRoom == nil {
+                if hasGlobal, parentRoom == nil, source == nil {
                     Picker("Server", selection: serverSelection) {
-                        ForEach(WorkspaceStore.Server.allCases) { server in
+                        ForEach([WorkspaceStore.Server.local, .global]) { server in
                             Text(server.label).tag(server)
                         }
                     }

@@ -1,0 +1,3 @@
+body { margin: 0; background: #fcfaf8; color: #211d19; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+#chart { box-sizing: border-box; padding: 32px; width: 100%; min-height: 360px; }
+*, *::before, *::after { animation: none !important; transition: none !important; }

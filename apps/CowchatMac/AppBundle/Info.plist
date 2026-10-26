@@ -12,14 +12,16 @@
 	<string>Cowchat</string>
 	<key>CFBundleIdentifier</key>
 	<string>inc.cowboy.cowchat</string>
+	<key>CFBundleURLTypes</key>
+    <array><dict><key>CFBundleURLName</key><string>inc.cowboy.cowchat.friend</string><key>CFBundleURLSchemes</key><array><string>cowchat</string></array></dict></array>
 	<key>CFBundleName</key>
 	<string>Cowchat</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.9.1</string>
+	<string>0.9.13</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>0.9.13</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
@@ -28,5 +30,15 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/cowboyinc/cowchat/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>H2eTZM51GKoaUZfJ5vzuvwd9inqQTC6Sv3wwdJGgzQc=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+	<key>SUEnableJavaScript</key>
+	<false/>
 </dict>
 </plist>

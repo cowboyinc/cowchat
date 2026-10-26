@@ -239,3 +239,33 @@ final class CowchatWebSocketTransportTests: XCTestCase {
         XCTAssertEqual(connection.profile, .local)
     }
 }
+
+extension CowchatWebSocketTransportTests {
+    @MainActor
+    func testHistoryCollectsSizeBoundedPagesUsingSequenceCursors() async throws {
+        let task = ScriptedWebSocketTask()
+        let profile = try ConnectionProfile.cowchatCloud(urlString: "wss://cloud.example/ws", apiKey: "test-key")
+        let connection = CowchatConnection(profile: profile) { _ in task }
+        var historyRequests = 0
+        task.onSend = { frame in
+            guard frame["type"] as? String == "get_history" else { return }
+            let request = frame["payload"] as! [String: Any]
+            historyRequests += 1
+            if historyRequests == 2 {
+                XCTAssertEqual(request["before_seq"] as? Int, 3)
+                XCTAssertEqual(request["limit"] as? Int, 2)
+            }
+            let seqs = historyRequests == 1 ? [3] : [1, 2]
+            let messages = seqs.map { seq in
+                ["message_id": "m\(seq)", "room_id": "room", "agent_id": "writer", "agent_name": "Writer", "content": "hello", "metadata": [:], "timestamp": "2026-10-16T00:00:00Z", "seq": seq] as [String: Any]
+            }
+            task.enqueue(frame: ["reply_to": frame["id"]!, "type": "history_result", "payload": ["messages": messages, "has_more": historyRequests == 1]])
+        }
+        try await connection.connect()
+        _ = try await connection.register(name: "Reader", agentID: "reader")
+        defer { connection.disconnect() }
+        let messages = try await connection.history(roomID: "room", limit: 3)
+        XCTAssertEqual(messages.map(\.seq), [1, 2, 3])
+        XCTAssertEqual(historyRequests, 2)
+    }
+}

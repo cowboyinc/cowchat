@@ -14,7 +14,7 @@ fn truncate_for_log(s: &str, max: usize) -> String {
 }
 
 use crate::broker::Broker;
-use crate::connection::{can_access_room, can_access_room_parts, matches_room_owner};
+use crate::connection::{can_access_room, can_access_room_parts, owns_room};
 use crate::reconnect::ReconnectManager;
 
 fn normalize_room_name(req_id: Option<&str>, name: &str) -> Result<String, Frame> {
@@ -203,10 +203,86 @@ pub async fn handle_frame(
     webhook_mgr: &Arc<crate::webhooks::WebhookManager>,
     reconnect_mgr: &Arc<ReconnectManager>,
 ) -> Frame {
+    broker.bind_access_store(store);
     let req_id = frame.id.as_deref();
 
+    if agent_api_key.starts_with(crate::store::social::PREFIX) {
+        if store.social_principal(agent_api_key).is_none() {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::Unauthorized, "Credential revoked or expired"),
+            );
+        }
+        if matches!(
+            frame.frame_type,
+            FrameType::CreateRoom
+                | FrameType::CreateInvite
+                | FrameType::RedeemInvite
+                | FrameType::RevokeInvite
+                | FrameType::Subscribe
+                | FrameType::SubscribeActor
+                | FrameType::ListInvites
+                | FrameType::ListSubscriptions
+                | FrameType::EnableSubscription
+                | FrameType::Unsubscribe
+                | FrameType::ClaimActorWork
+                | FrameType::CompleteActorWork
+        ) {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::Unauthorized,
+                    "Use human account approval for this operation",
+                ),
+            );
+        }
+        let mut room = frame
+            .payload
+            .get("room_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        {
+            if let Some(id) = frame
+                .payload
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                room = task_mgr.get_task(id).map(|t| t.room_id.clone());
+            }
+            if let Some(id) = frame
+                .payload
+                .get("vote_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                room = vote_mgr
+                    .active_votes
+                    .get(id)
+                    .map(|v| v.room_id.clone())
+                    .or_else(|| store.get_vote_meta(id).ok().flatten().map(|v| v.room_id));
+            }
+        }
+        if room
+            .as_deref()
+            .is_some_and(|id| store.social_room_access(id, agent_api_key) != Some(true))
+        {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::Unauthorized, "Room approval required"),
+            );
+        }
+    }
     match frame.frame_type {
         FrameType::Ping => Frame::pong(req_id),
+        FrameType::RoomCoordination => handle_coordination(
+            req_id,
+            frame.payload,
+            agent_id,
+            agent_name,
+            agent_api_key,
+            no_auth,
+            store,
+            broker,
+        ),
 
         FrameType::CreateRoom => {
             handle_create_room(
@@ -235,7 +311,9 @@ pub async fn handle_frame(
             )
             .await
         }
-        FrameType::LeaveRoom => handle_leave_room(req_id, frame.payload, agent_id, broker).await,
+        FrameType::LeaveRoom => {
+            handle_leave_room(req_id, frame.payload, agent_id, broker, store).await
+        }
         FrameType::RenameRoom => {
             handle_rename_room(
                 req_id,
@@ -650,8 +728,12 @@ async fn handle_rename_room(
             ErrorPayload::new(ErrorCode::AccessDenied, "System rooms cannot be renamed"),
         );
     }
-    if target.created_by.as_deref() != Some(agent_id)
-        || !matches_room_owner(target.owner_key.as_deref(), agent_api_key, no_auth)
+    if !store
+        .social_room_owner(&target.room_id, agent_api_key)
+        .unwrap_or_else(|| {
+            target.created_by.as_deref() == Some(agent_id)
+                && owns_room(&target, agent_api_key, no_auth, store)
+        })
     {
         return Frame::error(
             req_id,
@@ -774,6 +856,13 @@ async fn handle_join_room(
         return error;
     }
 
+    if let Err(error) = store.remember_room_voter(&p.room_id, agent_id) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+        );
+    }
+
     if broker.is_agent_in_room(agent_id, &p.room_id) {
         // Idempotent: joining a room you're already in is a no-op success, not
         // an error. (A stable-identity agent that took over a connection keeps
@@ -842,7 +931,12 @@ async fn handle_destroy_room(
 
     // Snapshot invite grants before destruction purges them, so invited
     // members still receive the RoomDestroyed event.
-    let granted_keys = store.granted_keys_for_room(&p.room_id);
+    let mut granted_keys = store.granted_keys_for_room(&p.room_id);
+    for entry in broker.agents.iter() {
+        if store.social_room_access(&p.room_id, &entry.api_key) == Some(true) {
+            granted_keys.insert(entry.api_key.clone());
+        }
+    }
 
     let destruction = broker
         .destroy_room_with(&p.room_id, || {
@@ -897,7 +991,10 @@ async fn handle_destroy_room(
     broadcast_room_destroyed(broker, &room, &granted_keys, no_auth, &event);
 
     log::info!("Room {} explicitly destroyed by {}", room.room_id, agent_id);
-    Frame::ok(req_id, serde_json::json!({"room_id": room.room_id}))
+    Frame::ok(
+        req_id,
+        serde_json::json!({"room_id": room.room_id,"destroyed":true}),
+    )
 }
 
 async fn handle_leave_room(
@@ -905,6 +1002,7 @@ async fn handle_leave_room(
     payload: serde_json::Value,
     agent_id: &str,
     broker: &Arc<Broker>,
+    store: &Arc<Store>,
 ) -> Frame {
     let p: LeaveRoomPayload = match serde_json::from_value(payload) {
         Ok(p) => p,
@@ -920,6 +1018,13 @@ async fn handle_leave_room(
         return Frame::error(
             req_id,
             ErrorPayload::new(ErrorCode::NotInRoom, "Not in this room"),
+        );
+    }
+
+    if let Err(error) = store.forget_room_voter(&p.room_id, agent_id) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
         );
     }
 
@@ -973,6 +1078,19 @@ async fn handle_send_message(
             )
         }
     };
+
+    if p.metadata
+        .get("display_external")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(
+                ErrorCode::InvalidPayload,
+                "metadata.display_external must be a boolean",
+            ),
+        );
+    }
 
     if p.key_epoch.is_some() {
         return Frame::error(
@@ -1030,14 +1148,48 @@ async fn handle_send_message(
     // every send, but we do NOT reject sends from non-holders. This avoids the
     // deadlock where the holder is stuck in `wait` and nobody else can speak.
 
+    let is_chart = p.metadata["type"].as_str() == Some("chart");
+    if is_chart {
+        if p.content.len() > 640 * 1024 {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::MessageTooLarge, "Chart message exceeds 640 KiB"),
+            );
+        }
+        // Encrypted charts stay opaque to the server. Plaintext charts must
+        // satisfy the same envelope/image bounds as the clients.
+        if !cowchat_core::crypto::is_ciphertext(&p.content)
+            && crate::chart::Chart::decode(&p.content).is_none()
+        {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, "Invalid chart image envelope"),
+            );
+        }
+    }
+
     // Check size + message rate limit (skip in no_auth mode)
     if !no_auth && !agent_api_key.is_empty() {
         let tier = store
             .get_key_tier(agent_api_key)
             .unwrap_or_else(|_| "free".to_string());
-        let limits = TierLimits::for_tier(&tier);
+        let mut limits = TierLimits::for_tier(&tier);
+        if is_chart {
+            limits.max_message_bytes = 640 * 1024;
+        }
         if let Some(err) = reject_oversized(req_id, &p.content, &limits) {
             return err;
+        }
+        // Charts consume the existing attachment upload allowance (60/hour)
+        // as well as the normal message budget, regardless of encryption.
+        if is_chart && !rate_limiter.try_register_upload(agent_api_key) {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::RateLimitMessages,
+                    "Chart upload limit exceeded (60 per hour)",
+                ),
+            );
         }
         if !rate_limiter.check_message_rate(agent_api_key, &limits) {
             return Frame::error(
@@ -1210,6 +1362,19 @@ async fn handle_get_history(
     agent_api_key: &str,
     no_auth: bool,
 ) -> Frame {
+    let bounded_pages = payload.get("bounded_pages").and_then(|v| v.as_bool()) == Some(true);
+    let before_seq = match payload.get("before_seq") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => match value.as_i64() {
+            Some(seq) => Some(seq),
+            None => {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InvalidPayload, "before_seq must be an integer"),
+                )
+            }
+        },
+    };
     let p: GetHistoryPayload = match serde_json::from_value(payload) {
         Ok(p) => p,
         Err(e) => {
@@ -1224,22 +1389,62 @@ async fn handle_get_history(
         return error;
     }
 
-    match store.get_history_filtered(
-        &p.room_id,
-        p.limit,
-        p.before,
-        p.since.as_deref(),
-        p.since_seq,
-    ) {
-        Ok(messages) => Frame {
-            id: Some(uuid::Uuid::new_v4().to_string()),
-            reply_to: req_id.map(String::from),
-            frame_type: FrameType::HistoryResult,
-            payload: serde_json::json!({
-                "room_id": p.room_id,
-                "messages": messages,
-            }),
-        },
+    let forward = before_seq.is_none() && (p.since_seq.is_some() || p.since.is_some());
+    let history = if let Some(before_seq) = before_seq {
+        store.get_history_before_seq(&p.room_id, p.limit, before_seq)
+    } else {
+        store.get_history_filtered(
+            &p.room_id,
+            p.limit,
+            p.before,
+            p.since.as_deref(),
+            p.since_seq,
+        )
+    };
+    match history {
+        Ok(mut messages) => {
+            let total = messages.len();
+            if !forward {
+                messages.reverse();
+            }
+            let mut bytes = 512usize;
+            let mut count = 0;
+            for message in &messages {
+                let size = match serde_json::to_vec(message) {
+                    Ok(body) => body.len() + 1,
+                    Err(error) => {
+                        return Frame::error(
+                            req_id,
+                            ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+                        )
+                    }
+                };
+                if bounded_pages && size + 4096 > crate::server::MAX_FRAME_BYTES {
+                    return Frame::error(
+                        req_id,
+                        ErrorPayload::new(
+                            ErrorCode::InvalidPayload,
+                            "A message exceeds the history frame limit",
+                        ),
+                    );
+                }
+                if bounded_pages && count > 0 && bytes + size > 768 * 1024 {
+                    break;
+                }
+                count += 1;
+                bytes += size;
+            }
+            messages.truncate(count);
+            if !forward {
+                messages.reverse();
+            }
+            Frame {
+                id: Some(uuid::Uuid::new_v4().to_string()),
+                reply_to: req_id.map(String::from),
+                frame_type: FrameType::HistoryResult,
+                payload: serde_json::json!({"room_id":p.room_id,"messages":messages,"has_more":count<total}),
+            }
+        }
         Err(e) => Frame::error(
             req_id,
             ErrorPayload::new(ErrorCode::InternalError, e.to_string()),
@@ -1508,7 +1713,19 @@ async fn handle_create_vote(
     }
 
     let vote_id = uuid::Uuid::new_v4().to_string();
-    let eligible_agents = broker.get_room_members(&p.room_id);
+    let mut eligible_agents = match store.room_voters(&p.room_id) {
+        Ok(agents) => agents,
+        Err(error) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InternalError, error.to_string()),
+            )
+        }
+    };
+    // Include live members admitted through non-CLI connection paths too.
+    eligible_agents.extend(broker.get_room_members(&p.room_id));
+    eligible_agents.sort();
+    eligible_agents.dedup();
     let eligible = eligible_agents.len();
 
     let closes_at = p
@@ -2770,7 +2987,7 @@ async fn handle_revoke_invite(
         .get_room(&invite.room_id)
         .ok()
         .flatten()
-        .is_some_and(|room| matches_room_owner(room.owner_key.as_deref(), agent_api_key, no_auth));
+        .is_some_and(|room| owns_room(&room, agent_api_key, no_auth, store));
     if !no_auth && !is_creator && !is_room_owner {
         return Frame::error(
             req_id,
@@ -3442,3 +3659,62 @@ mod invite_tests {
 
 #[cfg(test)]
 mod append_tests;
+
+fn handle_coordination(
+    req_id: Option<&str>,
+    payload: serde_json::Value,
+    agent: &str,
+    name: &str,
+    key: &str,
+    no_auth: bool,
+    store: &Arc<Store>,
+    broker: &Arc<Broker>,
+) -> Frame {
+    use crate::store::coordination::{CoordinationError, Request};
+    use sha2::Digest;
+    let request: Request = match serde_json::from_value(payload) {
+        Ok(request) => request,
+        Err(_) => {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::InvalidPayload,
+                    "Invalid room coordination request",
+                ),
+            )
+        }
+    };
+    if let Err(frame) = authorize_room(req_id, &request.room_id, key, no_auth, store) {
+        return frame;
+    }
+    if request.operation.mutates() && !broker.is_agent_in_room(agent, &request.room_id) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(
+                ErrorCode::NotInRoom,
+                "Join the room before changing its coordination state",
+            ),
+        );
+    }
+    let principal = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
+    match store.coordinate(
+        &request.room_id,
+        &principal,
+        agent,
+        name,
+        request.operation,
+        chrono::Utc::now().timestamp(),
+    ) {
+        Ok(result) => Frame::ok(req_id, result),
+        Err(error) => {
+            let code = match error {
+                CoordinationError::Lost => ErrorCode::AccessDenied,
+                CoordinationError::Conflict | CoordinationError::Invalid(_) => {
+                    ErrorCode::InvalidPayload
+                }
+                CoordinationError::Storage(_) => ErrorCode::InternalError,
+            };
+            Frame::error(req_id, ErrorPayload::new(code, error.to_string()))
+        }
+    }
+}

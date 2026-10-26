@@ -16,6 +16,12 @@ on:
         type: boolean
         default: false
 
+# Serialize promotion across tags so concurrent releases cannot move the stable
+# feed backward. Already-published assets remain immutable.
+concurrency:
+  group: cowchat-release
+  cancel-in-progress: false
+
 jobs:
   build:
     name: build (${{ matrix.target }})
@@ -88,6 +94,15 @@ jobs:
         with:
           toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm install --global pnpm@11.1.2
+      - run: pnpm --dir tools/cowchat-charts install --frozen-lockfile
+        env:
+          OPENUI_TELEMETRY_DISABLED: '1'
+          DO_NOT_TRACK: '1'
+      - run: node tools/cowchat-charts/bundle-mac.mjs
       - name: Require Apple release credentials
         run: |
           set -euo pipefail
@@ -152,8 +167,10 @@ jobs:
           ./build-app.sh
           APP="$HOME/Applications/Cowchat.app"
           codesign --verify --deep --strict "$APP"
-          lipo "$APP/Contents/MacOS/Cowchat" -verify_arch arm64 x86_64
-          lipo "$APP/Contents/Helpers/cowchat-server" -verify_arch arm64 x86_64
+          lipo "$APP/Contents/MacOS/Cowchat" -verify_arch arm64
+          lipo "$APP/Contents/MacOS/Cowchat" -verify_arch x86_64
+          lipo "$APP/Contents/Helpers/cowchat-server" -verify_arch arm64
+          lipo "$APP/Contents/Helpers/cowchat-server" -verify_arch x86_64
           codesign -dv --verbose=4 "$APP" 2>&1 \
             | grep -F 'Authority=Developer ID Application:'
           codesign -dv --verbose=4 "$APP/Contents/Helpers/cowchat-server" 2>&1 \
@@ -187,10 +204,27 @@ jobs:
           spctl --assess --type open --context context:primary-signature \
             --verbose=4 "$DMG"
           hdiutil verify "$DMG" >/dev/null
+      - name: Verify pinned Sparkle tools and signing contracts
+        run: |
+          set -euo pipefail
+          scripts/download-sparkle.sh "$RUNNER_TEMP/sparkle"
+          python3 scripts/test-appcast.py "$RUNNER_TEMP/sparkle/tools"
+          sh apps/CowchatMac/test-sparkle-packaging.sh "$RUNNER_TEMP/sparkle/tools/Sparkle.framework"
+          python3 scripts/test-publish-release.py
+      - name: Sign final notarized DMG and update feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-appcast.py --dmg "Cowchat-${TAG#v}.dmg" \
+            --info-plist "$HOME/Applications/Cowchat.app/Contents/Info.plist" \
+            --tools "$RUNNER_TEMP/sparkle/tools" --output appcast.xml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Cowchat-dmg
-          path: Cowchat-*.dmg
+          path: |
+            Cowchat-*.dmg
+            appcast.xml
           if-no-files-found: error
 
   release:
@@ -203,6 +237,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
@@ -222,6 +258,9 @@ jobs:
           }
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
           NOTES='Signed and notarized universal Cowchat.app DMG, plus prebuilt cowchat + cowchat-server binaries (macOS arm64/x86_64, Linux arm64/x86_64). Homebrew: `brew install --cask cowboyinc/tap/cowchat` for the app, `brew install cowboyinc/tap/cowchat` for the CLIs — pending tap merge; this note is updated on promotion.'
+          if [ -f "docs/releases/${TAG#v}.md" ]; then
+            printf -v NOTES '%s\n\n%s' "$(cat "docs/releases/${TAG#v}.md")" "$NOTES"
+          fi
 
           sha() {
             shasum -a 256 "dist/cowchat-${TAG}-$1.tar.gz" | awk '{print $1}'

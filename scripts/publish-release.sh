@@ -12,6 +12,7 @@ TAG=$1 REPO=$2 DIST=$3 POLICY=$4 MODE=$5
 VERSION=${TAG#v}
 assets=("Cowchat-${VERSION}.dmg")
 if [[ "$MODE" == full ]]; then
+  assets+=("appcast.xml")
   for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
     assets+=("cowchat-${TAG}-${target}.tar.gz")
   done

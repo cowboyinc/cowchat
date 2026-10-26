@@ -1,0 +1,41 @@
+{
+  "summary": {
+    "revenue": "$128,400",
+    "open": 12
+  },
+  "work": {
+    "report": {
+      "name": {
+        "text": "Quarterly report",
+        "href": "https://example.com/report"
+      },
+      "owner": "Sam",
+      "status": {
+        "text": "In progress",
+        "badge": true
+      }
+    },
+    "research": {
+      "name": "Customer research",
+      "owner": "Alex",
+      "status": {
+        "text": "Ready",
+        "badge": true,
+        "tone": "success"
+      }
+    }
+  },
+  "revenue": {
+    "labels": [
+      "April",
+      "May",
+      "June"
+    ],
+    "values": [
+      28,
+      42,
+      58
+    ]
+  },
+  "notes": "**This week**\n\nPrepare the next release and review customer research."
+}

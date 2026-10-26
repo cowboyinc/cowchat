@@ -143,6 +143,11 @@ struct ConnectionProfile: Equatable, CustomStringConvertible, CustomDebugStringC
         )
     }
 
+    static func socialSession(_ session: SocialSession) throws -> ConnectionProfile {
+        try cowchatCloud(urlString: session.endpoint.absoluteString, apiKey: session.deviceKey)
+            .persisted(cloudAccountID: session.scopeId)
+    }
+
     /// Represents a selected Cloud connection whose secure configuration could not be
     /// loaded. It preserves the selected mode for UI state but cannot be connected.
     static func unavailableCowchatCloud(urlString: String?) -> ConnectionProfile {

@@ -1,0 +1,5 @@
+packages:
+  - .
+allowBuilds:
+  '@openuidev/lang-core': true
+  esbuild: true

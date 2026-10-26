@@ -21,6 +21,29 @@ trap 'exit 143' TERM
 
 sh -n "$ROOT/build-dmg.sh"
 sh -n "$ROOT/build-app.sh"
+sh -n "$ROOT/sign-sparkle.sh"
+# Validate the actual production bundle contract, including the public signing
+# key; fixture-only signing checks cannot catch a misconfigured shipped app.
+python3 - "$ROOT/AppBundle/Info.plist" "$ROOT/../../Cargo.toml" <<'PYTHON'
+import base64
+import plistlib
+from pathlib import Path
+import re
+import sys
+with open(sys.argv[1], "rb") as source:
+    info = plistlib.load(source)
+version = info["CFBundleShortVersionString"]
+assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version), "Invalid production app version"
+assert info["CFBundleVersion"] == version, "Bundle build version must match display/release version"
+workspace = Path(sys.argv[2]).read_text().split("[workspace.package]", 1)[1].split("[", 1)[0]
+assert re.search(r'^version\s*=\s*"' + re.escape(version) + r'"', workspace, re.MULTILINE), "Bundle/Cargo release versions must match"
+assert info["SUFeedURL"] == "https://github.com/cowboyinc/cowchat/releases/latest/download/appcast.xml"
+assert info["SURequireSignedFeed"] is True, "Production must require signed feeds"
+assert info["SUVerifyUpdateBeforeExtraction"] is True, "Production must verify before extraction"
+key = base64.b64decode(info["SUPublicEDKey"], validate=True)
+assert len(key) == 32 and any(key), "Production needs a configured Ed25519 public key"
+PYTHON
+
 xmllint --noout "$ROOT/DmgBackground.svg"
 sips -s format png "$ROOT/DmgBackground.svg" --out "$WORK/background.png" >/dev/null
 
@@ -60,8 +83,10 @@ grep -Fq "attach_image \"\$FINAL_DMG\" -readonly" "$ROOT/build-dmg.sh"
 grep -q 'Applications.*symlink to /Applications' "$ROOT/build-dmg.sh"
 grep -q 'with timeout of 30 seconds' "$ROOT/build-dmg.sh"
 grep -q 'Finder automation is unavailable' "$ROOT/build-dmg.sh"
-grep -q 'lipo .* -verify_arch arm64 x86_64' "$ROOT/build-app.sh"
-grep -q 'lipo .* -verify_arch arm64 x86_64' "$ROOT/build-dmg.sh"
+grep -q 'lipo .* -verify_arch arm64' "$ROOT/build-app.sh"
+grep -q 'lipo .* -verify_arch x86_64' "$ROOT/build-app.sh"
+grep -q 'lipo .* -verify_arch arm64' "$ROOT/build-dmg.sh"
+grep -q 'lipo .* -verify_arch x86_64' "$ROOT/build-dmg.sh"
 grep -Fq "Contents/Helpers/\$SERVER_NAME" "$ROOT/build-app.sh"
 grep -Fq "Contents/Helpers/\$SERVER_NAME" "$ROOT/build-dmg.sh"
 grep -Fq "\"\$CARGO_BIN\" build --locked --release --package \"\$SERVER_NAME\"" "$ROOT/build-app.sh"
@@ -184,6 +209,12 @@ for test_target in aarch64-apple-darwin x86_64-apple-darwin; do
 	chmod +x "$test_server"
 done
 
+APP_ARTIFACTS="$APP_TEST/artifacts"
+APP_SPARKLE="$APP_ARTIFACTS/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework/Versions/B"
+mkdir -p "$APP_SPARKLE/XPCServices/Installer.xpc" "$APP_SPARKLE/XPCServices/Downloader.xpc" "$APP_SPARKLE/Updater.app"
+touch "$APP_SPARKLE/Sparkle" "$APP_SPARKLE/Autoupdate"
+printf '%s\n' 'Sparkle and third-party license fixture' > "$APP_ARTIFACTS/LICENSE"
+
 cat > "$APP_SHIMS/swift" <<'SHIM'
 #!/bin/sh
 case " $* " in
@@ -255,7 +286,7 @@ printf '%s\n' '<?xml version="1.0"?><plist version="1.0"><dict/></plist>' > "$pa
 SHIM
 cat > "$APP_SHIMS/ditto" <<'SHIM'
 #!/bin/sh
-if [ "${COWCHAT_TEST_FAIL_DITTO:-0}" = "1" ]; then
+if [ "${COWCHAT_TEST_FAIL_DITTO:-0}" = "1" ] && [ "${1##*/}" = "Cowchat.app" ]; then
 	mkdir -p "$2"
 	printf '%s\n' 'partial-copy' > "$2/partial"
 	exit 73
@@ -283,6 +314,7 @@ if /usr/bin/env \
 	HOME="$APP_HOME" \
 	PATH="$APP_SHIMS:/usr/bin:/bin:/usr/sbin:/sbin" \
 	CARGO_TARGET_DIR="$APP_CARGO_TARGET" \
+	COWCHAT_SWIFT_ARTIFACTS_DIR="$APP_ARTIFACTS" \
 	COWCHAT_TEST_BIN_DIR="$APP_BIN" \
 	COWCHAT_TEST_BUILD_EVENTS="$APP_BUILD_EVENTS" \
 	COWCHAT_TEST_FAIL_DITTO=1 \
@@ -295,6 +327,8 @@ if ! grep -Fq 'cargo:13.0:build --locked --release --package cowchat-server --ta
 	printf '%s\n' 'The app build did not request both locked server helper slices for macOS 13.' >&2
 	exit 1
 fi
+cmp "$APP_ARTIFACTS/LICENSE" "$APP_BIN/Cowchat.app/Contents/Resources/Sparkle-LICENSE.txt"
+
 dynamic_lipo_line=$(grep -n 'lipo:.* -create -output .*Contents/Helpers/cowchat-server' "$APP_BUILD_EVENTS" | head -n 1 | cut -d: -f1)
 dynamic_server_sign_line=$(grep -n 'codesign:--force --sign - .*Contents/Helpers/cowchat-server' "$APP_BUILD_EVENTS" | head -n 1 | cut -d: -f1)
 dynamic_app_sign_line=$(grep -n 'codesign:--force --sign - .*Cowchat.app$' "$APP_BUILD_EVENTS" | head -n 1 | cut -d: -f1)
@@ -317,6 +351,7 @@ if /usr/bin/env \
 	HOME="$APP_HOME" \
 	PATH="$APP_SHIMS:/usr/bin:/bin:/usr/sbin:/sbin" \
 	CARGO_TARGET_DIR="$APP_CARGO_TARGET" \
+	COWCHAT_SWIFT_ARTIFACTS_DIR="$APP_ARTIFACTS" \
 	COWCHAT_TEST_BIN_DIR="$APP_BIN" \
 	COWCHAT_TEST_BUILD_EVENTS="$APP_BUILD_EVENTS" \
 	COWCHAT_TEST_SIGNAL_AFTER_BACKUP=1 \
@@ -384,7 +419,7 @@ SHIM
 cat > "$DMG_SHIMS/lipo" <<'SHIM'
 #!/bin/sh
 case " $* " in
-	*"/Contents/Helpers/cowchat-server -verify_arch arm64 x86_64 "*)
+	*"/Contents/Helpers/cowchat-server -verify_arch "*)
 		if [ "${COWCHAT_TEST_BAD_HELPER_ARCH:-0}" = "1" ]; then exit 79; fi
 		;;
 esac

@@ -17,6 +17,7 @@ tokio.workspace = true
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 log.workspace = true
 env_logger.workspace = true
 directories = "5"
@@ -28,6 +29,7 @@ base64 = "0.22"
 hex = "0.4"
 k256 = { version = "0.13", features = ["ecdsa"] }
 zeroize = "1"
+libc = "0.2"
 
 [dev-dependencies]
 cowchat-server.workspace = true

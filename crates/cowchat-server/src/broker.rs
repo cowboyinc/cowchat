@@ -72,6 +72,7 @@ pub struct LeaveOutcome {
 /// — this is the basis for the round-robin turn token. The token holder for each room is
 /// tracked in `turn_holders`; absence means the room is currently empty.
 pub struct Broker {
+    access_store: std::sync::OnceLock<std::sync::Weak<crate::store::Store>>,
     /// Serializes room metadata mutations and their corresponding lifecycle
     /// events. Keeping this separate from `room_lifecycle` lets handlers
     /// publish without holding the admission/tombstone lock while still
@@ -101,6 +102,7 @@ impl Broker {
         room_members: Arc<DashMap<String, Vec<String>>>,
     ) -> Self {
         Self {
+            access_store: std::sync::OnceLock::new(),
             room_mutation: Mutex::new(()),
             agent_lifecycle: Mutex::new(()),
             agents,
@@ -110,6 +112,17 @@ impl Broker {
         }
     }
 
+    pub fn bind_access_store(&self, store: &Arc<crate::store::Store>) {
+        let _ = self.access_store.set(Arc::downgrade(store));
+    }
+    fn room_recipient_allowed(&self, id: &str, room: &str) -> bool {
+        let Some(store) = self.access_store.get().and_then(std::sync::Weak::upgrade) else {
+            return true;
+        };
+        self.agents
+            .get(id)
+            .is_some_and(|a| store.social_room_access(room, &a.api_key).unwrap_or(true))
+    }
     pub fn lock_agent_lifecycle(&self) -> std::sync::MutexGuard<'_, ()> {
         self.agent_lifecycle.lock().unwrap()
     }
@@ -131,7 +144,9 @@ impl Broker {
                 if member_id == sender_id {
                     continue;
                 }
-                self.send_to_agent(member_id, frame.clone());
+                if self.room_recipient_allowed(member_id, room_id) {
+                    self.send_to_agent(member_id, frame.clone());
+                }
             }
         }
     }
@@ -140,7 +155,9 @@ impl Broker {
     pub fn broadcast_to_room_all(&self, room_id: &str, frame: &Frame) {
         if let Some(members) = self.room_members.get(room_id) {
             for member_id in members.iter() {
-                self.send_to_agent(member_id, frame.clone());
+                if self.room_recipient_allowed(member_id, room_id) {
+                    self.send_to_agent(member_id, frame.clone());
+                }
             }
         }
     }
@@ -158,7 +175,9 @@ impl Broker {
         );
 
         for agent_id in mentions {
-            if self.is_agent_in_room(agent_id, room_id) {
+            if self.is_agent_in_room(agent_id, room_id)
+                && self.room_recipient_allowed(agent_id, room_id)
+            {
                 self.send_to_agent(agent_id, frame.clone());
             }
         }
@@ -167,6 +186,24 @@ impl Broker {
     /// Send a frame to a specific agent by ID.
     pub fn send_to_agent(&self, agent_id: &str, frame: Frame) {
         if let Some(agent) = self.agents.get(agent_id) {
+            if let Some(store) = self.access_store.get().and_then(std::sync::Weak::upgrade) {
+                if agent.api_key.starts_with(crate::store::social::PREFIX)
+                    && store.social_principal(&agent.api_key).is_none()
+                {
+                    return;
+                }
+                if let Some(room) = frame
+                    .payload
+                    .get("room_id")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    if frame.frame_type != FrameType::RoomDestroyed
+                        && store.social_room_access(room, &agent.api_key) == Some(false)
+                    {
+                        return;
+                    }
+                }
+            }
             if let Err(error) = agent.sender.try_send(frame) {
                 log::warn!(
                     "Disconnecting lagging agent {}: bounded queue unavailable: {}",

@@ -1,0 +1,25 @@
+{
+  "name": "@cowchat/charts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "render": "node render.mjs",
+    "test": "node --test test.mjs"
+  },
+  "dependencies": {
+    "@openuidev/react-lang": "1.0.1",
+    "@openuidev/react-ui": "0.18.1",
+    "esbuild": "0.25.11",
+    "playwright": "1.64.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@openuidev/lang-core",
+      "esbuild"
+    ]
+  }
+}

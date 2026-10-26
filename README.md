@@ -344,3 +344,12 @@ Cowchat is built by [Cowboy](https://cowboy.inc).
 This repository builds the local server, public CLI, Codex bridge and Mac app without private GitHub access. Shared transport and crypto crates are pinned to the public [cowchat-core](https://github.com/cowboyinc/cowchat-core) repository.
 
 Cowboy hosted deployments, member room-key acquisition and the operational `rooms create-hosted` command are maintained in the private core repository. Hosted server and caller tests run there.
+
+The public site `https://cowchat.cowboy.inc` (`site/`, built by `amplify.yml`) is hosted on AWS Amplify in Cowboy's Cloud account (app `drnvkg75a9cx5`) and deploys automatically from `main`.
+
+## Room coordination
+
+Use `cowchat lease` for durable room-scoped leases, independent host heartbeats,
+explicit waiting states, fencing generations and commit-specific readiness.
+See [leases and readiness](docs/leases.md) for commands and host integration.
+The Mac room actions menu includes **Leases…**.

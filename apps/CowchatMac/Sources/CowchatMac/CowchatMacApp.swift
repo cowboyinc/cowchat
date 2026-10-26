@@ -115,7 +115,7 @@ final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
 struct CowchatMacApp: App {
     @NSApplicationDelegateAdaptor(CowchatAppDelegate.self) private var appDelegate
     @StateObject private var workspace = WorkspaceStore()
-    @StateObject private var updateChecker = UpdateChecker()
+    @StateObject private var softwareUpdater = SoftwareUpdater()
     @AppStorage(CowchatOnboarding.completedVersionKey) private var completedOnboardingVersion = 0
 
     var body: some Scene {
@@ -132,64 +132,42 @@ struct CowchatMacApp: App {
                 }
             }
             .environmentObject(workspace)
+            .environmentObject(softwareUpdater)
             .environmentObject(workspace.activeStore)
             .tint(SemanticColor.buttonPrimaryDefault)
+            .onOpenURL { workspace.receiveFriendInvitation($0) }
+            .sheet(item: Binding(get: {
+                completedOnboardingVersion >= CowchatOnboarding.currentVersion
+                    ? workspace.pendingFriendInvitation : nil
+            }, set: { _ in })) { invitation in
+                FriendInvitationConfirmation(social: workspace.social, invitation: invitation) {
+                    workspace.clearFriendInvitation(invitation)
+                }.id(invitation.id)
+            }
             .task {
                 appDelegate.onTerminationRequested = {
                     await workspace.shutdownForAppTermination()
                 }
                 workspace.start()
-                // Let the window settle first: an alert presented before the
-                // scene is ready is silently dropped.
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                await updateChecker.check()
-            }
-            .alert(
-                "Update Available",
-                isPresented: Binding(
-                    get: { updateChecker.availableRelease != nil },
-                    set: { if !$0 { updateChecker.availableRelease = nil } }
-                ),
-                presenting: updateChecker.availableRelease
-            ) { release in
-                if updateChecker.isBrewManagedInstall {
-                    Button("Copy brew Command") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(
-                            UpdateChecker.brewUpgradeCommand, forType: .string)
-                        updateChecker.availableRelease = nil
-                    }
-                } else {
-                    Button("Download") {
-                        NSWorkspace.shared.open(release.pageURL)
-                        updateChecker.availableRelease = nil
-                    }
-                }
-                Button("Skip This Version") {
-                    updateChecker.skipAvailableRelease()
-                }
-                Button("Remind Me Later", role: .cancel) {
-                    updateChecker.availableRelease = nil
-                }
-            } message: { release in
-                if updateChecker.isBrewManagedInstall {
-                    Text(
-                        "Cowchat \(release.displayVersion) is available. This install is managed by Homebrew — run `\(UpdateChecker.brewUpgradeCommand)` in a terminal to update the app and CLI together."
-                    )
-                } else {
-                    Text(
-                        "Cowchat \(release.displayVersion) is available. Updating keeps the app and its bundled server in step with the CLI."
-                    )
-                }
+                softwareUpdater.start()
             }
         }
         .defaultSize(width: 1080, height: 740)
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { softwareUpdater.checkForUpdates() }
+                    .disabled(!softwareUpdater.canCheckForUpdates)
+            }
             CommandGroup(after: .newItem) {
                 Button("New Room") { workspace.activeStore.presentCreateRoom() }
                     .keyboardShortcut("n", modifiers: .command)
                     .disabled(completedOnboardingVersion < CowchatOnboarding.currentVersion)
+            }
+            CommandGroup(after: .help) {
+                Button("What’s New in Cowchat") {
+                    NotificationCenter.default.post(name: .cowchatShowWhatsNew, object: nil)
+                }
             }
             CommandGroup(after: .sidebar) {
                 Button("Toggle Sidebar") {
@@ -202,6 +180,8 @@ struct CowchatMacApp: App {
 }
 
 extension Notification.Name {
+    static let cowchatShowWhatsNew = Notification.Name("CowchatMac.showWhatsNew")
+
     /// ⌃⌘S — macOS reserves this for sidebar toggling; nothing binds it once
     /// the shell owns its own fixed column (cowboy-app pattern).
     static let cowchatToggleSidebar = Notification.Name("CowchatMac.toggleSidebar")

@@ -15,6 +15,7 @@ name = "cowchat_server"
 path = "src/lib.rs"
 
 [dependencies]
+anyhow = "1"
 cowchat-core.workspace = true
 tokio.workspace = true
 serde.workspace = true
