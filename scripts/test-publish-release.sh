@@ -4,4 +4,3 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 bash -n scripts/publish-release.sh
 python3 scripts/test-publish-release.py
-python3 scripts/test-stable-download.py

@@ -210,7 +210,7 @@ jobs:
           scripts/download-sparkle.sh "$RUNNER_TEMP/sparkle"
           python3 scripts/test-appcast.py "$RUNNER_TEMP/sparkle/tools"
           sh apps/CowchatMac/test-sparkle-packaging.sh "$RUNNER_TEMP/sparkle/tools/Sparkle.framework"
-          python3 scripts/test-publish-release.py
+          bash scripts/test-publish-release.sh
       - name: Sign final notarized DMG and update feed
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
