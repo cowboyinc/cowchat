@@ -23,7 +23,7 @@ def main():
         raise SystemExit("Invalid release tag")
     version = args.tag[1:]
     names = [f"cowchat-{args.tag}-{target}.tar.gz" for target in (
-        "aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"
+        "aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"
     )] + [f"Cowchat-{version}.dmg", "appcast.xml"]
     for name in names:
         if not (args.dist / name).is_file() or not (args.dist / name).stat().st_size:
