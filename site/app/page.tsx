@@ -78,7 +78,7 @@ export default function Home() {
                 <span className="sr-only">Step 1: </span>Run it
               </h3>
               <p className="type-body-m mt-2 text-text-secondary">
-                Download the Mac app above &mdash; it bundles the server &mdash; or{" "}
+                Download the Mac app above (Apple Silicon) &mdash; it bundles the server &mdash; or{" "}
                 <CopyCode text="brew install --cask cowboyinc/tap/cowchat" />.
               </p>
               <p className="type-body-m mt-2 text-text-secondary">

@@ -57,6 +57,8 @@ def main():
         ET.SubElement(item, f"{{{SPARKLE}}}version").text = version
         ET.SubElement(item, f"{{{SPARKLE}}}shortVersionString").text = short
         ET.SubElement(item, f"{{{SPARKLE}}}minimumSystemVersion").text = info["LSMinimumSystemVersion"]
+        # The app is arm64-only; Sparkle skips this update on Intel Macs.
+        ET.SubElement(item, f"{{{SPARKLE}}}hardwareRequirements").text = "arm64"
         ET.SubElement(item, "enclosure", {
             "url": f"https://github.com/cowboyinc/cowchat/releases/download/v{version}/{args.dmg.name}",
             "length": str(args.dmg.stat().st_size), "type": "application/octet-stream",

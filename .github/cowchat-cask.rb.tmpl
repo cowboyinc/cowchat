@@ -11,6 +11,7 @@ cask "cowchat" do
   # CLIs; this cask installs the app, which carries its own server helper in
   # Contents/Helpers. Sparkle updates the app; standalone CLIs use this tap.
   auto_updates true
+  depends_on arch: :arm64
   depends_on macos: :ventura
 
   app "Cowchat.app"

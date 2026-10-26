@@ -19,7 +19,7 @@ class PublicationTests(unittest.TestCase):
             dist = Path(temporary) / "dist"
             dist.mkdir()
             names = [f"cowchat-v0.9.10-{target}.tar.gz" for target in (
-                "aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"
+                "aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"
             )] + ["Cowchat-0.9.10.dmg", "appcast.xml"]
             for name in names:
                 (dist / name).write_bytes(name.encode())

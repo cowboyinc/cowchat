@@ -21,5 +21,4 @@ done
 test -L "$WORK/Sparkle.framework/Sparkle"
 test -L "$WORK/Sparkle.framework/Versions/Current"
 lipo "$WORK/Sparkle.framework/Versions/B/Sparkle" -verify_arch arm64
-lipo "$WORK/Sparkle.framework/Versions/B/Sparkle" -verify_arch x86_64
-printf '%s\n' 'Sparkle nested signatures, preserved entitlements, universal slices and framework symlinks verified.'
+printf '%s\n' 'Sparkle nested signatures, preserved entitlements, arm64 slice and framework symlinks verified.'

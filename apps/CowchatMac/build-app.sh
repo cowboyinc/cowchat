@@ -47,8 +47,8 @@ verify_server_binary() {
 			"$verification_phase" "$server_path" >&2
 		exit 1
 	fi
-	if ! lipo "$server_path" -verify_arch arm64 || ! lipo "$server_path" -verify_arch x86_64; then
-		printf 'Cowchat server helper is not universal (%s).\n' "$verification_phase" >&2
+	if [ "$(lipo -archs "$server_path")" != "arm64" ]; then
+		printf 'Cowchat server helper is not an arm64-only binary (%s).\n' "$verification_phase" >&2
 		exit 1
 	fi
 	if ! server_version_output=$("$server_path" --version 2>/dev/null); then
@@ -85,7 +85,7 @@ if ! command -v xcrun >/dev/null 2>&1; then
 	exit 1
 fi
 if ! command -v rustup >/dev/null 2>&1; then
-	printf '%s\n' 'Missing rustup; it is required to build both macOS server architectures.' >&2
+	printf '%s\n' 'Missing rustup; it is required to build the macOS server helper.' >&2
 	exit 1
 fi
 CARGO_BIN=$(rustup which --toolchain "$RUST_TOOLCHAIN" cargo)
@@ -96,36 +96,33 @@ if [ ! -x "$CARGO_BIN" ] || [ ! -x "$RUSTC_BIN" ]; then
 	exit 1
 fi
 
-# Build both supported Mac architectures so a versioned installer is never
-# silently tied to the architecture of the machine that produced it.
+# Cowchat for Mac is Apple Silicon only; Intel Macs are not supported.
 for chart_asset in index.html client.js client.css; do
     if [ ! -s "$ROOT/Sources/CowchatMac/Bundled/Charts/$chart_asset" ]; then
         printf 'Missing chart assets. Run pnpm --dir tools/cowchat-charts install --frozen-lockfile and node tools/cowchat-charts/bundle-mac.mjs before packaging.\n' >&2
         exit 1
     fi
 done
-swift build -c release --arch arm64 --arch x86_64
-BIN_DIR=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)
+swift build -c release --arch arm64
+BIN_DIR=$(swift build -c release --arch arm64 --show-bin-path)
 APP_DIR="$BIN_DIR/$APP_NAME"
 RESOURCE_BUNDLE="$BIN_DIR/${PRODUCT}_${PRODUCT}.bundle"
 
-for server_target in aarch64-apple-darwin x86_64-apple-darwin; do
-	if ! rustup target list --installed --toolchain "$RUST_TOOLCHAIN" | \
-		grep -Fxq "$server_target"; then
-		printf 'Rust target %s is not installed for toolchain %s.\n' \
-			"$server_target" "$RUST_TOOLCHAIN" >&2
-		printf 'Install it with: rustup target add --toolchain %s %s\n' \
-			"$RUST_TOOLCHAIN" "$server_target" >&2
-		exit 1
-	fi
-	MACOSX_DEPLOYMENT_TARGET=13.0 CARGO_TARGET_DIR="$SERVER_TARGET_DIR" \
-		RUSTC="$RUSTC_BIN" "$CARGO_BIN" build --locked --release --package "$SERVER_NAME" \
-		--target "$server_target" --manifest-path "$SERVER_MANIFEST"
-done
-ARM_SERVER="$SERVER_TARGET_DIR/aarch64-apple-darwin/release/$SERVER_NAME"
-INTEL_SERVER="$SERVER_TARGET_DIR/x86_64-apple-darwin/release/$SERVER_NAME"
-if [ ! -f "$ARM_SERVER" ] || [ ! -f "$INTEL_SERVER" ]; then
-	printf '%s\n' 'Missing one or more release cowchat-server target slices.' >&2
+SERVER_TARGET=aarch64-apple-darwin
+if ! rustup target list --installed --toolchain "$RUST_TOOLCHAIN" | \
+	grep -Fxq "$SERVER_TARGET"; then
+	printf 'Rust target %s is not installed for toolchain %s.\n' \
+		"$SERVER_TARGET" "$RUST_TOOLCHAIN" >&2
+	printf 'Install it with: rustup target add --toolchain %s %s\n' \
+		"$RUST_TOOLCHAIN" "$SERVER_TARGET" >&2
+	exit 1
+fi
+MACOSX_DEPLOYMENT_TARGET=13.0 CARGO_TARGET_DIR="$SERVER_TARGET_DIR" \
+	RUSTC="$RUSTC_BIN" "$CARGO_BIN" build --locked --release --package "$SERVER_NAME" \
+	--target "$SERVER_TARGET" --manifest-path "$SERVER_MANIFEST"
+ARM_SERVER="$SERVER_TARGET_DIR/$SERVER_TARGET/release/$SERVER_NAME"
+if [ ! -f "$ARM_SERVER" ]; then
+	printf '%s\n' 'Missing the release cowchat-server binary.' >&2
 	exit 1
 fi
 
@@ -137,8 +134,8 @@ if [ ! -d "$RESOURCE_BUNDLE" ]; then
 	printf '%s\n' "Missing SwiftPM resource bundle: $RESOURCE_BUNDLE" >&2
 	exit 1
 fi
-if ! lipo "$BIN_DIR/$PRODUCT" -verify_arch arm64 || ! lipo "$BIN_DIR/$PRODUCT" -verify_arch x86_64; then
-	printf '%s\n' 'Release executable is not universal (arm64 + x86_64).' >&2
+if [ "$(lipo -archs "$BIN_DIR/$PRODUCT")" != "arm64" ]; then
+	printf '%s\n' 'Release executable is not an arm64-only binary.' >&2
 	exit 1
 fi
 
@@ -173,7 +170,7 @@ for component in Sparkle Autoupdate Updater.app XPCServices/Installer.xpc XPCSer
 done
 
 SERVER_HELPER="$APP_DIR/Contents/Helpers/$SERVER_NAME"
-lipo "$ARM_SERVER" "$INTEL_SERVER" -create -output "$SERVER_HELPER"
+cp "$ARM_SERVER" "$SERVER_HELPER"
 chmod 755 "$SERVER_HELPER"
 verify_server_binary "$SERVER_HELPER" "built app before signing"
 
@@ -275,8 +272,8 @@ INSTALL_STAGE=$(mktemp -d "$INSTALL_DIR/.cowchat-install.XXXXXX")
 INSTALL_CANDIDATE="$INSTALL_STAGE/$APP_NAME"
 ditto "$APP_DIR" "$INSTALL_CANDIDATE"
 codesign --verify --deep --strict "$INSTALL_CANDIDATE"
-if ! lipo "$INSTALL_CANDIDATE/Contents/MacOS/Cowchat" -verify_arch arm64 || ! lipo "$INSTALL_CANDIDATE/Contents/MacOS/Cowchat" -verify_arch x86_64; then
-	printf '%s\n' 'The staged installed app is not universal (arm64 + x86_64).' >&2
+if [ "$(lipo -archs "$INSTALL_CANDIDATE/Contents/MacOS/Cowchat")" != "arm64" ]; then
+	printf '%s\n' 'The staged installed app is not an arm64-only binary.' >&2
 	exit 1
 fi
 INSTALL_SERVER_HELPER="$INSTALL_CANDIDATE/Contents/Helpers/$SERVER_NAME"
