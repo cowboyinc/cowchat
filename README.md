@@ -168,6 +168,10 @@ explicit operator recovery; do not use
 Tag pushes use `auto` promotion, which only advances latest to a greater numeric
 stable version. Manual dispatch defaults to `preserve`; opt into `promote_latest`
 only to advance latest. Historical runs do not open Homebrew downgrade PRs.
+Dispatch checks out the selected tag, so it can use this publisher only when that
+tag contains `scripts/publish-release.sh`. For older tags, use the installer-only
+backfill procedure below from a checkout containing this publisher; redispatching
+an old tag does not retrofit the new scripts.
 Publication and tap preparation share a fixed Actions concurrency group.
 Actions may replace pending runs in this group: if a tag's job is cancelled
 without publishing, dispatch the updated workflow again. This is not a FIFO
@@ -180,6 +184,11 @@ the public URL without modifying assets. Restore missing assets only from the
 original verified artifacts. If bytes differ, investigate or publish a new
 version. Do not delete or unpublish as automatic rollback. Daily monitoring is
 not included; manual publishers must preserve this contract.
+A successful run may report a skipped stable-URL check when GitHub reports a
+different latest tag, including a stale API response after promotion. That result
+does not verify the stable URL or guarantee a Homebrew PR was opened. Confirm
+the intended latest tag, stable download, and tap PR before declaring a release
+ready; rerun verification from the original artifacts if needed.
 
 ### Maintainer rollout for the first alias
 
