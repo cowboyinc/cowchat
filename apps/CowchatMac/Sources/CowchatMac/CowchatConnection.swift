@@ -333,7 +333,7 @@ final class CowchatConnection: CowchatConnectionProtocol {
         let payload = try await request(type: "send_message", payload: [
             "room_id": roomID,
             "content": content,
-            "metadata": [:],
+            "metadata": ["display_external": true],
             "mentions": [],
         ])
         return try decode(ChatMessage.self, from: payload)

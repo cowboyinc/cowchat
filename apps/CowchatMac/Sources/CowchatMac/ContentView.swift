@@ -445,6 +445,9 @@ private struct SidebarRoomLists: View {
                         emptyRoomsState
                     } else {
                         section(for: .local, store: local, at: timeline.date)
+                        if hasGlobal || hasAccountGlobal {
+                            sectionHeader("Global rooms")
+                        }
                         if hasGlobal {
                             section(for: .global, store: globalOrLocal, at: timeline.date)
                         }
@@ -461,12 +464,11 @@ private struct SidebarRoomLists: View {
     }
 
     private func baseRooms(in store: ChatStore, server: WorkspaceStore.Server) -> [Room] {
-        // The local Lobby lives in its own nav row, so the idle table excludes
-        // it — but an active search must still surface Lobby name/message
-        // hits. The global server has no nav row; its lobby stays listed.
+        // Lobby belongs in local navigation, not in the global room list.
+        // Local searches can still find its name and messages.
         let searching = !workspace.searchText
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let source = searching || server != .local
+        let source = searching && server == .local
             ? store.unarchivedRooms
             : store.unarchivedRooms.filter {
                 $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
@@ -509,8 +511,8 @@ private struct SidebarRoomLists: View {
         at now: Date
     ) -> some View {
         let rooms = baseRooms(in: store, server: server)
-        if hasGlobal || hasAccountGlobal {
-            sectionHeader(for: server, store: store)
+        if server == .local && (hasGlobal || hasAccountGlobal) {
+            sectionHeader("Local rooms")
         }
         if !rooms.isEmpty {
             VStack(spacing: 0) {
@@ -522,18 +524,10 @@ private struct SidebarRoomLists: View {
         }
     }
 
-    private func sectionHeader(for server: WorkspaceStore.Server, store: ChatStore) -> some View {
+    private func sectionHeader(_ title: String) -> some View {
         HStack(spacing: 6) {
-            Text(server == .local ? "Local" : server == .global ? "Community rooms" : "Your rooms")
+            Text(title)
                 .gallopText(.caption, color: SemanticColor.textTertiary)
-            if !store.connectionStatus.isConnected {
-                Text(store.connectionStatus.label)
-                    .gallopText(.dataLabel, color: SemanticColor.textTertiary)
-                    .help(
-                        store.connectionStatus.failureMessage
-                            ?? store.connectionStatus.label
-                    )
-            }
             Spacer()
         }
         .padding(.leading, 16)
@@ -695,17 +689,17 @@ private struct SidebarFooter: View {
             Button {
                 isSettingsPresented = true
             } label: {
-                Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 3) {
-                    statusRow(label: "Local", store: local)
-                    if hasGlobal {
-                        statusRow(label: "Community", store: globalOrLocal)
-                    }
-                    if hasAccountGlobal { statusRow(label: "Your rooms", store: accountOrLocal) }
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(connectionColor)
+                        .frame(width: 7, height: 7)
+                    Text(connectionLabel)
+                        .gallopText(.caption, color: SemanticColor.textSecondary)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Connection settings")
+            .help(connectionDetails)
             .macAccessibleAction(label: "Connection settings") { isSettingsPresented = true }
             Spacer()
             if anyServerDisconnected {
@@ -724,20 +718,36 @@ private struct SidebarFooter: View {
             )
         }
         .padding(.horizontal, 12)
-        .frame(height: hasGlobal && hasAccountGlobal ? 72 : 58)
+        .frame(height: 58)
     }
 
-    private func statusRow(label: String, store: ChatStore) -> some View {
-        GridRow {
-            Circle()
-                .fill(statusColor(for: store.connectionStatus))
-                .frame(width: 7, height: 7)
-            Text(label)
-                .gallopText(.caption, color: SemanticColor.textSecondary)
-            Text(store.connectionStatus.label)
-                .gallopText(.dataLabel, color: SemanticColor.textTertiary)
-                .help(store.connectionStatus.failureMessage ?? store.connectionStatus.label)
+    private var connectionLabel: String {
+        if !anyServerDisconnected { return "Connected" }
+        if statuses.contains(where: { if case .connecting = $0 { return true }; return false }) {
+            return "Connecting…"
         }
+        return "Connection issue"
+    }
+
+    private var connectionColor: Color {
+        if !anyServerDisconnected { return SemanticColor.success }
+        if statuses.contains(where: { if case .connecting = $0 { return true }; return false }) {
+            return SemanticColor.warning
+        }
+        return SemanticColor.textError
+    }
+
+    private var connectionDetails: String {
+        var details = ["Local: \(local.connectionStatus.label)"]
+        if hasGlobal { details.append("Global rooms (key): \(globalOrLocal.connectionStatus.label)") }
+        if hasAccountGlobal { details.append("Global rooms (account): \(accountOrLocal.connectionStatus.label)") }
+        return details.joined(separator: " · ")
+    }
+
+    private var statuses: [ConnectionStatus] {
+        [local.connectionStatus]
+            + (hasGlobal ? [globalOrLocal.connectionStatus] : [])
+            + (hasAccountGlobal ? [accountOrLocal.connectionStatus] : [])
     }
 
     private var anyServerDisconnected: Bool {
@@ -755,13 +765,6 @@ private struct SidebarFooter: View {
         }
     }
 
-    private func statusColor(for status: ConnectionStatus) -> Color {
-        switch status {
-        case .connected: return SemanticColor.success
-        case .connecting: return SemanticColor.warning
-        case .disconnected, .failed: return SemanticColor.textError
-        }
-    }
 }
 
 enum SidebarRowState {
@@ -2578,7 +2581,7 @@ private struct SettingsView: View {
             if let accountGlobal = workspace.accountGlobal {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Your rooms").gallopText(.bodyMStrong)
+                        Text("Global rooms · account").gallopText(.bodyMStrong)
                         Spacer()
                         ServerStatusBadge(store: accountGlobal)
                     }
@@ -2589,14 +2592,14 @@ private struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("Community rooms")
+                    Text("Global rooms · API key")
                         .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                     Spacer()
                     if let global = workspace.global {
                         ServerStatusBadge(store: global)
                     }
                 }
-                Text("Browse community rooms such as cowboy-junction with Find a room in the sidebar. These rooms use a separate connection. You can manage its server and API key here.")
+                Text("Find global rooms you can access, such as cowboy-junction, from the sidebar. Manage this connection's server and API key here.")
                     .gallopText(.bodyM, color: SemanticColor.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
                 TextField(ConnectionProfile.defaultGlobalURLString, text: $cloudURL)
@@ -3118,7 +3121,7 @@ private struct RoomCreationSheet: View {
                     if location == .global, workspace.global != nil, workspace.accountGlobal != nil {
                         Picker("Room audience", selection: $preferPrivate) {
                             Text("You and friends").tag(true)
-                            Text("Community").tag(false)
+                            Text("With API key").tag(false)
                         }.pickerStyle(.segmented)
                     }
                 }
@@ -3335,7 +3338,7 @@ private struct CreateRoomView: View {
             let outcome = await target.createRoom(
                 name: creatingName,
                 description: description,
-                isPublic: true
+                isPublic: false
             )
             isCreating = false
             switch outcome {

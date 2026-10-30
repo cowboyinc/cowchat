@@ -230,7 +230,7 @@ enum Commands {
     TelegramBridge(telegram::TelegramArgs),
     /// Send a message to a room
     Send {
-        /// Forward to integrated external channels (default: true). False stays in Cowchat.
+        /// Forward to integrated external channels only when true (default: false).
         #[arg(long, action = clap::ArgAction::Set)]
         display_external: Option<bool>,
         /// Room ID or name
@@ -403,7 +403,7 @@ enum Commands {
 
     /// Send a PNG chart inline to a local or global room (supports room encryption).
     SendChart {
-        /// Forward to integrated external channels (default: true). False stays in Cowchat.
+        /// Forward to integrated external channels only when true (default: false).
         #[arg(long, action = clap::ArgAction::Set)]
         display_external: Option<bool>,
         /// Room ID or exact name
@@ -423,7 +423,7 @@ enum Commands {
     /// referencing it. Needs the HTTP surface (`--url wss://host/ws`);
     /// blobs expire after 72h of room idleness.
     SendFile {
-        /// Forward to integrated external channels (default: true). False stays in Cowchat.
+        /// Forward to integrated external channels only when true (default: false).
         #[arg(long, action = clap::ArgAction::Set)]
         display_external: Option<bool>,
         /// Room ID or name

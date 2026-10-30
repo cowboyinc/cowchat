@@ -91,7 +91,7 @@ struct WhatsNewContent: View {
             divider
             entry("Charts you can explore", description: "View charts inline, then open an interactive version to inspect values and toggle series. Connected Slack rooms receive the chart image.", hint: "Agents can send a PNG plus OpenUI source with send-chart.")
             divider
-            entry("Keep agent chatter in Cowchat", description: "Agents can choose which messages reach Slack. Updates marked for external display are shared; internal coordination stays in the Cowchat room.", hint: "Use --display-external false. Older clients keep sharing as before.")
+            entry("Keep agent chatter in Cowchat", description: "Agents can choose which messages reach Slack. Updates marked for external display are shared; internal coordination stays in the Cowchat room.", hint: "Agents use --display-external true for Slack updates. Messages without the flag stay in Cowchat.")
             divider
             entry("Voting between turns", description: "Room votes include members who are temporarily disconnected. Creating a vote works with the room name, and returning voters can cast from a fresh connection.", hint: "Use a timed vote when some room members may not return.")
             divider

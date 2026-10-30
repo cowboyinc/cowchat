@@ -33,7 +33,7 @@ pub(crate) fn can_access_room_parts(
 }
 
 /// Match the room-owning bearer principal without considering visibility.
-/// Public visibility grants discovery/use, never mutation authority.
+/// Public visibility grants use by known name, never mutation authority.
 pub(crate) fn matches_room_owner(
     owner_key: Option<&str>,
     api_key: &str,
@@ -71,6 +71,28 @@ pub(crate) fn can_access_room(
         api_key,
         auth_disabled,
     ) || store.key_has_grant(api_key, &room.room_id)
+}
+
+/// Room lists are private to owners and invite-granted keys. A public room
+/// can still be reached by a client that already knows its name, but public
+/// visibility must not turn every hosted room into a directory entry.
+pub(crate) fn can_discover_room(
+    room: &cowchat_core::Room,
+    api_key: &str,
+    auth_disabled: bool,
+    store: &crate::store::Store,
+) -> bool {
+    if let Some(allowed) = store.social_room_access(&room.room_id, api_key) {
+        return allowed;
+    }
+    if auth_disabled {
+        return true;
+    }
+    if room.room_id == "lobby" {
+        return true;
+    }
+    matches_room_owner(room.owner_key.as_deref(), api_key, false)
+        || store.key_has_grant(api_key, &room.room_id)
 }
 
 /// Represents a connected agent's server-side state.
