@@ -11,6 +11,10 @@ on:
       tag:
         description: "Existing tag to (re)build and release, e.g. v0.4.0"
         required: true
+      promote_latest:
+        description: "Promote only if newer than the current latest release"
+        type: boolean
+        default: false
 
 # Serialize promotion across tags so concurrent releases cannot move the stable
 # feed backward. Already-published assets remain immutable.
@@ -206,7 +210,7 @@ jobs:
           scripts/download-sparkle.sh "$RUNNER_TEMP/sparkle"
           python3 scripts/test-appcast.py "$RUNNER_TEMP/sparkle/tools"
           sh apps/CowchatMac/test-sparkle-packaging.sh "$RUNNER_TEMP/sparkle/tools/Sparkle.framework"
-          python3 scripts/test-publish-release.py
+          bash scripts/test-publish-release.sh
       - name: Sign final notarized DMG and update feed
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -224,6 +228,9 @@ jobs:
           if-no-files-found: error
 
   release:
+    concurrency:
+      group: cowchat-release-publication
+      cancel-in-progress: false
     needs: [build, mac-app]
     permissions:
       contents: write
@@ -237,10 +244,12 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Publish release and render Homebrew formula + cask
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          PROMOTION_POLICY: ${{ (github.event_name == 'push' || inputs.promote_latest) && 'auto' || 'preserve' }}
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
@@ -263,9 +272,14 @@ jobs:
           VERSION="${TAG#v}"
           DMG=$(shasum -a 256 "dist/Cowchat-${VERSION}.dmg" | awk '{print $1}')
 
-          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/cowchat-release-notes.md"
-          python3 scripts/publish-release.py --repo "$REPO" --tag "$TAG" \
-            --dist dist --notes "$RUNNER_TEMP/cowchat-release-notes.md"
+          RELEASE_NOTES="$NOTES" bash scripts/publish-release.sh "$TAG" "$REPO" dist "$PROMOTION_POLICY" full
+          # A historical rerun must not open a Homebrew downgrade PR.
+          LATEST=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+          if [ "$LATEST" != "$TAG" ]; then
+            echo "update_tap=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "update_tap=true" >> "$GITHUB_OUTPUT"
 
           sed \
             -e "s|@TAG@|${TAG}|g" \
@@ -282,6 +296,7 @@ jobs:
             -e "s|@DMG@|${DMG}|g" \
             .github/cowchat-cask.rb.tmpl > /tmp/cowchat-cask.rb
       - name: Open formula + cask PR against cowboyinc/homebrew-tap
+        if: steps.publish.outputs.update_tap == 'true'
         env:
           GH_TOKEN: ${{ secrets.TAP_PR_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
