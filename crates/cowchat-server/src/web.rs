@@ -577,16 +577,20 @@ async fn api_list_rooms(
     {
         return json_error(StatusCode::UNAUTHORIZED, "Invalid credential");
     }
-    // Without a key: only public rooms. With a valid key: also private rooms
-    // owned by, or invite-granted to, that key.
+    // Hosted room discovery requires the owning or invite-granted key.
+    // A deliberately keyless local server retains its open room list.
     let key = headers
         .get(API_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
         .filter(|key| *key == state.api_key || state.store.validate_api_key(key).unwrap_or(false));
-    let rooms = state
-        .store
-        .list_rooms_for_key(key, None)
-        .unwrap_or_default();
+    let rooms = if state.no_auth {
+        state.store.list_rooms(None).unwrap_or_default()
+    } else {
+        state
+            .store
+            .list_rooms_for_key(key, None)
+            .unwrap_or_default()
+    };
 
     Json(serde_json::json!({"rooms": rooms})).into_response()
 }
@@ -2563,7 +2567,7 @@ mod tests {
             .filter_map(|room| room["name"].as_str())
             .collect();
         assert!(names.contains(&"Invited Room"));
-        // Keyless listing still shows only public rooms.
+        // A hosted listing without a key does not disclose room names.
         let public_only = response_json(
             api_list_rooms(State(state), HeaderMap::new())
                 .await
@@ -2577,5 +2581,6 @@ mod tests {
             .filter_map(|room| room["name"].as_str())
             .collect();
         assert!(!public_names.contains(&"Invited Room"));
+        assert!(public_names.is_empty());
     }
 }

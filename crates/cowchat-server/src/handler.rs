@@ -14,7 +14,7 @@ fn truncate_for_log(s: &str, max: usize) -> String {
 }
 
 use crate::broker::Broker;
-use crate::connection::{can_access_room, can_access_room_parts, owns_room};
+use crate::connection::{can_access_room, can_access_room_parts, can_discover_room, owns_room};
 use crate::reconnect::ReconnectManager;
 
 fn normalize_room_name(req_id: Option<&str>, name: &str) -> Result<String, Frame> {
@@ -1507,7 +1507,7 @@ async fn handle_list_rooms(
 
     let mut rooms = match store.list_rooms(p.parent_id.as_deref()) {
         Ok(mut rooms) => {
-            rooms.retain(|room| can_access_room(room, agent_api_key, no_auth, store));
+            rooms.retain(|room| can_discover_room(room, agent_api_key, no_auth, store));
             rooms
         }
         Err(e) => {
@@ -1661,7 +1661,7 @@ async fn handle_room_info(
 
     // Get sub-rooms
     let mut sub_rooms = store.list_rooms(Some(&p.room_id)).unwrap_or_default();
-    sub_rooms.retain(|child| can_access_room(child, agent_api_key, no_auth, store));
+    sub_rooms.retain(|child| can_discover_room(child, agent_api_key, no_auth, store));
 
     Frame {
         id: Some(uuid::Uuid::new_v4().to_string()),

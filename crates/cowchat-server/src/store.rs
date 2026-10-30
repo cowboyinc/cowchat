@@ -1601,8 +1601,8 @@ impl Store {
         Ok(count as usize)
     }
 
-    /// List rooms visible to the given API key: all public rooms + private
-    /// rooms owned by the key + private rooms the key holds a grant for.
+    /// List rooms discoverable by the given API key: rooms owned by the key
+    /// or explicitly granted to it. Public visibility alone is not a listing grant.
     pub fn list_rooms_for_key(
         &self,
         api_key: Option<&str>,
@@ -1615,7 +1615,7 @@ impl Store {
             (Some(pid), Some(key)) => {
                 let mut stmt = conn.prepare(
                     "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted
-                     FROM rooms WHERE parent_id = ?1 AND (visibility = 'public' OR owner_key = ?2
+                     FROM rooms WHERE parent_id = ?1 AND (room_id = 'lobby' OR owner_key = ?2
                          OR room_id IN (SELECT room_id FROM room_grants WHERE api_key = ?2)) ORDER BY name",
                 )?;
                 let rows = stmt.query_map(params![pid, key], map_room_row)?;
@@ -1623,20 +1623,11 @@ impl Store {
                     rooms.push(row?);
                 }
             }
-            (Some(pid), None) => {
-                let mut stmt = conn.prepare(
-                    "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted
-                     FROM rooms WHERE parent_id = ?1 AND visibility = 'public' ORDER BY name",
-                )?;
-                let rows = stmt.query_map(params![pid], map_room_row)?;
-                for row in rows {
-                    rooms.push(row?);
-                }
-            }
+            (Some(_), None) => {}
             (None, Some(key)) => {
                 let mut stmt = conn.prepare(
                     "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted
-                     FROM rooms WHERE visibility = 'public' OR owner_key = ?1
+                     FROM rooms WHERE room_id = 'lobby' OR owner_key = ?1
                          OR room_id IN (SELECT room_id FROM room_grants WHERE api_key = ?1) ORDER BY name",
                 )?;
                 let rows = stmt.query_map(params![key], map_room_row)?;
@@ -1644,16 +1635,7 @@ impl Store {
                     rooms.push(row?);
                 }
             }
-            (None, None) => {
-                let mut stmt = conn.prepare(
-                    "SELECT room_id, name, description, parent_id, created_by, created_at, visibility, owner_key, encrypted
-                     FROM rooms WHERE visibility = 'public' ORDER BY name",
-                )?;
-                let rows = stmt.query_map([], map_room_row)?;
-                for row in rows {
-                    rooms.push(row?);
-                }
-            }
+            (None, None) => {}
         }
 
         rooms.retain(|room| {
@@ -3635,6 +3617,69 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0, "{table} must be cleaned on destroy");
         }
+    }
+
+    #[test]
+    fn public_rooms_are_not_listed_without_an_owner_key_or_grant() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room_with_visibility(
+                "public-owned",
+                "Public Owned",
+                None,
+                None,
+                Some("creator"),
+                "public",
+                Some("owner-key"),
+                false,
+            )
+            .unwrap();
+        let room = store.get_room("public-owned").unwrap().unwrap();
+        assert!(crate::connection::can_access_room(
+            &room,
+            "stranger-key",
+            false,
+            &store
+        ));
+        assert!(!crate::connection::can_discover_room(
+            &room,
+            "stranger-key",
+            false,
+            &store
+        ));
+        assert!(store
+            .list_rooms_for_key(Some("stranger-key"), None)
+            .unwrap()
+            .iter()
+            .all(|room| room.room_id != "public-owned"));
+        assert!(store.list_rooms_for_key(None, None).unwrap().is_empty());
+        assert_eq!(
+            store
+                .list_rooms_for_key(Some("owner-key"), None)
+                .unwrap()
+                .iter()
+                .filter(|r| r.room_id == "public-owned")
+                .count(),
+            1
+        );
+        store
+            .add_room_grant("stranger-key", "public-owned")
+            .unwrap();
+        assert!(crate::connection::can_discover_room(
+            &room,
+            "stranger-key",
+            false,
+            &store
+        ));
+        assert_eq!(
+            store
+                .list_rooms_for_key(Some("stranger-key"), None)
+                .unwrap()
+                .iter()
+                .filter(|r| r.room_id == "public-owned")
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -36,10 +36,10 @@ struct RoomBrowserView: View {
                     if let store = workspace.global {
                         RoomBrowserSection(workspace: workspace, store: store, server: .global, query: query, onOpen: { dismiss() })
                     } else {
-                        Text("Community rooms").gallopText(.bodyMStrong)
+                        Text("Global rooms").gallopText(.bodyMStrong)
                         Text("Connect to browse rooms such as cowboy-junction. Your friend account and Home stay connected.")
                             .gallopText(.bodyS, color: SemanticColor.textSecondary)
-                        Button(connecting ? "Connecting…" : "Browse community rooms") { Task { await connect() } }
+                        Button(connecting ? "Connecting…" : "Connect to global rooms") { Task { await connect() } }
                             .buttonStyle(CowchatPillButtonStyle(prominent: true)).disabled(connecting)
                         if let error = workspace.globalSetupError { Text(error).foregroundStyle(.red) }
                     }
@@ -107,13 +107,16 @@ private struct RoomBrowserSection: View {
     @State private var busy = false
 
     private var matchingRooms: [Room] {
-        store.rooms.filter { RoomDiscovery.matches($0, query: query) }
+        store.rooms.filter {
+            (server == .local || $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame)
+                && RoomDiscovery.matches($0, query: query)
+        }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(server == .local ? "Local" : server == .global ? "Community rooms" : "Your rooms")
+            Text(server == .local ? "Local rooms" : server == .global ? "Global rooms · API key" : "Global rooms · account")
                 .gallopText(.bodyMStrong)
             if !store.connectionStatus.isConnected {
                 Text(store.connectionStatus.failureMessage ?? store.connectionStatus.label)
