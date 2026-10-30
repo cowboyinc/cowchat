@@ -2214,9 +2214,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 true
             };
 
-            // Inner loop: with --loop, keep advancing the bookmark until the
-            // returned message passes all filters. Without --loop, do at most
-            // one underlying wait call. In --loop mode the loop never returns on
+            // Inner loop: keep advancing the bookmark until the returned message
+            // passes all filters. Without --loop, the first underlying timeout
+            // ends the wait, and --timeout bounds the whole loop. In --loop mode the loop never returns on
             // its own until a match arrives, so an optional idle deadline races it.
             // `latest_seq` mirrors the bookmark out of the future (which the
             // select! may drop) so the idle-expiry path can print an accurate
@@ -2237,12 +2237,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if matches(&msg) {
                                 break Ok(Some(msg));
                             }
-                            // Filter rejected — advance the bookmark and continue (only
-                            // makes sense in --loop mode; without --loop fall through
-                            // and return None so the caller sees a timeout-like signal).
-                            if !*loop_ {
-                                break Ok(None);
-                            }
+                            // Filter rejected — advance the bookmark and continue. Without
+                            // --loop the outer --timeout deadline still bounds the wait.
                             cursor = Some(msg.seq);
                             latest_seq.store(msg.seq, std::sync::atomic::Ordering::Relaxed);
                         }
@@ -2334,6 +2330,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(None)
                     }
                 }
+            } else if !*loop_ {
+                // One --timeout budget across filter-rejected messages.
+                tokio::time::timeout(std::time::Duration::from_secs(effective_timeout), wait_loop)
+                    .await
+                    .unwrap_or(Ok(None))
             } else {
                 wait_loop.await
             };

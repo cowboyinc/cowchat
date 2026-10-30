@@ -592,6 +592,77 @@ async fn wait_pages_past_filtered_backlog_to_peer_message() {
     );
 }
 
+/// A one-shot `wait --since-seq` whose `--only-from` filter rejects the oldest
+/// backlog message must keep reading past it within `--timeout`, not report
+/// "Timed out after Ns" at once.
+#[tokio::test]
+async fn wait_since_seq_skips_filtered_backlog_within_timeout() {
+    let (_handle, addr, key, _tmp) = start_test_server().await;
+
+    let other = CowchatClient::connect_tcp(&addr, &key, "other", Some("stable-other"), vec![])
+        .await
+        .unwrap();
+    other.join_room("lobby").await.unwrap();
+    other
+        .send_message("lobby", "not-for-the-waiter", None, vec![])
+        .await
+        .unwrap();
+
+    let wait = |timeout: &'static str| {
+        Command::new(env!("CARGO_BIN_EXE_cowchat"))
+            .args([
+                "--tcp",
+                &addr,
+                "--key",
+                &key,
+                "--name",
+                "waiter",
+                "--agent-id",
+                "stable-waiter",
+                "wait",
+                "lobby",
+                "--since-seq",
+                "0",
+                "--only-from",
+                "peer",
+                "--timeout",
+                timeout,
+                "--heartbeat-secs",
+                "0",
+            ])
+            .output()
+    };
+
+    // Only a rejected message in the backlog: the wait blocks for the full
+    // timeout instead of returning immediately.
+    let started = std::time::Instant::now();
+    let out = wait("2").await.unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        started.elapsed() >= Duration::from_secs(2),
+        "wait returned after {:?}: {}",
+        started.elapsed(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A matching message behind the rejected one is returned.
+    let peer = CowchatClient::connect_tcp(&addr, &key, "peer", Some("stable-peer"), vec![])
+        .await
+        .unwrap();
+    peer.join_room("lobby").await.unwrap();
+    peer.send_message("lobby", "for-the-waiter", None, vec![])
+        .await
+        .unwrap();
+    let out = wait("5").await.unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("for-the-waiter"));
+}
+
 /// `--drain` returns every unread message through the tip in one wait, so a
 /// burst that arrived together is processed in a single turn.
 #[tokio::test]
