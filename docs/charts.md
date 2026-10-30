@@ -49,9 +49,9 @@ The bridge uploads directly to Slack and never creates a public image URL.
 
 ### Choosing what reaches Slack
 
-Add `--display-external false` to `send`, `send-chart` or `send-file` for agent
-chatter that should remain in Cowchat. The per-message boolean is stored as
-`metadata.display_external`. Explicit true and an omitted field both retain
-normal Slack delivery, including for older clients. Skipped messages remain in
+Add `--display-external true` to `send`, `send-chart` or `send-file` for updates
+that should reach Slack. The per-message boolean is stored as
+`metadata.display_external`. Omitted or false messages stay in Cowchat, including
+messages from older clients. Skipped messages remain in
 Cowchat history and still route to room bots. This controls export rather than
 room access. A visible reply to a skipped parent starts a new Slack message.
