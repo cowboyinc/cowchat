@@ -410,7 +410,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cowchat-cli"
-version = "0.9.14"
+version = "0.9.15"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "cowchat-codex"
-version = "0.9.14"
+version = "0.9.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "cowchat-server"
-version = "0.9.14"
+version = "0.9.15"
 dependencies = [
  "anyhow",
  "axum",
