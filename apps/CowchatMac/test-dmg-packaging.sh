@@ -83,15 +83,24 @@ grep -Fq "attach_image \"\$FINAL_DMG\" -readonly" "$ROOT/build-dmg.sh"
 grep -q 'Applications.*symlink to /Applications' "$ROOT/build-dmg.sh"
 grep -q 'with timeout of 30 seconds' "$ROOT/build-dmg.sh"
 grep -q 'Finder automation is unavailable' "$ROOT/build-dmg.sh"
-grep -q 'lipo .* -verify_arch arm64' "$ROOT/build-app.sh"
-grep -q 'lipo .* -verify_arch x86_64' "$ROOT/build-app.sh"
-grep -q 'lipo .* -verify_arch arm64' "$ROOT/build-dmg.sh"
-grep -q 'lipo .* -verify_arch x86_64' "$ROOT/build-dmg.sh"
+grep -Fq "[ \"\$(lipo -archs \"\$server_path\")\" != \"arm64\" ]" "$ROOT/build-app.sh"
+grep -Fq "[ \"\$(lipo -archs \"\$server_path\")\" != \"arm64\" ]" "$ROOT/build-dmg.sh"
+grep -Fq "[ \"\$(lipo -archs \"\$BIN_DIR/\$PRODUCT\")\" != \"arm64\" ]" "$ROOT/build-app.sh"
+grep -Fq "[ \"\$(lipo -archs \"\$SOURCE_APP/Contents/MacOS/Cowchat\")\" != \"arm64\" ]" "$ROOT/build-dmg.sh"
+# Cowchat for Mac is Apple Silicon only: no Intel slice, no lipo -create.
+# (Sparkle's upstream xcframework slice is named macos-arm64_x86_64.)
+for packaging_script in "$ROOT/build-app.sh" "$ROOT/build-dmg.sh"; do
+	if grep -nE 'x86_64-apple-darwin|--arch x86_64|-create|-verify_arch' "$packaging_script"; then
+		printf 'Intel or universal packaging remains in %s.\n' "$packaging_script" >&2
+		exit 1
+	fi
+done
 grep -Fq "Contents/Helpers/\$SERVER_NAME" "$ROOT/build-app.sh"
 grep -Fq "Contents/Helpers/\$SERVER_NAME" "$ROOT/build-dmg.sh"
 grep -Fq "\"\$CARGO_BIN\" build --locked --release --package \"\$SERVER_NAME\"" "$ROOT/build-app.sh"
 grep -Fq 'MACOSX_DEPLOYMENT_TARGET=13.0' "$ROOT/build-app.sh"
-grep -Fq 'aarch64-apple-darwin x86_64-apple-darwin' "$ROOT/build-app.sh"
+grep -Fq 'SERVER_TARGET=aarch64-apple-darwin' "$ROOT/build-app.sh"
+grep -Fq 'swift build -c release --arch arm64' "$ROOT/build-app.sh"
 grep -Fq 'Cowchat app/server version mismatch' "$ROOT/build-app.sh"
 grep -Fq "verify_server_binary \"\$INSTALL_SERVER_HELPER\" \"staged installed app\"" "$ROOT/build-app.sh"
 grep -Fq "verify_server_signature \"\$INSTALL_SERVER_HELPER\" \"staged installed app\"" "$ROOT/build-app.sh"
@@ -128,11 +137,11 @@ if [ "$install_copy_line" -ge "$install_verify_line" ] || \
 	exit 1
 fi
 
-server_lipo_line=$(grep -nF "lipo \"\$ARM_SERVER\" \"\$INTEL_SERVER\" -create -output \"\$SERVER_HELPER\"" "$ROOT/build-app.sh" | cut -d: -f1)
+server_copy_line=$(grep -nF "cp \"\$ARM_SERVER\" \"\$SERVER_HELPER\"" "$ROOT/build-app.sh" | cut -d: -f1)
 server_sign_line=$(grep -nF "codesign --force --sign - \"\$SERVER_HELPER\"" "$ROOT/build-app.sh" | cut -d: -f1)
 app_sign_line=$(grep -nF "codesign --force --sign - \"\$APP_DIR\"" "$ROOT/build-app.sh" | cut -d: -f1)
-if [ "$server_lipo_line" -ge "$server_sign_line" ] || [ "$server_sign_line" -ge "$app_sign_line" ]; then
-	printf '%s\n' 'The universal server helper must be assembled and signed before the outer app.' >&2
+if [ -z "$server_copy_line" ] || [ "$server_copy_line" -ge "$server_sign_line" ] || [ "$server_sign_line" -ge "$app_sign_line" ]; then
+	printf '%s\n' 'The arm64 server helper must be copied in and signed before the outer app.' >&2
 	exit 1
 fi
 
@@ -199,15 +208,12 @@ APP_BUILD_EVENTS="$APP_TEST/build-events.log"
 TEST_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/AppBundle/Info.plist")
 mkdir -p "$APP_SHIMS" "$APP_BIN/CowchatMac_CowchatMac.bundle" \
 	"$APP_HOME/Applications/Cowchat.app/Contents" \
-	"$APP_CARGO_TARGET/aarch64-apple-darwin/release" \
-	"$APP_CARGO_TARGET/x86_64-apple-darwin/release"
+	"$APP_CARGO_TARGET/aarch64-apple-darwin/release"
 printf '%s\n' 'previous-install' > "$APP_HOME/Applications/Cowchat.app/Contents/sentinel"
-printf '%s\n' 'fake-universal-binary' > "$APP_BIN/CowchatMac"
-for test_target in aarch64-apple-darwin x86_64-apple-darwin; do
-	test_server="$APP_CARGO_TARGET/$test_target/release/cowchat-server"
-	printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-server $TEST_VERSION'" > "$test_server"
-	chmod +x "$test_server"
-done
+printf '%s\n' 'fake-arm64-binary' > "$APP_BIN/CowchatMac"
+test_server="$APP_CARGO_TARGET/aarch64-apple-darwin/release/cowchat-server"
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-server $TEST_VERSION'" > "$test_server"
+chmod +x "$test_server"
 
 APP_ARTIFACTS="$APP_TEST/artifacts"
 APP_SPARKLE="$APP_ARTIFACTS/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework/Versions/B"
@@ -217,6 +223,7 @@ printf '%s\n' 'Sparkle and third-party license fixture' > "$APP_ARTIFACTS/LICENS
 
 cat > "$APP_SHIMS/swift" <<'SHIM'
 #!/bin/sh
+printf 'swift:%s\n' "$*" >> "$COWCHAT_TEST_BUILD_EVENTS"
 case " $* " in
 	*" --show-bin-path "*) printf '%s\n' "$COWCHAT_TEST_BIN_DIR" ;;
 esac
@@ -225,19 +232,9 @@ cat > "$APP_SHIMS/lipo" <<'SHIM'
 #!/bin/sh
 printf 'lipo:%s\n' "$*" >> "$COWCHAT_TEST_BUILD_EVENTS"
 case " $* " in
-	*" -create "*)
-		output=''
-		previous=''
-		for argument do
-			if [ "$previous" = "-output" ]; then output=$argument; break; fi
-			previous=$argument
-		done
-		[ -n "$output" ] || exit 65
-		cp "$1" "$output"
-		chmod +x "$output"
-		;;
+	*" -archs "*) printf '%s\n' 'arm64' ;;
+	*) exit 64 ;;
 esac
-exit 0
 SHIM
 cat > "$APP_SHIMS/codesign" <<'SHIM'
 #!/bin/sh
@@ -253,7 +250,7 @@ cat > "$APP_SHIMS/rustup" <<'SHIM'
 #!/bin/sh
 case ${1:-} in
 	target)
-		printf '%s\n' 'aarch64-apple-darwin' 'x86_64-apple-darwin'
+		printf '%s\n' 'aarch64-apple-darwin'
 		;;
 	which)
 		for argument do tool_name=$argument; done
@@ -322,20 +319,24 @@ if /usr/bin/env \
 	printf '%s\n' 'The injected app copy failure unexpectedly succeeded.' >&2
 	exit 1
 fi
-if ! grep -Fq 'cargo:13.0:build --locked --release --package cowchat-server --target aarch64-apple-darwin' "$APP_BUILD_EVENTS" || \
-	! grep -Fq 'cargo:13.0:build --locked --release --package cowchat-server --target x86_64-apple-darwin' "$APP_BUILD_EVENTS"; then
-	printf '%s\n' 'The app build did not request both locked server helper slices for macOS 13.' >&2
+if ! grep -Fq 'cargo:13.0:build --locked --release --package cowchat-server --target aarch64-apple-darwin' "$APP_BUILD_EVENTS"; then
+	printf '%s\n' 'The app build did not request the locked arm64 server helper for macOS 13.' >&2
+	exit 1
+fi
+if grep -Eq 'x86_64-apple-darwin|--arch x86_64|-create' "$APP_BUILD_EVENTS" || \
+	! grep -Fxq 'swift:build -c release --arch arm64' "$APP_BUILD_EVENTS"; then
+	printf '%s\n' 'The app build requested an Intel or universal slice.' >&2
 	exit 1
 fi
 cmp "$APP_ARTIFACTS/LICENSE" "$APP_BIN/Cowchat.app/Contents/Resources/Sparkle-LICENSE.txt"
 
-dynamic_lipo_line=$(grep -n 'lipo:.* -create -output .*Contents/Helpers/cowchat-server' "$APP_BUILD_EVENTS" | head -n 1 | cut -d: -f1)
+dynamic_lipo_line=$(grep -n 'lipo:-archs .*Contents/Helpers/cowchat-server' "$APP_BUILD_EVENTS" | head -n 1 | cut -d: -f1)
 dynamic_server_sign_line=$(grep -n 'codesign:--force --sign - .*Contents/Helpers/cowchat-server' "$APP_BUILD_EVENTS" | head -n 1 | cut -d: -f1)
 dynamic_app_sign_line=$(grep -n 'codesign:--force --sign - .*Cowchat.app$' "$APP_BUILD_EVENTS" | head -n 1 | cut -d: -f1)
 if [ -z "$dynamic_lipo_line" ] || [ -z "$dynamic_server_sign_line" ] || [ -z "$dynamic_app_sign_line" ] || \
 	[ "$dynamic_lipo_line" -ge "$dynamic_server_sign_line" ] || \
 	[ "$dynamic_server_sign_line" -ge "$dynamic_app_sign_line" ]; then
-	printf '%s\n' 'The app build did not assemble and sign the server helper inside-out.' >&2
+	printf '%s\n' 'The app build did not verify and sign the server helper inside-out.' >&2
 	exit 1
 fi
 if [ "$(cat "$APP_HOME/Applications/Cowchat.app/Contents/sentinel")" != "previous-install" ]; then
@@ -379,7 +380,7 @@ DMG_OUTPUT="$DMG_TEST/output"
 mkdir -p "$DMG_SHIMS" "$DMG_APP/Contents/MacOS" \
 	"$DMG_APP/Contents/Helpers" "$DMG_TMP" "$DMG_OUTPUT"
 cp "$ROOT/AppBundle/Info.plist" "$DMG_APP/Contents/Info.plist"
-printf '%s\n' 'fake-universal-binary' > "$DMG_APP/Contents/MacOS/Cowchat"
+printf '%s\n' 'fake-arm64-binary' > "$DMG_APP/Contents/MacOS/Cowchat"
 printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-server $TEST_VERSION'" \
 	> "$DMG_APP/Contents/Helpers/cowchat-server"
 chmod +x "$DMG_APP/Contents/Helpers/cowchat-server"
@@ -419,11 +420,17 @@ SHIM
 cat > "$DMG_SHIMS/lipo" <<'SHIM'
 #!/bin/sh
 case " $* " in
-	*"/Contents/Helpers/cowchat-server -verify_arch "*)
-		if [ "${COWCHAT_TEST_BAD_HELPER_ARCH:-0}" = "1" ]; then exit 79; fi
+	*" -archs "*"/Contents/Helpers/cowchat-server "*)
+		# A universal helper is no longer a supported package.
+		if [ "${COWCHAT_TEST_BAD_HELPER_ARCH:-0}" = "1" ]; then
+			printf '%s\n' 'x86_64 arm64'
+		else
+			printf '%s\n' 'arm64'
+		fi
 		;;
+	*" -archs "*) printf '%s\n' 'arm64' ;;
+	*) exit 64 ;;
 esac
-exit 0
 SHIM
 cat > "$DMG_SHIMS/osascript" <<'SHIM'
 #!/bin/sh
@@ -536,7 +543,7 @@ run_rejected_source_helper_test wrong-version "$BAD_HELPER_APP" \
 run_rejected_source_helper_test non-executable "$NONEXEC_HELPER_APP" \
 	'Cowchat server helper is missing or not executable (source app)' 0 0
 run_rejected_source_helper_test wrong-architecture "$DMG_APP" \
-	'Cowchat server helper is not universal (source app).' 1 0
+	'Cowchat server helper is not an arm64-only binary (source app).' 1 0
 run_rejected_source_helper_test invalid-signature "$DMG_APP" \
 	'Cowchat server helper signature is invalid (source app)' 0 1
 run_rejected_source_helper_test wrong-signing-team "$DMG_APP" \

@@ -18,6 +18,6 @@ For a new signing key, provision the Actions secret before the first release. Ke
 
 ## Verification
 
-Run the native Swift tests and universal release build, `apps/CowchatMac/test-dmg-packaging.sh`, the Sparkle framework packaging check, and the appcast/publication tests. The signing tests use temporary test keys and reject modified archives, modified feeds and mismatched signing keys. Existing app termination and supervisor tests cover owned-child shutdown and external-server ownership.
+Run the native Swift tests and arm64 release build, `apps/CowchatMac/test-dmg-packaging.sh`, the Sparkle framework packaging check, and the appcast/publication tests. The signing tests use temporary test keys and reject modified archives, modified feeds and mismatched signing keys. Existing app termination and supervisor tests cover owned-child shutdown and external-server ownership.
 
-Before promoting a release, verify the packaged framework and both app/helper slices, nested signatures, notarization, and an actual update/install/relaunch through a signed feed. A successful build or signature test alone does not prove installation.
+Before promoting a release, verify the packaged framework, the arm64-only app and helper, nested signatures, notarization, and an actual update/install/relaunch through a signed feed. A successful build or signature test alone does not prove installation.

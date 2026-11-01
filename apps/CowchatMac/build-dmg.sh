@@ -94,8 +94,8 @@ verify_server_helper() {
 			"$verification_phase" "$server_path" >&2
 		exit 1
 	fi
-	if ! lipo "$server_path" -verify_arch arm64 || ! lipo "$server_path" -verify_arch x86_64; then
-		printf 'Cowchat server helper is not universal (%s).\n' "$verification_phase" >&2
+	if [ "$(lipo -archs "$server_path")" != "arm64" ]; then
+		printf 'Cowchat server helper is not an arm64-only binary (%s).\n' "$verification_phase" >&2
 		exit 1
 	fi
 	if ! codesign --verify --strict "$server_path"; then
@@ -176,8 +176,8 @@ if ! codesign --verify --deep --strict "$SOURCE_APP"; then
 	printf 'Cowchat.app is not validly signed: %s\n' "$SOURCE_APP" >&2
 	exit 1
 fi
-if ! lipo "$SOURCE_APP/Contents/MacOS/Cowchat" -verify_arch arm64 || ! lipo "$SOURCE_APP/Contents/MacOS/Cowchat" -verify_arch x86_64; then
-	printf '%s\n' 'Cowchat.app is not universal (arm64 + x86_64).' >&2
+if [ "$(lipo -archs "$SOURCE_APP/Contents/MacOS/Cowchat")" != "arm64" ]; then
+	printf '%s\n' 'Cowchat.app is not an arm64-only binary.' >&2
 	printf '%s\n' 'Rebuild it with the current ./build-app.sh before packaging.' >&2
 	exit 1
 fi
@@ -408,8 +408,8 @@ verify_payload() {
 		exit 1
 	fi
 	codesign --verify --deep --strict "$volume_root/Cowchat.app"
-	if ! lipo "$volume_root/Cowchat.app/Contents/MacOS/Cowchat" -verify_arch arm64 || ! lipo "$volume_root/Cowchat.app/Contents/MacOS/Cowchat" -verify_arch x86_64; then
-		printf 'Cowchat.app lost a supported architecture in the %s image.\n' "$verification_phase" >&2
+	if [ "$(lipo -archs "$volume_root/Cowchat.app/Contents/MacOS/Cowchat")" != "arm64" ]; then
+		printf 'Cowchat.app is not an arm64-only binary in the %s image.\n' "$verification_phase" >&2
 		exit 1
 	fi
 	verify_server_helper "$volume_root/Cowchat.app" "$verification_phase image"

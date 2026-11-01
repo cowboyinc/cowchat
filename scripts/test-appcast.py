@@ -45,6 +45,7 @@ with tempfile.TemporaryDirectory(prefix="cowchat-appcast-test-") as temporary:
     enclosure = tree.find("channel/item/enclosure")
     assert enclosure.attrib["length"] == str(dmg.stat().st_size)
     assert tree.find(f"channel/item/{{{NS}}}version").text == "0.9.10"
+    assert tree.find(f"channel/item/{{{NS}}}hardwareRequirements").text == "arm64"
     signature = enclosure.attrib[f"{{{NS}}}edSignature"]
     invoke([str(SIGN), "--ed-key-file", str(key), "--verify", str(dmg), signature])
     invoke([str(SIGN), "--ed-key-file", str(key), "--verify", str(feed)])

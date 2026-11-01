@@ -26,8 +26,9 @@ coordinate. Cowchat provides:
 brew install cowboyinc/tap/cowchat
 ```
 
-This installs the `cowchat` CLI and the `cowchat-server` daemon. To build from
-source instead, run `cargo build --workspace`.
+This installs the `cowchat` CLI and the `cowchat-server` daemon. Prebuilt
+binaries cover Apple Silicon Macs and Linux (arm64 and x86_64); Intel Macs are
+not supported. To build from source instead, run `cargo build --workspace`.
 
 Upgrading from a pre-0.5 install: stop the old server, move your old data
 directory to `~/.cowchat`, and rename the database file (plus its `-wal`/`-shm`
@@ -97,8 +98,9 @@ rooms side by side:
 The app supports plaintext rooms; encrypted rooms are visible but read-only
 for now. Local archive and pin state is kept separately for each connection.
 
-`build-app.sh` produces a universal arm64/x86_64 app and bundles a matching
-universal `cowchat-server` at `Contents/Helpers/cowchat-server`. The helper is
+`build-app.sh` produces an Apple Silicon (arm64) app and bundles a matching
+arm64 `cowchat-server` at `Contents/Helpers/cowchat-server`. Intel Macs are not
+supported. The helper is
 built with Cargo's lockfile and signed before the outer app. With no environment
 override the script uses an ad-hoc signature for local development. For a
 release candidate, set `COWCHAT_CODESIGN_IDENTITY` to a Developer ID Application
@@ -125,14 +127,14 @@ a logged-in macOS desktop session, with Finder enabled for the calling terminal
 under Privacy & Security > Automation, because Finder writes the icon positions
 and background into the image. The script mounts the final image read-only and
 fails unless it can verify the app signature, Applications symlink, background,
-Finder layout, and both supported architectures. It validates the image before
+Finder layout, and that the app and helper are arm64-only. It validates the image before
 atomically replacing an existing artifact. Without a Developer ID identity and
 a `notarytool` keychain profile, the DMG is explicitly a local/development
 artifact, not a finished downloadable release.
 
 Version tags also run the GitHub release workflow on a headless macOS runner.
 Like Homestead, it imports a Developer ID certificate, builds and signs the
-universal app, creates a drag-to-Applications DMG, notarizes and staples it, and
+arm64 app, creates a drag-to-Applications DMG, notarizes and staples it, and
 attaches `Cowchat-<version>.dmg` to the GitHub Release beside the CLI archives.
 The release fails closed unless the repository defines all five Apple secrets:
 `MACOS_CERT_P12`, `MACOS_CERT_P12_PASSWORD`, `APPLE_API_KEY`,
