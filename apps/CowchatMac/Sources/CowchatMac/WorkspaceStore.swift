@@ -150,7 +150,8 @@ final class WorkspaceStore: ObservableObject {
             store.start()
         }
         if activeServer == .accountGlobal, accountGlobal == nil {
-            activeServer = global == nil ? .local : .global
+            // Signed out, the window opens on this Mac's lobby, whose chat the sidebar lists. A hosted lobby is hidden.
+            activeServer = .local
         }
     }
 

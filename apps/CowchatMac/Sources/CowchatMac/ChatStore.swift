@@ -1193,7 +1193,7 @@ final class ChatStore: ObservableObject {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedName.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
             return .failed(
-                "\u{201C}lobby\u{201D} is reserved for the Lobby dashboard. Choose another name."
+                "\u{201C}lobby\u{201D} is reserved. Choose another name." // copy: the Lobby page is gone (2 November)
             )
         }
         do {
@@ -1340,7 +1340,7 @@ final class ChatStore: ObservableObject {
             return false
         }
         guard name.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
-            errorMessage = "\u{201C}lobby\u{201D} is reserved for the Lobby dashboard. Choose another name."
+            errorMessage = "\u{201C}lobby\u{201D} is reserved. Choose another name." // copy: the Lobby page is gone (2 November)
             return false
         }
 
@@ -2362,10 +2362,10 @@ final class ChatStore: ObservableObject {
         return try JSONDecoder().decode(type, from: data)
     }
 
-    /// Lobby-first ordering for the dashboard grid and fallback selection.
+    /// Lobby-first ordering for the first and fallback selection.
     /// Deliberately NOT shared with RoomSidebarPresentation.sortedByRecency:
-    /// the sidebar excludes Lobby (it lives in its own nav row) and sorts by
-    /// parsed recency alone.
+    /// the sidebar sorts by parsed recency alone, with the local lobby as an
+    /// ordinary room.
     private func roomSort(_ lhs: Room, _ rhs: Room) -> Bool {
         guard lhs.id != rhs.id else { return false }
         let lhsIsLobby = lhs.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame

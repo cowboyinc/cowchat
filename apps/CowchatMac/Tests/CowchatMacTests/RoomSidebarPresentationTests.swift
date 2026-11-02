@@ -32,7 +32,7 @@ final class RoomSidebarPresentationTests: XCTestCase {
     }
 
     func testSortedByRecencyOrdersByActivityDescending() {
-        // Lobby gets no special treatment — it lives in its own nav row now.
+        // The lobby gets no special place in the order.
         let lobby = makeRoom(name: "Lobby", lastActivity: "2026-08-01T00:00:00Z")
         let older = makeRoom(name: "alpha", lastActivity: "2026-08-03T00:00:00Z")
         let newer = makeRoom(name: "zulu", lastActivity: "2026-08-04T00:00:00Z")
@@ -60,18 +60,46 @@ final class RoomSidebarPresentationTests: XCTestCase {
         )
     }
 
-    func testLobbyAvailableAgentCountExcludesThisMacClientAndDeduplicates() throws {
-        func agent(_ id: String) throws -> AgentPresence {
-            try JSONDecoder().decode(
-                AgentPresence.self,
-                from: Data(#"{"agent_id":"\#(id)","name":"Agent","capabilities":[]}"#.utf8)
-            )
-        }
-        let members = try [agent("cowchat-mac"), agent("bot-a"), agent("bot-a"), agent("bot-b")]
+    func testTheLocalLobbyIsListedUnderThisMac() {
+        let lobby = makeRoom(id: "lobby", name: "lobby")
+        let scratch = makeRoom(id: "scratch", name: "scratch")
 
         XCTAssertEqual(
-            LobbyPresentation.availableAgentCount(from: members, excluding: "cowchat-mac"),
-            2
+            RoomSidebarPresentation.listedRooms([lobby, scratch], on: .local, searching: false, homeRoomID: nil)
+                .map(\.id),
+            ["lobby", "scratch"]
+        )
+    }
+
+    func testAHostedLobbyIsNotListed() {
+        let lobby = makeRoom(id: "lobby", name: "Lobby")
+        let general = makeRoom(id: "general", name: "general")
+
+        for server in [WorkspaceStore.Server.global, .accountGlobal] {
+            for searching in [false, true] {
+                XCTAssertEqual(
+                    RoomSidebarPresentation.listedRooms([lobby, general], on: server, searching: searching,
+                                                        homeRoomID: nil).map(\.id),
+                    ["general"],
+                    "\(server) searching: \(searching)"
+                )
+            }
+        }
+    }
+
+    func testHomeLeavesTheAccountListUnlessASearchLooksForIt() {
+        let home = makeRoom(id: "home", name: "home")
+        let general = makeRoom(id: "general", name: "general")
+
+        XCTAssertEqual(
+            RoomSidebarPresentation.listedRooms([home, general], on: .accountGlobal, searching: false,
+                                                homeRoomID: "home").map(\.id),
+            ["general"]
+        )
+        XCTAssertEqual(
+            RoomSidebarPresentation.listedRooms([home, general], on: .accountGlobal, searching: true,
+                                                homeRoomID: "home").map(\.id),
+            ["home", "general"]
         )
     }
 

@@ -51,25 +51,18 @@ struct ContentView: View {
             }
 
             Group {
-                if let page = workspace.page {
-                    switch page {
-                    case .inbox:
-                        InboxPage(inbox: workspace.inbox, home: workspace.homeSessions)
-                    case .team:
-                        TeamPage(team: workspace.team, account: workspace.accountGlobal ?? workspace.local)
-                    case .friends:
-                        FriendsPage(social: workspace.social, newRoom: { workspace.newRoom(with: $0) },
-                                    signIn: onShowOnboarding)
-                    }
-                } else if let room = store.selectedRoom {
-                    if room.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame {
-                        LobbyDashboardView(room: room, isSidebarVisible: $isSidebarVisible)
-                            .id("lobby-\(room.id)")
-                    } else {
-                        ChatRoomView(room: room, isSidebarVisible: $isSidebarVisible)
-                            .id(room.id)
-                    }
-                } else {
+                switch MainArea.content(page: workspace.page, selectedRoom: store.selectedRoom) {
+                case .page(.inbox):
+                    InboxPage(inbox: workspace.inbox, home: workspace.homeSessions)
+                case .page(.team):
+                    TeamPage(team: workspace.team, account: workspace.accountGlobal ?? workspace.local)
+                case .page(.friends):
+                    FriendsPage(social: workspace.social, newRoom: { workspace.newRoom(with: $0) },
+                                signIn: onShowOnboarding)
+                case .chat(let room):
+                    ChatRoomView(room: room, isSidebarVisible: $isSidebarVisible)
+                        .id(room.id)
+                case .empty:
                     EmptyChatView()
                 }
             }
@@ -244,24 +237,20 @@ private struct SidebarView: View {
     // same loop signature as the 2026-08-06 freeze).
     var body: some View {
         VStack(spacing: 0) {
-            LobbyNavRow(
-                local: workspace.local,
-                accountOrLocal: workspace.accountGlobal ?? workspace.local,
-                home: workspace.homeSessions
-            )
-
+            // One gap of 10 under the search field puts the first row's icon 20 under it, the distance between the
+            // icons of the rows stacked below.
             searchField
                 .padding(.horizontal, 12)
-                .padding(.bottom, 14)
+                .padding(.bottom, 10)
 
-            Button { isRoomBrowserPresented = true } label: {
-                Label("Find a room", systemImage: "magnifyingglass")
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            // Find a room, the Inbox and Home stack at their own 38, with their icons and titles in one column.
+            // copy:
+            SidebarNavRow(title: "Find a room", icon: .search, fallbackSystemName: "magnifyingglass",
+                          accessibilityLabel: "Find a room", isSelected: false) {
+                isRoomBrowserPresented = true
             }
-            .buttonStyle(.plain)
-            .gallopText(.bodySStrong, color: SemanticColor.textSecondary)
-            .padding(.horizontal, 18)
-            .padding(.bottom, 12)
+            .padding(.horizontal, 12)
+            .padding(.trailing, listsScrollerWidth)
             .sheet(isPresented: $isRoomBrowserPresented) {
                 RoomBrowserView(workspace: workspace)
             }
@@ -327,44 +316,18 @@ private struct SidebarView: View {
 
 }
 
-/// Dash-style nav destination: Lobby is Home, above the conversations
-/// table, not a row inside it (Patrick, 2026-08-06). Once the account has a
-/// Home, Home takes its place at the top of the room lists (`HomePlaces`).
-private struct LobbyNavRow: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @ObservedObject var local: ChatStore
-    @ObservedObject var accountOrLocal: ChatStore
-    @ObservedObject var home: HomeSessions
-
-    private var lobby: Room? {
-        local.rooms.first { $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame }
-    }
-
-    private var hasHome: Bool {
-        workspace.accountGlobal != nil && accountOrLocal.rooms.contains { $0.id == home.roomID }
-    }
-
-    var body: some View {
-        if let lobby, !hasHome {
-            SidebarNavRow(title: "Lobby", isSelected: workspace.isSelected(lobby, on: .local)) {
-                Task { await workspace.select(room: lobby, on: .local) }
-            }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 10)
-        }
-    }
-}
-
 /// A destination above the room lists: Dash's sunrise at 18, or the
 /// destination's own glyph, 10 before the title in Body S Strong, 10 at the
-/// sides, 38 tall, on the sidebar's row background. The Lobby, Home, the Inbox
-/// and Team draw it. A count sits at the row's end in Caption, Text/Tertiary,
+/// sides, 38 tall, on the sidebar's row background. Find a room, the Inbox,
+/// Home and Team draw it. A count sits at the row's end in Caption, Text/Tertiary,
 /// as the Archive row's does, and nothing at zero.
 private struct SidebarNavRow: View {
     let title: String
     var icon = GallopIcon.sunrise
     var fallbackSystemName = "sunrise"
     var count = 0
+    /// The row's accessible name, "Open <title>" unless it says otherwise.
+    var accessibilityLabel: String?
     let isSelected: Bool
     let action: () -> Void
     @State private var isHovering = false
@@ -398,7 +361,7 @@ private struct SidebarNavRow: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .macAccessibleAction(
-            label: "Open \(title)",
+            label: accessibilityLabel ?? "Open \(title)",
             value: accessibilityValue,
             action: action
         )
@@ -425,7 +388,6 @@ private struct InboxNavRow: View {
                 workspace.show(.inbox)
             }
             .padding(.horizontal, 12)
-            .padding(.bottom, 2)
         }
     }
 }
@@ -448,8 +410,8 @@ private struct TeamNavRow: View {
     }
 }
 
-/// Home in place of the Lobby row, pinned above the room lists' scroll view
-/// as the Lobby row is, so it never scrolls away. Its live sessions scroll
+/// Home, pinned above the room lists' scroll view under the Inbox, so it
+/// never scrolls away. Its live sessions scroll
 /// under it at the top of the lists (`HomePlaces`).
 private struct HomeNavRow: View {
     @EnvironmentObject private var workspace: WorkspaceStore
@@ -463,7 +425,7 @@ private struct HomeNavRow: View {
             SidebarNavRow(title: "Home", isSelected: workspace.isSelected(room, on: .accountGlobal)) {
                 Task { await workspace.select(room: room, on: .accountGlobal) }
             }
-            // The nav rows sit 12 in, as the Lobby row does, and the sessions 2 under.
+            // The nav rows sit 12 in, and Home's sessions 2 under it.
             .padding(.horizontal, 12)
             .padding(.bottom, 2)
         }
@@ -494,7 +456,7 @@ private struct HomePlaces: View {
                     .sidebarListItem("sessions-more")
                 }
             }
-            // The lists sit 8 in; the nav rows sit 12 in, as the Lobby row does.
+            // The lists sit 8 in; the nav rows sit 12 in.
             .padding(.horizontal, 4)
             // Home's row and the first list keep the 10 between them they had.
             .padding(.bottom, home.shown.isEmpty ? 8 : 10)
@@ -893,19 +855,10 @@ private struct SidebarRoomLists: View {
     static func rowID(_ roomID: String, on server: WorkspaceStore.Server) -> String { "\(server.rawValue)/\(roomID)" }
 
     private func baseRooms(in store: ChatStore, server: WorkspaceStore.Server) -> [Room] {
-        // Lobby belongs in local navigation, not in the global room list.
-        // Local searches can still find its name and messages.
         let searching = !workspace.searchText
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        var source = searching && server == .local
-            ? store.unarchivedRooms
-            : store.unarchivedRooms.filter {
-                $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
-            }
-        // Home has its own row above the lists, as the Lobby does.
-        if server == .accountGlobal, !searching {
-            source.removeAll { $0.id == home.roomID }
-        }
+        let source = RoomSidebarPresentation.listedRooms(store.unarchivedRooms, on: server, searching: searching,
+                                                         homeRoomID: home.roomID)
         return RoomSidebarPresentation.filteredRooms(
             from: source,
             query: workspace.searchText,
@@ -1302,148 +1255,6 @@ private struct RoomRow: View {
         if let messagePreview, !messagePreview.isEmpty { return messagePreview }
         if let description = room.description, !description.isEmpty { return description }
         return "Open conversation"
-    }
-}
-
-private struct LobbyDashboardView: View {
-    @EnvironmentObject private var store: ChatStore
-    let room: Room
-    @Binding var isSidebarVisible: Bool
-
-    private var dashboardRooms: [Room] {
-        store.unarchivedRooms.filter { $0.id != room.id }
-    }
-
-    private var availableAgentCount: Int {
-        LobbyPresentation.availableAgentCount(
-            from: store.roomMembers,
-            excluding: store.agentID
-        )
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Lobby")
-                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                    Text("\(availableAgentCount) available agents")
-                        .gallopText(.caption, color: SemanticColor.textTertiary)
-                }
-
-                Spacer()
-            }
-            .padding(.top, 10)
-            .padding(.leading, 18)
-            .padding(.trailing, 14)
-            .frame(height: 58)
-
-            ScrollView {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 210, maximum: 280), spacing: 14)],
-                    alignment: .leading,
-                    spacing: 14
-                ) {
-                    ForEach(dashboardRooms) { dashboardRoom in
-                        DashboardRoomCard(room: dashboardRoom)
-                    }
-
-                    Button {
-                        store.presentCreateRoom()
-                    } label: {
-                        VStack(alignment: .leading, spacing: 18) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(SemanticColor.buttonSecondaryIconDefault)
-                                .frame(width: 34, height: 34)
-                                .background(SemanticColor.buttonSecondaryDefault, in: Circle())
-                            Spacer(minLength: 12)
-                            Text("New Room")
-                                .gallopText(.h4, color: SemanticColor.textPrimary)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
-                        .gallopCard()
-                    }
-                    .buttonStyle(.plain)
-                    .macAccessibleAction(label: "Create room") {
-                        store.presentCreateRoom()
-                    }
-                }
-                .padding(20)
-            }
-            .scrollIndicators(.hidden)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-        .background(SemanticColor.surface500)
-    }
-}
-
-private struct DashboardRoomCard: View {
-    @EnvironmentObject private var store: ChatStore
-    let room: Room
-
-    private var parentRoom: Room? {
-        guard let parentID = room.parentID else { return nil }
-        return store.rooms.first { $0.id == parentID }
-    }
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Button {
-                Task { await store.select(room: room) }
-            } label: {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        RoomAvatar(name: room.name, size: 38, accented: false)
-                        if room.encrypted {
-                            GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
-                                .foregroundStyle(SemanticColor.iconTertiary)
-                        }
-                        Spacer()
-                    }
-
-                    Spacer(minLength: 8)
-                    if let parentRoom {
-                        Text("in \(parentRoom.name)")
-                            .gallopText(.dataLabel, color: SemanticColor.textTertiary)
-                            .lineLimit(1)
-                    }
-                    Text(room.name)
-                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                        .lineLimit(1)
-                    Text(
-                        store.roomMessagePreviews[room.id]
-                            ?? room.description
-                            ?? "Open conversation"
-                    )
-                        .gallopText(.caption, color: SemanticColor.textTertiary)
-                        .lineLimit(2)
-                }
-                .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
-                .gallopCard()
-            }
-            .buttonStyle(.plain)
-            .macAccessibleAction(label: "Open \(room.name)") {
-                Task { await store.select(room: room) }
-            }
-
-            Menu {
-                Button("Rename") { store.presentRename(room) }
-                    .disabled(!store.canRename(room))
-                Button("Archive") {
-                    Task { await store.archive(room) }
-                }
-            } label: {
-                GallopIconView(icon: .ellipsis, fallbackSystemName: "ellipsis", size: 14)
-                    .foregroundStyle(SemanticColor.iconTertiary)
-                    .frame(width: 28, height: 28)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .accessibilityLabel("Actions for \(room.name)")
-            .padding(12)
-        }
     }
 }
 
@@ -3020,86 +2831,51 @@ private struct CircleIconButton: View {
     }
 }
 
+/// What the window's main area draws: a page chosen from the sidebar, the selected room's chat, or the empty state.
+/// The lobby is an ordinary room and opens as a chat (Patrick removed the Lobby page, 2 November).
+enum MainArea: Equatable {
+    case page(WorkspaceStore.Page)
+    case chat(Room)
+    case empty
+
+    static func content(page: WorkspaceStore.Page?, selectedRoom: Room?) -> MainArea {
+        if let page { return .page(page) }
+        if let selectedRoom { return .chat(selectedRoom) }
+        return .empty
+    }
+}
+
 private struct EmptyChatView: View {
     @EnvironmentObject private var store: ChatStore
 
     var body: some View {
         Group {
-            if store.rooms.isEmpty {
-                if case .failed = store.connectionStatus {
-                    connectionFailedState
-                } else {
-                    // Centered welcome IS the empty state, with a direct path to
-                    // the first room (Patrick, 2026-08-06).
-                    VStack(spacing: 20) {
-                        welcome(alignment: .center)
-
-                        Button {
-                            store.presentCreateRoom()
-                        } label: {
-                            Text("New room")
-                                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                                .padding(.horizontal, 20)
-                                .frame(height: 38)
-                                .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .keyboardShortcut(.defaultAction)
-                        .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
-                    }
-                    .padding(24)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+            if store.rooms.isEmpty, case .failed = store.connectionStatus {
+                connectionFailedState
             } else {
-                VStack(alignment: .leading, spacing: 18) {
-                    welcome(alignment: .leading)
+                // The quiet room's icon and title with no line under them (Patrick removed the Lobby page and its
+                // welcome, 2 November). With no rooms, New room sits under the title.
+                VStack(spacing: 10) {
+                    GallopIconView(icon: .message, fallbackSystemName: "bubble.left", size: 24)
+                        .foregroundStyle(SemanticColor.iconTertiary)
+                    // copy:
+                    Text(store.rooms.isEmpty ? "No rooms yet" : "No room open")
+                        .gallopText(.h5, color: SemanticColor.textPrimary)
 
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
-                        ForEach(store.rooms.prefix(6)) { room in
-                            Button {
-                                Task { await store.select(room: room) }
-                            } label: {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    RoomAvatar(name: room.name, size: 38, accented: false)
-                                    Text(room.name)
-                                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                                    Text(room.description ?? "Open conversation")
-                                        .gallopText(.caption, color: SemanticColor.textTertiary)
-                                        .lineLimit(2)
-                                }
-                                .frame(maxWidth: .infinity, minHeight: 116, alignment: .topLeading)
-                                .padding(16)
-                                .background(SemanticColor.surface600, in: RoundedRectangle(cornerRadius: 12))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .macAccessibleAction(label: "Open \(room.name)") {
-                                Task { await store.select(room: room) }
-                            }
-                        }
+                    if store.rooms.isEmpty {
+                        // copy:
+                        Button("New room") { store.presentCreateRoom() }
+                            .buttonStyle(CowchatPillButtonStyle(prominent: true))
+                            .keyboardShortcut(.defaultAction)
+                            .padding(.top, 6)
+                            .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
                     }
-                    Spacer()
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.horizontal, 24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(SemanticColor.surface500)
-    }
-
-    /// One source of truth for the welcome copy; alignment differs per branch.
-    @ViewBuilder
-    private func welcome(alignment: HorizontalAlignment) -> some View {
-        VStack(alignment: alignment, spacing: 4) {
-            Text("Howdy, welcome to Cowchat")
-                .gallopText(.h4, color: SemanticColor.textPrimary)
-            Text("Choose a local room or start a new conversation.")
-                .gallopText(.bodyM, color: SemanticColor.textTertiary)
-        }
-        .multilineTextAlignment(alignment == .center ? .center : .leading)
     }
 
     private var connectionFailedState: some View {

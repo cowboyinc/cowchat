@@ -1,14 +1,5 @@
 import Foundation
 
-enum LobbyPresentation {
-    static func availableAgentCount(
-        from members: [AgentPresence],
-        excluding currentAgentID: String
-    ) -> Int {
-        Set(members.lazy.filter { $0.id != currentAgentID }.map(\.id)).count
-    }
-}
-
 enum ChatPresencePresentation {
     static func summary(
         members: [AgentPresence],
@@ -127,6 +118,26 @@ enum ChatPresencePresentation {
 }
 
 enum RoomSidebarPresentation {
+    /// The rooms a server's list shows before a search narrows it. The local
+    /// lobby is an ordinary room in the This Mac list (Patrick removed the Lobby
+    /// page, 2 November). A hosted server's lobby stays hidden. Home has its own
+    /// row above the lists, so the account list leaves it out unless a search
+    /// is looking for it.
+    static func listedRooms(
+        _ rooms: [Room],
+        on server: WorkspaceStore.Server,
+        searching: Bool,
+        homeRoomID: String?
+    ) -> [Room] {
+        var listed = server == .local
+            ? rooms
+            : rooms.filter { $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame }
+        if server == .accountGlobal, !searching, let homeRoomID {
+            listed.removeAll { $0.id == homeRoomID }
+        }
+        return listed
+    }
+
     static func filteredRooms(
         from rooms: [Room],
         query: String,
@@ -141,8 +152,8 @@ enum RoomSidebarPresentation {
         }
     }
 
-    /// Flat iMessage-style ordering by recency. Lobby lives in its own nav
-    /// row above the table (Patrick, 2026-08-06), so no special-casing here.
+    /// Flat iMessage-style ordering by recency, with no special case for the
+    /// lobby.
     static func sortedByRecency(_ rooms: [Room]) -> [Room] {
         rooms.sorted { lhs, rhs in
             let l = lhs.activityDate ?? .distantPast
