@@ -189,10 +189,10 @@ struct CowchatSetupWizard: View {
             SetupCard {
                 VStack(alignment: .leading, spacing: 0) {
                     // copy:
-                    SetupField(placeholder: "Your name", text: $name)
+                    CapsuleField(placeholder: "Your name", text: $name)
                     if social.handleAvailabilitySupported {
                         // copy:
-                        SetupField(placeholder: "Your username", text: $handle, leading: "@") { handleStatus }
+                        CapsuleField(placeholder: "Your username", text: $handle, leading: "@", trailing: { handleStatus })
                             .padding(.top, 12)
                             .task(id: handle + "|" + (social.savedSession?.scopeId ?? "")) { await checkHandle() }
                         if let problem = handleProblem {
@@ -467,39 +467,6 @@ private struct SetupCard<Content: View>: View {
     }
 }
 
-/// A 40 field as Settings draws its own: Body M on a Textfield/Default capsule with a 1-point Border/Default edge and
-/// 13 at the sides. A leading mark, such as the handle's "@", sits in Text/Tertiary, and a trailing one 11 from the end.
-private struct SetupField<Trailing: View>: View {
-    let placeholder: String
-    @Binding var text: String
-    var leading: String?
-    @ViewBuilder let trailing: Trailing
-
-    init(placeholder: String, text: Binding<String>, leading: String? = nil,
-         @ViewBuilder trailing: () -> Trailing = { EmptyView() }) {
-        self.placeholder = placeholder
-        _text = text
-        self.leading = leading
-        self.trailing = trailing()
-    }
-
-    var body: some View {
-        HStack(spacing: 2) {
-            if let leading { Text(leading).gallopText(.bodyM, color: SemanticColor.textTertiary) }
-            TextField(placeholder, text: $text)
-                .textFieldStyle(.plain)
-                .gallopText(.bodyM, color: SemanticColor.textPrimary)
-                .accessibilityLabel(placeholder)
-            trailing
-        }
-        .padding(.leading, 13)
-        .padding(.trailing, Trailing.self == EmptyView.self ? 13 : 11)
-        .frame(height: 40)
-        .background(SemanticColor.textfieldDefault, in: Capsule())
-        .overlay { Capsule().strokeBorder(SemanticColor.borderDefault, lineWidth: 1) }
-    }
-}
-
 /// A choice beside the card's, as Cowboy's pages draw theirs: Body S in Text/Tertiary, centred, and Text/Secondary
 /// underlined on hover.
 private struct SetupLink: View {
@@ -519,8 +486,8 @@ private struct SetupLink: View {
 }
 
 /// A sign-in provider's mark at 20, from `Bundled/Icons/providers`: Google's in its own colours, GitHub's in the
-/// door's Text/Primary.
-private struct ProviderMark: View {
+/// door's Text/Primary. Settings' Account page draws it beside each sign-in.
+struct ProviderMark: View {
     let provider: String
 
     var body: some View {

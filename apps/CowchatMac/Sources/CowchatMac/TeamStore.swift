@@ -170,14 +170,28 @@ final class TeamStore: ObservableObject {
     @Published var expanded: Set<String> = []
 
     private var accountID: String?
+    /// The team chosen in the sidebar footer, or nil for the server's choice when the account has no teams.
+    private(set) var teamID: String?
     private var generation = 0
     private var people: [TeamPerson] = []
 
     /// Starts over for the account signed in.
     func use(accountID: String?) {
         guard accountID != self.accountID else { return }
-        generation += 1
         self.accountID = accountID
+        teamID = nil
+        startOver()
+    }
+
+    /// Starts over for the team chosen in the sidebar footer.
+    func use(teamID: String?) {
+        guard teamID != self.teamID else { return }
+        self.teamID = teamID
+        startOver()
+    }
+
+    private func startOver() {
+        generation += 1
         groups = []
         people = []
         isLoaded = false
@@ -186,11 +200,13 @@ final class TeamStore: ObservableObject {
         expanded = []
     }
 
-    /// Asks the server for the team's work. A server without the route leaves the page as it was.
+    /// Asks the server for the chosen team's work. A server without the route leaves the page as it was.
     func refresh(social: SocialStore) async {
         guard let accountID, social.savedSession?.account.id == accountID else { return }
         let ticket = generation
-        guard let reply: TeamReply = try? await social.readingAPI().social(["team"]), ticket == generation else {
+        let query = teamID.map { [URLQueryItem(name: "team_id", value: $0)] } ?? []
+        guard let reply: TeamReply = try? await social.readingAPI().social(["team"], query: query),
+              ticket == generation else {
             return
         }
         receive(reply)

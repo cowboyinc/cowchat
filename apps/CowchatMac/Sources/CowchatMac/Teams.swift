@@ -9,13 +9,15 @@ struct SocialTeam: Decodable, Identifiable, Equatable {
     let name: String
 }
 
-/// The account's teams and the one chosen in the sidebar footer's switcher. Choosing a team only stores the choice on
-/// this Mac, per account, for now. After the Inbox and Team work merges, the Team page lists the chosen team's people
-/// and New room puts a room inside the chosen team's company room.
+/// The account's teams and the one chosen in the sidebar footer's switcher. The choice is kept on this Mac, per
+/// account. The Team page lists the chosen team's people, and New room puts a room inside the chosen team's company
+/// room. With no teams listed, both do what they did before.
 @MainActor
 final class TeamChoice: ObservableObject {
     @Published private(set) var teams: [SocialTeam] = []
     @Published private(set) var chosenID: String?
+    /// Called when the chosen team changes, by a choice or a new list.
+    var onChoiceChanged: (() -> Void)?
     private var accountID: String?
     private let defaults: UserDefaults
     static let storageKey = "CowchatMac.chosenTeam"
@@ -30,6 +32,8 @@ final class TeamChoice: ObservableObject {
     /// Lists the signed-in account's teams and reads its stored choice. A server without the route lists none, and
     /// the footer then draws no switcher.
     func load(for session: SocialSession?) async {
+        let before = chosen?.id
+        defer { if chosen?.id != before { onChoiceChanged?() } }
         guard let session else {
             teams = []
             chosenID = nil
@@ -46,8 +50,10 @@ final class TeamChoice: ObservableObject {
 
     func choose(_ team: SocialTeam) {
         guard let accountID, teams.contains(team) else { return }
+        let before = chosen?.id
         chosenID = team.id
         defaults.set(team.id, forKey: Self.key(for: accountID))
+        if chosen?.id != before { onChoiceChanged?() }
     }
 
     static func key(for accountID: String) -> String { "\(storageKey).\(accountID)" }

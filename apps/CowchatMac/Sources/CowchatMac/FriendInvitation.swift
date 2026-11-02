@@ -71,7 +71,6 @@ struct FriendInvitationConfirmation: View {
     @State private var confirmation: FriendInvitationConfirmationSnapshot?
     @State private var failure: String?
     @State private var sending = false
-    @State private var reviewRequests = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -97,7 +96,10 @@ struct FriendInvitationConfirmation: View {
                 case .outgoingPending: Text("Your friend request is waiting for their approval.")
                 case .incomingPending:
                     Text("They already sent you a friend request. Review it to accept or decline.")
-                    Button("Review request") { reviewRequests = true }
+                    Button("Review request") {
+                        NotificationCenter.default.post(name: .cowchatShowFriends, object: nil)
+                        onDismiss()
+                    }
                 case .none:
                     Text("Send a friend request? Friendship does not grant access to rooms or agents.").gallopText(.bodyM)
                     Button(sending ? "Sending…" : "Send friend request") {
@@ -118,7 +120,6 @@ struct FriendInvitationConfirmation: View {
         }
         .padding(28).frame(width: 500)
         .task(id: invitation.id + (social.savedSession?.scopeId ?? "") + String(describing: social.phase)) { await load() }
-        .sheet(isPresented: $reviewRequests) { FriendsView(social: social) }
     }
 
     private func load() async {

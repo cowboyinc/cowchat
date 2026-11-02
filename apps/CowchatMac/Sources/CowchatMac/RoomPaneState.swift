@@ -37,4 +37,10 @@ enum RoomPaneState: Equatable {
     static func showsInviteNudge(state: RoomPaneState, hasOtherMembers: Bool) -> Bool {
         state == .chat && !hasOtherMembers
     }
+
+    /// Whether the quiet state offers Copy connect prompt: everywhere but Home while one of the person's sessions is
+    /// live there, since an agent is already in.
+    static func quietOffersConnectPrompt(isHome: Bool, liveSessions: Int) -> Bool {
+        !(isHome && liveSessions > 0)
+    }
 }

@@ -40,10 +40,12 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    /// What the window's main area shows instead of a room: the Inbox or the Team page, chosen from the sidebar.
+    /// What the window's main area shows instead of a room: the Inbox or the Team page, chosen from the sidebar, or the
+    /// Friends page, from the toolbar's people button.
     enum Page: Equatable {
         case inbox
         case team
+        case friends
     }
 
     let local: ChatStore
@@ -62,8 +64,21 @@ final class WorkspaceStore: ObservableObject {
     }()
     /// Claude Code's plugin and Codex's hooks, as first run and Settings show them.
     let agentConnections = AgentConnections()
-    /// The account's teams and the one chosen in the sidebar footer.
-    lazy var teams = TeamChoice(defaults: defaults)
+    /// The account's teams and the one chosen in the sidebar footer, which picks the team the Team page shows and the
+    /// company room New room makes a room in.
+    lazy var teams: TeamChoice = {
+        let teams = TeamChoice(defaults: defaults)
+        teams.onChoiceChanged = { [weak self] in
+            guard let self else { return }
+            self.team.use(teamID: teams.chosen?.id)
+            Task { await self.refreshPages() }
+        }
+        return teams
+    }()
+    /// New room with an account room's draft, as a friend's row on the Friends page opens it.
+    @Published var roomDraft: SocialRoomDraft?
+    /// A room's people, as its menu's People… shows them.
+    @Published var roomPeople: SocialParticipants?
     /// True from launch until a room is opened, so the app opens on Home once the account's Home is known.
     private var opensHomeWhenReady = true
     @Published private(set) var global: ChatStore?
@@ -368,6 +383,7 @@ final class WorkspaceStore: ObservableObject {
     /// the Mac's notifications. Team goes first, since it says whose a community room's session is.
     func refreshPages() async {
         guard let session = social.savedSession else { return }
+        team.use(teamID: teams.chosen?.id)
         await team.refresh(social: social)
         let people = social.friends.map(\.account) + [session.account]
         await inbox.refresh(social: social, community: global, people: people) { [team] in team.owner(of: $0) }
@@ -429,6 +445,26 @@ final class WorkspaceStore: ObservableObject {
         inbox.remove(item)
         await refreshPages()
         return true
+    }
+
+    // MARK: Friends and New room
+
+    /// A draft for an account room, made inside the chosen team's company room when the account has teams.
+    func newRoomDraft(friendIDs: [String] = []) -> SocialRoomDraft {
+        SocialRoomDraft(friendIDs: friendIDs, parentID: teams.chosen?.id)
+    }
+
+    /// Pressing a friend's row on the Friends page: New room with that friend picked.
+    func newRoom(with friend: SocialFriend) {
+        roomDraft = newRoomDraft(friendIDs: [friend.id])
+    }
+
+    /// People… in an account room's menu: the room's people and agents from the server.
+    func showPeople(of roomID: String) async {
+        await social.perform { api in
+            let people: SocialParticipants = try await api.social(["rooms", roomID, "participants"])
+            self.roomPeople = people
+        }
     }
 
     /// Pressing a Team row that opens a room: the room its branch's newest session works in, on the account.

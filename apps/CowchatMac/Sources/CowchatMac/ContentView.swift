@@ -32,9 +32,6 @@ struct ContentView: View {
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
     @State private var isSidebarVisible = true
     @State private var isSettingsPresented = false
-    @State private var isFriendsPresented = false
-    @State private var friendsSection = SocialSection.friends
-    @State private var pendingFriendsSection: SocialSection?
     @State private var isWhatsNewPresented = false
     @Environment(\.controlActiveState) private var controlActiveState
 
@@ -60,6 +57,9 @@ struct ContentView: View {
                         InboxPage(inbox: workspace.inbox, home: workspace.homeSessions)
                     case .team:
                         TeamPage(team: workspace.team, account: workspace.accountGlobal ?? workspace.local)
+                    case .friends:
+                        FriendsPage(social: workspace.social, newRoom: { workspace.newRoom(with: $0) },
+                                    signIn: onShowOnboarding)
                     }
                 } else if let room = store.selectedRoom {
                     if room.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame {
@@ -94,9 +94,12 @@ struct ContentView: View {
         .navigationTitle(windowTitle)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button { friendsSection = .friends; isFriendsPresented = true } label: {
-                    Label("Friends & account", systemImage: "person.2")
-                }.help("Friends, agents and account")
+                // copy:
+                Button { workspace.show(.friends) } label: {
+                    Label("Friends", systemImage: "person.2")
+                }
+                .help("Friends")
+                .macAccessibleAction(label: "Open Friends") { workspace.show(.friends) }
             }
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -136,23 +139,32 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 600)
         .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
         .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
-        .sheet(isPresented: $isFriendsPresented, onDismiss: presentPendingFriendsSection) {
-            FriendsView(social: workspace.social, initialSection: friendsSection).id(friendsSection)
-        }
-        .onReceive(workspace.notifications.$destination.receive(on: RunLoop.main)) { section in
-            guard let section, workspace.notifications.consumeDestination(section) else { return }
-            pendingFriendsSection = section
-            let dismissingSheet = isSettingsPresented || store.isCreateRoomPresented || isWhatsNewPresented || store.roomBeingRenamed != nil || isFriendsPresented
+        // A social notification's click: a friend request opens the Friends page, and a room invitation the Inbox.
+        .onReceive(workspace.notifications.$destination.receive(on: RunLoop.main)) { destination in
+            guard let destination, workspace.notifications.consumeDestination(destination) else { return }
             isSettingsPresented = false
             store.isCreateRoomPresented = false
             isWhatsNewPresented = false
             store.roomBeingRenamed = nil
-            isFriendsPresented = false
-            if !dismissingSheet { presentPendingFriendsSection() }
+            workspace.roomDraft = nil
+            workspace.roomPeople = nil
+            workspace.show(destination == .inbox ? .inbox : .friends)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .cowchatShowFriends)) { _ in
+            workspace.show(.friends)
+        }
+        .sheet(item: $workspace.roomDraft) { draft in
+            SocialRoomCreationView(social: workspace.social, draft: draft) { roomID in
+                Task { _ = await workspace.openCreatedSocialRoom(roomID: roomID) }
+            }
+        }
+        .sheet(isPresented: Binding(get: { workspace.roomPeople != nil },
+                                    set: { if !$0 { workspace.roomPeople = nil } })) {
+            RoomParticipantsSheet(social: workspace.social, participants: $workspace.roomPeople)
         }
         .sheet(
             isPresented: $store.isCreateRoomPresented,
-            onDismiss: { store.createRoomParentID = nil; presentPendingFriendsSection() }
+            onDismiss: { store.createRoomParentID = nil }
         ) {
             RoomCreationSheet(initialSource: workspace.activeServer)
                 .environmentObject(store)
@@ -161,12 +173,12 @@ struct ContentView: View {
             guard controlActiveState == .key || controlActiveState == .active else { return }
             isWhatsNewPresented = true
         }
-        .sheet(isPresented: $isWhatsNewPresented, onDismiss: presentPendingFriendsSection) { WhatsNewView() }
-        .sheet(item: $store.roomBeingRenamed, onDismiss: presentPendingFriendsSection) { room in
+        .sheet(isPresented: $isWhatsNewPresented) { WhatsNewView() }
+        .sheet(item: $store.roomBeingRenamed) { room in
             RenameRoomView(room: room)
                 .environmentObject(store)
         }
-        .sheet(isPresented: $isSettingsPresented, onDismiss: presentPendingFriendsSection) {
+        .sheet(isPresented: $isSettingsPresented) {
             SettingsView(
                 isPresented: $isSettingsPresented,
                 onShowOnboarding: onShowOnboarding
@@ -205,18 +217,9 @@ struct ContentView: View {
         switch workspace.page {
         case .inbox: return "Inbox"
         case .team: return "Team"
+        case .friends: return "Friends"
         case nil: return store.selectedRoom?.name ?? "Cowchat"
         }
-    }
-
-    private func presentPendingFriendsSection() {
-        guard let section = pendingFriendsSection, workspace.social.phase == .signedIn else {
-            pendingFriendsSection = nil
-            return
-        }
-        pendingFriendsSection = nil
-        friendsSection = section
-        isFriendsPresented = true
     }
 }
 
@@ -1683,8 +1686,7 @@ private struct ChatRoomView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Room key for \(room.name)").font(.headline)
                 Text("Enter the shared room key. It stays in this Mac’s Keychain.").font(.callout)
-                SecureField("Room key", text: $roomKeyDraft)
-                    .textFieldStyle(.roundedBorder)
+                CapsuleField(placeholder: "Room key", text: $roomKeyDraft, isSecure: true)
                 if let error = roomKeyError { Text(error).foregroundStyle(.red).font(.caption) }
                 HStack {
                     if store.unlockedRoomIDs.contains(room.id) {
@@ -1747,6 +1749,10 @@ private struct ChatRoomView: View {
                     Button("Copy connect prompt") { copyConnectPrompt() }
                     if !store.isLocalConnection {
                         Button("Artifact…") { isArtifactPresented = true }
+                        if RoomPeople.isOffered(isLocal: store.isLocalConnection, apiKey: store.connectionProfile.apiKey) {
+                            // copy:
+                            Button("People…") { Task { await workspace.showPeople(of: room.id) } }
+                        }
                         if !store.connectionProfile.apiKey.hasPrefix("csoc_") {
                             Button("Invites…") { isInvitesPresented = true }
                             Button("Slack…") { isSlackPresented = true }
@@ -2069,41 +2075,53 @@ private struct ChatRoomView: View {
         }
     }
 
+    /// Whether the room's quiet state offers the connect prompt: not in Home while one of the person's sessions is live
+    /// there, since an agent is already in.
+    private var offersConnectPrompt: Bool {
+        RoomPaneState.quietOffersConnectPrompt(isHome: isHome, liveSessions: home.sessions.count)
+    }
+
     private var quietRoom: some View {
         VStack(spacing: 10) {
             GallopIconView(icon: .message, fallbackSystemName: "bubble.left", size: 24)
                 .foregroundStyle(SemanticColor.iconTertiary)
             Text("This room is quiet")
                 .gallopText(.h5, color: SemanticColor.textPrimary)
-            Text("Bring an agent in with the connect prompt, or open the composer and say hello.")
+            // copy: with a session live in Home, the line drops the connect prompt along with its button.
+            Text(offersConnectPrompt ? "Bring an agent in with the connect prompt, or open the composer and say hello."
+                                     : "Open the composer and say hello.")
                 .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 .multilineTextAlignment(.center)
 
-            Button {
-                copyConnectPrompt()
-                hasCopiedQuietRoomPrompt = true
-            } label: {
-                // Reserve the wider label's width (no resize on click) and keep
-                // the chrome inside the label so the whole capsule is clickable.
-                ZStack {
-                    Text("Copy connect prompt").hidden()
-                    Text(hasCopiedQuietRoomPrompt ? "Copied" : "Copy connect prompt")
-                }
-                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                .padding(.horizontal, 18)
-                .frame(height: 38)
-                .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 6)
-            .macAccessibleAction(label: "Copy connect prompt") {
-                copyConnectPrompt()
-                hasCopiedQuietRoomPrompt = true
-            }
+            if offersConnectPrompt { quietRoomPromptButton }
         }
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var quietRoomPromptButton: some View {
+        Button {
+            copyConnectPrompt()
+            hasCopiedQuietRoomPrompt = true
+        } label: {
+            // Reserve the wider label's width (no resize on click) and keep
+            // the chrome inside the label so the whole capsule is clickable.
+            ZStack {
+                Text("Copy connect prompt").hidden()
+                Text(hasCopiedQuietRoomPrompt ? "Copied" : "Copy connect prompt")
+            }
+            .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
+            .padding(.horizontal, 18)
+            .frame(height: 38)
+            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 6)
+        .macAccessibleAction(label: "Copy connect prompt") {
+            copyConnectPrompt()
+            hasCopiedQuietRoomPrompt = true
+        }
     }
 
 
@@ -3116,31 +3134,33 @@ private struct EmptyChatView: View {
 }
 
 private enum SettingsPage {
+    case account
     case connection
     case agents
     case theme
     case roomIcons
     case updates
     case notifications
-    case team
     case whatsNew
 
     var title: String {
         switch self {
+        // copy:
+        case .account: return "Account"
         case .connection: return "Connection"
         case .agents: return "Agents" // copy:
         case .theme: return "Theme"
         case .roomIcons: return "Room icons"
         case .updates: return "Updates"
         case .notifications: return "Notifications"
-        // copy:
-        case .team: return "Team"
         case .whatsNew: return "What’s new"
         }
     }
 
-    var subtitle: String {
+    /// The line under the title. Account has none.
+    var subtitle: String? {
         switch self {
+        case .account: return nil
         case .connection: return "Choose where Cowchat stores and syncs your rooms."
         // copy:
         case .agents: return "Connect Claude Code and Codex to your Home."
@@ -3148,8 +3168,6 @@ private enum SettingsPage {
         case .roomIcons: return "Every room gets the same icon on every Mac — it is drawn from the room name."
         case .updates: return "Keep Cowchat up to date."
         case .notifications: return "Choose what gets your attention on this Mac."
-        // copy:
-        case .team: return "Choose whether your team sees what you are working on."
         case .whatsNew: return "The latest improvements to Cowchat."
         }
     }
@@ -3178,7 +3196,8 @@ private struct SettingsView: View {
     let onShowOnboarding: () -> Void
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
     @AppStorage(RoomIconStyle.storageKey) private var roomIconStyle = RoomIconStyle.fallback.rawValue
-    @State private var selectedPage = SettingsPage.connection
+    /// The page chosen in the list, or nil for the first: Account while an account is signed in, else Connection.
+    @State private var chosenPage: SettingsPage?
     @State private var cloudURL = ""
     @State private var cloudAPIKey = ""
     @State private var isConnectingGlobal = false
@@ -3194,6 +3213,14 @@ private struct SettingsView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 20)
                     .padding(.bottom, 8)
+                if isSignedIn {
+                    // copy:
+                    settingsNavigationRow(
+                        "Account",
+                        systemName: "person.crop.circle",
+                        page: .account
+                    )
+                }
                 settingsNavigationRow(
                     "Connection",
                     systemName: "network",
@@ -3219,14 +3246,6 @@ private struct SettingsView: View {
                     systemName: "bell",
                     page: .notifications
                 )
-                if workspace.accountGlobal != nil {
-                    // copy:
-                    settingsNavigationRow(
-                        "Team",
-                        systemName: "person.2",
-                        page: .team
-                    )
-                }
                 settingsNavigationRow(
                     "Updates",
                     systemName: "arrow.down.circle",
@@ -3248,6 +3267,13 @@ private struct SettingsView: View {
                 settingsHeader
 
                 switch selectedPage {
+                case .account:
+                    ScrollView {
+                        AccountSettings(social: workspace.social) {
+                            isPresented = false
+                            Task { await workspace.signOut() }
+                        }
+                    }
                 case .connection:
                     ScrollView {
                         connectionSettings
@@ -3263,8 +3289,6 @@ private struct SettingsView: View {
                     updateSettings
                 case .notifications:
                     SocialNotificationSettings(notifications: workspace.notifications)
-                case .team:
-                    TeamSharingSettings(team: workspace.team, social: workspace.social)
                 case .whatsNew:
                     ScrollView { WhatsNewContent() }
                 }
@@ -3312,13 +3336,22 @@ private struct SettingsView: View {
         }
     }
 
+    private var isSignedIn: Bool { workspace.social.phase == .signedIn }
+
+    private var selectedPage: SettingsPage {
+        let page = chosenPage ?? (isSignedIn ? .account : .connection)
+        return page == .account && !isSignedIn ? .connection : page
+    }
+
     private var settingsHeader: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
                 Text(selectedPage.title)
                     .gallopText(.h4, color: SemanticColor.textPrimary)
-                Text(selectedPage.subtitle)
-                    .gallopText(.bodyM, color: SemanticColor.textTertiary)
+                if let subtitle = selectedPage.subtitle {
+                    Text(subtitle)
+                        .gallopText(.bodyM, color: SemanticColor.textTertiary)
+                }
             }
             Spacer()
             Button("Close") { isPresented = false }
@@ -3479,11 +3512,23 @@ private struct SettingsView: View {
 
 
     /// Claude Code and Codex with where each stands, and Connect on one that isn't connected, for a person who
-    /// skipped them in first run.
+    /// skipped them in first run. A signed-in account's bots follow in a list of their own, then the switch that shows
+    /// the person's live sessions on Team.
     private var agentSettings: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            AgentHookList(connections: workspace.agentConnections).gallopCard(cornerRadius: 14)
-            AgentHookError(connections: workspace.agentConnections)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                VStack(alignment: .leading, spacing: 12) {
+                    AgentHookList(connections: workspace.agentConnections).gallopCard(cornerRadius: 14)
+                    AgentHookError(connections: workspace.agentConnections)
+                }
+                if isSignedIn {
+                    BotSettings(social: workspace.social)
+                }
+                if workspace.accountGlobal != nil {
+                    TeamSharingSettings(team: workspace.team, social: workspace.social)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .task { await workspace.agentConnections.refresh() }
     }
@@ -3595,7 +3640,7 @@ private struct SettingsView: View {
         systemName: String,
         page: SettingsPage
     ) -> some View {
-        Button { selectedPage = page } label: {
+        Button { chosenPage = page } label: {
             HStack(spacing: 9) {
                 Image(systemName: systemName)
                     .font(.system(size: 13, weight: .medium))
@@ -3622,7 +3667,7 @@ private struct SettingsView: View {
             .padding(.horizontal, 8)
         }
         .buttonStyle(.plain)
-        .macAccessibleAction(label: title, value: selectedPage == page ? "selected" : nil) { selectedPage = page }
+        .macAccessibleAction(label: title, value: selectedPage == page ? "selected" : nil) { chosenPage = page }
     }
 
     private var canSaveCloudConfiguration: Bool {
@@ -3724,16 +3769,7 @@ private struct RenameRoomView: View {
                 CircleIconButton(icon: .dismiss, fallbackSystemName: "xmark", help: "Close", action: cancel)
             }
 
-            TextField("Room name", text: $name)
-                .textFieldStyle(.plain)
-                .gallopText(.bodyM, color: SemanticColor.textPrimary)
-                .padding(.horizontal, 14)
-                .frame(height: 42)
-                .background(SemanticColor.textfieldDefault, in: Capsule())
-                .overlay {
-                    Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
-                }
-                .onSubmit(renameRoom)
+            CapsuleField(placeholder: "Room name", text: $name, onSubmit: renameRoom)
 
             if let validationMessage {
                 Text(validationMessage)
@@ -3915,7 +3951,7 @@ private struct RoomCreationSheet: View {
                 .padding(.horizontal, 28).padding(.top, 20).padding(.bottom, 8)
             }
             if usePrivateGlobal, store.createRoomParentID == nil {
-                SocialRoomCreationView(social: workspace.social)
+                SocialRoomCreationView(social: workspace.social, draft: workspace.newRoomDraft())
             } else if location == .global && !hasGlobal {
                 Text("The online connection was disconnected. Choose Local to create a room on this Mac.")
                     .gallopText(.bodyM).padding(28)

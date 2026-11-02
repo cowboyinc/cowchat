@@ -200,14 +200,14 @@ final class SocialTests: XCTestCase {
     }
 
     @MainActor
-    func testClosingFriendsKeepsTheSetupThatNamesHome() async throws {
+    func testCancellingALinkKeepsTheSetupThatNamesHome() async throws {
         let fixture = try SetupFixture()
         defer { fixture.close() }
         fixture.established = true
         let store = fixture.store()
         await store.loadSetup()
         XCTAssertEqual(store.setup?.roomId, "starter-home")
-        store.closeFriends()
+        store.cancelLink()
         XCTAssertEqual(store.setup?.roomId, "starter-home")
         XCTAssertTrue(store.setupLoaded)
         store.cancelSignIn()
@@ -345,11 +345,9 @@ final class SocialTests: XCTestCase {
         XCTAssertEqual(changes, 2)
         XCTAssertEqual(store.rooms.count, 2)
         XCTAssertTrue(store.errorMessage?.contains("Room creation unavailable") == true)
-        try render(FriendsView(social: store, initialSection: .rooms), name: "mac-rooms-populated-create-action")
         roomList = []
         let emptyStore = SocialStore(endpoint: endpoint, credentials: credentials, session: session)
         await emptyStore.refresh()
-        try render(FriendsView(social: emptyStore, initialSection: .rooms), name: "mac-rooms-empty-create-action")
         try render(SocialRoomCreationView(social: emptyStore), name: "mac-room-create-solo")
         try render(SocialRoomCreationView(social: emptyStore, draft: draft), name: "mac-room-create-friend")
     }
@@ -457,7 +455,7 @@ final class SocialTests: XCTestCase {
         SocialFixtureProtocol.contentType = "text/html"
         SocialFixtureProtocol.handler = { _ in (200, "<!doctype html><html>Cowchat</html>") }
         await store.refresh()
-        try render(FriendsView(social: store), name: "mac-friends-server-update")
+        try render(FriendsPage(social: store, newRoom: { _ in }, signIn: {}), name: "mac-friends-server-update")
     }
 
     func testCopiedHandleCanBePastedIntoFriendRequest() {
@@ -543,7 +541,7 @@ final class SocialTests: XCTestCase {
         XCTAssertNil(store.errorMessage)
         XCTAssertEqual(store.friends.first?.account.handle, "renzo")
         XCTAssertEqual(store.requests.first?.from.handle, "rachel")
-        try render(FriendsView(social: store), name: "mac-friends-signed-in")
+        try render(FriendsPage(social: store, newRoom: { _ in }, signIn: {}), name: "mac-friends-signed-in")
         var loggedOut = false
         store.onSessionChanged = { value in loggedOut = value == nil }
         await store.signOut()
@@ -551,7 +549,7 @@ final class SocialTests: XCTestCase {
         XCTAssertNil(credentials.value)
         XCTAssertTrue(store.friends.isEmpty)
         XCTAssertEqual(store.phase, .signedOut)
-        try render(FriendsView(social: store), name: "mac-friends-sign-in")
+        try render(FriendsPage(social: store, newRoom: { _ in }, signIn: {}), name: "mac-friends-sign-in")
     }
 
     @MainActor
@@ -703,7 +701,7 @@ final class SocialTests: XCTestCase {
         await store.refresh()
         XCTAssertEqual(store.identities.map(\.provider), ["github"])
         XCTAssertEqual(store.availableLinkProviders, ["google"])
-        try render(SocialProfileEditor(handle: .constant("chad"), displayName: .constant("Chad"), busy: false, error: nil, identities: store.identities, linkProviders: store.availableLinkProviders, onCancel: {}, onSave: {}), name: "mac-friends-link-provider")
+        try render(AccountSettings(social: store, signOut: {}), name: "mac-account-link-provider")
         XCTAssertNil(store.linkProvider("github"))
         var activated: SocialSession?
         store.onSessionChanged = { activated = $0 }
@@ -726,7 +724,7 @@ final class SocialTests: XCTestCase {
         XCTAssertEqual(try fixture.savedCredential()?.deviceKey, "csoc_linked")
         XCTAssertEqual(store.identities.map(\.provider), ["github", "google"])
         XCTAssertTrue(store.availableLinkProviders.isEmpty)
-        try render(SocialProfileEditor(handle: .constant("chad"), displayName: .constant("Chad"), busy: false, error: nil, identities: store.identities, linkProviders: store.availableLinkProviders, onCancel: {}, onSave: {}), name: "mac-friends-linked-providers")
+        try render(AccountSettings(social: store, signOut: {}), name: "mac-account-linked-providers")
     }
 
     @MainActor
@@ -882,7 +880,6 @@ final class SocialTests: XCTestCase {
         let recipient = SocialAccount(id: "recipient", handle: "chad", displayName: "Chad")
         let coordinator = SocialAgent(id: "coordinator", ownerId: account.id, name: "Renzo's coordinator", discoverable: true)
         let own = SocialAgent(id: "reviewer", ownerId: recipient.id, name: "Chad's reviewer", discoverable: true)
-        try render(SocialProfileEditor(handle: .constant("chad"), displayName: .constant("Chad"), busy: false, error: nil, onCancel: {}, onSave: {}), name: "mac-friends-edit-profile")
         let invitation = SocialRoomInvitation(id: "invitation", roomId: "room", roomName: "Release planning", from: account, to: recipient, proposedAgents: [own], members: [account], agents: [coordinator], historyPolicy: "full", encrypted: false, slackConnected: false, status: "pending")
         let session = LiveSession(id: "reviewer", harness: .claudeCode, folder: "cowchat", branch: "chad/release-notes", state: .working, startedAt: Date())
         try render(SocialInvitationReview(invitation: invitation, sessions: [session], sessionName: { $0.baseName }, selectedSession: .constant(nil), busy: false, error: nil, onCancel: {}, onDecline: {}, onAccept: {}), name: "mac-friends-invitation")

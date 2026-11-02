@@ -126,6 +126,8 @@ struct PageRowSeam: View {
 /// The sidebar's search field as a view of its own: 36 tall, Textfield/Default in a capsule with a 1-point
 /// Border/Default edge, 11 at the sides, the 13 search icon in Icon/Tertiary, 8, the text in Body M, and once text is
 /// typed the 13 dismiss button in Icon/Tertiary, which reads as enabled in dark mode where Icon/Subtle did not. Escape clears it and gives up the focus.
+/// A field that takes something other than a search, such as Friends' handle, puts its `leading` mark in Text/Tertiary
+/// where the icon goes, and Return calls `onSubmit`.
 struct SearchCapsule: View {
     let placeholder: String
     @Binding var text: String
@@ -133,15 +135,24 @@ struct SearchCapsule: View {
     /// The dismiss button's accessible label.
     let clearLabel: String
     var width: CGFloat?
+    var leading: String?
+    var onSubmit: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 8) {
-            GallopIconView(icon: .search, fallbackSystemName: "magnifyingglass", size: 13)
-                .foregroundStyle(SemanticColor.iconTertiary)
+            if let leading {
+                Text(leading)
+                    .gallopText(.bodyM, color: SemanticColor.textTertiary)
+                    .accessibilityHidden(true)
+            } else {
+                GallopIconView(icon: .search, fallbackSystemName: "magnifyingglass", size: 13)
+                    .foregroundStyle(SemanticColor.iconTertiary)
+            }
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
                 .gallopText(.bodyM, color: SemanticColor.textPrimary)
                 .focused(isFocused)
+                .onSubmit { onSubmit?() }
                 .onExitCommand {
                     // Escape clears the filter and returns focus to the list.
                     text = ""
@@ -164,5 +175,73 @@ struct SearchCapsule: View {
         .overlay {
             Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
         }
+    }
+}
+
+/// The app's 40 text field, as Settings and first run draw theirs: Body M on a Textfield/Default capsule with a 1-point
+/// Border/Default edge drawn inside it, and 13 at the sides. A leading mark, such as a handle's "@", sits in
+/// Text/Tertiary, and a trailing view 11 from the end. Return calls `onSubmit`.
+struct CapsuleField<Trailing: View>: View {
+    let placeholder: String
+    @Binding var text: String
+    var leading: String?
+    var isSecure = false
+    var onSubmit: (() -> Void)?
+    @ViewBuilder let trailing: Trailing
+
+    init(placeholder: String, text: Binding<String>, leading: String? = nil, isSecure: Bool = false,
+         onSubmit: (() -> Void)? = nil, @ViewBuilder trailing: () -> Trailing = { EmptyView() }) {
+        self.placeholder = placeholder
+        _text = text
+        self.leading = leading
+        self.isSecure = isSecure
+        self.onSubmit = onSubmit
+        self.trailing = trailing()
+    }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            if let leading { Text(leading).gallopText(.bodyM, color: SemanticColor.textTertiary) }
+            Group {
+                if isSecure {
+                    SecureField(placeholder, text: $text)
+                } else {
+                    TextField(placeholder, text: $text)
+                }
+            }
+            .textFieldStyle(.plain)
+            .gallopText(.bodyM, color: SemanticColor.textPrimary)
+            .onSubmit { onSubmit?() }
+            .accessibilityLabel(placeholder)
+            trailing
+        }
+        .padding(.leading, 13)
+        .padding(.trailing, Trailing.self == EmptyView.self ? 13 : 11)
+        .frame(height: 40)
+        .background(SemanticColor.textfieldDefault, in: Capsule())
+        .overlay { Capsule().strokeBorder(SemanticColor.borderDefault, lineWidth: 1) }
+    }
+}
+
+/// A page row's actions behind a 24 ⋯, drawn as the Lobby's room cards draw theirs: the 14 ellipsis in Icon/Tertiary.
+/// It shows while the row is hovered and keeps its place when hidden, so the row's columns don't move.
+struct PageRowMoreMenu<Items: View>: View {
+    let isVisible: Bool
+    let accessibilityLabel: String
+    @ViewBuilder let items: () -> Items
+
+    var body: some View {
+        Menu(content: items) {
+            GallopIconView(icon: .ellipsis, fallbackSystemName: "ellipsis", size: 14)
+                .foregroundStyle(SemanticColor.iconTertiary)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .frame(width: 24, height: 24)
+        .opacity(isVisible ? 1 : 0)
+        .accessibilityLabel(accessibilityLabel)
     }
 }

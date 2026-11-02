@@ -271,6 +271,11 @@ final class SocialStore: ObservableObject {
 
     func closeFriends() { cancel(keepingSetup: phase == .signedIn) }
 
+    /// Settings › Account's Cancel, or the page closing while a link is under way: cancels the link, and keeps a
+    /// signed-in account's setup, which names its Home.
+    func cancelLink() { cancel(keepingSetup: phase == .signedIn) }
+
+    /// First run closing on Home: the same as cancelling a link, so the Home it set up stays in the sidebar.
     func closeOnboarding() { cancel(keepingSetup: phase == .signedIn) }
 
     private func cancel(keepingSetup: Bool) {
@@ -459,6 +464,45 @@ final class SocialStore: ObservableObject {
             succeeded = ticket == self.generation
         }
         return succeeded && ticket == generation
+    }
+
+    /// Accept or Decline on a friend request sent to the person.
+    func answerFriendRequest(_ id: String, accept: Bool) async {
+        await perform { api in
+            let _: SocialAcknowledgement = try await api.social(["friend-requests", id, accept ? "accept" : "decline"],
+                                                                method: "POST")
+        }
+    }
+
+    /// Remove friend. Rooms already approved stay; the person leaves them separately.
+    func removeFriend(_ id: String) async {
+        await perform { api in
+            let _: SocialAcknowledgement = try await api.social(["friends", id], method: "DELETE")
+        }
+    }
+
+    /// Revoke on a bot: its credentials stop working and it leaves the account.
+    func revokeAgent(_ id: String) async {
+        await perform { api in
+            let _: SocialAcknowledgement = try await api.social(["agents", id], method: "DELETE")
+        }
+    }
+
+    /// Save on Settings' Account page: the person's display name and handle.
+    @discardableResult
+    func saveProfile(displayName: String, handle: String) async -> Bool {
+        let ticket = generation
+        var saved = false
+        await perform { api in
+            let me: SocialMe = try await api.social(["me"], method: "PATCH", body: [
+                "display_name": displayName.trimmingCharacters(in: .whitespacesAndNewlines),
+                "handle": SocialAPI.normalizedHandle(handle),
+            ])
+            guard ticket == self.generation else { return }
+            try self.saveAccount(me.account)
+            saved = true
+        }
+        return saved && ticket == generation
     }
 
     func connectAgent(_ id: String) async {

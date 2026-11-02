@@ -16,13 +16,20 @@ struct SocialNotificationSnapshot {
     var deliveryScope: String { accountScope + "." + session.scopeId }
 }
 
+/// Where clicking a social notification opens: the Friends page for a friend request or an accepted one, and the Inbox,
+/// which holds the Join sheet, for a room invitation. The raw values are the ones notifications already delivered carry.
+enum SocialDestination: String {
+    case friends = "Friends"
+    case inbox = "Invitations"
+}
+
 struct SocialNotificationEvent: Equatable {
     enum Kind: String, CaseIterable {
         case friendRequest
         case friendAccepted
         case roomInvitation
 
-        var destination: SocialSection { self == .roomInvitation ? .invitations : .friends }
+        var destination: SocialDestination { self == .roomInvitation ? .inbox : .friends }
         var title: String {
             switch self {
             case .friendRequest: return "New friend request"
@@ -85,7 +92,7 @@ struct InboxNotificationLedger: Codable {
 @MainActor
 final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     @Published private(set) var authorizationStatus: UNAuthorizationStatus = .notDetermined
-    @Published private(set) var destination: SocialSection?
+    @Published private(set) var destination: SocialDestination?
     @Published private(set) var errorMessage: String?
     @Published var enabled: Bool {
         didSet {
@@ -101,7 +108,7 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
     private let center: UNUserNotificationCenter?
     private var activeScope: String?
     private var sessionConfigured = false
-    private var pendingOpen: (String, SocialSection)?
+    private var pendingOpen: (String, SocialDestination)?
     /// Opens the Inbox, for a click on an Inbox item's notification.
     var onOpenInbox: (() -> Void)?
     private static let enabledKey = "CowchatMac.notifications.enabled"
@@ -240,7 +247,7 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
         catch { errorMessage = "The test notification could not be delivered. \(error.localizedDescription)" }
     }
 
-    func consumeDestination(_ section: SocialSection) -> Bool {
+    func consumeDestination(_ section: SocialDestination) -> Bool {
         guard destination == section else { return false }
         destination = nil
         return true
@@ -251,14 +258,14 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
         center?.removeAllDeliveredNotifications()
     }
 
-    private func open(scope: String, section: SocialSection) {
+    private func open(scope: String, section: SocialDestination) {
         guard route(scope: scope, section: section) else { return }
         NSApplication.shared.activate(ignoringOtherApps: true)
         NSApplication.shared.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
     }
 
     @discardableResult
-    func route(scope: String, section: SocialSection) -> Bool {
+    func route(scope: String, section: SocialDestination) -> Bool {
         guard sessionConfigured else { pendingOpen = (scope, section); return false }
         guard scope == activeScope else { return false }
         destination = section
@@ -276,7 +283,7 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
         let scope = info["scope"] as? String
-        let section = (info["section"] as? String).flatMap(SocialSection.init(rawValue:))
+        let section = (info["section"] as? String).flatMap(SocialDestination.init(rawValue:))
         let opensInbox = info["inbox"] as? Bool == true
         Task { @MainActor in
             if response.actionIdentifier == UNNotificationDefaultActionIdentifier, let scope {

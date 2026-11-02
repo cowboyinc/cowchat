@@ -81,14 +81,25 @@ struct TeamPage: View {
 }
 
 /// A person's head on the Team page, the message row's sender line: 16 in, their 24 avatar, 11, and their name in
-/// Body M Strong, 32 tall. It is not a button.
+/// Body M Strong, 32 tall. It is not a button. Friends heads its groups with the same line without the avatar.
 struct TeamGroupHead: View {
-    let person: SocialAccount
+    let title: String
+    let person: SocialAccount?
+
+    init(person: SocialAccount) {
+        title = person.displayName
+        self.person = person
+    }
+
+    init(title: String) {
+        self.title = title
+        person = nil
+    }
 
     var body: some View {
         HStack(spacing: 11) {
-            SocialPersonAvatar(name: person.displayName, size: 24, letters: 1)
-            Text(person.displayName)
+            if let person { SocialPersonAvatar(name: person.displayName, size: 24, letters: 1) }
+            Text(title)
                 .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
