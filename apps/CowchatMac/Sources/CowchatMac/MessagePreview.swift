@@ -3,6 +3,19 @@ import Foundation
 enum MessagePreview {
     static let characterLimit = 1_200
     static let lineLimit = 5
+    /// How long the sidebar's one-line preview of a room's newest message runs.
+    static let lineCharacterLimit = 140
+
+    // copy:
+    /// A message as the sidebar previews it under a room's name, and the Inbox under who sent it: its words on one line,
+    /// at most 140 characters, or "Encrypted message" for an encrypted one. Empty when it has no words.
+    static func line(for content: String) -> String {
+        let words = (content.hasPrefix("cow1:") ? "Encrypted message" : content)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return String(words.prefix(lineCharacterLimit))
+    }
 
     struct CollapsedPreview: Equatable {
         let source: String

@@ -164,12 +164,17 @@ struct SocialAPI {
         self.session = session
     }
 
-    func makeRequest(_ path: [String], auth: Bool = true, method: String = "GET", body: [String: Any]? = nil) throws -> URLRequest {
+    func makeRequest(_ path: [String], auth: Bool = true, method: String = "GET", body: [String: Any]? = nil,
+                     query: [URLQueryItem] = []) throws -> URLRequest {
         var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
         components.scheme = "https"
         components.path = ""
         var url = components.url!
         for segment in path { url.appendPathComponent(segment) }
+        if !query.isEmpty, var withQuery = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            withQuery.queryItems = query
+            url = withQuery.url ?? url
+        }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 20
@@ -181,8 +186,9 @@ struct SocialAPI {
         return request
     }
 
-    func request<T: Decodable>(_ path: [String], auth: Bool = true, method: String = "GET", body: [String: Any]? = nil) async throws -> T {
-        let request = try makeRequest(path, auth: auth, method: method, body: body)
+    func request<T: Decodable>(_ path: [String], auth: Bool = true, method: String = "GET", body: [String: Any]? = nil,
+                               query: [URLQueryItem] = []) async throws -> T {
+        let request = try makeRequest(path, auth: auth, method: method, body: body, query: query)
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw CowchatConnectionError.invalidResponse }
         if path == ["social", "v1", "capabilities"],
@@ -198,8 +204,9 @@ struct SocialAPI {
         return try decoder.decode(T.self, from: data)
     }
 
-    func social<T: Decodable>(_ path: [String], method: String = "GET", body: [String: Any]? = nil) async throws -> T {
-        try await request(["social", "v1"] + path, method: method, body: body)
+    func social<T: Decodable>(_ path: [String], method: String = "GET", body: [String: Any]? = nil,
+                              query: [URLQueryItem] = []) async throws -> T {
+        try await request(["social", "v1"] + path, method: method, body: body, query: query)
     }
 
     static func normalizedHandle(_ input: String) -> String {

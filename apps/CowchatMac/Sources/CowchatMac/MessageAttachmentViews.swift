@@ -147,20 +147,32 @@ struct PullRequestRow: View {
 
     @ViewBuilder private var checks: some View {
         if let label = pullRequest.checksLabel {
-            Group {
-                switch pullRequest.checks {
-                case .passing:
-                    GallopIconView(icon: .success, fallbackSystemName: "checkmark.circle.fill", size: 16)
-                        .foregroundStyle(SemanticColor.notificationSuccessIconPrimary)
-                case .failing:
-                    GallopIconView(icon: .circleX, fallbackSystemName: "xmark.circle.fill", size: 16)
-                        .foregroundStyle(SemanticColor.notificationErrorIconPrimary)
-                default:
-                    SessionWorkingMark()
-                        .frame(width: 16, height: 16)
-                }
-            }
-            .help(label)
+            PullRequestChecksMark(checks: pullRequest.checks)
+                .help(label)
+        }
+    }
+}
+
+/// A pull request's checks at 16: Gallop's success mark in Notification/Success/Icon when they passed, its circled
+/// cross in Notification/Error/Icon when they failed, and the sidebar's working mark while they run, unless
+/// `showsRunning` is off, as on a Team row whose state slot already turns. Nothing when the agent sent no checks.
+struct PullRequestChecksMark: View {
+    let checks: MessagePullRequest.Checks?
+    var showsRunning = true
+
+    var body: some View {
+        switch checks {
+        case .passing:
+            GallopIconView(icon: .success, fallbackSystemName: "checkmark.circle.fill", size: 16)
+                .foregroundStyle(SemanticColor.notificationSuccessIconPrimary)
+        case .failing:
+            GallopIconView(icon: .circleX, fallbackSystemName: "xmark.circle.fill", size: 16)
+                .foregroundStyle(SemanticColor.notificationErrorIconPrimary)
+        case .running where showsRunning:
+            SessionWorkingMark()
+                .frame(width: 16, height: 16)
+        default:
+            EmptyView()
         }
     }
 }

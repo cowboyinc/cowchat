@@ -54,7 +54,14 @@ struct ContentView: View {
             }
 
             Group {
-                if let room = store.selectedRoom {
+                if let page = workspace.page {
+                    switch page {
+                    case .inbox:
+                        InboxPage(inbox: workspace.inbox, home: workspace.homeSessions)
+                    case .team:
+                        TeamPage(team: workspace.team, account: workspace.accountGlobal ?? workspace.local)
+                    }
+                } else if let room = store.selectedRoom {
                     if room.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame {
                         LobbyDashboardView(room: room, isSidebarVisible: $isSidebarVisible)
                             .id("lobby-\(room.id)")
@@ -84,7 +91,7 @@ struct ContentView: View {
         // The unified toolbar otherwise paints its own system strip; tint it
         // with the same surface400 shell so the nav reads as one tan surface.
         .toolbarBackground(SemanticColor.surface400, for: .windowToolbar)
-        .navigationTitle(store.selectedRoom?.name ?? "Cowchat")
+        .navigationTitle(windowTitle)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { friendsSection = .friends; isFriendsPresented = true } label: {
@@ -192,6 +199,16 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: store.secondAgentHintRoom?.id)
     }
 
+    // copy:
+    /// The window's title: the page's, or the open room's.
+    private var windowTitle: String {
+        switch workspace.page {
+        case .inbox: return "Inbox"
+        case .team: return "Team"
+        case nil: return store.selectedRoom?.name ?? "Cowchat"
+        }
+    }
+
     private func presentPendingFriendsSection() {
         guard let section = pendingFriendsSection, workspace.social.phase == .signedIn else {
             pendingFriendsSection = nil
@@ -243,6 +260,8 @@ private struct SidebarView: View {
                 RoomBrowserView(workspace: workspace)
             }
 
+            InboxNavRow(inbox: workspace.inbox)
+
             HomeNavRow(account: workspace.accountGlobal ?? workspace.local, home: workspace.homeSessions)
 
             SidebarRoomLists(
@@ -293,34 +312,8 @@ private struct SidebarView: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 8) {
-            GallopIconView(icon: .search, fallbackSystemName: "magnifyingglass", size: 13)
-                .foregroundStyle(SemanticColor.iconTertiary)
-            TextField("Search rooms or messages", text: $workspace.searchText)
-                .textFieldStyle(.plain)
-                .gallopText(.bodyM, color: SemanticColor.textPrimary)
-                .focused($isSearchFocused)
-                .onExitCommand {
-                    // Escape clears the filter and returns focus to the list.
-                    workspace.searchText = ""
-                    isSearchFocused = false
-                }
-                .accessibilityLabel("Search rooms or messages")
-            if !workspace.searchText.isEmpty {
-                Button { workspace.searchText = "" } label: {
-                    GallopIconView(icon: .dismiss, fallbackSystemName: "xmark.circle.fill", size: 13)
-                        .foregroundStyle(SemanticColor.iconSubtle)
-                }
-                .buttonStyle(.plain)
-                .macAccessibleAction(label: "Clear room search") { workspace.searchText = "" }
-            }
-        }
-        .padding(.horizontal, 11)
-        .frame(height: 36)
-        .background(SemanticColor.textfieldDefault, in: Capsule())
-        .overlay {
-            Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
-        }
+        SearchCapsule(placeholder: "Search rooms or messages", text: $workspace.searchText,
+                      isFocused: $isSearchFocused, clearLabel: "Clear room search")
     }
 
 }
@@ -353,11 +346,16 @@ private struct LobbyNavRow: View {
     }
 }
 
-/// A destination above the room lists: Dash's sunrise at 18, 10 before the
-/// title in Body S Strong, 10 at the sides, 38 tall, on the sidebar's row
-/// background. The Lobby and Home draw it.
+/// A destination above the room lists: Dash's sunrise at 18, or the
+/// destination's own glyph, 10 before the title in Body S Strong, 10 at the
+/// sides, 38 tall, on the sidebar's row background. The Lobby, Home, the Inbox
+/// and Team draw it. A count sits at the row's end in Caption, Text/Tertiary,
+/// as the Archive row's does, and nothing at zero.
 private struct SidebarNavRow: View {
     let title: String
+    var icon = GallopIcon.sunrise
+    var fallbackSystemName = "sunrise"
+    var count = 0
     let isSelected: Bool
     let action: () -> Void
     @State private var isHovering = false
@@ -365,7 +363,7 @@ private struct SidebarNavRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
-                GallopIconView(icon: .sunrise, fallbackSystemName: "sunrise", size: 18)
+                GallopIconView(icon: icon, fallbackSystemName: fallbackSystemName, size: 18)
                     .foregroundStyle(
                         isSelected
                             ? SemanticColor.surfaceGlassOnIconDefault
@@ -374,6 +372,10 @@ private struct SidebarNavRow: View {
                 Text(title)
                     .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
                 Spacer()
+                if count > 0 {
+                    Text("\(count)")
+                        .gallopText(.caption, color: SemanticColor.textTertiary)
+                }
             }
             .padding(.horizontal, 10)
             .frame(height: 38)
@@ -388,9 +390,52 @@ private struct SidebarNavRow: View {
         .onHover { isHovering = $0 }
         .macAccessibleAction(
             label: "Open \(title)",
-            value: isSelected ? "selected" : nil,
+            value: accessibilityValue,
             action: action
         )
+    }
+
+    // copy:
+    private var accessibilityValue: String? {
+        let parts = [count > 0 ? "\(count) unread" : nil, isSelected ? "selected" : nil].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+}
+
+/// The Inbox above Home, pinned as Home's row is, once the person is signed in. Its count is every unread item, open
+/// invitations included, and it shows nothing at zero.
+private struct InboxNavRow: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @ObservedObject var inbox: InboxStore
+
+    var body: some View {
+        if workspace.accountGlobal != nil {
+            // copy:
+            SidebarNavRow(title: "Inbox", icon: .incoming, fallbackSystemName: "tray.and.arrow.down",
+                          count: inbox.unreadCount, isSelected: workspace.page == .inbox) {
+                workspace.show(.inbox)
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 2)
+        }
+    }
+}
+
+/// Team under Home's sessions, at the top of the room lists' scroll view, drawn as Home's row is.
+private struct TeamNavRow: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+
+    var body: some View {
+        if workspace.accountGlobal != nil {
+            // copy:
+            SidebarNavRow(title: "Team", icon: .posse, fallbackSystemName: "person.2",
+                          isSelected: workspace.page == .team) {
+                workspace.show(.team)
+            }
+            // The scroll view's lists sit 8 in, so 4 more puts the row 12 in, as Home's is.
+            .padding(.horizontal, 4)
+            .padding(.bottom, 10)
+        }
     }
 }
 
@@ -433,8 +478,11 @@ private struct HomePlaces: View {
                         .sidebarListItem("session/\(session.id)")
                 }
                 if home.hiddenCount > 0 {
-                    SessionsMoreRow(home: home)
-                        .sidebarListItem("sessions-more")
+                    // The session names start after the harness mark's 16 and the 8 beside it.
+                    SessionsMoreRow(title: home.moreTitle, indent: SessionRow.indent + 16 + 8) {
+                        home.showsAll.toggle()
+                    }
+                    .sidebarListItem("sessions-more")
                 }
             }
             // The lists sit 8 in; the nav rows sit 12 in, as the Lobby row does.
@@ -580,32 +628,44 @@ struct SessionWorkingMark: View {
     }
 }
 
-/// The row after Home's first five sessions when more are live: how many more
-/// in Body S, Text/Secondary at the session names' indent with no icon, 32
-/// tall, with the sidebar's hover. Pressing it shows every session, and it
-/// then says how many it hides again.
-private struct SessionsMoreRow: View {
-    @ObservedObject var home: HomeSessions
+/// The row after the first five sessions when more are live: how many more in Body S, Text/Secondary at the names'
+/// indent with no icon, 32 tall, with the row hover of the surface it sits on. Pressing it shows every row, and it then
+/// says how many it hides again. Home's sessions in the sidebar and each person on the Team page draw it.
+struct SessionsMoreRow: View {
+    enum Surface { case sidebar, page }
+
+    let title: String
+    let indent: CGFloat
+    var surface = Surface.sidebar
+    let action: () -> Void
     @State private var isHovering = false
 
-    /// The session names start after the harness mark's 16 and the 8 beside it.
-    private static let indent = SessionRow.indent + 16 + 8
-
     var body: some View {
-        Button { home.showsAll.toggle() } label: {
-            Text(home.moreTitle)
-                .gallopText(.bodyS, color: SemanticColor.textSecondary)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, Self.indent)
-                .padding(.trailing, 6)
-                .frame(height: 32)
-                .background(SidebarRowBackground(state: .init(isSelected: false, isHovering: isHovering)))
-                .contentShape(Rectangle())
+        Group {
+            switch surface {
+            case .sidebar:
+                Button(action: action) {
+                    label.background(SidebarRowBackground(state: .init(isSelected: false, isHovering: isHovering)))
+                }
+                .buttonStyle(.plain)
+                .onHover { isHovering = $0 }
+            case .page:
+                Button(action: action) { label }
+                    .buttonStyle(PageRowButtonStyle())
+            }
         }
-        .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
-        .macAccessibleAction(label: home.moreTitle) { home.showsAll.toggle() }
+        .macAccessibleAction(label: title, action: action)
+    }
+
+    private var label: some View {
+        Text(title)
+            .gallopText(.bodyS, color: SemanticColor.textSecondary)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, indent)
+            .padding(.trailing, 6)
+            .frame(height: 32)
+            .contentShape(Rectangle())
     }
 }
 
@@ -712,6 +772,7 @@ private struct SidebarRoomLists: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         HomePlaces(account: accountOrLocal, home: home)
+                        TeamNavRow()
                         if visibleRoomsEmpty && isSearchActive {
                             emptyRoomsState
                         } else {
@@ -3011,6 +3072,7 @@ private enum SettingsPage {
     case roomIcons
     case updates
     case notifications
+    case team
     case whatsNew
 
     var title: String {
@@ -3020,6 +3082,8 @@ private enum SettingsPage {
         case .roomIcons: return "Room icons"
         case .updates: return "Updates"
         case .notifications: return "Notifications"
+        // copy:
+        case .team: return "Team"
         case .whatsNew: return "What’s new"
         }
     }
@@ -3031,6 +3095,8 @@ private enum SettingsPage {
         case .roomIcons: return "Every room gets the same icon on every Mac — it is drawn from the room name."
         case .updates: return "Keep Cowchat up to date."
         case .notifications: return "Choose what gets your attention on this Mac."
+        // copy:
+        case .team: return "Choose whether your team sees what you are working on."
         case .whatsNew: return "The latest improvements to Cowchat."
         }
     }
@@ -3095,6 +3161,14 @@ private struct SettingsView: View {
                     systemName: "bell",
                     page: .notifications
                 )
+                if workspace.accountGlobal != nil {
+                    // copy:
+                    settingsNavigationRow(
+                        "Team",
+                        systemName: "person.2",
+                        page: .team
+                    )
+                }
                 settingsNavigationRow(
                     "Updates",
                     systemName: "arrow.down.circle",
@@ -3129,6 +3203,8 @@ private struct SettingsView: View {
                     updateSettings
                 case .notifications:
                     SocialNotificationSettings(notifications: workspace.notifications)
+                case .team:
+                    TeamSharingSettings(team: workspace.team, social: workspace.social)
                 case .whatsNew:
                     ScrollView { WhatsNewContent() }
                 }

@@ -68,6 +68,20 @@ struct SocialNotificationLedger: Codable {
     }
 }
 
+/// The Inbox's messages already seen on this Mac for an account, so each new one notifies once. The first poll only
+/// records what is there, as `SocialNotificationLedger` does.
+struct InboxNotificationLedger: Codable {
+    private var seen: Set<String> = []
+    private var initialized = false
+
+    /// The IDs not seen before, none on the first poll.
+    mutating func consume(_ ids: [String]) -> [String] {
+        let fresh = ids.filter { seen.insert($0).inserted }
+        defer { initialized = true }
+        return initialized ? fresh : []
+    }
+}
+
 @MainActor
 final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     @Published private(set) var authorizationStatus: UNAuthorizationStatus = .notDetermined
@@ -88,6 +102,8 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
     private var activeScope: String?
     private var sessionConfigured = false
     private var pendingOpen: (String, SocialSection)?
+    /// Opens the Inbox, for a click on an Inbox item's notification.
+    var onOpenInbox: (() -> Void)?
     private static let enabledKey = "CowchatMac.notifications.enabled"
     private static let requestsKey = "CowchatMac.notifications.friendRequests"
     private static let acceptedKey = "CowchatMac.notifications.acceptedRequests"
@@ -159,6 +175,42 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
         }
     }
 
+    /// A notification for each Inbox message that arrived since the last poll. Invitations notify as room invitations
+    /// already do, so they are left out here. Clicking one opens the Inbox.
+    func receiveInbox(_ items: [InboxItem], session: SocialSession, title: (InboxItem) -> String) {
+        let snapshot = SocialNotificationSnapshot(session: session, requests: [], invitations: [])
+        guard activeScope == snapshot.deliveryScope else { return }
+        let messages = items.filter { !$0.isInvitation }
+        let key = "CowchatMac.notifications.seen.inbox.v1." + snapshot.accountScope
+        var ledger = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(InboxNotificationLedger.self, from: $0) }
+            ?? InboxNotificationLedger()
+        let fresh = Set(ledger.consume(messages.map(\.id)))
+        if let data = try? JSONEncoder().encode(ledger) { defaults.set(data, forKey: key) }
+        let arrived = messages.filter { fresh.contains($0.id) }
+        guard enabled, let center, !arrived.isEmpty else { return }
+        let scope = snapshot.deliveryScope
+        let contents = arrived.map { item -> (String, UNMutableNotificationContent) in
+            let content = UNMutableNotificationContent()
+            content.title = title(item)
+            content.subtitle = item.roomName
+            content.body = item.message
+            content.sound = .default
+            content.threadIdentifier = "cowchat-inbox.\(scope)"
+            content.userInfo = ["scope": scope, "inbox": true]
+            return ("\(scope).inbox.\(item.id)", content)
+        }
+        Task {
+            let status = await center.notificationSettings().authorizationStatus
+            authorizationStatus = status
+            guard enabled, activeScope == scope, status == .authorized || status == .provisional else { return }
+            for (id, content) in contents {
+                guard enabled, activeScope == scope else { return }
+                do { try await center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil)) }
+                catch { errorMessage = "The notification could not be delivered. \(error.localizedDescription)" }
+            }
+        }
+    }
+
     func refreshAuthorization() async {
         guard let center else { return }
         authorizationStatus = await center.notificationSettings().authorizationStatus
@@ -225,9 +277,16 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
         let info = response.notification.request.content.userInfo
         let scope = info["scope"] as? String
         let section = (info["section"] as? String).flatMap(SocialSection.init(rawValue:))
+        let opensInbox = info["inbox"] as? Bool == true
         Task { @MainActor in
-            if response.actionIdentifier == UNNotificationDefaultActionIdentifier, let scope, let section {
-                open(scope: scope, section: section)
+            if response.actionIdentifier == UNNotificationDefaultActionIdentifier, let scope {
+                if let section {
+                    open(scope: scope, section: section)
+                } else if opensInbox, scope == activeScope {
+                    onOpenInbox?()
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    NSApplication.shared.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
+                }
             }
             completionHandler()
         }

@@ -327,6 +327,13 @@ final class SocialStore: ObservableObject {
         } catch { if ticket == generation { errorMessage = error.localizedDescription } }
     }
 
+    /// The signed-in account's social API, for the Inbox's and Team's reads, which poll with the friends. It throws
+    /// when no account is signed in.
+    func readingAPI() throws -> SocialAPI {
+        guard phase == .signedIn, savedSession != nil else { throw CowchatConnectionError.notConnected }
+        return try boundAPI()
+    }
+
     private func saveAccount(_ account: SocialAccount) throws {
         guard let old = savedSession, old.account != account else { return }
         let saved = SocialSession(endpoint: old.endpoint, deviceKey: old.deviceKey, account: account, scopeId: old.scopeId)

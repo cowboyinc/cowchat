@@ -159,9 +159,12 @@ struct MessageMetadata: Codable, Equatable {
     let pullRequest: MessagePullRequest?
     /// Files the message carries under its text, such as screenshots. Each is a blob, as a file message's is.
     let attachments: [MessageAttachment]
+    /// Who the message mentions, as the server records it in `metadata.mentions`: a session's agent ID or a person's
+    /// account ID (Chad's plan, task 3).
+    let mentions: [String]
 
     enum CodingKeys: String, CodingKey {
-        case type, name, sha256, size, attachments
+        case type, name, sha256, size, attachments, mentions
         case displayExternal = "display_external"
         case blobID = "blob_id"
         case senderKind = "sender_kind"
@@ -177,7 +180,8 @@ struct MessageMetadata: Codable, Equatable {
         size: Int? = nil,
         senderKind: MessageSenderKind? = nil,
         pullRequest: MessagePullRequest? = nil,
-        attachments: [MessageAttachment] = []
+        attachments: [MessageAttachment] = [],
+        mentions: [String] = []
     ) {
         self.displayExternal = displayExternal
         self.type = type
@@ -188,6 +192,7 @@ struct MessageMetadata: Codable, Equatable {
         self.senderKind = senderKind
         self.pullRequest = pullRequest
         self.attachments = attachments
+        self.mentions = mentions
     }
 
     init(from decoder: Decoder) throws {
@@ -203,6 +208,7 @@ struct MessageMetadata: Codable, Equatable {
         pullRequest = try? values.decodeIfPresent(MessagePullRequest.self, forKey: .pullRequest)
         attachments = (try? values.decodeIfPresent([MessageAttachment.Lenient].self, forKey: .attachments))?
             .compactMap(\.attachment) ?? []
+        mentions = (try? values.decodeIfPresent([String].self, forKey: .mentions)) ?? []
     }
 }
 

@@ -40,10 +40,20 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// What the window's main area shows instead of a room: the Inbox or the Team page, chosen from the sidebar.
+    enum Page: Equatable {
+        case inbox
+        case team
+    }
+
     let local: ChatStore
     let notifications: SocialNotifications
     /// The person's live sessions, read from the agents in their Home.
     let homeSessions = HomeSessions()
+    let inbox: InboxStore
+    let team = TeamStore()
+    /// The page the main area shows, or nil while it shows the open room.
+    @Published private(set) var page: Page?
     /// True from launch until a room is opened, so the app opens on Home once the account's Home is known.
     private var opensHomeWhenReady = true
     @Published private(set) var global: ChatStore?
@@ -73,7 +83,10 @@ final class WorkspaceStore: ObservableObject {
             self?.notifications.setSession(session)
             self?.useSocialSession(session)
         }
-        social.onSnapshot = { [weak self] snapshot in self?.notifications.receive(snapshot) }
+        social.onSnapshot = { [weak self] snapshot in
+            self?.notifications.receive(snapshot)
+            Task { await self?.refreshPages() }
+        }
         social.onRoomsChanged = { [weak self] in
             guard let self, self.social.savedSession != nil else { return }
             Task { try? await self.accountGlobal?.refreshRooms() }
@@ -101,6 +114,9 @@ final class WorkspaceStore: ObservableObject {
         accountGlobal?.shutdownForRemoval()
         accountGlobal = nil
         homeSessions.clear()
+        inbox.use(account: session?.account, scope: session.map(Self.accountScope))
+        team.use(accountID: session?.account.id)
+        if session == nil { page = nil }
         if let session, let profile = try? ConnectionProfile.socialSession(session) {
             let store = makeAccountStore(profile)
             store.searchText = searchText
@@ -229,6 +245,7 @@ final class WorkspaceStore: ObservableObject {
     ) {
         self.local = local
         self.notifications = SocialNotifications(defaults: defaults)
+        self.inbox = InboxStore(defaults: defaults)
         self.preferences = preferences
         self.socialCredentials = socialCredentials
         self.defaults = defaults
@@ -285,6 +302,7 @@ final class WorkspaceStore: ObservableObject {
 
     func start() {
         local.start()
+        notifications.onOpenInbox = { [weak self] in self?.show(.inbox) }
         notifications.setSession(social.savedSession)
         social.startMonitoring()
         global?.start()
@@ -305,7 +323,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func isSelected(_ room: Room, on server: Server) -> Bool {
-        activeServer == server && store(for: server)?.selectedRoomID == room.id
+        page == nil && activeServer == server && store(for: server)?.selectedRoomID == room.id
     }
 
     /// Makes a server's selection the one the chat pane shows (e.g. after
@@ -318,8 +336,87 @@ final class WorkspaceStore: ObservableObject {
     func select(room: Room, on server: Server) async {
         guard let store = store(for: server) else { return }
         opensHomeWhenReady = false
+        page = nil
         activeServer = server
         await store.select(room: room)
+    }
+
+    // MARK: The Inbox and Team
+
+    /// Shows a page in the main area in place of the room, which stays open under it.
+    func show(_ page: Page) {
+        opensHomeWhenReady = false
+        self.page = page
+    }
+
+    /// The scope the Inbox keeps its read state under: the server and the account, as the social notifications'.
+    nonisolated static func accountScope(of session: SocialSession) -> String {
+        SocialNotificationSnapshot(session: session, requests: [], invitations: []).accountScope
+    }
+
+    /// Polls the Team page's and the Inbox's endpoints, as the friends are polled, then hands the Inbox's new items to
+    /// the Mac's notifications. Team goes first, since it says whose a community room's session is.
+    func refreshPages() async {
+        guard let session = social.savedSession else { return }
+        await team.refresh(social: social)
+        let people = social.friends.map(\.account) + [session.account]
+        await inbox.refresh(social: social, community: global, people: people) { [team] in team.owner(of: $0) }
+        guard social.savedSession?.account.id == session.account.id, inbox.isLoaded else { return }
+        notifications.receiveInbox(inbox.items, session: session) { [homeSessions] item in
+            item.title { id in homeSessions.sessions.first { $0.id == id }.map(homeSessions.name(of:)) }
+        }
+    }
+
+    /// Pressing an Inbox message, or an answered invitation: its room opens at its latest messages, and it is read.
+    func open(_ item: InboxItem) async {
+        inbox.markRead(item)
+        guard let store = store(for: item.server) else { return }
+        if !store.rooms.contains(where: { $0.id == item.roomID }) { try? await store.refreshRooms() }
+        guard let room = store.rooms.first(where: { $0.id == item.roomID }) else { return }
+        await select(room: room, on: item.server)
+    }
+
+    /// Join in the Join sheet: accepts the invitation with the chosen session, or none, then opens the room. The item
+    /// is read once it is answered.
+    @discardableResult
+    func accept(_ item: InboxItem, with session: LiveSession?) async -> Bool {
+        guard let invitationID = item.invitationID else { return false }
+        var accepted = false
+        await social.perform { api in
+            struct Reply: Decodable { let roomId: String }
+            let _: Reply = try await api.social(["room-invitations", invitationID, "accept"], method: "POST",
+                                                 body: ["agent_ids": session.map { [$0.id] } ?? []])
+            accepted = true
+        }
+        guard accepted else { return false }
+        inbox.markRead(item)
+        await refreshPages()
+        await open(item)
+        return true
+    }
+
+    /// Decline, in the Join sheet or the row's menu: the invitation is declined and its row leaves the Inbox.
+    @discardableResult
+    func decline(_ item: InboxItem) async -> Bool {
+        guard let invitationID = item.invitationID else { return false }
+        var declined = false
+        await social.perform { api in
+            let _: SocialAcknowledgement = try await api.social(["room-invitations", invitationID, "decline"],
+                                                                method: "POST")
+            declined = true
+        }
+        guard declined else { return false }
+        inbox.remove(item)
+        await refreshPages()
+        return true
+    }
+
+    /// Pressing a Team row that opens a room: the room its branch's newest session works in, on the account.
+    func open(_ branch: TeamBranch) async {
+        guard let roomID = branch.room?.roomId, let store = accountGlobal else { return }
+        if !store.rooms.contains(where: { $0.id == roomID }) { try? await store.refreshRooms() }
+        guard let room = store.rooms.first(where: { $0.id == roomID }) else { return }
+        await select(room: room, on: .accountGlobal)
     }
 
     /// Saved global config for prefilling the settings fields. Falls back to

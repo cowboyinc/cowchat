@@ -885,7 +885,8 @@ final class SocialTests: XCTestCase {
         let own = SocialAgent(id: "reviewer", ownerId: recipient.id, name: "Chad's reviewer", discoverable: true)
         try render(SocialProfileEditor(handle: .constant("chad"), displayName: .constant("Chad"), busy: false, error: nil, onCancel: {}, onSave: {}), name: "mac-friends-edit-profile")
         let invitation = SocialRoomInvitation(id: "invitation", roomId: "room", roomName: "Release planning", from: account, to: recipient, proposedAgents: [own], members: [account], agents: [coordinator], historyPolicy: "full", encrypted: false, slackConnected: false, status: "pending")
-        try render(SocialInvitationReview(invitation: invitation, agents: [own], selectedAgents: .constant([]), busy: false, error: nil, onCancel: {}, onAccept: {}), name: "mac-friends-invitation")
+        let session = LiveSession(id: "reviewer", harness: .claudeCode, folder: "cowchat", branch: "chad/release-notes", state: .working, startedAt: Date())
+        try render(SocialInvitationReview(invitation: invitation, sessions: [session], sessionName: { $0.baseName }, selectedSession: .constant(nil), busy: false, error: nil, onCancel: {}, onDecline: {}, onAccept: {}), name: "mac-friends-invitation")
         try render(VStack(alignment: .leading, spacing: 16) {
             Text("Release planning").gallopText(.h3)
             SocialConsentDetails(members: [account, recipient], agents: [coordinator, own], slack: false)

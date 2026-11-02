@@ -1040,6 +1040,12 @@ final class ChatStore: ObservableObject {
         try await connection.listAgents(roomID: roomID)
     }
 
+    /// A room's newest messages, oldest first, whether or not it is open. The Inbox reads the community rooms'
+    /// mentions with it.
+    func recentMessages(in roomID: String, limit: Int) async throws -> [ChatMessage] {
+        try await connection.history(roomID: roomID, limit: limit, before: nil)
+    }
+
     func select(room: Room) async {
         loadRoomSecret(for: room)
         let expectedProfileGeneration = profileGeneration
@@ -2083,12 +2089,9 @@ final class ChatStore: ObservableObject {
 
     private func updateRoomPreview(from message: ChatMessage) {
         guard !message.isThinking, showsInFeed(message) else { return }
-        let preview = (message.content.hasPrefix("cow1:") ? "Encrypted message" : message.content)
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+        let preview = MessagePreview.line(for: message.content)
         guard !preview.isEmpty else { return }
-        roomMessagePreviews[message.roomID] = String(preview.prefix(140))
+        roomMessagePreviews[message.roomID] = preview
         previewActivityByRoomID[message.roomID] = message.timestamp
     }
 

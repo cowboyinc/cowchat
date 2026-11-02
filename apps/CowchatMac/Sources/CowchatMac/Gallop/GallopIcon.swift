@@ -35,6 +35,8 @@ final class OriginalNativeImageCache: @unchecked Sendable {
 public enum GallopIcon: String, CaseIterable, Sendable {
     case add
     case arrowUpRight = "arrow-up-right"
+    /// The menu bar item's glyph, which carries the Inbox's unread count beside it.
+    case bell
     /// A run of agent messages a room folds away.
     case chatbot
     case chevronDown = "chevron-down"
@@ -60,8 +62,12 @@ public enum GallopIcon: String, CaseIterable, Sendable {
     case edit
     case ellipsis
     case folder
+    /// The Inbox's nav row in the sidebar.
+    case incoming
     case lock
     case message
+    /// The Team page's nav row in the sidebar.
+    case posse
     /// From the gallop web set (Retry.svg) — the mac port has no retry glyph.
     case retry
     case search
@@ -130,6 +136,9 @@ public enum GallopIcon: String, CaseIterable, Sendable {
     static func nativeImage(for icon: GallopIcon, in bundle: Bundle?) -> NSImage? {
         icon.nativeImage(in: bundle)
     }
+
+    /// The glyph as a template image from the app's bundle, for AppKit places such as the menu bar.
+    var templateImage: NSImage? { nativeImage(in: Self.resourceBundle) }
 
     private func nativeImage(in bundle: Bundle?) -> NSImage? {
         guard let url = bundle?.url(forResource: "Icons/svg/\(rawValue)", withExtension: "svg"),

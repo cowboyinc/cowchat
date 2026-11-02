@@ -6,6 +6,8 @@ final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
     private var screenObserver: NSObjectProtocol?
     private var terminationTask: Task<Void, Never>?
     private var terminationShutdownCompleted = false
+    /// The Inbox's menu bar item and Dock badge.
+    let inboxMenuBar = InboxMenuBar()
     var onTerminationRequested: (@MainActor () async -> Void)?
     var replyToApplicationShouldTerminate: @MainActor (NSApplication, Bool) -> Void = {
         application, shouldTerminate in
@@ -150,6 +152,7 @@ struct CowchatMacApp: App {
                 }
                 workspace.start()
                 softwareUpdater.start()
+                appDelegate.inboxMenuBar.start(workspace: workspace)
             }
         }
         .defaultSize(width: 1080, height: 740)

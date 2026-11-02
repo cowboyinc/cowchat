@@ -15,6 +15,7 @@ struct FriendsView: View {
     @State private var participants: SocialParticipants?
     @State private var invitation: SocialRoomInvitation?
     @State private var consentingAgents: Set<String> = []
+    @State private var joiningSession: String?
 
     init(social: SocialStore, initialSection: SocialSection = .friends) {
         self.social = social
@@ -300,7 +301,7 @@ struct FriendsView: View {
                         Text("From @\(invite.from.handle)").gallopText(.caption, color: SemanticColor.textSecondary)
                     }
                     Spacer()
-                    Button("Review invitation") { invitation = invite; consentingAgents = [] }.buttonStyle(CowchatPillButtonStyle(prominent: true))
+                    Button("Review invitation") { invitation = invite; joiningSession = nil }.buttonStyle(CowchatPillButtonStyle(prominent: true))
                     Button("Decline") { Task { await social.perform { api in let _: SocialAcknowledgement = try await api.social(["room-invitations", invite.id, "decline"], method: "POST") } } }
                 }.gallopCard(cornerRadius: 14)
             }
@@ -333,10 +334,15 @@ struct FriendsView: View {
     private var invitationSheet: some View {
         Group {
             if let invite = invitation {
-                SocialInvitationReview(invitation: invite, agents: social.agents, selectedAgents: $consentingAgents, busy: social.busy, error: social.errorMessage, onCancel: { invitation = nil }, onAccept: {
+                SocialInvitationReview(invitation: invite, sessions: workspace.homeSessions.sessions, sessionName: workspace.homeSessions.name(of:), selectedSession: $joiningSession, busy: social.busy, error: social.errorMessage, onCancel: { invitation = nil }, onDecline: {
+                    Task { await social.perform { api in
+                        let _: SocialAcknowledgement = try await api.social(["room-invitations", invite.id, "decline"], method: "POST")
+                        invitation = nil
+                    } }
+                }, onAccept: {
                     Task { await social.perform { api in
                         struct Reply: Decodable { let roomId: String }
-                        let _: Reply = try await api.social(["room-invitations", invite.id, "accept"], method: "POST", body: ["agent_ids": Array(consentingAgents)])
+                        let _: Reply = try await api.social(["room-invitations", invite.id, "accept"], method: "POST", body: ["agent_ids": joiningSession.map { [$0] } ?? []])
                         invitation = nil
                     } }
                 })
@@ -414,13 +420,17 @@ struct SocialConsentDetails: View {
     }
 }
 
+/// Accepting an invitation, from Friends or as the Inbox's Join sheet: what the room holds, then which of the person's
+/// live sessions joins it, or none, then Decline at the left and Cancel and Join at the right.
 struct SocialInvitationReview: View {
     let invitation: SocialRoomInvitation
-    let agents: [SocialAgent]
-    @Binding var selectedAgents: Set<String>
+    let sessions: [LiveSession]
+    let sessionName: (LiveSession) -> String
+    @Binding var selectedSession: String?
     let busy: Bool
     let error: String?
     let onCancel: () -> Void
+    let onDecline: () -> Void
     let onAccept: () -> Void
 
     var body: some View {
@@ -431,18 +441,32 @@ struct SocialInvitationReview: View {
             if !invitation.proposedAgents.isEmpty {
                 Text("Suggested agents: \(invitation.proposedAgents.map(\.name).joined(separator: ", "))").gallopText(.caption)
             }
-            Text("Approve your agents").gallopText(.caption, color: SemanticColor.textSecondary)
-            ForEach(agents) { agent in
-                Toggle(agent.name, isOn: Binding(get: { selectedAgents.contains(agent.id) }, set: { selected in
-                    if selected { selectedAgents.insert(agent.id) } else { selectedAgents.remove(agent.id) }
-                })).toggleStyle(.checkbox)
+            // copy:
+            Text("Add a session").gallopText(.caption, color: SemanticColor.textSecondary)
+            Picker("Add a session", selection: $selectedSession) {
+                ForEach(sessions) { session in
+                    HStack(spacing: 8) {
+                        Text(sessionName(session)).gallopText(.bodyM)
+                        Text(session.place).gallopText(.bodyS, color: SemanticColor.textTertiary)
+                    }
+                    .tag(Optional(session.id))
+                }
+                // copy:
+                Text("No session").gallopText(.bodyM).tag(String?.none)
             }
-            Text("You can join without adding an agent. This does not wake agents or authorize tool use.").gallopText(.caption, color: SemanticColor.textSecondary)
+            .pickerStyle(.radioGroup)
+            .labelsHidden()
+            // copy:
+            Text("You can join without adding a session. This does not wake a session or authorize tool use.")
+                .gallopText(.caption, color: SemanticColor.textSecondary)
             if let error { Text(error).foregroundStyle(.red).font(.caption) }
             HStack {
-                Button("Cancel", action: onCancel)
+                // copy:
+                Button("Decline", role: .destructive, action: onDecline).disabled(busy)
                 Spacer()
-                Button("Accept room invitation", action: onAccept).buttonStyle(CowchatPillButtonStyle(prominent: true)).disabled(busy)
+                Button("Cancel", action: onCancel)
+                // copy:
+                Button("Join", action: onAccept).buttonStyle(CowchatPillButtonStyle(prominent: true)).disabled(busy)
             }
         }.padding(24).frame(width: 570).background(SemanticColor.surface500)
         .buttonStyle(CowchatPillButtonStyle())
@@ -579,17 +603,30 @@ private struct SocialIconBadge: View {
     }
 }
 
-private struct SocialPersonAvatar: View {
+/// A person's round mark: their initials on Surface/Glass/On/Default with a 0.5 Border/Default edge. At Friends' 40
+/// it holds two initials in Body M Strong; smaller, such as a Team page's 24, it holds `letters` initials at 0.42 of
+/// its size, bold and rounded, as the message rows' 24 avatar sizes its letter.
+struct SocialPersonAvatar: View {
     let name: String
+    var size: CGFloat = 40
+    var letters = 2
 
     var body: some View {
-        Text(String(name.split(whereSeparator: { $0.isWhitespace }).prefix(2).compactMap(\.first)))
+        let initials = Text(String(name.split(whereSeparator: { $0.isWhitespace }).prefix(letters).compactMap(\.first)))
             .textCase(.uppercase)
-            .gallopText(.bodyMStrong, color: SemanticColor.surfaceGlassOnTextDefault)
-            .frame(width: 40, height: 40)
-            .background(SemanticColor.surfaceGlassOnDefault, in: Circle())
-            .overlay(Circle().stroke(SemanticColor.borderDefault, lineWidth: 0.5))
-            .accessibilityHidden(true)
+        Group {
+            if size >= 40 {
+                initials.gallopText(.bodyMStrong, color: SemanticColor.surfaceGlassOnTextDefault)
+            } else {
+                initials
+                    .font(.system(size: size * 0.42, weight: .bold, design: .rounded))
+                    .foregroundStyle(SemanticColor.surfaceGlassOnTextDefault)
+            }
+        }
+        .frame(width: size, height: size)
+        .background(SemanticColor.surfaceGlassOnDefault, in: Circle())
+        .overlay(Circle().stroke(SemanticColor.borderDefault, lineWidth: 0.5))
+        .accessibilityHidden(true)
     }
 }
 
