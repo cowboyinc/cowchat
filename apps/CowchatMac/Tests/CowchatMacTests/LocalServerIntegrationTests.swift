@@ -96,7 +96,7 @@ final class LocalServerIntegrationTests: XCTestCase {
         )
         try await connection.join(roomID: room.roomID)
         let members = try await connection.listAgents(roomID: room.roomID)
-        let message = try await connection.send(roomID: room.roomID, content: "hello from SwiftUI")
+        let message = try await connection.send(roomID: room.roomID, content: "hello from SwiftUI", mentions: [])
 
         XCTAssertEqual(members.count, 1)
         XCTAssertEqual(members.first?.name, "Cowchat Mac Tests")

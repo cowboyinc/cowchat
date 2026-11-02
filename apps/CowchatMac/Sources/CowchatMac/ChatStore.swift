@@ -59,6 +59,23 @@ final class ChatStore: ObservableObject {
     @Published var isLoadingMessages = false
     @Published var isCreateRoomPresented = false
     @Published var createRoomParentID: String?
+    /// A room whose composer should open with the cursor at the end of its draft, as opening Home from a session's
+    /// row asks. The room's view takes the request and clears it.
+    @Published var composerRequestRoomID: String?
+    /// A room whose agents the store keeps listed while another room is open: the account's Home, whose agents are
+    /// the person's live sessions. They are listed again with the rooms, and on every join, leave and presence change
+    /// while it is the open room.
+    var watchedRoomID: String? {
+        didSet {
+            guard watchedRoomID != oldValue else { return }
+            watchedRoomAgents = []
+            onWatchedRoomAgents?([])
+            Task { [weak self] in await self?.refreshWatchedRoom() }
+        }
+    }
+    @Published private(set) var watchedRoomAgents: [AgentPresence] = []
+    /// Called with the watched room's agents each time they are listed.
+    var onWatchedRoomAgents: (([AgentPresence]) -> Void)?
 
     private let connection: any CowchatConnectionProtocol
     private let connectionPreferences: ConnectionProfilePreferences?
@@ -875,6 +892,8 @@ final class ChatStore: ObservableObject {
         previewActivityByRoomID = [:]
         activeMessageSearchContext = nil
         completedMessageSearchContext = nil
+        composerRequestRoomID = nil
+        setWatchedRoomAgents([])
 
         localPreferences = Self.roomPreferences(defaults: defaults, profile: profile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
@@ -988,6 +1007,29 @@ final class ChatStore: ObservableObject {
         if selectedRoomID == joinedRoomID {
             await refreshMembers()
         }
+        if watchedRoomID != joinedRoomID || selectedRoomID != joinedRoomID {
+            await refreshWatchedRoom()
+        }
+    }
+
+    /// Lists the watched room's agents again.
+    func refreshWatchedRoom() async {
+        guard connectionStatus.isConnected, let roomID = watchedRoomID,
+              rooms.contains(where: { $0.id == roomID }) else { return }
+        let expectedProfileGeneration = profileGeneration
+        guard let agents = try? await connection.listAgents(roomID: roomID),
+              expectedProfileGeneration == profileGeneration, watchedRoomID == roomID else { return }
+        setWatchedRoomAgents(agents)
+    }
+
+    private func setWatchedRoomAgents(_ agents: [AgentPresence]) {
+        if agents != watchedRoomAgents { watchedRoomAgents = agents }
+        onWatchedRoomAgents?(agents)
+    }
+
+    /// The agents in a room, as the server lists them, whether or not it is open.
+    func agents(in roomID: String) async throws -> [AgentPresence] {
+        try await connection.listAgents(roomID: roomID)
     }
 
     func select(room: Room) async {
@@ -1376,7 +1418,8 @@ final class ChatStore: ObservableObject {
         unlockedRoomIDs.remove(room.id)
     }
 
-    func sendDraft() {
+    /// Sends the open room's draft. `mentions` holds the agent IDs it names.
+    func sendDraft(mentions: [String] = []) {
         guard let room = selectedRoom, !room.encrypted || unlockedRoomIDs.contains(room.id) else { return }
         let content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
@@ -1399,7 +1442,7 @@ final class ChatStore: ObservableObject {
         failedDraftRestorationsByRoomID.removeValue(forKey: room.id)
         Task {
             do {
-                let message = try await connection.send(roomID: room.roomID, content: wireContent)
+                let message = try await connection.send(roomID: room.roomID, content: wireContent, mentions: mentions)
                 guard expectedProfileGeneration == profileGeneration else { return }
                 if selectedRoomID == room.roomID { append(message) }
             } catch {
@@ -1424,6 +1467,14 @@ final class ChatStore: ObservableObject {
                 present(error)
             }
         }
+    }
+
+    /// Starts the open room's draft with `lead`, such as a session's @name and a space, unless it already starts with
+    /// it, and asks the room's composer to open with the cursor after it.
+    func startDraft(with lead: String) {
+        guard let roomID = selectedRoomID else { return }
+        if !draft.hasPrefix(lead) { draft = lead + draft }
+        composerRequestRoomID = roomID
     }
 
     private func handleEvent(type: String, payload: [String: Any]) {
@@ -1490,6 +1541,9 @@ final class ChatStore: ObservableObject {
                 }
             }
         case "agent_joined", "agent_left":
+            if let roomID = payload["room_id"] as? String, roomID == watchedRoomID, roomID != selectedRoomID {
+                Task { [weak self] in await self?.refreshWatchedRoom() }
+            }
             guard payload["room_id"] as? String == selectedRoomID else { break }
             // Join/leave bursts can be much faster than a Cloud list request.
             // Funnel them through one request plus a dirty-bit rerun rather
@@ -1499,6 +1553,8 @@ final class ChatStore: ObservableObject {
             recordPresenceActivity(from: payload)
             if joinedRoomID == selectedRoomID, !updatePresence(from: payload) {
                 scheduleMemberRefresh()
+            } else if joinedRoomID == selectedRoomID, joinedRoomID == watchedRoomID {
+                setWatchedRoomAgents(roomMembers)
             }
         case "thinking":
             // Live thinking pulses arrive as this dedicated event, not
@@ -1713,6 +1769,7 @@ final class ChatStore: ObservableObject {
         roomMembers = members.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
+        if roomID == watchedRoomID { setWatchedRoomAgents(members) }
         updateRoomMemberCount(
             roomID: roomID,
             count: members.count,

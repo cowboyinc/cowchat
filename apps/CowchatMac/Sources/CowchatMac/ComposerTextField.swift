@@ -9,11 +9,18 @@ import SwiftUI
 /// proportions — a text view lets the insertion point be drawn at text
 /// height instead.
 struct ComposerTextField: NSViewRepresentable {
+    /// The keys a list over the field, such as the @ completion, can take before the field does.
+    enum Key { case up, down, tab, enter, escape }
+
     @Binding var text: String
     let placeholder: String
     let isEnabled: Bool
     let onSubmit: () -> Void
     var onCancel: (() -> Void)?
+    /// Offered each of `Key` first; returning true keeps the field from acting on it.
+    var onKey: ((Key) -> Bool)?
+    /// Each new value focuses the field with the cursor after its text, as opening a room with a started draft asks.
+    var focusRequest = 0
 
     /// The font's real line height. Framing the field shorter than this makes
     /// the layout draw a cramped, mis-centered insertion caret.
@@ -23,7 +30,7 @@ struct ComposerTextField: NSViewRepresentable {
     }()
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, onSubmit: onSubmit, onCancel: onCancel)
+        Coordinator(text: $text, onSubmit: onSubmit, onCancel: onCancel, onKey: onKey, focusRequest: focusRequest)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -74,6 +81,7 @@ struct ComposerTextField: NSViewRepresentable {
         context.coordinator.text = $text
         context.coordinator.onSubmit = onSubmit
         context.coordinator.onCancel = onCancel
+        context.coordinator.onKey = onKey
         textView.placeholderString = NSAttributedString(
             string: placeholder,
             attributes: [
@@ -85,18 +93,35 @@ struct ComposerTextField: NSViewRepresentable {
         textView.isEditable = isEnabled
         textView.isSelectable = isEnabled
         textView.setAccessibilityLabel(placeholder)
-        if textView.string != text { textView.string = text }
+        if textView.string != text {
+            textView.string = text
+            textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+        }
+        if context.coordinator.focusRequest != focusRequest {
+            context.coordinator.focusRequest = focusRequest
+            DispatchQueue.main.async { [weak textView] in
+                guard let textView, let window = textView.window, textView.isEditable else { return }
+                window.makeFirstResponder(textView)
+                textView.setSelectedRange(NSRange(location: (textView.string as NSString).length, length: 0))
+                textView.scrollRangeToVisible(textView.selectedRange())
+            }
+        }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
         var onSubmit: () -> Void
         var onCancel: (() -> Void)?
+        var onKey: ((Key) -> Bool)?
+        var focusRequest: Int
 
-        init(text: Binding<String>, onSubmit: @escaping () -> Void, onCancel: (() -> Void)?) {
+        init(text: Binding<String>, onSubmit: @escaping () -> Void, onCancel: (() -> Void)?,
+             onKey: ((Key) -> Bool)?, focusRequest: Int) {
             self.text = text
             self.onSubmit = onSubmit
             self.onCancel = onCancel
+            self.onKey = onKey
+            self.focusRequest = focusRequest
         }
 
         func textDidChange(_ notification: Notification) {
@@ -114,6 +139,11 @@ struct ComposerTextField: NSViewRepresentable {
             _ textView: NSTextView,
             doCommandBy commandSelector: Selector
         ) -> Bool {
+            if let key = Self.key(for: commandSelector), let onKey {
+                // The list over the field reads the draft, so it must be current first.
+                text.wrappedValue = textView.string
+                if onKey(key) { return true }
+            }
             if commandSelector == #selector(NSResponder.cancelOperation(_:)), let onCancel {
                 onCancel()
                 return true
@@ -122,6 +152,17 @@ struct ComposerTextField: NSViewRepresentable {
             text.wrappedValue = textView.string
             onSubmit()
             return true
+        }
+
+        private static func key(for selector: Selector) -> Key? {
+            switch selector {
+            case #selector(NSResponder.moveUp(_:)): return .up
+            case #selector(NSResponder.moveDown(_:)): return .down
+            case #selector(NSResponder.insertTab(_:)): return .tab
+            case #selector(NSResponder.insertNewline(_:)): return .enter
+            case #selector(NSResponder.cancelOperation(_:)): return .escape
+            default: return nil
+            }
         }
     }
 }

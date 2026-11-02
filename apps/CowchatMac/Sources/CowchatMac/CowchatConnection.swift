@@ -83,7 +83,8 @@ protocol CowchatConnectionProtocol: AnyObject {
         limit: Int,
         before: String?
     ) async throws -> [ChatMessage]
-    func send(roomID: String, content: String) async throws -> ChatMessage
+    /// Sends a message. `mentions` holds the agent IDs it names, which the server keeps on the message.
+    func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage
     func disconnect()
 }
 
@@ -329,12 +330,12 @@ final class CowchatConnection: CowchatConnectionProtocol {
         return messages
     }
 
-    func send(roomID: String, content: String) async throws -> ChatMessage {
+    func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage {
         let payload = try await request(type: "send_message", payload: [
             "room_id": roomID,
             "content": content,
             "metadata": ["display_external": true],
-            "mentions": [],
+            "mentions": mentions,
         ])
         return try decode(ChatMessage.self, from: payload)
     }

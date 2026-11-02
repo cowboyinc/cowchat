@@ -80,6 +80,7 @@ struct ContentView: View {
             .padding(.leading, isSidebarVisible ? 0 : 8)
         }
         .background(SemanticColor.surface400)
+        .environmentObject(workspace.homeSessions)
         // The unified toolbar otherwise paints its own system strip; tint it
         // with the same surface400 shell so the nav reads as one tan surface.
         .toolbarBackground(SemanticColor.surface400, for: .windowToolbar)
@@ -220,7 +221,11 @@ private struct SidebarView: View {
     // same loop signature as the 2026-08-06 freeze).
     var body: some View {
         VStack(spacing: 0) {
-            LobbyNavRow(local: workspace.local)
+            LobbyNavRow(
+                local: workspace.local,
+                accountOrLocal: workspace.accountGlobal ?? workspace.local,
+                home: workspace.homeSessions
+            )
 
             searchField
                 .padding(.horizontal, 12)
@@ -242,6 +247,7 @@ private struct SidebarView: View {
                 local: workspace.local,
                 globalOrLocal: workspace.global ?? workspace.local,
                 accountOrLocal: workspace.accountGlobal ?? workspace.local,
+                home: workspace.homeSessions,
                 hasAccountGlobal: workspace.accountGlobal != nil,
                 hasGlobal: workspace.global != nil
             )
@@ -318,29 +324,44 @@ private struct SidebarView: View {
 }
 
 /// Dash-style nav destination: Lobby is Home, above the conversations
-/// table, not a row inside it (Patrick, 2026-08-06).
+/// table, not a row inside it (Patrick, 2026-08-06). Once the account has a
+/// Home, Home takes its place at the top of the room lists (`HomePlaces`).
 private struct LobbyNavRow: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var local: ChatStore
-    @State private var isHovering = false
+    @ObservedObject var accountOrLocal: ChatStore
+    @ObservedObject var home: HomeSessions
 
     private var lobby: Room? {
         local.rooms.first { $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame }
     }
 
-    var body: some View {
-        if let lobby {
-            row(lobby)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 10)
-        }
+    private var hasHome: Bool {
+        workspace.accountGlobal != nil && accountOrLocal.rooms.contains { $0.id == home.roomID }
     }
 
-    private func row(_ lobby: Room) -> some View {
-        let isSelected = workspace.isSelected(lobby, on: .local)
-        return Button {
-            Task { await workspace.select(room: lobby, on: .local) }
-        } label: {
+    var body: some View {
+        if let lobby, !hasHome {
+            SidebarNavRow(title: "Lobby", isSelected: workspace.isSelected(lobby, on: .local)) {
+                Task { await workspace.select(room: lobby, on: .local) }
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 10)
+        }
+    }
+}
+
+/// A destination above the room lists: Dash's sunrise at 18, 10 before the
+/// title in Body S Strong, 10 at the sides, 38 tall, on the sidebar's row
+/// background. The Lobby and Home draw it.
+private struct SidebarNavRow: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
             HStack(spacing: 10) {
                 GallopIconView(icon: .sunrise, fallbackSystemName: "sunrise", size: 18)
                     .foregroundStyle(
@@ -348,7 +369,7 @@ private struct LobbyNavRow: View {
                             ? SemanticColor.surfaceGlassOnIconDefault
                             : SemanticColor.iconSecondary
                     )
-                Text("Lobby")
+                Text(title)
                     .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
                 Spacer()
             }
@@ -364,11 +385,205 @@ private struct LobbyNavRow: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .macAccessibleAction(
-            label: "Open Lobby",
-            value: isSelected ? "selected" : nil
-        ) {
-            Task { await workspace.select(room: lobby, on: .local) }
+            label: "Open \(title)",
+            value: isSelected ? "selected" : nil,
+            action: action
+        )
+    }
+}
+
+/// Home in the Lobby row's place, with the person's live sessions under it:
+/// at most five (`HomeSessions.picked`), then a row for the rest. They sit at
+/// the top of the room lists' scroll view, so however many sessions are
+/// live the rooms stay in reach.
+private struct HomePlaces: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @ObservedObject var account: ChatStore
+    @ObservedObject var home: HomeSessions
+
+    var body: some View {
+        if workspace.accountGlobal != nil,
+           let room = account.rooms.first(where: { $0.id == home.roomID }) {
+            VStack(spacing: 2) {
+                // copy:
+                SidebarNavRow(title: "Home", isSelected: workspace.isSelected(room, on: .accountGlobal)) {
+                    Task { await workspace.select(room: room, on: .accountGlobal) }
+                }
+                ForEach(home.shown) { session in
+                    SessionRow(home: home, session: session)
+                }
+                if home.hiddenCount > 0 {
+                    SessionsMoreRow(home: home)
+                }
+            }
+            // The lists sit 8 in; the nav rows sit 12 in, as the Lobby row does.
+            .padding(.horizontal, 4)
+            .padding(.bottom, 10)
         }
+    }
+}
+
+/// One of the person's live sessions under Home: its harness mark lined up
+/// with Home's title, its name in Body S and its second line in Caption, and
+/// the turning mark at the row's end while it works. Pressing it opens the
+/// room made for the session, or Home with the session mentioned in the
+/// composer. It never draws selected; the room it opens shows the selection.
+private struct SessionRow: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @ObservedObject var home: HomeSessions
+    let session: LiveSession
+    @State private var isHovering = false
+
+    /// Home's title starts 38 in from the row's edge: 10 of padding, the 18
+    /// icon and 10 between them.
+    static let indent: CGFloat = 38
+
+    var body: some View {
+        Button {
+            Task { await workspace.openSession(session) }
+        } label: {
+            SessionRowLabel(home: home, session: session, line: home.line(for: session), showsWork: true)
+                .padding(.leading, Self.indent)
+                .padding(.trailing, 6)
+                .frame(height: 40)
+                .background(SidebarRowBackground(state: .init(isSelected: false, isHovering: isHovering)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .macAccessibleAction(label: "Open \(home.name(of: session))", value: accessibilityValue) {
+            Task { await workspace.openSession(session) }
+        }
+    }
+
+    // copy:
+    private var accessibilityValue: String? {
+        switch session.state {
+        case .working: return "Working"
+        case .prompt: return home.line(for: session)
+        case .idle: return nil
+        }
+    }
+}
+
+/// A session's mark, name and second line, as Home's rows and the @
+/// completion draw them: the harness mark at 16, 8 before the name in Body S,
+/// the line under it in Caption (Text/Tertiary, or the warning colour while
+/// the session waits at a prompt), and with `showsWork`, a slot at the end as
+/// wide as an XS button holding the turning mark while it works.
+private struct SessionRowLabel: View {
+    @ObservedObject var home: HomeSessions
+    let session: LiveSession
+    let line: String
+    let showsWork: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HarnessMark(harness: session.harness)
+                .help(session.harness.appName)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(home.name(of: session))
+                    .gallopText(.bodyS, color: SemanticColor.textPrimary)
+                    .lineLimit(1)
+                Text(line)
+                    .gallopText(
+                        .caption,
+                        color: session.state == .prompt && showsWork
+                            ? SemanticColor.warning : SemanticColor.textTertiary
+                    )
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+            if showsWork {
+                Group {
+                    if session.state == .working { SessionWorkingMark() }
+                }
+                .frame(width: 28, height: 16)
+            }
+        }
+    }
+}
+
+/// The harness a session runs in, as a 16-point rounded square: Claude Code's
+/// asterisk on its clay, or Codex's code glyph on near-black. Gallop has no
+/// tokens for other products' marks, so their colours are written here. In
+/// dark mode Codex's mark turns light so it keeps 3:1 on every dark surface.
+private struct HarnessMark: View {
+    let harness: LiveSession.Harness
+    var size: CGFloat = 16
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+            .fill(background)
+            .overlay {
+                Image(systemName: harness == .claudeCode ? "asterisk" : "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: size * 0.56, weight: .bold))
+                    .foregroundStyle(glyph)
+            }
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+
+    private var background: Color {
+        switch harness {
+        case .claudeCode: return HexColor.adaptive(light: "#D97757", dark: "#D97757")
+        case .codex: return HexColor.adaptive(light: "#1D1916", dark: "#AEA399")
+        }
+    }
+
+    private var glyph: Color {
+        switch harness {
+        case .claudeCode: return .white
+        case .codex: return HexColor.adaptive(light: "#FFFFFF", dark: "#1D1916")
+        }
+    }
+}
+
+/// A working session's mark: Dash Chat's live-task glyph, which a room row
+/// draws while its agents work, turning once a second as Gallop's spinner
+/// does. At 20 its arc has the 10-point spinner's radius and stroke, in
+/// Icon/Tertiary so it stays quiet beside the names.
+private struct SessionWorkingMark: View {
+    @State private var turning = false
+
+    var body: some View {
+        GallopIconView(icon: .thinking, fallbackSystemName: "circle.dotted", size: 20)
+            .foregroundStyle(SemanticColor.iconTertiary)
+            .frame(width: 10, height: 10)
+            .rotationEffect(.degrees(turning ? 360 : 0))
+            .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: turning)
+            .onAppear { turning = true }
+            .accessibilityHidden(true)
+    }
+}
+
+/// The row after Home's first five sessions when more are live: how many more
+/// in Body S, Text/Secondary at the session names' indent with no icon, 32
+/// tall, with the sidebar's hover. Pressing it shows every session, and it
+/// then says how many it hides again.
+private struct SessionsMoreRow: View {
+    @ObservedObject var home: HomeSessions
+    @State private var isHovering = false
+
+    /// The session names start after the harness mark's 16 and the 8 beside it.
+    private static let indent = SessionRow.indent + 16 + 8
+
+    var body: some View {
+        Button { home.showsAll.toggle() } label: {
+            Text(home.moreTitle)
+                .gallopText(.bodyS, color: SemanticColor.textSecondary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, Self.indent)
+                .padding(.trailing, 6)
+                .frame(height: 32)
+                .background(SidebarRowBackground(state: .init(isSelected: false, isHovering: isHovering)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .macAccessibleAction(label: home.moreTitle) { home.showsAll.toggle() }
     }
 }
 
@@ -434,6 +649,7 @@ private struct SidebarRoomLists: View {
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
     @ObservedObject var accountOrLocal: ChatStore
+    @ObservedObject var home: HomeSessions
     let hasAccountGlobal: Bool
     let hasGlobal: Bool
 
@@ -441,6 +657,7 @@ private struct SidebarRoomLists: View {
         TimelineView(.periodic(from: .now, by: anyAgentsThinking ? 10 : 60)) { timeline in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    HomePlaces(account: accountOrLocal, home: home)
                     if visibleRoomsEmpty && isSearchActive {
                         emptyRoomsState
                     } else {
@@ -468,11 +685,15 @@ private struct SidebarRoomLists: View {
         // Local searches can still find its name and messages.
         let searching = !workspace.searchText
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let source = searching && server == .local
+        var source = searching && server == .local
             ? store.unarchivedRooms
             : store.unarchivedRooms.filter {
                 $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
             }
+        // Home has its own row above the lists, as the Lobby does.
+        if server == .accountGlobal, !searching {
+            source.removeAll { $0.id == home.roomID }
+        }
         return RoomSidebarPresentation.filteredRooms(
             from: source,
             query: workspace.searchText,
@@ -1107,8 +1328,15 @@ private struct SecondAgentHintNotice: View {
 
 private struct ChatRoomView: View {
     @EnvironmentObject private var store: ChatStore
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @EnvironmentObject private var home: HomeSessions
     let room: Room
     @Binding var isSidebarVisible: Bool
+    /// Bumped to focus the composer with the cursor after the draft.
+    @State private var composerFocusRequest = 0
+    @State private var mentionHighlight = 0
+    /// The draft the @ completion was closed on with Escape. It stays closed until the draft changes.
+    @State private var mentionClosedDraft: String?
     @State private var isRoomKeyPresented = false
     @State private var roomKeyDraft = ""
     @State private var roomKeyError: String?
@@ -1130,6 +1358,21 @@ private struct ChatRoomView: View {
     private var parentRoom: Room? {
         guard let parentID = room.parentID else { return nil }
         return store.rooms.first { $0.id == parentID }
+    }
+
+    /// Whether this is the account's Home, which the sidebar and the header call Home whatever its room name.
+    private var isHome: Bool {
+        workspace.activeServer == .accountGlobal && room.id == home.roomID
+    }
+
+    // copy:
+    private var title: String { isHome ? "Home" : room.name }
+
+    /// The live sessions the @ being typed in Home's draft can name, or none while no @ is being typed.
+    private var mentionOptions: [LiveSession] {
+        guard isHome, isComposerExpanded, store.draft != mentionClosedDraft,
+              let query = HomeSessions.mentionQuery(in: store.draft) else { return [] }
+        return home.options(matching: query)
     }
 
     private func paneState(at now: Date) -> RoomPaneState {
@@ -1195,6 +1438,9 @@ private struct ChatRoomView: View {
             }
         }
         .background(SemanticColor.surface500)
+        // The request is current when this view appears with the room, so the subscription's first value covers
+        // opening Home from another room.
+        .onReceive(store.$composerRequestRoomID.receive(on: RunLoop.main)) { takeComposerRequest($0) }
         .sheet(isPresented: $isRoomKeyPresented) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Room key for \(room.name)").font(.headline)
@@ -1310,7 +1556,7 @@ private struct ChatRoomView: View {
                         GallopIconView(icon: .chevronRightExtraSmall, fallbackSystemName: "chevron.right", size: 10)
                             .foregroundStyle(SemanticColor.iconSubtle)
                     }
-                    Text(room.name)
+                    Text(title)
                         .gallopText(.h4, color: SemanticColor.textPrimary)
                     if room.encrypted {
                         GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
@@ -1597,12 +1843,14 @@ private struct ChatRoomView: View {
             HStack(spacing: 8) {
                 ComposerTextField(
                     text: $store.draft,
-                    placeholder: "Message \(room.name)",
+                    placeholder: "Message \(title)",
                     isEnabled: !room.encrypted || store.unlockedRoomIDs.contains(room.id),
-                    onSubmit: store.sendDraft,
+                    onSubmit: sendDraft,
                     onCancel: {
                         withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
-                    }
+                    },
+                    onKey: handleComposerKey,
+                    focusRequest: composerFocusRequest
                 )
                 .frame(height: ComposerTextField.naturalHeight)
                 .padding(.horizontal, 16)
@@ -1617,7 +1865,7 @@ private struct ChatRoomView: View {
                 }
                 .onHover { isFieldHovering = $0 }
 
-                Button { store.sendDraft() } label: {
+                Button { sendDraft() } label: {
                     GallopIconView(icon: .send, fallbackSystemName: "paperplane.fill", size: 18)
                         .foregroundStyle(SemanticColor.buttonPrimaryIconDefault)
                         .frame(width: 36, height: 36)
@@ -1630,20 +1878,173 @@ private struct ChatRoomView: View {
                 .macAccessibleAction(
                     label: "Send message",
                     isEnabled: canSend,
-                    action: store.sendDraft
+                    action: sendDraft
                 )
+            }
+            // The completion floats over the feed, 8 above the field and lined up with its start, as a menu would: a
+            // frame with no height at the field's top holds it by its bottom edge.
+            .overlay(alignment: .topLeading) {
+                let options = mentionOptions
+                if !options.isEmpty {
+                    MentionCompletion(
+                        options: options,
+                        highlight: min(mentionHighlight, options.count - 1),
+                        pick: pickMention
+                    )
+                    .frame(height: 0, alignment: .bottomLeading)
+                    .offset(y: -8)
+                }
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
         .background(SemanticColor.surface500)
+        .onChange(of: HomeSessions.mentionQuery(in: store.draft)) { _ in mentionHighlight = 0 }
+    }
+
+    /// Sends the draft, with the live sessions it names after an @ as its mentions when it is Home's.
+    private func sendDraft() {
+        store.sendDraft(mentions: isHome ? home.mentions(in: store.draft) : [])
+    }
+
+    /// The arrow keys move through the @ completion, Return or Tab puts the highlighted name in the draft, and Escape
+    /// closes it. With the completion closed the field takes every key itself.
+    private func handleComposerKey(_ key: ComposerTextField.Key) -> Bool {
+        let options = mentionOptions
+        guard !options.isEmpty else { return false }
+        let current = min(mentionHighlight, options.count - 1)
+        switch key {
+        case .up: mentionHighlight = max(0, current - 1)
+        case .down: mentionHighlight = min(options.count - 1, current + 1)
+        case .tab, .enter: pickMention(options[current])
+        case .escape: mentionClosedDraft = store.draft
+        }
+        return true
+    }
+
+    private func pickMention(_ session: LiveSession) {
+        store.draft = HomeSessions.completing(store.draft, with: home.name(of: session))
+        composerFocusRequest += 1
+    }
+
+    /// Opening Home from a session's row starts its draft with the session's @name; the composer opens with the
+    /// cursor after it.
+    private func takeComposerRequest(_ roomID: String?) {
+        guard roomID == room.id else { return }
+        store.composerRequestRoomID = nil
+        isComposerExpanded = true
+        composerFocusRequest += 1
     }
 
     private var canSend: Bool {
         store.connectionStatus.isConnected
             && (!room.encrypted || store.unlockedRoomIDs.contains(room.id))
             && !store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+/// The @ completion over Home's composer: the live sessions the typed name matches, each with its harness mark, its
+/// one name and where it runs, as Home's rows name them. The app has no menu that floats over a text field without
+/// taking its keys, so this draws the demo's picker (a Gallop Submenu of MenuItem rows, 320 wide) on the app's
+/// floating glass: Body L names, Body S lines, 16 at the sides and 12 above and below each row. The highlighted row
+/// takes the glass hover, since Return or Tab picks it. Past five rows it stops at five and a half, so the cut row
+/// says it scrolls, and the highlighted row scrolls into view as the arrows move it.
+private struct MentionCompletion: View {
+    @EnvironmentObject private var home: HomeSessions
+    let options: [LiveSession]
+    let highlight: Int
+    let pick: (LiveSession) -> Void
+
+    /// A row: 12 above and below, a 24 name line, 2 between and a 20 line under it.
+    private static let rowHeight: CGFloat = 12 + 24 + 2 + 20 + 12
+    private static let rowSpacing: CGFloat = 2
+    private static let padding: CGFloat = 8
+    private static let rowsShown = 5
+    private static var cappedHeight: CGFloat {
+        padding + CGFloat(rowsShown) * (rowHeight + rowSpacing) + rowHeight / 2
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 32, style: .continuous)
+        Group {
+            if options.count > Self.rowsShown {
+                ScrollViewReader { proxy in
+                    ScrollView { rows }
+                        .frame(height: Self.cappedHeight)
+                        .onAppear { proxy.scrollTo(highlight) }
+                        .onChange(of: highlight) { proxy.scrollTo($0) }
+                }
+            } else {
+                rows
+            }
+        }
+        .frame(width: 320)
+        .background {
+            shape.fill(.ultraThinMaterial)
+                .overlay { shape.fill(SemanticColor.surfaceGlass500) }
+        }
+        .clipShape(shape)
+        .overlay { shape.stroke(SemanticColor.surfaceGlassBorderHighlight, lineWidth: 1) }
+        .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+        .shadow(color: .black.opacity(0.04), radius: 0, y: 0.5)
+    }
+
+    private var rows: some View {
+        VStack(alignment: .leading, spacing: Self.rowSpacing) {
+            ForEach(Array(options.enumerated()), id: \.element.id) { index, session in
+                MentionCompletionRow(
+                    name: home.name(of: session),
+                    line: session.place,
+                    harness: session.harness,
+                    isHighlighted: index == highlight
+                ) { pick(session) }
+                .id(index)
+            }
+        }
+        .padding(Self.padding)
+    }
+}
+
+private struct MentionCompletionRow: View {
+    let name: String
+    let line: String
+    let harness: LiveSession.Harness
+    let isHighlighted: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        let lit = isHighlighted || isHovering
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 12) {
+                    HarnessMark(harness: harness, size: 20)
+                        .frame(minHeight: 24)
+                    Text(name)
+                        .gallopText(
+                            .bodyL,
+                            color: lit ? SemanticColor.surfaceGlassOffTextHover : SemanticColor.surfaceGlassOffTextDefault
+                        )
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Text(line)
+                    .gallopText(.bodyS, color: SemanticColor.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.leading, 32)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(lit ? SemanticColor.surfaceGlassOffHover : .clear, in: shape)
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help(harness.appName)
+        .macAccessibleAction(label: "Mention \(name)", value: isHighlighted ? "selected" : nil, action: action)
     }
 }
 

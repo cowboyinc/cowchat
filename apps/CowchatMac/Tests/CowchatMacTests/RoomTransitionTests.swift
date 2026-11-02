@@ -221,7 +221,7 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         }
         return Array(eligible.suffix(limit))
     }
-    func send(roomID: String, content: String) async throws -> ChatMessage {
+    func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage {
         operations.append("send:\(roomID):\(content)")
         if blocksSend {
             await withCheckedContinuation { sendContinuations[content] = $0 }

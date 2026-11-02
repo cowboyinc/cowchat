@@ -40,8 +40,12 @@ final class SocialStore: ObservableObject {
         return nil
     }
     private var friendLinkLoad = UUID()
-    @Published private(set) var setup: SocialSetup?
+    @Published private(set) var setup: SocialSetup? {
+        didSet { onSetupChanged?(setup) }
+    }
     @Published private(set) var setupLoaded = false
+    /// Called when the account's setup, which names its Home, is loaded or forgotten.
+    var onSetupChanged: ((SocialSetup?) -> Void)?
     @Published private(set) var identities: [SocialMe.Identity] = []
     @Published private(set) var oauthFlow: OAuthFlow?
     @Published private(set) var friends: [SocialFriend] = []
@@ -160,6 +164,12 @@ final class SocialStore: ObservableObject {
             guard ticket == generation, !Task.isCancelled else { return }
             let roomList: SocialRooms = try await boundAPI.social(["rooms"])
             guard ticket == generation, !Task.isCancelled else { return }
+            // The setup names the account's Home, which the sidebar opens.
+            var loadedSetup: SocialSetupReply?
+            if setupSupported, !setupLoaded {
+                loadedSetup = try await boundAPI.social(["setup"])
+                guard ticket == generation, !Task.isCancelled else { return }
+            }
             if account == accountAtStart { try saveAccount(me.account) }
             identities = me.identities
             friends = friendList.friends
@@ -167,6 +177,10 @@ final class SocialStore: ObservableObject {
             agents = agentList.agents
             invitations = invitationList.invitations.filter { $0.status == "pending" && $0.to.id == me.account.id }
             rooms = roomList.rooms
+            if let loadedSetup {
+                setup = loadedSetup.setup
+                setupLoaded = true
+            }
             errorMessage = nil
             if let savedSession {
                 onSnapshot?(SocialNotificationSnapshot(session: savedSession, requests: requestList.requests, invitations: invitationList.invitations))

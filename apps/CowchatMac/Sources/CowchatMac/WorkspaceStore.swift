@@ -42,6 +42,10 @@ final class WorkspaceStore: ObservableObject {
 
     let local: ChatStore
     let notifications: SocialNotifications
+    /// The person's live sessions, read from the agents in their Home.
+    let homeSessions = HomeSessions()
+    /// True from launch until a room is opened, so the app opens on Home once the account's Home is known.
+    private var opensHomeWhenReady = true
     @Published private(set) var global: ChatStore?
     @Published private(set) var accountGlobal: ChatStore?
     @Published private(set) var activeServer: Server = .local
@@ -74,6 +78,7 @@ final class WorkspaceStore: ObservableObject {
             guard let self, self.social.savedSession != nil else { return }
             Task { try? await self.accountGlobal?.refreshRooms() }
         }
+        social.onSetupChanged = { [weak self] setup in self?.useHome(roomID: setup?.roomId) }
         return social
     }()
 
@@ -95,15 +100,88 @@ final class WorkspaceStore: ObservableObject {
     func useSocialSession(_ session: SocialSession?) {
         accountGlobal?.shutdownForRemoval()
         accountGlobal = nil
+        homeSessions.clear()
         if let session, let profile = try? ConnectionProfile.socialSession(session) {
             let store = makeAccountStore(profile)
             store.searchText = searchText
             accountGlobal = store
+            watchHome(on: store)
             store.start()
         }
         if activeServer == .accountGlobal, accountGlobal == nil {
             activeServer = global == nil ? .local : .global
         }
+    }
+
+    // MARK: Home
+
+    /// The account's Home room, once its setup has named it and the account's rooms list it.
+    var homeRoom: Room? {
+        guard let roomID = homeSessions.roomID else { return nil }
+        return accountGlobal?.rooms.first { $0.id == roomID }
+    }
+
+    /// Opens the account's Home. Returns false when there is none yet.
+    @discardableResult
+    func openHome() async -> Bool {
+        guard let room = homeRoom else { return false }
+        await select(room: room, on: .accountGlobal)
+        return true
+    }
+
+    /// Pressing a session's row: the room made for the session when the person is in one, or else Home with the
+    /// session's @name in the composer and the cursor after it.
+    func openSession(_ session: LiveSession) async {
+        guard let store = accountGlobal, let home = homeRoom else { return }
+        let name = homeSessions.name(of: session)
+        if let room = await sessionRoom(for: session, named: name, in: store, home: home), accountGlobal === store {
+            await select(room: room, on: .accountGlobal)
+            return
+        }
+        guard accountGlobal === store else { return }
+        await select(room: home, on: .accountGlobal)
+        guard accountGlobal === store, store.selectedRoomID == home.id else { return }
+        store.startDraft(with: "@\(name) ")
+    }
+
+    /// The room made for a session: one of the person's account rooms named as the session is, with the session among
+    /// its agents. The server has no field yet saying which session a room was made for, so the name and the agent
+    /// list stand in for it.
+    private func sessionRoom(for session: LiveSession, named name: String, in store: ChatStore,
+                             home: Room) async -> Room? {
+        let candidates = store.unarchivedRooms.filter {
+            $0.id != home.id && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }
+        for room in candidates {
+            if let agents = try? await store.agents(in: room.id), agents.contains(where: { $0.agentID == session.id }) {
+                return room
+            }
+        }
+        return nil
+    }
+
+    private func useHome(roomID: String?) {
+        guard homeSessions.roomID != roomID else { return }
+        homeSessions.clear()
+        homeSessions.roomID = roomID
+        accountGlobal?.watchedRoomID = roomID
+    }
+
+    /// Keeps Home's sessions current from the account store, which lists Home's agents with its rooms and as they
+    /// change, and opens Home the first time it is listed after launch.
+    private func watchHome(on store: ChatStore) {
+        store.watchedRoomID = homeSessions.roomID
+        store.onWatchedRoomAgents = { [weak self, weak store] agents in
+            guard let self, let store, self.accountGlobal === store else { return }
+            self.homeSessions.update(from: agents)
+            self.openHomeIfWaiting()
+        }
+    }
+
+    private func openHomeIfWaiting() {
+        guard opensHomeWhenReady, let room = homeRoom else { return }
+        opensHomeWhenReady = false
+        Task { await select(room: room, on: .accountGlobal) }
     }
 
     var activeStore: ChatStore {
@@ -238,6 +316,7 @@ final class WorkspaceStore: ObservableObject {
 
     func select(room: Room, on server: Server) async {
         guard let store = store(for: server) else { return }
+        opensHomeWhenReady = false
         activeServer = server
         await store.select(room: room)
     }

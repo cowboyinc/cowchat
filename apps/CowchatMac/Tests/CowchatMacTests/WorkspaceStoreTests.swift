@@ -33,7 +33,7 @@ private final class StubConnection: CowchatConnectionProtocol {
     func join(roomID: String) async throws {}
     func leave(roomID: String) async throws {}
     func history(roomID: String, limit: Int, before: String?) async throws -> [ChatMessage] { [] }
-    func send(roomID: String, content: String) async throws -> ChatMessage {
+    func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage {
         throw CancellationError()
     }
     func disconnect() {}
