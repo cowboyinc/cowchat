@@ -188,7 +188,8 @@ struct TeamRow: View {
 }
 
 /// Settings' Team page: the switch that takes the person's live sessions off their teammates' Team pages, drawn as the
-/// notification settings' switches are. It waits for the server to say where the person stands.
+/// notification settings' switches are, with no line under it since the page's subtitle says what it does. It waits
+/// for the server to say where the person stands.
 struct TeamSharingSettings: View {
     @ObservedObject var team: TeamStore
     @ObservedObject var social: SocialStore
@@ -206,9 +207,6 @@ struct TeamSharingSettings: View {
                                  isEnabled: team.sharing != nil && !social.busy) {
                 Task { await team.setSharing(!(team.sharing ?? false), social: social) }
             }
-            // copy:
-            Text("Teammates see each branch you work on, its repo, and a pull request where they can read it.")
-                .gallopText(.bodyS, color: SemanticColor.textSecondary)
             if let error = social.errorMessage {
                 Text(error).gallopText(.bodyS, color: SemanticColor.notificationErrorTextDefault)
             }
