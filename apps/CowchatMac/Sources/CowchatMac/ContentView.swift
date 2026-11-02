@@ -846,7 +846,8 @@ private struct SidebarRoomLists: View {
         }
         if !rooms.isEmpty {
             VStack(spacing: 0) {
-                ForEach(RoomSidebarPresentation.sortedByRecency(rooms)) { room in
+                // Ordered and timed by the newest message each room's feed shows.
+                ForEach(RoomSidebarPresentation.sortedByRecency(rooms.map(store.roomAsShown))) { room in
                     SidebarRoomRowButton(store: store, room: room, server: server, now: now)
                         .sidebarListItem(Self.rowID(room.id, on: server))
                 }
@@ -1695,13 +1696,21 @@ private struct ChatRoomView: View {
                 }
                 TimelineView(.periodic(from: .now, by: 10)) { timeline in
                     let summary = presenceSummary(at: timeline.date)
-                    Text(summary)
-                        .gallopText(
-                            .caption,
-                            color: summary.contains("active")
-                                ? SemanticColor.warning : SemanticColor.textTertiary
-                        )
-                        .lineLimit(1)
+                    HStack(spacing: 0) {
+                        Text(summary)
+                            .gallopText(
+                                .caption,
+                                color: summary.contains("active")
+                                    ? SemanticColor.warning : SemanticColor.textTertiary
+                            )
+                        // The room's switch is on, so its feed has every message.
+                        if store.showsAllMessages(in: room.id) {
+                            // copy:
+                            Text(" · Agent conversations included")
+                                .gallopText(.caption, color: SemanticColor.textTertiary)
+                        }
+                    }
+                    .lineLimit(1)
                 }
             }
 
@@ -1923,6 +1932,13 @@ private struct ChatRoomView: View {
                     let clearance = UnitPoint(x: 0.5, y: max(0, 1 - Self.openComposerClearance / viewport.size.height))
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                         proxy.scrollTo("message-list-bottom", anchor: clearance)
+                    }
+                }
+                // The switch adds or takes away messages all through the feed, so a feed at its end stays there.
+                .onChange(of: store.showsAllMessages(in: room.id)) { _ in
+                    guard isMessageListNearBottom, hasPositionedInitialScroll else { return }
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("message-list-bottom", anchor: .bottom)
                     }
                 }
                 .onChange(of: store.isLoadingMessages) { loading in

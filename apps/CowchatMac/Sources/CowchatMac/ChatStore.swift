@@ -1240,9 +1240,9 @@ final class ChatStore: ObservableObject {
         readState.isUnread(roomAsShown(room), selectedRoomID: selectedRoomID)
     }
 
-    /// The room as its unread dot reads it: once its newest shown message is known for its current activity, the room
-    /// is as recent as that message, so messages its feed hides do not count.
-    private func roomAsShown(_ room: Room) -> Room {
+    /// The room as its sidebar row and unread dot read it: once its newest shown message is known for its current
+    /// activity, the room is as recent as that message, so messages its feed hides do not count.
+    func roomAsShown(_ room: Room) -> Room {
         guard let shown = shownActivityByRoomID[room.id],
               shown.activity == (room.lastActivity ?? room.createdAt) else { return room }
         return room.updating(lastActivity: shown.latest ?? room.createdAt)
