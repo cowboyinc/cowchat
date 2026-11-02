@@ -152,11 +152,20 @@ struct MessageMetadata: Codable, Equatable {
     let name: String?
     let sha256: String?
     let size: Int?
+    /// Who sent the message, as the server records it from the connection. Nil on messages from before the server
+    /// recorded it and on a kind this app does not know.
+    let senderKind: MessageSenderKind?
+    /// The pull request the message carries as finished work.
+    let pullRequest: MessagePullRequest?
+    /// Files the message carries under its text, such as screenshots. Each is a blob, as a file message's is.
+    let attachments: [MessageAttachment]
 
     enum CodingKeys: String, CodingKey {
-        case type, name, sha256, size
+        case type, name, sha256, size, attachments
         case displayExternal = "display_external"
         case blobID = "blob_id"
+        case senderKind = "sender_kind"
+        case pullRequest = "pull_request"
     }
 
     init(
@@ -165,7 +174,10 @@ struct MessageMetadata: Codable, Equatable {
         blobID: String? = nil,
         name: String? = nil,
         sha256: String? = nil,
-        size: Int? = nil
+        size: Int? = nil,
+        senderKind: MessageSenderKind? = nil,
+        pullRequest: MessagePullRequest? = nil,
+        attachments: [MessageAttachment] = []
     ) {
         self.displayExternal = displayExternal
         self.type = type
@@ -173,6 +185,24 @@ struct MessageMetadata: Codable, Equatable {
         self.name = name
         self.sha256 = sha256
         self.size = size
+        self.senderKind = senderKind
+        self.pullRequest = pullRequest
+        self.attachments = attachments
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        displayExternal = try values.decodeIfPresent(Bool.self, forKey: .displayExternal)
+        type = try values.decodeIfPresent(String.self, forKey: .type)
+        blobID = try values.decodeIfPresent(String.self, forKey: .blobID)
+        name = try values.decodeIfPresent(String.self, forKey: .name)
+        sha256 = try values.decodeIfPresent(String.self, forKey: .sha256)
+        size = try values.decodeIfPresent(Int.self, forKey: .size)
+        // Newer than most clients, so a malformed one is dropped on its own and the fields above stay.
+        senderKind = try? values.decodeIfPresent(MessageSenderKind.self, forKey: .senderKind)
+        pullRequest = try? values.decodeIfPresent(MessagePullRequest.self, forKey: .pullRequest)
+        attachments = (try? values.decodeIfPresent([MessageAttachment.Lenient].self, forKey: .attachments))?
+            .compactMap(\.attachment) ?? []
     }
 }
 

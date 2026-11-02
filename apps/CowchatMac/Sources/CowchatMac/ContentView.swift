@@ -566,7 +566,7 @@ private struct HarnessMark: View {
 /// draws while its agents work, turning once a second as Gallop's spinner
 /// does. At 20 its arc has the 10-point spinner's radius and stroke, in
 /// Icon/Tertiary so it stays quiet beside the names.
-private struct SessionWorkingMark: View {
+struct SessionWorkingMark: View {
     @State private var turning = false
 
     var body: some View {
@@ -1465,6 +1465,8 @@ private struct ChatRoomView: View {
     /// The list is revealed only after the initial bottom-anchor scroll, so a
     /// room switch never paints top-anchored content and animates it away.
     @State private var hasPositionedInitialScroll = false
+    /// The runs of hidden agent messages opened in place, by their first message.
+    @State private var openRuns: Set<String> = []
 
     private var parentRoom: Room? {
         guard let parentID = room.parentID else { return nil }
@@ -1621,6 +1623,12 @@ private struct ChatRoomView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 Spacer()
                 Menu {
+                    // copy:
+                    Toggle("Show all messages", isOn: Binding(
+                        get: { store.showsAllMessages(in: room.id) },
+                        set: { store.setShowsAllMessages($0, in: room.id) }
+                    ))
+                    Divider()
                     Button("Leases…") { isLeasesPresented = true }
                     Button("Copy connect prompt") { copyConnectPrompt() }
                     if !store.isLocalConnection {
@@ -1716,6 +1724,20 @@ private struct ChatRoomView: View {
         }
     }
 
+    private func openAttachment(_ attachment: FileAttachment) {
+        Task {
+            do {
+                try await store.openAttachment(attachment)
+            } catch {
+                store.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func toggleRun(_ run: HiddenMessageRun) {
+        withAnimation(.easeInOut(duration: 0.16)) { openRuns.formSymmetricDifference([run.id]) }
+    }
+
     private func saveAttachment(_ attachment: FileAttachment) {
         Task {
             do {
@@ -1770,22 +1792,47 @@ private struct ChatRoomView: View {
                             now: timeline.date
                         )
 
-                        ForEach(store.messages) { message in
-                            VStack(alignment: .leading, spacing: 10) {
-                                MessageFeedRow(
-                                    message: store.displayMessage(message),
-                                    isMine: message.agentID == store.agentID,
-                                    now: timeline.date,
-                                    onSaveAttachment: room.encrypted ? nil : { saveAttachment($0) }
-                                )
-                                ForEach(
-                                    pulseAnchors.byMessageID[message.id] ?? [],
-                                    id: \.agentID
-                                ) { pulse in
-                                    ThinkingPulsePill(pulse: pulse)
+                        let feed = MessageFeed.items(
+                            store.messages,
+                            showsAll: store.showsAllMessages(in: room.id),
+                            openRuns: openRuns
+                        )
+
+                        ForEach(feed) { item in
+                            switch item {
+                            case .message(let message, let quiet):
+                                VStack(alignment: .leading, spacing: 10) {
+                                    MessageFeedRow(
+                                        message: store.displayMessage(message),
+                                        isMine: message.agentID == store.agentID,
+                                        now: timeline.date,
+                                        quiet: quiet,
+                                        onSaveAttachment: room.encrypted ? nil : { saveAttachment($0) },
+                                        onOpenAttachment: room.encrypted ? nil : { openAttachment($0) }
+                                    )
+                                    ForEach(
+                                        pulseAnchors.byMessageID[message.id] ?? [],
+                                        id: \.agentID
+                                    ) { pulse in
+                                        ThinkingPulsePill(pulse: pulse)
+                                    }
                                 }
+                                .id(message.id)
+                            case .run(let run):
+                                // A closed run keeps the pulses of the agents inside it under its row.
+                                VStack(alignment: .leading, spacing: 10) {
+                                    HiddenRunRow(run: run) { toggleRun(run) }
+                                    if !run.isOpen {
+                                        ForEach(
+                                            run.messages.flatMap { pulseAnchors.byMessageID[$0.id] ?? [] },
+                                            id: \.agentID
+                                        ) { pulse in
+                                            ThinkingPulsePill(pulse: pulse)
+                                        }
+                                    }
+                                }
+                                .id(item.id)
                             }
-                            .id(message.id)
                         }
 
                         // Pulsing agents who haven't spoken yet pill at the
@@ -1862,7 +1909,8 @@ private struct ChatRoomView: View {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo("message-list-bottom", anchor: .bottom)
                         }
-                    } else {
+                    } else if let latest = store.messages.last, store.showsInFeed(latest) {
+                        // A hidden arrival only joins a fold, so there is nothing new to read.
                         newMessageCount += 1
                     }
                 }
@@ -2201,7 +2249,11 @@ private struct MessageFeedRow: View {
     let message: ChatMessage
     let isMine: Bool
     let now: Date
+    /// A message the room hides by default, drawn because its run is open or the room's switch is on. Its text takes
+    /// Text/Tertiary.
+    var quiet = false
     var onSaveAttachment: ((FileAttachment) -> Void)?
+    var onOpenAttachment: ((FileAttachment) -> Void)?
     @State private var isHovering = false
 
     var body: some View {
@@ -2211,6 +2263,7 @@ private struct MessageFeedRow: View {
                 VStack(alignment: .leading, spacing: 7) {
                     ExpandableMessageText(content: message.content, textColor: SemanticColor.textPrimary)
                     attachmentChip
+                    carriedWork
                     Text(relativeTimestamp)
                         .gallopText(.caption, color: SemanticColor.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -2253,8 +2306,12 @@ private struct MessageFeedRow: View {
                         }
                     }
                     .modifier(OpenInAppAccessibility(label: openInLabel, value: relativeTimestamp, action: openInApp))
-                    ExpandableMessageText(content: message.content)
+                    ExpandableMessageText(
+                        content: message.content,
+                        textColor: quiet ? SemanticColor.textTertiary : SemanticColor.textSecondary
+                    )
                     attachmentChip
+                    carriedWork
                 }
                 .frame(maxWidth: 760, alignment: .leading)
                 Spacer(minLength: 24)
@@ -2266,9 +2323,34 @@ private struct MessageFeedRow: View {
         }
     }
 
+    /// What the message carries under its text: its pull request's row, its pictures as thumbnails, and its other
+    /// files as attachment chips.
+    @ViewBuilder
+    private var carriedWork: some View {
+        if let pullRequest = message.metadata.pullRequest {
+            PullRequestRow(pullRequest: pullRequest)
+        }
+        let pictures = message.attachments.filter(\.isImage)
+        if !pictures.isEmpty, let onOpenAttachment {
+            MessageFlowLayout(spacing: 8, lineSpacing: 8) {
+                ForEach(pictures, id: \.blobID) { picture in
+                    AttachmentThumbnail(attachment: picture, onOpen: onOpenAttachment)
+                }
+            }
+        }
+        ForEach(message.attachments.filter { !$0.isImage }, id: \.blobID) { file in
+            attachmentChip(file)
+        }
+    }
+
     @ViewBuilder
     private var attachmentChip: some View {
-        if let attachment = message.fileAttachment, onSaveAttachment != nil {
+        if let attachment = message.fileAttachment { attachmentChip(attachment) }
+    }
+
+    @ViewBuilder
+    private func attachmentChip(_ attachment: FileAttachment) -> some View {
+        if onSaveAttachment != nil {
             Button {
                 onSaveAttachment?(attachment)
             } label: {

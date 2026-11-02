@@ -11,6 +11,7 @@ struct RoomLocalPreferences {
     // any value a previous build left behind; nothing reads or writes it now.
     static let pendingSetupScreenRoomIDsKey = "CowchatMac.pendingSetupScreenRoomIDs"
     static let roomReadStateKey = "CowchatMac.roomReadState"
+    static let showsAllMessagesRoomIDsKey = "CowchatMac.showsAllMessagesRoomIDs"
 
     private let defaults: UserDefaults
     private let scope: String?
@@ -26,6 +27,11 @@ struct RoomLocalPreferences {
 
     var pendingSetupRoomIDs: Set<String> {
         loadIDs(forKey: Self.pendingSetupRoomIDsKey)
+    }
+
+    /// Rooms whose switch shows every message.
+    var showsAllMessagesRoomIDs: Set<String> {
+        loadIDs(forKey: Self.showsAllMessagesRoomIDsKey)
     }
 
     var roomReadState: RoomReadState? {
@@ -44,6 +50,10 @@ struct RoomLocalPreferences {
 
     func savePendingSetupRoomIDs(_ roomIDs: Set<String>) {
         save(roomIDs, forKey: Self.pendingSetupRoomIDsKey)
+    }
+
+    func saveShowsAllMessagesRoomIDs(_ roomIDs: Set<String>) {
+        save(roomIDs, forKey: Self.showsAllMessagesRoomIDsKey)
     }
 
     private func loadIDs(forKey key: String) -> Set<String> {

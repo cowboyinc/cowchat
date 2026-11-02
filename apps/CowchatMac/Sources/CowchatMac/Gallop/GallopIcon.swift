@@ -35,6 +35,8 @@ final class OriginalNativeImageCache: @unchecked Sendable {
 public enum GallopIcon: String, CaseIterable, Sendable {
     case add
     case arrowUpRight = "arrow-up-right"
+    /// A run of agent messages a room folds away.
+    case chatbot
     case chevronDown = "chevron-down"
     /// Dash's 16pt Chat detail chevron, exported separately from the 24pt
     /// large variant because the paths are not scale-equivalent.
@@ -50,6 +52,8 @@ public enum GallopIcon: String, CaseIterable, Sendable {
     /// Dash's 16pt Chat detail chevron, exported separately from the 24pt
     /// large variant because the paths are not scale-equivalent.
     case chevronUpExtraSmall = "chevron-up-extra-small"
+    /// A pull request whose checks failed.
+    case circleX = "circle-x"
     case copy
     case dismiss
     /// Dash's 16pt user-message edit glyph from Figma component `584:7533`.
@@ -64,6 +68,8 @@ public enum GallopIcon: String, CaseIterable, Sendable {
     case send
     case settings
     case sidebar
+    /// A pull request whose checks passed.
+    case success
     /// Dash Overview's destination glyph — used for the Lobby home row.
     case sunrise
     /// Dash Chat's live-task indicator from Figma node `1762:71500`.

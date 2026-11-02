@@ -37,6 +37,8 @@ final class ChatStore: ObservableObject {
     @Published private(set) var archivedRoomIDs: Set<String> = []
     @Published private(set) var setupRoomIDs: Set<String> = []
     @Published private(set) var readState = RoomReadState()
+    /// Rooms whose switch shows every message, agents' unmarked ones included. Kept on this Mac.
+    @Published private(set) var showsAllMessagesRoomIDs: Set<String> = []
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
     @Published private(set) var lastThinkingAt: [String: [String: Date]] = [:]
@@ -128,6 +130,9 @@ final class ChatStore: ObservableObject {
     private var failedDraftRestorationsByRoomID: [String: FailedDraftRestoration] = [:]
     private var sendGeneration = 0
     private var previewActivityByRoomID: [String: String] = [:]
+    /// Each room's newest message its feed shows, as of the room's activity when that was read, so a hidden agent
+    /// message moves the room's activity on without lighting its unread dot.
+    private var shownActivityByRoomID: [String: ShownActivity] = [:]
     private var promptInviteMintsInFlight: Set<String> = []
     private(set) var agentID = ""
     let agentName = "Cowchat Mac"
@@ -255,6 +260,7 @@ final class ChatStore: ObservableObject {
         archivedRoomIDs = localPreferences.archivedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
+        showsAllMessagesRoomIDs = localPreferences.showsAllMessagesRoomIDs
         // One-time cleanup: the setup-screen takeover was removed in the
         // onboarding redesign (spec 2026-08-07); stale persisted IDs would
         // otherwise sit orphaned forever.
@@ -890,6 +896,7 @@ final class ChatStore: ObservableObject {
         draftsByRoomID = [:]
         failedDraftRestorationsByRoomID = [:]
         previewActivityByRoomID = [:]
+        shownActivityByRoomID = [:]
         activeMessageSearchContext = nil
         completedMessageSearchContext = nil
         composerRequestRoomID = nil
@@ -899,6 +906,7 @@ final class ChatStore: ObservableObject {
         archivedRoomIDs = localPreferences.archivedRoomIDs
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
+        showsAllMessagesRoomIDs = localPreferences.showsAllMessagesRoomIDs
         connectionStatus = .disconnected
         surfacedSpawnFailureDescription = nil
     }
@@ -1115,7 +1123,7 @@ final class ChatStore: ObservableObject {
                 recordHistoricalAgentActivity(in: rawHistory, now: Date())
                 let history = Self.visibleMessages(in: rawHistory)
                 messages = Self.merging(history: history, live: messages)
-                if let latest = messages.last { updateRoomPreview(from: latest) }
+                if let latest = messages.last(where: showsInFeed) { updateRoomPreview(from: latest) }
                 isLoadingMessages = false
                 await memberRefresh.value
             } catch {
@@ -1229,7 +1237,46 @@ final class ChatStore: ObservableObject {
     }
 
     func isUnread(_ room: Room) -> Bool {
-        readState.isUnread(room, selectedRoomID: selectedRoomID)
+        readState.isUnread(roomAsShown(room), selectedRoomID: selectedRoomID)
+    }
+
+    /// The room as its unread dot reads it: once its newest shown message is known for its current activity, the room
+    /// is as recent as that message, so messages its feed hides do not count.
+    private func roomAsShown(_ room: Room) -> Room {
+        guard let shown = shownActivityByRoomID[room.id],
+              shown.activity == (room.lastActivity ?? room.createdAt) else { return room }
+        return room.updating(lastActivity: shown.latest ?? room.createdAt)
+    }
+
+    // MARK: Messages for people
+
+    private struct ShownActivity {
+        /// The room's activity when this was read.
+        let activity: String
+        /// The timestamp of its newest message the feed shows, or nil when it shows none.
+        let latest: String?
+    }
+
+    func showsAllMessages(in roomID: String) -> Bool {
+        showsAllMessagesRoomIDs.contains(roomID)
+    }
+
+    /// The room menu's switch: every message in the room, or only what people wrote and what agents marked for people.
+    func setShowsAllMessages(_ on: Bool, in roomID: String) {
+        guard on != showsAllMessages(in: roomID) else { return }
+        if on { showsAllMessagesRoomIDs.insert(roomID) } else { showsAllMessagesRoomIDs.remove(roomID) }
+        localPreferences.saveShowsAllMessagesRoomIDs(showsAllMessagesRoomIDs)
+        // The room's preview and unread dot follow what its feed shows, so both are read again.
+        shownActivityByRoomID.removeValue(forKey: roomID)
+        previewActivityByRoomID.removeValue(forKey: roomID)
+        if roomID == selectedRoomID, let latest = messages.last(where: showsInFeed) { updateRoomPreview(from: latest) }
+        scheduleRoomPreviewRefresh()
+    }
+
+    /// Whether the message's room draws it outside a fold: always with the room's switch on, and otherwise as
+    /// `MessageVisibility` says.
+    func showsInFeed(_ message: ChatMessage) -> Bool {
+        showsAllMessages(in: message.roomID) || MessageVisibility.showsByDefault(message)
     }
 
     func isWorking(_ room: Room, at now: Date = Date()) -> Bool {
@@ -1933,8 +1980,14 @@ final class ChatStore: ObservableObject {
                           (current.lastActivity ?? current.createdAt) == capturedActivity else {
                         continue
                     }
-                    if let latest { updateRoomPreview(from: latest) }
+                    if let latest {
+                        updateRoomPreview(from: latest)
+                    } else {
+                        roomMessagePreviews.removeValue(forKey: room.id)
+                    }
                     previewActivityByRoomID[room.id] = capturedActivity
+                    shownActivityByRoomID[room.id] = ShownActivity(activity: capturedActivity,
+                                                                   latest: latest?.timestamp)
                 } catch {
                     continue
                 }
@@ -1947,7 +2000,7 @@ final class ChatStore: ObservableObject {
         var seenCutoffs: Set<String> = []
         while !Task.isCancelled {
             let page = try await connection.history(roomID: roomID, limit: 20, before: before)
-            if let latest = Self.visibleMessages(in: page).last { return latest }
+            if let latest = Self.visibleMessages(in: page).last(where: showsInFeed) { return latest }
             guard page.count == 20,
                   let cutoff = page.first?.timestamp,
                   !cutoff.isEmpty,
@@ -2011,14 +2064,25 @@ final class ChatStore: ObservableObject {
               let index = rooms.firstIndex(where: { $0.roomID == message.roomID }) else { return }
         let currentActivity = rooms[index].activityDate
         if let currentActivity, activity <= currentActivity { return }
+        noteShownActivity(of: message, in: rooms[index])
         rooms[index] = rooms[index].updating(lastActivity: message.timestamp)
         rooms.sort(by: roomSort)
         recordRoomMutation(roomID: message.roomID)
         if message.roomID == selectedRoomID { markSelectedRoomRead() }
     }
 
+    /// Keeps a room's newest shown message in step with a message that moves its activity on. A message the feed
+    /// hides keeps the newest shown one, when that was known for the room's activity before it.
+    private func noteShownActivity(of message: ChatMessage, in room: Room) {
+        if message.isThinking || showsInFeed(message) {
+            shownActivityByRoomID[room.id] = ShownActivity(activity: message.timestamp, latest: message.timestamp)
+        } else if let known = shownActivityByRoomID[room.id], known.activity == (room.lastActivity ?? room.createdAt) {
+            shownActivityByRoomID[room.id] = ShownActivity(activity: message.timestamp, latest: known.latest)
+        }
+    }
+
     private func updateRoomPreview(from message: ChatMessage) {
-        guard !message.isThinking else { return }
+        guard !message.isThinking, showsInFeed(message) else { return }
         let preview = (message.content.hasPrefix("cow1:") ? "Encrypted message" : message.content)
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
