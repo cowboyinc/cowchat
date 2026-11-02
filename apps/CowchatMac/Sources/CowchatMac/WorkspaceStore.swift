@@ -135,11 +135,12 @@ final class WorkspaceStore: ObservableObject {
         guard let store = accountGlobal, let home = homeRoom else { return }
         let name = homeSessions.name(of: session)
         if let room = await sessionRoom(for: session, named: name, in: store, home: home), accountGlobal === store {
-            await select(room: room, on: .accountGlobal)
+            if !isSelected(room, on: .accountGlobal) { await select(room: room, on: .accountGlobal) }
             return
         }
         guard accountGlobal === store else { return }
-        await select(room: home, on: .accountGlobal)
+        // Opening the room again would load its messages again, so Home already open stays as it is.
+        if !isSelected(home, on: .accountGlobal) { await select(room: home, on: .accountGlobal) }
         guard accountGlobal === store, store.selectedRoomID == home.id else { return }
         store.startDraft(with: "@\(name) ")
     }

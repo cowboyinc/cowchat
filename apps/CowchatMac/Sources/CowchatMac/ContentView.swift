@@ -655,30 +655,46 @@ private struct SidebarRoomLists: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: anyAgentsThinking ? 10 : 60)) { timeline in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    HomePlaces(account: accountOrLocal, home: home)
-                    if visibleRoomsEmpty && isSearchActive {
-                        emptyRoomsState
-                    } else {
-                        section(for: .local, store: local, at: timeline.date)
-                        if hasGlobal || hasAccountGlobal {
-                            sectionHeader("Global rooms")
-                        }
-                        if hasGlobal {
-                            section(for: .global, store: globalOrLocal, at: timeline.date)
-                        }
-                        if hasAccountGlobal {
-                            section(for: .accountGlobal, store: accountOrLocal, at: timeline.date)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        HomePlaces(account: accountOrLocal, home: home)
+                        if visibleRoomsEmpty && isSearchActive {
+                            emptyRoomsState
+                        } else {
+                            section(for: .local, store: local, at: timeline.date)
+                            if hasGlobal || hasAccountGlobal {
+                                sectionHeader("Global rooms")
+                            }
+                            if hasGlobal {
+                                section(for: .global, store: globalOrLocal, at: timeline.date)
+                            }
+                            if hasAccountGlobal {
+                                section(for: .accountGlobal, store: accountOrLocal, at: timeline.date)
+                            }
                         }
                     }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 12)
                 }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 12)
+                .scrollIndicators(.hidden)
+                // Home's sessions sit above the rooms, so the open room's row is scrolled into view when it changes,
+                // at once, as a native list reveals its selection.
+                .onChange(of: selectedRowID) { id in
+                    if let id { proxy.scrollTo(id) }
+                }
             }
-            .scrollIndicators(.hidden)
         }
     }
+
+    /// The open room's row, as `rowID` names it.
+    private var selectedRowID: String? {
+        let server = workspace.activeServer
+        return workspace.store(for: server)?.selectedRoomID.map { Self.rowID($0, on: server) }
+    }
+
+    /// A room row's ID for scrolling to it. Room IDs are each server's own, so the server is part of it.
+    static func rowID(_ roomID: String, on server: WorkspaceStore.Server) -> String { "\(server.rawValue)/\(roomID)" }
 
     private func baseRooms(in store: ChatStore, server: WorkspaceStore.Server) -> [Room] {
         // Lobby belongs in local navigation, not in the global room list.
@@ -739,6 +755,7 @@ private struct SidebarRoomLists: View {
             VStack(spacing: 0) {
                 ForEach(RoomSidebarPresentation.sortedByRecency(rooms)) { room in
                     SidebarRoomRowButton(store: store, room: room, server: server, now: now)
+                        .id(Self.rowID(room.id, on: server))
                 }
             }
             .padding(.bottom, 10)

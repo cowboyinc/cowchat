@@ -89,6 +89,13 @@ protocol CowchatConnectionProtocol: AnyObject {
 }
 
 extension CowchatConnectionProtocol {
+    /// Sends a message that mentions no one.
+    func send(roomID: String, content: String) async throws -> ChatMessage {
+        try await send(roomID: roomID, content: content, mentions: [])
+    }
+}
+
+extension CowchatConnectionProtocol {
     func reconfigure(profile _: ConnectionProfile) {}
 
     func roomLeases(roomID: String) async throws -> [RoomLease] {
