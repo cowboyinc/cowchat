@@ -144,10 +144,13 @@ final class HomeSessions: ObservableObject {
     /// The rows under Home while the more row is closed: every session stopped at a prompt, since its person must
     /// answer it there, then the most recently started of the rest, up to five rows in all, in Home's order so a row
     /// never jumps when it is picked. With five or fewer live, all of them. More than five at a prompt all show.
-    var picked: [LiveSession] {
-        guard sessions.count > Self.sidebarLimit else { return sessions }
+    var picked: [LiveSession] { Self.pick(from: sessions) }
+
+    /// The pick from `sessions`, kept in their order. The Join sheet's rows use it too.
+    static func pick(from sessions: [LiveSession]) -> [LiveSession] {
+        guard sessions.count > sidebarLimit else { return sessions }
         let prompted = sessions.filter { $0.state == .prompt }
-        let rest = sessions.filter { $0.state != .prompt }.prefix(max(0, Self.sidebarLimit - prompted.count))
+        let rest = sessions.filter { $0.state != .prompt }.prefix(max(0, sidebarLimit - prompted.count))
         let ids = Set(prompted.map(\.id)).union(rest.map(\.id))
         return sessions.filter { ids.contains($0.id) }
     }
@@ -158,11 +161,13 @@ final class HomeSessions: ObservableObject {
     /// How many sessions the pick leaves out. The more row shows only when it is more than none.
     var hiddenCount: Int { sessions.count - picked.count }
 
+    var moreTitle: String { Self.moreTitle(hidden: hiddenCount, showsAll: showsAll) }
+
     // copy:
     /// The more row's words: how many more it shows, or once open, how many it hides again.
-    var moreTitle: String {
-        guard showsAll else { return "Show \(hiddenCount) more" }
-        return hiddenCount == 1 ? "Hide 1 session" : "Hide \(hiddenCount) sessions"
+    static func moreTitle(hidden: Int, showsAll: Bool) -> String {
+        guard showsAll else { return "Show \(hidden) more" }
+        return hidden == 1 ? "Hide 1 session" : "Hide \(hidden) sessions"
     }
 
     // copy:

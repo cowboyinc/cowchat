@@ -420,59 +420,6 @@ struct SocialConsentDetails: View {
     }
 }
 
-/// Accepting an invitation, from Friends or as the Inbox's Join sheet: what the room holds, then which of the person's
-/// live sessions joins it, or none, then Decline at the left and Cancel and Join at the right.
-struct SocialInvitationReview: View {
-    let invitation: SocialRoomInvitation
-    let sessions: [LiveSession]
-    let sessionName: (LiveSession) -> String
-    @Binding var selectedSession: String?
-    let busy: Bool
-    let error: String?
-    let onCancel: () -> Void
-    let onDecline: () -> Void
-    let onAccept: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Label("Join \(invitation.roomName)?", systemImage: "envelope.open").gallopText(.h3)
-            Text("Invited by @\(invitation.from.handle)").gallopText(.bodyM)
-            SocialConsentDetails(members: invitation.members, agents: invitation.agents, slack: invitation.slackConnected)
-            if !invitation.proposedAgents.isEmpty {
-                Text("Suggested agents: \(invitation.proposedAgents.map(\.name).joined(separator: ", "))").gallopText(.caption)
-            }
-            // copy:
-            Text("Add a session").gallopText(.caption, color: SemanticColor.textSecondary)
-            Picker("Add a session", selection: $selectedSession) {
-                ForEach(sessions) { session in
-                    HStack(spacing: 8) {
-                        Text(sessionName(session)).gallopText(.bodyM)
-                        Text(session.place).gallopText(.bodyS, color: SemanticColor.textTertiary)
-                    }
-                    .tag(Optional(session.id))
-                }
-                // copy:
-                Text("No session").gallopText(.bodyM).tag(String?.none)
-            }
-            .pickerStyle(.radioGroup)
-            .labelsHidden()
-            // copy:
-            Text("You can join without adding a session. This does not wake a session or authorize tool use.")
-                .gallopText(.caption, color: SemanticColor.textSecondary)
-            if let error { Text(error).foregroundStyle(.red).font(.caption) }
-            HStack {
-                // copy:
-                Button("Decline", role: .destructive, action: onDecline).disabled(busy)
-                Spacer()
-                Button("Cancel", action: onCancel)
-                // copy:
-                Button("Join", action: onAccept).buttonStyle(CowchatPillButtonStyle(prominent: true)).disabled(busy)
-            }
-        }.padding(24).frame(width: 570).background(SemanticColor.surface500)
-        .buttonStyle(CowchatPillButtonStyle())
-    }
-}
-
 struct SocialProfileEditor: View {
     @Binding var handle: String
     @Binding var displayName: String

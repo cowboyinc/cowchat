@@ -579,7 +579,7 @@ private struct SessionRowLabel: View {
 /// asterisk on its clay, or Codex's code glyph on near-black. Gallop has no
 /// tokens for other products' marks, so their colours are written here. In
 /// dark mode Codex's mark turns light so it keeps 3:1 on every dark surface.
-private struct HarnessMark: View {
+struct HarnessMark: View {
     let harness: LiveSession.Harness
     var size: CGFloat = 16
 

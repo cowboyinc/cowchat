@@ -39,6 +39,8 @@ public enum GallopIcon: String, CaseIterable, Sendable {
     case bell
     /// A run of agent messages a room folds away.
     case chatbot
+    /// The Join sheet's tick on the chosen session.
+    case checkmark
     case chevronDown = "chevron-down"
     /// Dash's 16pt Chat detail chevron, exported separately from the 24pt
     /// large variant because the paths are not scale-equivalent.
