@@ -1743,6 +1743,9 @@ private struct ChatRoomView: View {
         )
     }
 
+    /// The feed's padding under its last message while the composer is open, which keeps the message above the field.
+    private static let openComposerClearance: CGFloat = 86
+
     private var messageList: some View {
         TimelineView(.periodic(from: .now, by: 60)) { timeline in
             ScrollViewReader { proxy in
@@ -1811,7 +1814,7 @@ private struct ChatRoomView: View {
                         }
                         .padding(.horizontal, 20)
                         .padding(.top, 18)
-                        .padding(.bottom, isComposerExpanded ? 86 : 72)
+                        .padding(.bottom, isComposerExpanded ? Self.openComposerClearance : 72)
                     }
                     .coordinateSpace(name: "cowchatFeed")
                     .onPreferenceChange(FeedBottomOffsetKey.self) { markerY in
@@ -1863,14 +1866,15 @@ private struct ChatRoomView: View {
                         newMessageCount += 1
                     }
                 }
-                // The open composer is taller than its button, so a feed at its end moves up to keep the newest
-                // message above the field.
+                // The open composer covers the feed's last lines, so a feed at its end moves up to show the newest
+                // message whole above the field, as far as the feed's padding under it. It moves once the composer
+                // has opened and without animating, since an animated scroll here is lost to the field taking focus.
                 .onChange(of: isComposerExpanded) { expanded in
-                    guard expanded, isMessageListNearBottom, hasPositionedInitialScroll else { return }
-                    DispatchQueue.main.async {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo("message-list-bottom", anchor: .bottom)
-                        }
+                    guard expanded, isMessageListNearBottom, hasPositionedInitialScroll,
+                          viewport.size.height > 0 else { return }
+                    let clearance = UnitPoint(x: 0.5, y: max(0, 1 - Self.openComposerClearance / viewport.size.height))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        proxy.scrollTo("message-list-bottom", anchor: clearance)
                     }
                 }
                 .onChange(of: store.isLoadingMessages) { loading in
