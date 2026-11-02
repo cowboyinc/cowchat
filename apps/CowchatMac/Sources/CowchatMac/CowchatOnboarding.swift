@@ -171,7 +171,8 @@ struct CowchatSetupWizard: View {
     /// A card that can only say why sign-in can't go on, with Try again as its one button.
     private func notice(_ line: String) -> some View {
         VStack(spacing: 20) {
-            CentredText(text: line, style: .bodyM, color: SemanticColor.textPrimary)
+            Text(line).gallopText(.bodyM, color: SemanticColor.textPrimary)
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             // copy:
             Button { Task { await recover() } } label: { Text("Try again").frame(maxWidth: .infinity) }
                 .buttonStyle(CowchatPillButtonStyle(prominent: true))
@@ -312,7 +313,8 @@ struct CowchatSetupWizard: View {
     @ViewBuilder
     private func failure(_ message: String?, retry: (() -> Void)? = nil) -> some View {
         if let message {
-            CentredText(text: message, style: .bodyS, color: SemanticColor.textError)
+            Text(message).gallopText(.bodyS, color: SemanticColor.textError)
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .padding(.top, 12)
             if let retry {
@@ -405,38 +407,16 @@ private struct SetupTitle: View {
                     .accessibilityHidden(true)
                     .padding(.bottom, 24)
             }
-            CentredText(text: title, style: .h2, color: SemanticColor.textPrimary)
+            Text(title).gallopText(.h2, color: SemanticColor.textPrimary)
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             if let line {
-                CentredText(text: line, style: .bodyL, color: SemanticColor.textSecondary)
+                Text(line).gallopText(.bodyL, color: SemanticColor.textSecondary)
+                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: 400)
                     .padding(.top, 10)
             }
         }
         .padding(.bottom, 28)
-    }
-}
-
-/// Centred lines in a Gallop type role. `gallopText` sets the exact line box with `.lineHeight` on macOS 26 and later,
-/// and with it a centred line that wraps is drawn about 27 points right of its frame and cut off at the frame's end
-/// (Home's quiet state shows the same). So centred text takes Gallop's earlier line box, from its line spacing and
-/// padding, which centres correctly.
-private struct CentredText: View {
-    let text: String
-    let style: GallopTextStyle
-    let color: Color
-    @Environment(\.gallopFontProvider) private var provider
-
-    var body: some View {
-        let layout = GallopLineLayout(targetLineHeight: style.lineHeight,
-                                      naturalLineHeight: provider.naturalLineHeight(for: style))
-        Text(text)
-            .font(provider.font(for: style))
-            .tracking(style.tracking)
-            .lineSpacing(layout.lineSpacing)
-            .padding(.vertical, layout.verticalPadding)
-            .foregroundStyle(color)
-            .multilineTextAlignment(.center)
-            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

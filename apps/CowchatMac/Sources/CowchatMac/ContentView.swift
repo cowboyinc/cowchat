@@ -148,7 +148,7 @@ struct ContentView: View {
             store.roomBeingRenamed = nil
             workspace.roomDraft = nil
             workspace.roomPeople = nil
-            workspace.show(destination == .inbox ? .inbox : .friends)
+            workspace.show(destination.page)
         }
         .onReceive(NotificationCenter.default.publisher(for: .cowchatShowFriends)) { _ in
             workspace.show(.friends)

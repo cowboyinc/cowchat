@@ -150,14 +150,27 @@ public extension EnvironmentValues {
     }
 }
 
+/// How `gallopText` sets a role's line box. macOS 26's exact line height draws leading text well, but a centred or
+/// trailing line that wraps is drawn about 27 points right of its frame and cut off at the frame's end. Text that isn't
+/// leading takes the earlier line box, from `GallopLineLayout`'s line spacing and padding, which aligns correctly.
+enum GallopLineBox: Equatable {
+    case exactLineHeight
+    case lineSpacing
+
+    static func path(for alignment: TextAlignment) -> GallopLineBox {
+        alignment == .leading ? .exactLineHeight : .lineSpacing
+    }
+}
+
 private struct GallopTextModifier: ViewModifier {
     let style: GallopTextStyle
     @Environment(\.gallopFontProvider) private var provider
+    @Environment(\.multilineTextAlignment) private var alignment
 
     @ViewBuilder
     func body(content: Content) -> some View {
         #if compiler(>=6.2)
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, *), GallopLineBox.path(for: alignment) == .exactLineHeight {
             content
                 .font(provider.font(for: style))
                 .tracking(style.tracking)

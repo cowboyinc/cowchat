@@ -542,6 +542,11 @@ final class SocialTests: XCTestCase {
         XCTAssertEqual(store.friends.first?.account.handle, "renzo")
         XCTAssertEqual(store.requests.first?.from.handle, "rachel")
         try render(FriendsPage(social: store, newRoom: { _ in }, signIn: {}), name: "mac-friends-signed-in")
+        try render(ScrollView { BotSettings(social: store).padding(24) }, name: "mac-settings-bots")
+        try render(NewBotSheet(social: store, cancel: {}), name: "mac-bot-new")
+        let issued = SocialCreatedAgent(agent: SocialAgent(id: "agent", ownerId: account.id, name: "Release bot",
+                                                           discoverable: true), apiKey: "cagt_fixture_key")
+        try render(BotCredentialSheet(issued: issued, endpoint: endpoint, done: {}), name: "mac-bot-credential")
         var loggedOut = false
         store.onSessionChanged = { value in loggedOut = value == nil }
         await store.signOut()
@@ -701,7 +706,9 @@ final class SocialTests: XCTestCase {
         await store.refresh()
         XCTAssertEqual(store.identities.map(\.provider), ["github"])
         XCTAssertEqual(store.availableLinkProviders, ["google"])
-        try render(AccountSettings(social: store, signOut: {}), name: "mac-account-link-provider")
+        // The page cancels a link under way as it closes, so its render is gone before Link is pressed.
+        try autoreleasepool { try render(AccountSettings(social: store, signOut: {}), name: "mac-account-link-provider") }
+        try await Task.sleep(for: .milliseconds(200))
         XCTAssertNil(store.linkProvider("github"))
         var activated: SocialSession?
         store.onSessionChanged = { activated = $0 }

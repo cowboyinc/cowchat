@@ -277,7 +277,7 @@ private struct BotSheetFrame<Content: View, Buttons: View>: View {
 }
 
 /// New bot: its name in a 40 field, then Cancel and Create at the right. Escape is Cancel and Return is Create.
-private struct NewBotSheet: View {
+struct NewBotSheet: View {
     @ObservedObject var social: SocialStore
     let cancel: () -> Void
     @State private var name = ""
@@ -326,7 +326,7 @@ private struct NewBotSheet: View {
 
 /// A bot's new credential, shown once: the key in a read-only 40 capsule, Copy command (the flags every Cowchat agent
 /// command takes, the bot's ID among them, which stays off the screen), Copy key and Done.
-private struct BotCredentialSheet: View {
+struct BotCredentialSheet: View {
     let issued: SocialCreatedAgent
     let endpoint: URL
     let done: () -> Void

@@ -21,6 +21,14 @@ struct SocialNotificationSnapshot {
 enum SocialDestination: String {
     case friends = "Friends"
     case inbox = "Invitations"
+
+    /// The page a notification's click shows: Friends for a friend request, the Inbox for a room invitation.
+    var page: WorkspaceStore.Page {
+        switch self {
+        case .friends: return .friends
+        case .inbox: return .inbox
+        }
+    }
 }
 
 struct SocialNotificationEvent: Equatable {

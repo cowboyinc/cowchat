@@ -36,6 +36,22 @@ enum FriendsList {
         ].compactMap { $0 }
     }
 
+    /// What the page shows under its header.
+    enum Content: Equatable {
+        /// "Sign in to add friends." with Sign in, and no accessory.
+        case signedOut
+        /// "No friends yet." with the person's handle.
+        case empty
+        case groups([Group])
+    }
+
+    static func content(signedIn: Bool, requests: [SocialFriendRequest], friends: [SocialFriend],
+                        viewer: String?) -> Content {
+        guard signedIn else { return .signedOut }
+        let groups = groups(requests: requests, friends: friends, viewer: viewer)
+        return groups.isEmpty ? .empty : .groups(groups)
+    }
+
     // copy:
     /// The header's count, "12 friends", or nothing at zero.
     static func countLine(_ count: Int) -> String? {
@@ -85,11 +101,11 @@ struct FriendsPage: View {
                     .padding(.leading, 20)
                     .padding(.top, 8)
             }
-            if !isSignedIn {
-                signedOut
-            } else {
-                let groups = FriendsList.groups(requests: social.requests, friends: social.friends, viewer: viewer)
-                if groups.isEmpty { empty } else { list(groups) }
+            switch FriendsList.content(signedIn: isSignedIn, requests: social.requests, friends: social.friends,
+                                       viewer: viewer) {
+            case .signedOut: signedOut
+            case .empty: empty
+            case .groups(let groups): list(groups)
             }
             Spacer(minLength: 0)
         }
@@ -271,10 +287,15 @@ struct FriendRow<End: View>: View {
                 .truncationMode(.tail)
                 .frame(width: Self.handleWidth, alignment: .trailing)
             Spacer().frame(width: 16)
-            end()
-                .fixedSize()
-                .background(GeometryReader { Color.clear.preference(key: FriendsEndWidthKey.self, value: $0.size.width) })
-                .frame(width: endWidth, alignment: .trailing)
+            // The column keeps its width when the end is empty, as a Sent row's is.
+            ZStack(alignment: .trailing) {
+                Color.clear.frame(width: endWidth, height: 0)
+                end()
+                    .fixedSize()
+                    .background(GeometryReader {
+                        Color.clear.preference(key: FriendsEndWidthKey.self, value: $0.size.width)
+                    })
+            }
         }
         .padding(.horizontal, 16)
         .frame(height: Self.height)
