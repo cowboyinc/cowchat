@@ -6,11 +6,13 @@ struct InboxPage: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var inbox: InboxStore
     @ObservedObject var home: HomeSessions
+    /// The rows' width with their insets, which the header takes.
+    @State private var rowsWidth: CGFloat?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // copy:
-            PageHeader(title: "Inbox") {
+            PageHeader(title: "Inbox", rowsWidth: rowsWidth) {
                 Button("Mark all read") { inbox.markAllRead() }
                     .buttonStyle(CowchatPillButtonStyle())
                     .disabled(!inbox.hasUnreadMessages)
@@ -32,6 +34,7 @@ struct InboxPage: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onPreferenceChange(PageRowsWidthKey.self) { rowsWidth = $0 }
         .sheet(item: $inbox.joining) { item in
             InboxJoinSheet(item: item, inbox: inbox, home: home)
                 .environmentObject(workspace)
@@ -56,6 +59,7 @@ struct InboxPage: View {
                 .padding(.bottom, 16)
             }
             .padding(.horizontal, PageLayout.listInset)
+            .reportsPageRowsWidth()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollIndicators(.automatic)
@@ -282,7 +286,9 @@ struct InboxPanel: View {
                         GallopIconView(icon: .chevronRightSmall, fallbackSystemName: "chevron.right", size: 16)
                             .foregroundStyle(SemanticColor.iconTertiary)
                     }
-                    .padding(.horizontal, 16)
+                    // The label starts under the rows' titles: their 16 in, the 20 dot box and the 8 after it.
+                    .padding(.leading, 16 + 20 + 8)
+                    .padding(.trailing, 16)
                     .frame(height: 44)
                 }
                 .buttonStyle(PageRowButtonStyle())

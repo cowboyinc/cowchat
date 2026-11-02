@@ -226,6 +226,9 @@ private struct SidebarView: View {
     @Binding var isSettingsPresented: Bool
     @State private var isArchiveExpanded = false
     @State private var isRoomBrowserPresented = false
+    /// What a legacy scroller takes from the room lists' right edge, which the pinned Inbox and Home rows give up too so
+    /// they end where Team's row ends.
+    @State private var listsScrollerWidth: CGFloat = 0
     @FocusState private var isSearchFocused: Bool
     /// Once per process: the launch-focus clear must not repeat on sidebar re-mounts.
     private static var didClearLaunchFocus = false
@@ -261,8 +264,10 @@ private struct SidebarView: View {
             }
 
             InboxNavRow(inbox: workspace.inbox)
+                .padding(.trailing, listsScrollerWidth)
 
             HomeNavRow(account: workspace.accountGlobal ?? workspace.local, home: workspace.homeSessions)
+                .padding(.trailing, listsScrollerWidth)
 
             SidebarRoomLists(
                 local: workspace.local,
@@ -272,6 +277,7 @@ private struct SidebarView: View {
                 hasAccountGlobal: workspace.accountGlobal != nil,
                 hasGlobal: workspace.global != nil
             )
+            .onPreferenceChange(SidebarScrollerWidthKey.self) { listsScrollerWidth = $0 }
 
             // Archive stays pinned above the footer instead of trailing the
             // room list (which floats it mid-sidebar when the list is short).
@@ -733,6 +739,24 @@ private final class SidebarListLayout {
     var height: CGFloat = 0
 }
 
+/// What a legacy scroller takes from the room lists' width: the lists' width less their content's, or none.
+private struct SidebarScrollerWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// The room lists' content width, measured inside their scroll view.
+private struct SidebarListsContentWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct SidebarListFramesKey: PreferenceKey {
     static let defaultValue: [String: CGRect] = [:]
 
@@ -765,6 +789,9 @@ private struct SidebarRoomLists: View {
     @State private var layout = SidebarListLayout()
     /// Room at the lists' end, so a row can scroll to the top edge when the end is near.
     @State private var endRoom: CGFloat = 0
+    /// The lists' width and their content's, whose difference is what a legacy scroller takes.
+    @State private var listsWidth: CGFloat = 0
+    @State private var contentWidth: CGFloat = 0
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: anyAgentsThinking ? 10 : 60)) { timeline in
@@ -794,16 +821,28 @@ private struct SidebarRoomLists: View {
                     }
                     .padding(.horizontal, 8)
                     .padding(.bottom, Self.endPadding)
+                    .background {
+                        GeometryReader { content in
+                            Color.clear.preference(key: SidebarListsContentWidthKey.self, value: content.size.width)
+                        }
+                    }
                 }
                 .coordinateSpace(name: Self.coordinateSpace)
                 .background {
                     GeometryReader { viewport in
                         Color.clear
-                            .onAppear { layout.height = viewport.size.height }
+                            .onAppear {
+                                layout.height = viewport.size.height
+                                listsWidth = viewport.size.width
+                            }
                             .onChange(of: viewport.size.height) { layout.height = $0 }
+                            .onChange(of: viewport.size.width) { listsWidth = $0 }
                     }
                 }
                 .onPreferenceChange(SidebarListFramesKey.self) { layout.frames = $0 }
+                .onPreferenceChange(SidebarListsContentWidthKey.self) { contentWidth = $0 }
+                .preference(key: SidebarScrollerWidthKey.self,
+                            value: contentWidth > 0 ? max(0, listsWidth - contentWidth) : 0)
                 .scrollIndicators(.hidden)
                 // Home's sessions sit above the rooms, so the open room's row is scrolled into view when it changes,
                 // at once, as a native list reveals its selection.
@@ -1543,6 +1582,13 @@ private struct ChatRoomView: View {
     // copy:
     private var title: String { isHome ? "Home" : room.name }
 
+    /// Every session in Home is its person's, so Home names a session's messages by its name alone, without the handle
+    /// the server adds. Other rooms keep the server's name.
+    private func senderName(of message: ChatMessage) -> String? {
+        guard isHome, let session = home.sessions.first(where: { $0.id == message.agentID }) else { return nil }
+        return home.name(of: session)
+    }
+
     /// The @names this room's messages and composer draw in the accent: the live sessions of the room's owner when
     /// that is the viewer, since the app knows only the viewer's sessions, and the people the app knows.
     private var mentionMarks: MentionMarks {
@@ -1764,12 +1810,6 @@ private struct ChatRoomView: View {
                                 color: summary.contains("active")
                                     ? SemanticColor.warning : SemanticColor.textTertiary
                             )
-                        // The room's switch is on, so its feed has every message.
-                        if store.showsAllMessages(in: room.id) {
-                            // copy:
-                            Text(" · Agent conversations included")
-                                .gallopText(.caption, color: SemanticColor.textTertiary)
-                        }
                     }
                     .lineLimit(1)
                 }
@@ -1877,6 +1917,7 @@ private struct ChatRoomView: View {
                                         isMine: message.agentID == store.agentID,
                                         now: timeline.date,
                                         quiet: quiet,
+                                        senderName: senderName(of: message),
                                         onSaveAttachment: room.encrypted ? nil : { saveAttachment($0) },
                                         onOpenAttachment: room.encrypted ? nil : { openAttachment($0) }
                                     )
@@ -2329,6 +2370,8 @@ private struct MessageFeedRow: View {
     /// A message the room hides by default, drawn because its run is open or the room's switch is on. Its text takes
     /// Text/Tertiary.
     var quiet = false
+    /// The name over the message when the room names its sender itself, as Home does its own sessions.
+    var senderName: String?
     var onSaveAttachment: ((FileAttachment) -> Void)?
     var onOpenAttachment: ((FileAttachment) -> Void)?
     @State private var isHovering = false
@@ -2373,7 +2416,7 @@ private struct MessageFeedRow: View {
                 AgentAvatar(name: message.agentName, size: 24)
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 8) {
-                        Text(message.agentName)
+                        Text(senderName ?? message.agentName)
                             .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                         Text(relativeTimestamp)
                             .gallopText(.caption, color: SemanticColor.textTertiary)
@@ -2486,7 +2529,7 @@ private struct MessageFeedRow: View {
         // Keep the specific agent name in the announcement — several
         // claude-* agents can share a room, and the overlay replaces the
         // visual name/timestamp pair for VoiceOver users.
-        resolvedApp.map { "\(message.agentName), open in \($0.displayName)" }
+        resolvedApp.map { "\(senderName ?? message.agentName), open in \($0.displayName)" }
     }
     private func openInApp() { if let resolvedApp { AgentAppResolver.open(resolvedApp) } }
 }

@@ -8,10 +8,12 @@ struct TeamPage: View {
     /// The account's rooms, which say which rows open a room.
     @ObservedObject var account: ChatStore
     @FocusState private var isSearchFocused: Bool
+    /// The rows' width with their insets, which the header takes.
+    @State private var rowsWidth: CGFloat?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PageHeader(title: "Team", caption: caption) {
+            PageHeader(title: "Team", caption: caption, rowsWidth: rowsWidth) {
                 // copy: the spec's "Search people, branches or repos" does not fit the 240 capsule in Body M.
                 SearchCapsule(placeholder: "Search people or branches", text: $team.query,
                               isFocused: $isSearchFocused, clearLabel: "Clear team search", width: 240)
@@ -30,6 +32,7 @@ struct TeamPage: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onPreferenceChange(PageRowsWidthKey.self) { rowsWidth = $0 }
     }
 
     /// The count once the server has answered and someone shares their work; an empty page says so in its line.
@@ -70,6 +73,7 @@ struct TeamPage: View {
             .padding(.top, 4)
             .padding(.bottom, 16)
             .padding(.horizontal, PageLayout.listInset)
+            .reportsPageRowsWidth()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollIndicators(.automatic)

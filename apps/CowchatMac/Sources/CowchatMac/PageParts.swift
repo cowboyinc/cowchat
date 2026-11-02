@@ -13,15 +13,20 @@ enum PageLayout {
 
 /// A page's header, drawn as a room's is: 58 tall with 10 above, the title in Heading 4 at 18 from the card's edge, an
 /// optional line under it in Caption, Text/Tertiary, and an accessory at the trailing end, 20 in. The title keeps its
-/// place whether or not there is a line under it, so it does not move between a room and a page.
+/// place whether or not there is a line under it, so it does not move between a room and a page. It is as wide as the
+/// page's rows and their insets (`rowsWidth`), so its end stays over theirs when a legacy scroller takes the list's
+/// right edge.
 struct PageHeader<Accessory: View>: View {
     let title: String
     var caption: String?
+    var rowsWidth: CGFloat?
     @ViewBuilder var accessory: () -> Accessory
 
-    init(title: String, caption: String? = nil, @ViewBuilder accessory: @escaping () -> Accessory) {
+    init(title: String, caption: String? = nil, rowsWidth: CGFloat? = nil,
+         @ViewBuilder accessory: @escaping () -> Accessory) {
         self.title = title
         self.caption = caption
+        self.rowsWidth = rowsWidth
         self.accessory = accessory
     }
 
@@ -46,7 +51,23 @@ struct PageHeader<Accessory: View>: View {
         .padding(.leading, 18)
         .padding(.trailing, 20)
         .frame(height: 58)
-        .frame(maxWidth: PageLayout.headerWidth, alignment: .leading)
+        .frame(maxWidth: rowsWidth ?? PageLayout.headerWidth, alignment: .leading)
+    }
+}
+
+/// The width of a page's rows and their insets, measured where the list draws them, which a legacy scroller narrows.
+struct PageRowsWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
+extension View {
+    /// Reports this view's width as the page's rows and their insets, for the header to take.
+    func reportsPageRowsWidth() -> some View {
+        background(GeometryReader { Color.clear.preference(key: PageRowsWidthKey.self, value: $0.size.width) })
     }
 }
 
@@ -104,7 +125,7 @@ struct PageRowSeam: View {
 
 /// The sidebar's search field as a view of its own: 36 tall, Textfield/Default in a capsule with a 1-point
 /// Border/Default edge, 11 at the sides, the 13 search icon in Icon/Tertiary, 8, the text in Body M, and once text is
-/// typed the 13 dismiss button in Icon/Subtle. Escape clears it and gives up the focus.
+/// typed the 13 dismiss button in Icon/Tertiary, which reads as enabled in dark mode where Icon/Subtle did not. Escape clears it and gives up the focus.
 struct SearchCapsule: View {
     let placeholder: String
     @Binding var text: String
@@ -130,7 +151,7 @@ struct SearchCapsule: View {
             if !text.isEmpty {
                 Button { text = "" } label: {
                     GallopIconView(icon: .dismiss, fallbackSystemName: "xmark.circle.fill", size: 13)
-                        .foregroundStyle(SemanticColor.iconSubtle)
+                        .foregroundStyle(SemanticColor.iconTertiary)
                 }
                 .buttonStyle(.plain)
                 .macAccessibleAction(label: clearLabel) { text = "" }

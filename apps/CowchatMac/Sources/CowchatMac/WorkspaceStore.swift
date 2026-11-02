@@ -367,13 +367,23 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    /// Pressing an Inbox message, or an answered invitation: its room opens at its latest messages, and it is read.
+    /// Pressing an Inbox message, or an answered invitation: its room opens at its latest messages, and only then is it
+    /// read. When the room cannot be opened the item stays unread, and the window's alert says so, as it does for the
+    /// app's other failures.
     func open(_ item: InboxItem) async {
-        inbox.markRead(item)
-        guard let store = store(for: item.server) else { return }
+        guard let store = store(for: item.server) else {
+            // copy:
+            activeStore.errorMessage = "Reconnect before opening this room."
+            return
+        }
         if !store.rooms.contains(where: { $0.id == item.roomID }) { try? await store.refreshRooms() }
-        guard let room = store.rooms.first(where: { $0.id == item.roomID }) else { return }
+        guard let room = store.rooms.first(where: { $0.id == item.roomID }) else {
+            // copy:
+            activeStore.errorMessage = "This room can't be opened. You may no longer be in it."
+            return
+        }
         await select(room: room, on: item.server)
+        if isSelected(room, on: item.server) { inbox.markRead(item) }
     }
 
     /// Join in the Join sheet: accepts the invitation with the chosen session, or none, then opens the room. The item
