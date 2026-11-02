@@ -12,9 +12,18 @@ final class InboxMenuBar: NSObject, NSPopoverDelegate {
     private var observers: Set<AnyCancellable> = []
     private weak var workspace: WorkspaceStore?
 
+    /// The app's menu bar item, once it has started.
+    private(set) static weak var current: InboxMenuBar?
+
+    /// Whether the panel stays open while the app is in the background. It closes as a menu does otherwise.
+    var keepsPanelOpen = false {
+        didSet { popover.behavior = keepsPanelOpen ? .applicationDefined : .transient }
+    }
+
     func start(workspace: WorkspaceStore) {
         guard self.workspace == nil else { return }
         self.workspace = workspace
+        Self.current = self
         let inbox = workspace.inbox
         popover.behavior = .transient
         popover.delegate = self

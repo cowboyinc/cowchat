@@ -91,7 +91,8 @@ struct InboxPage: View {
 
 /// One Inbox row, laid on the notification history's columns: 74 tall, 16 in at both sides, the unread dot centred in
 /// a 20 box on the title line, 8, the title over the message line, then the Room column (160) and the When column
-/// (64), each right-aligned and centred on the row's height, 16 apart. It is a button with the page row's hover and
+/// (80), each right-aligned and centred on the row's height, 16 apart. The When column is the spec's 64 widened to
+/// hold the sidebar's longest times, "59 min ago" and "59 sec ago", in Body S. It is a button with the page row's hover and
 /// press, and a menu that marks it read or unread and declines an open invitation.
 struct InboxRow: View {
     let item: InboxItem
@@ -105,7 +106,7 @@ struct InboxRow: View {
 
     static let height: CGFloat = 74
     static let roomWidth: CGFloat = 160
-    static let whenWidth: CGFloat = 64
+    static let whenWidth: CGFloat = 80
     static let titleMinWidth: CGFloat = 240
 
     var body: some View {

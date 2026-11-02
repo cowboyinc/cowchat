@@ -12,8 +12,8 @@ struct TeamPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             PageHeader(title: "Team", caption: caption) {
-                // copy:
-                SearchCapsule(placeholder: "Search people, branches or repos", text: $team.query,
+                // copy: the spec's "Search people, branches or repos" does not fit the 240 capsule in Body M.
+                SearchCapsule(placeholder: "Search people or branches", text: $team.query,
                               isFocused: $isSearchFocused, clearLabel: "Clear team search", width: 240)
             }
             if team.isLoaded {
@@ -166,7 +166,7 @@ struct TeamRow: View {
     @ViewBuilder private var pullRequest: some View {
         if let pullRequest = branch.pullRequest {
             HStack(spacing: 6) {
-                Text("#\(pullRequest.number)")
+                Text(verbatim: "#\(pullRequest.number)")
                     .gallopText(.bodyS, color: SemanticColor.textSecondary)
                     .lineLimit(1)
                     .fixedSize()
