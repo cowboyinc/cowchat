@@ -1469,11 +1469,11 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// Starts the open room's draft with `lead`, such as a session's @name and a space, unless it already starts with
-    /// it, and asks the room's composer to open with the cursor after it.
+    /// Starts the open room's draft with `lead`, such as a session's @name and a space, when the draft is empty, and
+    /// asks the room's composer to open with the cursor at the draft's end. A draft with text in it stays as it is.
     func startDraft(with lead: String) {
         guard let roomID = selectedRoomID else { return }
-        if !draft.hasPrefix(lead) { draft = lead + draft }
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { draft = lead }
         composerRequestRoomID = roomID
     }
 

@@ -243,6 +243,8 @@ private struct SidebarView: View {
                 RoomBrowserView(workspace: workspace)
             }
 
+            HomeNavRow(account: workspace.accountGlobal ?? workspace.local, home: workspace.homeSessions)
+
             SidebarRoomLists(
                 local: workspace.local,
                 globalOrLocal: workspace.global ?? workspace.local,
@@ -392,11 +394,10 @@ private struct SidebarNavRow: View {
     }
 }
 
-/// Home in the Lobby row's place, with the person's live sessions under it:
-/// at most five (`HomeSessions.picked`), then a row for the rest. They sit at
-/// the top of the room lists' scroll view, so however many sessions are
-/// live the rooms stay in reach.
-private struct HomePlaces: View {
+/// Home in place of the Lobby row, pinned above the room lists' scroll view
+/// as the Lobby row is, so it never scrolls away. Its live sessions scroll
+/// under it at the top of the lists (`HomePlaces`).
+private struct HomeNavRow: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var account: ChatStore
     @ObservedObject var home: HomeSessions
@@ -404,21 +405,42 @@ private struct HomePlaces: View {
     var body: some View {
         if workspace.accountGlobal != nil,
            let room = account.rooms.first(where: { $0.id == home.roomID }) {
+            // copy:
+            SidebarNavRow(title: "Home", isSelected: workspace.isSelected(room, on: .accountGlobal)) {
+                Task { await workspace.select(room: room, on: .accountGlobal) }
+            }
+            // The nav rows sit 12 in, as the Lobby row does, and the sessions 2 under.
+            .padding(.horizontal, 12)
+            .padding(.bottom, 2)
+        }
+    }
+}
+
+/// The person's live sessions under Home's pinned row: at most five
+/// (`HomeSessions.picked`), then a row for the rest. They sit at the top of
+/// the room lists' scroll view, so however many sessions are live the rooms
+/// stay in reach.
+private struct HomePlaces: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @ObservedObject var account: ChatStore
+    @ObservedObject var home: HomeSessions
+
+    var body: some View {
+        if workspace.accountGlobal != nil, account.rooms.contains(where: { $0.id == home.roomID }) {
             VStack(spacing: 2) {
-                // copy:
-                SidebarNavRow(title: "Home", isSelected: workspace.isSelected(room, on: .accountGlobal)) {
-                    Task { await workspace.select(room: room, on: .accountGlobal) }
-                }
                 ForEach(home.shown) { session in
                     SessionRow(home: home, session: session)
+                        .sidebarListItem("session/\(session.id)")
                 }
                 if home.hiddenCount > 0 {
                     SessionsMoreRow(home: home)
+                        .sidebarListItem("sessions-more")
                 }
             }
             // The lists sit 8 in; the nav rows sit 12 in, as the Lobby row does.
             .padding(.horizontal, 4)
-            .padding(.bottom, 10)
+            // Home's row and the first list keep the 10 between them they had.
+            .padding(.bottom, home.shown.isEmpty ? 8 : 10)
         }
     }
 }
@@ -644,6 +666,33 @@ private struct SidebarRoomRowButton: View {
     }
 }
 
+/// Where each row of the sidebar's lists sat in the scroll view when it last laid out, and the scroll view's height.
+/// A reference, so writing it while the lists scroll redraws nothing.
+private final class SidebarListLayout {
+    var frames: [String: CGRect] = [:]
+    var height: CGFloat = 0
+}
+
+private struct SidebarListFramesKey: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+private extension View {
+    /// A row of the sidebar's lists: scrolled to by `id`, and kept whole at the lists' top edge when it is.
+    func sidebarListItem(_ id: String) -> some View {
+        self.id(id).background {
+            GeometryReader { row in
+                Color.clear.preference(key: SidebarListFramesKey.self,
+                                       value: [id: row.frame(in: .named(SidebarRoomLists.coordinateSpace))])
+            }
+        }
+    }
+}
+
 private struct SidebarRoomLists: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var local: ChatStore
@@ -652,6 +701,10 @@ private struct SidebarRoomLists: View {
     @ObservedObject var home: HomeSessions
     let hasAccountGlobal: Bool
     let hasGlobal: Bool
+    /// Where the rows sat when the lists last laid out, kept apart from state so scrolling redraws nothing.
+    @State private var layout = SidebarListLayout()
+    /// Room at the lists' end, so a row can scroll to the top edge when the end is near.
+    @State private var endRoom: CGFloat = 0
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: anyAgentsThinking ? 10 : 60)) { timeline in
@@ -673,16 +726,56 @@ private struct SidebarRoomLists: View {
                                 section(for: .accountGlobal, store: accountOrLocal, at: timeline.date)
                             }
                         }
+                        // The lists' end, with any room added so a row can reach the top edge.
+                        Color.clear
+                            .frame(height: endRoom)
+                            .sidebarListItem(Self.endID)
                     }
                     .padding(.horizontal, 8)
-                    .padding(.bottom, 12)
+                    .padding(.bottom, Self.endPadding)
                 }
+                .coordinateSpace(name: Self.coordinateSpace)
+                .background {
+                    GeometryReader { viewport in
+                        Color.clear
+                            .onAppear { layout.height = viewport.size.height }
+                            .onChange(of: viewport.size.height) { layout.height = $0 }
+                    }
+                }
+                .onPreferenceChange(SidebarListFramesKey.self) { layout.frames = $0 }
                 .scrollIndicators(.hidden)
                 // Home's sessions sit above the rooms, so the open room's row is scrolled into view when it changes,
                 // at once, as a native list reveals its selection.
                 .onChange(of: selectedRowID) { id in
-                    if let id { proxy.scrollTo(id) }
+                    if let id { reveal(id, with: proxy) }
                 }
+            }
+        }
+    }
+
+    static let coordinateSpace = "sidebarLists"
+    private static let endID = "lists-end"
+    private static let endPadding: CGFloat = 12
+
+    /// Scrolls a row into view as little as it can, as `scrollTo` does, unless it is in view already. A row left cut
+    /// at the top edge then scrolls away to the next row's top, with room added at the lists' end when the end is too
+    /// near to scroll that far.
+    private func reveal(_ id: String, with proxy: ScrollViewProxy) {
+        if let frame = layout.frames[id], frame.minY >= -0.5, frame.maxY <= layout.height + 0.5 { return }
+        proxy.scrollTo(id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            // A room with no row here, such as Home, leaves the lists as they are.
+            guard layout.frames[id] != nil else { return }
+            let rows = layout.frames.filter { $0.key != Self.endID }.sorted { $0.value.minY < $1.value.minY }
+            guard let cut = rows.first(where: { $0.value.minY < -0.5 && $0.value.maxY > 0.5 }),
+                  let next = rows.first(where: { $0.value.minY >= cut.value.maxY - 0.5 }) else { return }
+            let distance = next.value.minY
+            let remaining = layout.frames[Self.endID].map { $0.maxY + Self.endPadding - layout.height } ?? .infinity
+            if distance > remaining + 0.5 {
+                endRoom += distance - remaining
+                DispatchQueue.main.async { proxy.scrollTo(next.key, anchor: .top) }
+            } else {
+                proxy.scrollTo(next.key, anchor: .top)
             }
         }
     }
@@ -755,7 +848,7 @@ private struct SidebarRoomLists: View {
             VStack(spacing: 0) {
                 ForEach(RoomSidebarPresentation.sortedByRecency(rooms)) { room in
                     SidebarRoomRowButton(store: store, room: room, server: server, now: now)
-                        .id(Self.rowID(room.id, on: server))
+                        .sidebarListItem(Self.rowID(room.id, on: server))
                 }
             }
             .padding(.bottom, 10)
@@ -772,6 +865,7 @@ private struct SidebarRoomLists: View {
         .padding(.trailing, 10)
         .padding(.top, 6)
         .padding(.bottom, 4)
+        .sidebarListItem("header/\(title)")
     }
 
     /// Only ever shown while `isSearchActive`, so the branch below always has
@@ -1385,6 +1479,16 @@ private struct ChatRoomView: View {
     // copy:
     private var title: String { isHome ? "Home" : room.name }
 
+    /// The @names this room's messages and composer draw in the accent: the live sessions of the room's owner when
+    /// that is the viewer, since the app knows only the viewer's sessions, and the people the app knows.
+    private var mentionMarks: MentionMarks {
+        let social = workspace.social
+        let owner = isHome ? social.account?.id : social.rooms.first { $0.roomId == room.id }?.ownerId
+        let ownsRoom = workspace.activeServer == .accountGlobal && owner != nil && owner == social.account?.id
+        return MentionMarks(sessionNames: ownsRoom ? home.sessions.map(home.name(of:)) : [],
+                            people: social.friends.map(\.account), viewer: social.account)
+    }
+
     /// The live sessions the @ being typed in Home's draft can name, or none while no @ is being typed.
     private var mentionOptions: [LiveSession] {
         guard isHome, isComposerExpanded, store.draft != mentionClosedDraft,
@@ -1419,6 +1523,7 @@ private struct ChatRoomView: View {
 
             ZStack(alignment: .bottomTrailing) {
                 messageList
+                    .environment(\.mentionMarks, mentionMarks)
                 if store.isLoadingMessages && !hasPositionedInitialScroll {
                     ProgressView()
                         .controlSize(.small)
@@ -1631,7 +1736,10 @@ private struct ChatRoomView: View {
                 store.fallbackMemberCountIncludesCurrentAgent(in: room.id),
             recentActivityByAgent: store.recentAgentActivityAt[room.id],
             now: now,
-            connectionStatus: store.connectionStatus
+            connectionStatus: store.connectionStatus,
+            // Every session in Home is its person's, so Home names them without the handle the server adds.
+            name: isHome ? home.headerName(of:) : \.name,
+            nameSeparator: isHome ? HomeSessions.headerNameSeparator : " · "
         )
     }
 
@@ -1755,6 +1863,16 @@ private struct ChatRoomView: View {
                         newMessageCount += 1
                     }
                 }
+                // The open composer is taller than its button, so a feed at its end moves up to keep the newest
+                // message above the field.
+                .onChange(of: isComposerExpanded) { expanded in
+                    guard expanded, isMessageListNearBottom, hasPositionedInitialScroll else { return }
+                    DispatchQueue.main.async {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("message-list-bottom", anchor: .bottom)
+                        }
+                    }
+                }
                 .onChange(of: store.isLoadingMessages) { loading in
                     // A room with no history has nothing to position — reveal
                     // straight to the quiet-room state.
@@ -1867,7 +1985,8 @@ private struct ChatRoomView: View {
                         withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
                     },
                     onKey: handleComposerKey,
-                    focusRequest: composerFocusRequest
+                    focusRequest: composerFocusRequest,
+                    mentionMarks: mentionMarks
                 )
                 .frame(height: ComposerTextField.naturalHeight)
                 .padding(.horizontal, 16)
@@ -2304,6 +2423,7 @@ enum MessageRenderPlan: Equatable {
 struct ExpandableMessageText: View {
     let content: String
     var textColor: Color
+    @Environment(\.mentionMarks) private var mentionMarks
     @State private var isExpanded = false
     @State private var expandedPlan: MessageRenderPlan?
     private let chart: ChartMessage?
@@ -2379,7 +2499,7 @@ struct ExpandableMessageText: View {
     private func renderedContent(_ plan: MessageRenderPlan) -> some View {
         switch plan {
         case .plainText(let source):
-            Text(source)
+            Text(mentionMarks.marking(AttributedString(source)))
                 .textSelection(.enabled)
                 .gallopText(.bodyL, color: textColor)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2388,18 +2508,18 @@ struct ExpandableMessageText: View {
                 ForEach(segments) { segment in
                     switch segment.kind {
                     case .prose:
-                        Text(MessageContentParser.attributedInline(segment.text))
+                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(.bodyL, color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
                     case .heading(let level):
-                        Text(MessageContentParser.attributedInline(segment.text))
+                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(headingStyle(for: level), color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityAddTraits(.isHeader)
                     case .unorderedList, .orderedList:
-                        Text(MessageContentParser.attributedInline(segment.text))
+                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(.bodyL, color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
@@ -2414,7 +2534,7 @@ struct ExpandableMessageText: View {
                             RoundedRectangle(cornerRadius: 1)
                                 .fill(SemanticColor.borderDefault)
                                 .frame(width: 3)
-                            Text(MessageContentParser.attributedInline(segment.text))
+                            Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
                                 .textSelection(.enabled)
                                 .gallopText(.bodyL, color: textColor)
                                 .fixedSize(horizontal: false, vertical: true)

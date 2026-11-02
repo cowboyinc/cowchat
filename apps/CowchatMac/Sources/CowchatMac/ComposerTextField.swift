@@ -21,6 +21,9 @@ struct ComposerTextField: NSViewRepresentable {
     var onKey: ((Key) -> Bool)?
     /// Each new value focuses the field with the cursor after its text, as opening a room with a started draft asks.
     var focusRequest = 0
+    /// The @names the field draws in the accent once they are typed out. The colour goes on the layout manager as a
+    /// temporary attribute, so the field's plain text and its typing attributes stay as they are.
+    var mentionMarks = MentionMarks()
 
     /// The font's real line height. Framing the field shorter than this makes
     /// the layout draw a cramped, mis-centered insertion caret.
@@ -30,7 +33,8 @@ struct ComposerTextField: NSViewRepresentable {
     }()
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, onSubmit: onSubmit, onCancel: onCancel, onKey: onKey, focusRequest: focusRequest)
+        Coordinator(text: $text, onSubmit: onSubmit, onCancel: onCancel, onKey: onKey, focusRequest: focusRequest,
+                    mentionMarks: mentionMarks)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -82,6 +86,7 @@ struct ComposerTextField: NSViewRepresentable {
         context.coordinator.onSubmit = onSubmit
         context.coordinator.onCancel = onCancel
         context.coordinator.onKey = onKey
+        context.coordinator.mentionMarks = mentionMarks
         textView.placeholderString = NSAttributedString(
             string: placeholder,
             attributes: [
@@ -97,6 +102,7 @@ struct ComposerTextField: NSViewRepresentable {
             textView.string = text
             textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
         }
+        context.coordinator.markMentions(in: textView)
         if context.coordinator.focusRequest != focusRequest {
             context.coordinator.focusRequest = focusRequest
             DispatchQueue.main.async { [weak textView] in
@@ -114,14 +120,28 @@ struct ComposerTextField: NSViewRepresentable {
         var onCancel: (() -> Void)?
         var onKey: ((Key) -> Bool)?
         var focusRequest: Int
+        var mentionMarks: MentionMarks
 
         init(text: Binding<String>, onSubmit: @escaping () -> Void, onCancel: (() -> Void)?,
-             onKey: ((Key) -> Bool)?, focusRequest: Int) {
+             onKey: ((Key) -> Bool)?, focusRequest: Int, mentionMarks: MentionMarks) {
             self.text = text
             self.onSubmit = onSubmit
             self.onCancel = onCancel
             self.onKey = onKey
             self.focusRequest = focusRequest
+            self.mentionMarks = mentionMarks
+        }
+
+        /// Draws each typed-out @name in the accent, and everything else in the field's own colour.
+        func markMentions(in textView: NSTextView) {
+            guard let layoutManager = textView.layoutManager else { return }
+            let string = textView.string
+            layoutManager.removeTemporaryAttribute(
+                .foregroundColor, forCharacterRange: NSRange(location: 0, length: (string as NSString).length))
+            for mark in mentionMarks.marks(in: string, completedOnly: true) {
+                layoutManager.addTemporaryAttribute(
+                    .foregroundColor, value: MentionMarks.accent, forCharacterRange: NSRange(mark.range, in: string))
+            }
         }
 
         func textDidChange(_ notification: Notification) {
@@ -133,6 +153,7 @@ struct ComposerTextField: NSViewRepresentable {
                     .joined(separator: " ")
             }
             text.wrappedValue = textView.string
+            markMentions(in: textView)
         }
 
         func textView(

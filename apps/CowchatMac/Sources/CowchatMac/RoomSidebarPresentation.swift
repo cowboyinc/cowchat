@@ -18,7 +18,9 @@ enum ChatPresencePresentation {
         recentActivityByAgent: [String: Date]? = nil,
         now: Date = Date(),
         recentWindow: TimeInterval = 120,
-        connectionStatus: ConnectionStatus = .connected
+        connectionStatus: ConnectionStatus = .connected,
+        name: (AgentPresence) -> String = \.name,
+        nameSeparator: String = " · "
     ) -> String {
         switch connectionStatus {
         case .connecting:
@@ -35,7 +37,7 @@ enum ChatPresencePresentation {
             return status == "working" || status == "thinking"
         }
         if !active.isEmpty {
-            let names = active.prefix(2).map(\.name).joined(separator: " · ")
+            let names = active.prefix(2).map(name).joined(separator: nameSeparator)
             return "\(names) active"
         }
 

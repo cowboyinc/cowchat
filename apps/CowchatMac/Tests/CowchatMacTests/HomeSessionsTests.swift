@@ -186,6 +186,69 @@ final class HomeSessionsTests: XCTestCase {
         XCTAssertEqual(home.options(matching: "pmandia/un").map(\.id), ["b"], "By branch")
     }
 
+    // MARK: Mentions drawn in the accent
+
+    private let patrick = SocialAccount(id: "patrick", handle: "Patrick-Mandia", displayName: "Patrick Mandia")
+    private let chad = SocialAccount(id: "chad", handle: "Chad-DePue", displayName: "Chad DePue")
+
+    private func marked(_ marks: MentionMarks, _ text: String, completedOnly: Bool = false) -> [String] {
+        marks.marks(in: text, completedOnly: completedOnly).map { "\(text[$0.range])\($0.namesViewer ? " (viewer)" : "")" }
+    }
+
+    func testAMessageMarksTheOwnersSessionsAndKnownPeople() {
+        let marks = MentionMarks(sessionNames: ["parity-sign-in", "unread-counts-2"], people: [chad], viewer: patrick)
+        XCTAssertEqual(marked(marks, "@parity-sign-in wait for @Chad, then ask @Unread-Counts-2."),
+                       ["@parity-sign-in", "@Chad", "@Unread-Counts-2"])
+        XCTAssertEqual(marked(marks, "@Patrick should we use it? @Patrick-Mandia, @Chad-DePue"),
+                       ["@Patrick (viewer)", "@Patrick-Mandia (viewer)", "@Chad-DePue"])
+        XCTAssertEqual(marked(marks, "@nobody and mail p@parity-sign-in and @parity"), [],
+                       "Only a known name after an @ that starts a word")
+        XCTAssertEqual(marked(MentionMarks(), "@parity-sign-in @Patrick"), [], "No names, no marks")
+    }
+
+    func testTheComposerMarksAMentionOnceItIsTypedOut() {
+        let marks = MentionMarks(sessionNames: ["parity-sign-in"], people: [], viewer: nil)
+        XCTAssertEqual(marked(marks, "@parity-sign-in", completedOnly: true), [], "Still being typed")
+        XCTAssertEqual(marked(marks, "@parity-sign-in ", completedOnly: true), ["@parity-sign-in"])
+        XCTAssertEqual(marked(marks, "ask @parity-sign-in.", completedOnly: true), ["@parity-sign-in"])
+    }
+
+    func testMarkingColoursOnlyTheMentionsAndFillsTheViewers() {
+        let marks = MentionMarks(sessionNames: ["unread-counts"], people: [], viewer: patrick)
+        let source = (try? AttributedString(markdown: "**Ready**: @unread-counts asks @Patrick to merge"))
+            ?? AttributedString()
+        let result = marks.marking(source)
+        let coloured = result.runs.filter { $0.swiftUI.foregroundColor != nil }
+            .map { String(result[$0.range].characters) }
+        XCTAssertEqual(coloured, ["@unread-counts", "@Patrick"])
+        let filled = result.runs.filter { $0.swiftUI.backgroundColor != nil }.map { String(result[$0.range].characters) }
+        XCTAssertEqual(filled, ["@Patrick"])
+        XCTAssertEqual(String(result.characters), String(source.characters), "The text itself is unchanged")
+        XCTAssertTrue(result.runs.contains { $0.inlinePresentationIntent == .stronglyEmphasized },
+                      "Markdown's own styling stays")
+    }
+
+    // MARK: Home's header
+
+    func testHomesHeaderNamesItsSessionsWithoutTheirHandle() {
+        let home = home([session("a", "pmandia/actor-logs", minute: 0), session("b", "pmandia/actor-logs", minute: 5)])
+        let members = [
+            AgentPresence(agentID: "mac", name: "mac-patrick", capabilities: [], connectedAt: nil, status: nil),
+            AgentPresence(agentID: "b", name: "actor-logs-2 · @Patrick-Mandia", capabilities: [], connectedAt: nil,
+                          status: "working"),
+            AgentPresence(agentID: "a", name: "actor-logs · @Patrick-Mandia", capabilities: [], connectedAt: nil,
+                          status: "working"),
+        ]
+        XCTAssertEqual(ChatPresencePresentation.summary(members: members, currentAgentID: "mac",
+                                                        fallbackMemberCount: nil, name: home.headerName(of:),
+                                                        nameSeparator: HomeSessions.headerNameSeparator),
+                       "actor-logs-2, actor-logs active")
+        XCTAssertEqual(ChatPresencePresentation.summary(members: members, currentAgentID: "mac",
+                                                        fallbackMemberCount: nil),
+                       "actor-logs-2 · @Patrick-Mandia · actor-logs · @Patrick-Mandia active",
+                       "Other rooms keep the server's names")
+    }
+
     func testADraftsMentionsAreTheSessionsItNames() {
         let home = home([
             session("bot-patrick.p-dash", "pmandia/parity-sign-in", minute: 0),
