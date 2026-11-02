@@ -147,13 +147,13 @@ final class ChatStore: ObservableObject {
         memberCountIncludesCurrentAgentRoomIDs.contains(roomID)
     }
 
-    /// True while the selected room should render the connect state: non-lobby,
+    /// True while the selected room should render the connect state:
     /// connected, nothing said yet, nobody else here. Keeps the 2s poll honest
-    /// about who is actually in the room (spec §3 "member-truth refresh").
+    /// about who is actually in the room (spec §3 "member-truth refresh"). The
+    /// lobby is an ordinary room and opens as a chat, so it is polled too.
     var selectedRoomAwaitingFirstAgent: Bool {
         guard connectionStatus.isConnected,
-              let room = selectedRoom,
-              room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame,
+              selectedRoom != nil,
               messages.isEmpty, !isLoadingMessages else { return false }
         return !roomMembers.contains { $0.id != agentID }
     }

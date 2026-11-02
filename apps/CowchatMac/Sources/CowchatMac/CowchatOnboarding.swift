@@ -423,9 +423,14 @@ private struct SetupTitle: View {
 /// Cowboy's sign-in card: Surface/600 with corners of 16 and no border, raised by two shadows because SwiftUI's
 /// `.shadow` has no spread: Hay/600 inset 4 at the sides, 4 lower and blurred 2, and a 1-point Bison/100 at blur 1. It
 /// holds 28 on every side, or for a list 28 at the sides and 16 above and below.
+///
+/// Those two primitives are light colours, which leave a light band under the card and a light edge around it in
+/// dark mode. There the card draws as the app's other dark cards do (`gallopCard`): no coloured shadow, and a 1-point
+/// Border/Default edge.
 private struct SetupCard<Content: View>: View {
     var list = false
     @ViewBuilder let content: Content
+    @Environment(\.colorScheme) private var colorScheme
 
     init(list: Bool = false, @ViewBuilder content: () -> Content) {
         self.list = list
@@ -439,9 +444,14 @@ private struct SetupCard<Content: View>: View {
             .padding(.horizontal, 28)
             .padding(.vertical, list ? 16 : 28)
             .background {
-                ZStack {
-                    shape.fill(Palette.hay600).padding(.horizontal, 4).offset(y: 4).blur(radius: 2)
-                    shape.fill(SemanticColor.surface600).shadow(color: Palette.bison100, radius: 1)
+                if colorScheme == .dark {
+                    shape.fill(SemanticColor.surface600)
+                        .overlay { shape.strokeBorder(SemanticColor.borderDefault, lineWidth: 1) }
+                } else {
+                    ZStack {
+                        shape.fill(Palette.hay600).padding(.horizontal, 4).offset(y: 4).blur(radius: 2)
+                        shape.fill(SemanticColor.surface600).shadow(color: Palette.bison100, radius: 1)
+                    }
                 }
             }
     }

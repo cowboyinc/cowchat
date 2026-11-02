@@ -20,8 +20,8 @@ enum RoomPaneState: Equatable {
         hasMessages: Bool,
         hasOtherMembers: Bool
     ) -> RoomPaneState {
-        // Spec §3 decision-table order, minus the lobby row (handled by
-        // ContentView's outer switch before this function is reached).
+        // Spec §3 decision-table order. Its lobby row is gone: the lobby is an
+        // ordinary room (Patrick removed the Lobby page, 2 November).
         if !connectionStatus.isConnected && !hasMessages {
             return .connectPrompt(connectionStatus == .connecting ? .connecting : .offline)
         }

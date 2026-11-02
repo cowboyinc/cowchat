@@ -2338,6 +2338,21 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
+    func testTheLobbyIsPolledForMembersAsAnyRoomIs() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        let lobby = try decodeRoom(id: "lobby", name: "lobby")
+        connection.listedRooms = [lobby]
+        await store.connect()
+        await store.select(room: lobby)
+        XCTAssertTrue(store.selectedRoomAwaitingFirstAgent)
+
+        connection.agentsByRoom["lobby"] = [AgentPresence(agentID: "other-agent", name: "codex")]
+        await store.pollSetupRoomReadiness()
+        XCTAssertTrue(store.roomMembers.contains { $0.agentID == "other-agent" })
+    }
+
+    @MainActor
     func testAgentLeftRestartsSetupReadinessPollingForConnectStateRoom() async throws {
         let connection = MockRoomConnection()
         let store = makeStore(connection: connection)
