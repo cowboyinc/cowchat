@@ -239,6 +239,8 @@ struct PageRowMoreMenu<Items: View>: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
+        // A borderless menu tints its label with the accent colour, so the ⋯ takes Icon/Tertiary as its tint.
+        .tint(SemanticColor.iconTertiary)
         .fixedSize()
         .frame(width: 24, height: 24)
         .opacity(isVisible ? 1 : 0)
