@@ -436,6 +436,9 @@ final class WorkspaceStore: ObservableObject {
             accepted = true
         }
         guard accepted else { return false }
+        // The Join sheet closes once the server has the answer. Left open while the room loads, it came back over the
+        // next page the window showed.
+        if inbox.joining?.id == item.id { inbox.joining = nil }
         inbox.markRead(item)
         await refreshPages()
         await open(item)
