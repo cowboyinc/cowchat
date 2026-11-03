@@ -361,7 +361,8 @@ private struct SidebarNavRow: View {
 
 /// The Inbox and Team, 2 apart, and the line under them with 8 above it, once the person is signed in. The Inbox's
 /// count is every unread item, open invitations included, and it shows nothing at zero. The line is 1 point of
-/// Surface/Glass/Border/Shadow at the rows' padding, as the page rows' seam is drawn.
+/// Border/Default at the rows' padding. The note's Surface/Glass/Border/Shadow is the dark sidebar's own colour, so the
+/// line could not be seen in dark mode.
 private struct AccountNavRows: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var inbox: InboxStore
@@ -381,7 +382,7 @@ private struct AccountNavRows: View {
                 }
                 .padding(.top, 2)
                 Rectangle()
-                    .fill(SemanticColor.surfaceGlassBorderShadow)
+                    .fill(SemanticColor.borderDefault)
                     .frame(height: 1)
                     .padding(.horizontal, 10)
                     .padding(.top, 8)
