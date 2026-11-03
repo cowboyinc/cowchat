@@ -59,6 +59,9 @@ protocol CowchatConnectionProtocol: AnyObject {
     func register(name: String, agentID: String) async throws -> CowchatRegistration
     func roomLeases(roomID: String) async throws -> [RoomLease]
     func listRooms() async throws -> [Room]
+    /// Rooms this connection's key may join and is not in, which the sidebar's search lists under To join. The server
+    /// has no such call yet (a question for Chad, navigation note section 3.7).
+    func listJoinableRooms() async throws -> [Room]
     func listAgents(roomID: String) async throws -> [AgentPresence]
     func createRoom(
         name: String,
@@ -100,6 +103,10 @@ extension CowchatConnectionProtocol {
 
     func roomLeases(roomID: String) async throws -> [RoomLease] {
         throw CowchatConnectionError.transport("Room leases require an updated Cowchat server.")
+    }
+
+    func listJoinableRooms() async throws -> [Room] {
+        throw CowchatConnectionError.transport("Listing rooms to join requires an updated Cowchat server.")
     }
 
     func history(roomID: String, limit: Int) async throws -> [ChatMessage] {

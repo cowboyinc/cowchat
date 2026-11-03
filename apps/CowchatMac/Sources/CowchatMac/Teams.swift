@@ -9,7 +9,7 @@ struct SocialTeam: Decodable, Identifiable, Equatable {
     let name: String
 }
 
-/// The account's teams and the one chosen in the sidebar footer's switcher. The choice is kept on this Mac, per
+/// The account's teams and the one chosen in the sidebar's team row. The choice is kept on this Mac, per
 /// account. The Team page lists the chosen team's people, and New room puts a room inside the chosen team's company
 /// room. With no teams listed, both do what they did before.
 @MainActor
@@ -30,7 +30,7 @@ final class TeamChoice: ObservableObject {
     var chosen: SocialTeam? { teams.first { $0.id == chosenID } ?? teams.first }
 
     /// Lists the signed-in account's teams and reads its stored choice. A server without the route lists none, and
-    /// the footer then draws no switcher.
+    /// the sidebar then draws no team row.
     func load(for session: SocialSession?) async {
         let before = chosen?.id
         defer { if chosen?.id != before { onChoiceChanged?() } }
@@ -59,86 +59,89 @@ final class TeamChoice: ObservableObject {
     static func key(for accountID: String) -> String { "\(storageKey).\(accountID)" }
 }
 
-/// The sidebar footer's left side. With teams, the chosen team's room icon sits beside the switcher, which sits over
-/// the footer's connection line, as the demo's footer has them; without, the connection line is alone, as before.
-struct TeamFooterLead<Connection: View>: View {
+/// The sidebar's first row, once the account has teams (navigation note, section 3.2). It is drawn as a nav row: 36
+/// tall, the chosen team's room icon at 20 centred on the nav icons' column, its name in Body S Strong, and with two or
+/// more teams 2 and the 16 down chevron in Icon/Tertiary. With two or more it opens `TeamSwitcher`'s menu and takes the
+/// row hover. With one there is nothing to switch, so it has no chevron, no hover and no menu.
+struct SidebarTeamRow: View {
     @ObservedObject var teams: TeamChoice
-    @ViewBuilder let connection: () -> Connection
     @AppStorage(RoomIconStyle.storageKey) private var iconStyle = RoomIconStyle.fallback.rawValue
 
     var body: some View {
         if let chosen = teams.chosen {
-            HStack(spacing: 10) {
-                RoomAvatar(name: chosen.name, size: 28, accented: false)
-                VStack(alignment: .leading, spacing: 1) {
-                    TeamSwitcher(teams: teams, iconStyle: RoomIconStyle(rawValue: iconStyle) ?? .fallback)
-                    connection()
+            if teams.teams.count > 1 {
+                TeamSwitcher(teams: teams, iconStyle: RoomIconStyle(rawValue: iconStyle) ?? .fallback) { isHovering in
+                    TeamSwitcherLabel(name: chosen.name, opensMenu: true, isHovering: isHovering)
                 }
+            } else {
+                TeamSwitcherLabel(name: chosen.name, opensMenu: false, isHovering: false)
             }
-        } else {
-            connection()
         }
     }
 }
 
-/// The team switcher over the footer's connection line, as the demo draws it: the chosen team's name and a chevron,
-/// opening the system menu of the account's teams, each with its room icon and a tick on the chosen one. With one
-/// team there is nothing to switch, so only its name shows.
-struct TeamSwitcher: View {
+/// The team switcher: the system menu of the account's teams, each with its room icon and a toggle that ticks the
+/// chosen one, opened from `label`, which is told when the pointer is over it.
+struct TeamSwitcher<Label: View>: View {
     @ObservedObject var teams: TeamChoice
     let iconStyle: RoomIconStyle
-
-    var body: some View {
-        if let chosen = teams.chosen {
-            if teams.teams.count > 1 {
-                Menu {
-                    ForEach(teams.teams) { team in
-                        // A toggle per team, so the menu ticks the chosen one.
-                        Toggle(isOn: Binding(get: { team.id == chosen.id }, set: { _ in teams.choose(team) })) {
-                            Label {
-                                Text(team.name)
-                            } icon: {
-                                Image(nsImage: TeamIconImage.make(team, style: iconStyle))
-                            }
-                        }
-                    }
-                } label: {
-                    TeamSwitcherLabel(name: chosen.name)
-                }
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                // copy:
-                .help("Switch team")
-                .accessibilityLabel("Team, \(chosen.name)")
-            } else {
-                Text(chosen.name).gallopText(.bodySStrong, color: SemanticColor.textPrimary).lineLimit(1)
-            }
-        }
-    }
-}
-
-/// The switcher's label, as the demo draws it: the team's name in Body S Strong and the app's down chevron in
-/// Icon/Tertiary, filled on hover.
-private struct TeamSwitcherLabel: View {
-    let name: String
+    @ViewBuilder let label: (Bool) -> Label
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 2) {
-            Text(name).gallopText(.bodySStrong, color: SemanticColor.textPrimary).lineLimit(1)
-            GallopIconView(icon: .chevronDownExtraSmall, fallbackSystemName: "chevron.down", size: 16)
-                .foregroundStyle(SemanticColor.iconTertiary)
+        if let chosen = teams.chosen {
+            Menu {
+                ForEach(teams.teams) { team in
+                    // A toggle per team, so the menu ticks the chosen one.
+                    Toggle(isOn: Binding(get: { team.id == chosen.id }, set: { _ in teams.choose(team) })) {
+                        SwiftUI.Label {
+                            Text(team.name)
+                        } icon: {
+                            Image(nsImage: TeamIconImage.make(team, style: iconStyle))
+                        }
+                    }
+                }
+            } label: {
+                label(isHovering)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .onHover { isHovering = $0 }
+            // copy:
+            .help("Switch team")
+            .accessibilityLabel("Team, \(chosen.name)")
         }
-        .padding(.leading, 6)
-        .padding(.trailing, 2)
-        .frame(height: 22)
-        .background(isHovering ? SemanticColor.buttonGhostHover : .clear,
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .padding(.leading, -6)
+    }
+}
+
+/// The team row's label, laid out as a nav row's: the team's room icon at 20 on the 18 icon column 10 in, 10, the name
+/// in Body S Strong in Text/Primary, then 2 and the chevron when it opens the menu, on the sidebar's row fill.
+private struct TeamSwitcherLabel: View {
+    let name: String
+    let opensMenu: Bool
+    let isHovering: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            RoomAvatar(name: name, size: 20, accented: false)
+                .frame(width: 18)
+            Text(name)
+                .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
+                .lineLimit(1)
+                .padding(.leading, 10)
+            if opensMenu {
+                GallopIconView(icon: .chevronDownExtraSmall, fallbackSystemName: "chevron.down", size: 16)
+                    .foregroundStyle(SemanticColor.iconTertiary)
+                    .padding(.leading, 2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity)
+        .frame(height: 36)
+        .background(SidebarRowBackground(state: .init(isSelected: false, isHovering: opensMenu && isHovering)))
         .contentShape(Rectangle())
-        .onHover { isHovering = $0 }
     }
 }
 

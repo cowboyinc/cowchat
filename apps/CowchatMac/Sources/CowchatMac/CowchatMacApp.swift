@@ -162,6 +162,11 @@ struct CowchatMacApp: App {
                 Button("Check for Updates…") { softwareUpdater.checkForUpdates() }
                     .disabled(!softwareUpdater.canCheckForUpdates)
             }
+            CommandGroup(replacing: .appSettings) {
+                // copy:
+                Button("Settings…") { NotificationCenter.default.post(name: .cowchatShowSettings, object: nil) }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
             CommandGroup(after: .newItem) {
                 Button("New Room") { workspace.activeStore.presentCreateRoom() }
                     .keyboardShortcut("n", modifiers: .command)
@@ -184,6 +189,9 @@ struct CowchatMacApp: App {
 
 extension Notification.Name {
     static let cowchatShowWhatsNew = Notification.Name("CowchatMac.showWhatsNew")
+
+    /// ⌘, — the window presents its Settings sheet. The app has no Settings scene.
+    static let cowchatShowSettings = Notification.Name("CowchatMac.showSettings")
 
     /// ⌃⌘S — macOS reserves this for sidebar toggling; nothing binds it once
     /// the shell owns its own fixed column (cowboy-app pattern).

@@ -77,9 +77,8 @@ extension PageHeader where Accessory == EmptyView {
     }
 }
 
-/// A page row's fill, beside the sidebar's `SidebarRowBackground` and with its 12 continuous corners: Surface/400 under
-/// the pointer and Button/Ghost/Pressed while pressed, with no hairline or shadow, which on the page's Surface/500
-/// would draw a box.
+/// A page row's fill, with 12 continuous corners: Surface/400 under the pointer and Button/Ghost/Pressed while pressed,
+/// with no hairline or shadow, which on the page's Surface/500 would draw a box.
 struct PageRowBackground: View {
     let isHovering: Bool
     var isPressed = false

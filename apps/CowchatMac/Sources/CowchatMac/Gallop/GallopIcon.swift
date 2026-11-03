@@ -66,6 +66,13 @@ public enum GallopIcon: String, CaseIterable, Sendable {
     case incoming
     case lock
     case message
+    /// From the gallop web set (Network.svg). The sidebar's cells draw the Network family in place of their state mark
+    /// while the server they are on cannot be reached (navigation note, section 3.10).
+    case network
+    /// From the gallop web set (Network_Down.svg), for a server the app has lost.
+    case networkDown = "network-down"
+    /// From the gallop web set (Network_Error.svg), for a server that refused the app.
+    case networkError = "network-error"
     /// The Team page's nav row in the sidebar.
     case posse
     /// From the gallop web set (Retry.svg) — the mac port has no retry glyph.

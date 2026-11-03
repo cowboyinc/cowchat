@@ -9,7 +9,7 @@ struct SocialRoomDraft: Identifiable {
     var agentIDs: Set<String> = []
     /// The friends' agents suggested for the room, across every friend picked.
     var proposedAgentIDs: Set<String> = []
-    /// The company room the room is made inside: the team chosen in the sidebar footer, or none.
+    /// The company room the room is made inside: the team chosen in the sidebar's team row, or none.
     var parentID: String?
 
     /// The first friend picked, whom room creation invites.

@@ -65,7 +65,7 @@ final class WorkspaceStore: ObservableObject {
     }()
     /// Claude Code's plugin and Codex's hooks, as first run and Settings show them.
     let agentConnections = AgentConnections()
-    /// The account's teams and the one chosen in the sidebar footer, which picks the team the Team page shows and the
+    /// The account's teams and the one chosen in the sidebar's team row, which picks the team the Team page shows and the
     /// company room New room makes a room in.
     lazy var teams: TeamChoice = {
         let teams = TeamChoice(defaults: defaults)
@@ -90,6 +90,9 @@ final class WorkspaceStore: ObservableObject {
     /// Inline error for the global-server settings card. Connection failures
     /// live on the store; this only carries save/enable problems.
     @Published var globalSetupError: String?
+    /// The sidebar's filter. It is not kept, so the app starts on All, and it goes back to All on sign out when the
+    /// signed-out sidebar does not offer it.
+    @Published var sidebarFilter = SidebarFilter.all
     @Published var searchText = "" {
         didSet {
             local.searchText = searchText
@@ -155,6 +158,7 @@ final class WorkspaceStore: ObservableObject {
         // Signed in, the app opens on the Inbox, which gathers what needs the person across rooms (Patrick, 2
         // November). The account store still selects a room underneath, which shows when its cell is pressed.
         page = session == nil ? nil : .inbox
+        if !SidebarFilter.offered(signedIn: session != nil).contains(sidebarFilter) { sidebarFilter = .all }
         if let session, let profile = try? ConnectionProfile.socialSession(session) {
             let store = makeAccountStore(profile)
             store.searchText = searchText
@@ -396,9 +400,69 @@ final class WorkspaceStore: ObservableObject {
         guard let store = store(for: server) else { return }
         page = nil
         activeServer = server
+        // A room inside a closed company room opens its parent first, so its cell shows selected.
+        var parentID = room.parentID
+        var seen: Set<String> = [room.id]
+        while let id = parentID, seen.insert(id).inserted {
+            store.setCollapsed(false, roomID: id)
+            parentID = store.rooms.first { $0.id == id }?.parentID
+        }
         await store.select(room: room)
         // The room that was open may be an ended session's, which archives once something else opens.
         scheduleSessionRoomArchive()
+    }
+
+    // MARK: The sidebar
+
+    /// Every room of the three connections as the sidebar's list holds them, each with its live session.
+    var sidebarRooms: [SidebarRoom] {
+        Server.allCases.flatMap { server -> [SidebarRoom] in
+            guard let store = store(for: server) else { return [] }
+            return RoomSidebarPresentation.listedRooms(store.rooms, on: server).map { room in
+                SidebarRoom(server: server, room: store.roomAsShown(room),
+                            session: server == .accountGlobal ? liveSessions.session(inRoom: room.id) : nil,
+                            isArchived: store.isArchived(room), isUnread: store.isUnread(room),
+                            matchesMessages: store.messageSearchRoomIDs.contains(room.id))
+            }
+        }
+    }
+
+    /// The rooms the sidebar's search offers under To join: the Inbox's open invitations, and the rooms the API key may
+    /// join and the person is not in.
+    var sidebarJoinable: [SidebarJoinable] {
+        let invitations = inbox.items.filter(\.isOpenInvitation).map {
+            SidebarJoinable(name: $0.roomName, server: $0.server, at: $0.at, source: .invitation(itemID: $0.id))
+        }
+        let rooms = (global?.joinableRooms ?? []).map {
+            SidebarJoinable(name: $0.name, description: $0.description, server: .global, at: $0.activityDate,
+                            source: .room($0))
+        }
+        return invitations + rooms
+    }
+
+    /// The closed company rooms of the three connections, by their list IDs.
+    var sidebarCollapsed: Set<String> {
+        Set(Server.allCases.flatMap { server in
+            (store(for: server)?.collapsedParentRoomIDs ?? []).map { SidebarRoom.id($0, on: server) }
+        })
+    }
+
+    /// Opens a room the API key may join and the person is not in, from the sidebar search's To join group. Opening it
+    /// joins it.
+    func openJoinable(_ room: Room) async {
+        guard let store = global else { return }
+        page = nil
+        activeServer = .global
+        await store.openJoinable(room)
+        scheduleSessionRoomArchive()
+    }
+
+    /// Opens the Join sheet for an open invitation, from the sidebar search's To join group. The sheet is the Inbox's,
+    /// so the Inbox shows under it.
+    func openInvitation(itemID: String) {
+        guard let item = inbox.items.first(where: { $0.id == itemID && $0.isOpenInvitation }) else { return }
+        show(.inbox)
+        inbox.joining = item
     }
 
     // MARK: The Inbox and Team

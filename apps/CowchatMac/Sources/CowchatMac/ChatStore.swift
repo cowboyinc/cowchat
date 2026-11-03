@@ -50,7 +50,19 @@ final class ChatStore: ObservableObject {
     @Published private(set) var recentAgentActivityAt: [String: [String: Date]] = [:]
     @Published var roomReadyNotice: Room?
     @Published var roomBeingRenamed: Room?
-    @Published var connectionStatus: ConnectionStatus = .disconnected
+    @Published var connectionStatus: ConnectionStatus = .disconnected {
+        didSet { followConnectionDown() }
+    }
+    /// Whether the connection has been down for `connectionDownDelay`, which the sidebar's cells show. It waits so that
+    /// launch and a quick reconnect change no icon (navigation note, section 3.11).
+    @Published private(set) var isConnectionDown = false
+    var connectionDownDelay: Duration = .seconds(3)
+    private var connectionDownTask: Task<Void, Never>?
+    /// Company rooms whose rooms the sidebar hides, kept on this Mac.
+    @Published private(set) var collapsedParentRoomIDs: Set<String> = []
+    /// Rooms this connection's key may join and is not in, which the sidebar's search lists under To join. A server
+    /// without the list call gives none.
+    @Published private(set) var joinableRooms: [Room] = []
     @Published private(set) var connectionProfile: ConnectionProfile
     /// Cached single-use invite token per room, embedded in connect prompts
     /// for shared servers. Copying a prompt consumes the token and mints a
@@ -248,6 +260,7 @@ final class ChatStore: ObservableObject {
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
         showsAllMessagesRoomIDs = localPreferences.showsAllMessagesRoomIDs
+        collapsedParentRoomIDs = localPreferences.collapsedParentRoomIDs
         // One-time cleanup: the setup-screen takeover was removed in the
         // onboarding redesign (spec 2026-08-07); stale persisted IDs would
         // otherwise sit orphaned forever.
@@ -891,6 +904,7 @@ final class ChatStore: ObservableObject {
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
         showsAllMessagesRoomIDs = localPreferences.showsAllMessagesRoomIDs
+        collapsedParentRoomIDs = localPreferences.collapsedParentRoomIDs
         connectionStatus = .disconnected
         surfacedSpawnFailureDescription = nil
     }
@@ -970,6 +984,8 @@ final class ChatStore: ObservableObject {
             memberCountIncludesCurrentAgentRoomIDs.insert(joinedRoomID)
         }
         reconcileLocalRoomPreferences()
+        // The rooms the key may join follow the person's own, since a room they join leaves that list.
+        Task { [weak self] in await self?.refreshJoinableRooms() }
         if !readState.hasSeeded {
             readState.seed(rooms: rooms)
             localPreferences.saveRoomReadState(readState)
@@ -1270,6 +1286,56 @@ final class ChatStore: ObservableObject {
     func unarchive(_ room: Room) {
         guard archivedRoomIDs.remove(room.id) != nil else { return }
         localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
+    }
+
+    // MARK: The sidebar
+
+    func isCollapsed(_ roomID: String) -> Bool {
+        collapsedParentRoomIDs.contains(roomID)
+    }
+
+    /// Hides or shows the rooms inside a company room in the sidebar.
+    func setCollapsed(_ collapsed: Bool, roomID: String) {
+        guard collapsed != isCollapsed(roomID) else { return }
+        if collapsed { collapsedParentRoomIDs.insert(roomID) } else { collapsedParentRoomIDs.remove(roomID) }
+        localPreferences.saveCollapsedParentRoomIDs(collapsedParentRoomIDs)
+    }
+
+    /// Lists the rooms this connection's key may join. Any failure, such as a server without the call, lists none.
+    func refreshJoinableRooms() async {
+        let generation = profileGeneration
+        let listed = (try? await connection.listJoinableRooms()) ?? []
+        guard generation == profileGeneration else { return }
+        let joined = Set(rooms.map(\.id))
+        let fresh = listed.filter { !joined.contains($0.id) }
+        if fresh != joinableRooms { joinableRooms = fresh }
+    }
+
+    /// Opens a room the key may join and is not in. Opening it joins it, as for any room, and the rooms list then holds
+    /// it as one of the person's.
+    func openJoinable(_ room: Room) async {
+        joinableRooms.removeAll { $0.id == room.id }
+        if !rooms.contains(where: { $0.id == room.id }) { rooms = (rooms + [room]).sorted(by: roomSort) }
+        await select(room: room)
+        try? await refreshRooms(selectFallbackForMissingSelection: false)
+    }
+
+    /// Marks the connection down once it has stayed down for `connectionDownDelay`, and up again at once.
+    private func followConnectionDown() {
+        if connectionStatus.isConnected {
+            connectionDownTask?.cancel()
+            connectionDownTask = nil
+            if isConnectionDown { isConnectionDown = false }
+            return
+        }
+        guard !isConnectionDown, connectionDownTask == nil else { return }
+        let delay = connectionDownDelay
+        connectionDownTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, !Task.isCancelled else { return }
+            self.connectionDownTask = nil
+            if !self.connectionStatus.isConnected { self.isConnectionDown = true }
+        }
     }
 
     /// Records what the archive rule did with an ended session's room, or forgets it when its session resumes.
