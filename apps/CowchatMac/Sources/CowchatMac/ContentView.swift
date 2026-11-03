@@ -95,55 +95,61 @@ struct ContentView: View {
             // The three buttons are one set: a 20 glyph in Icon/Secondary in a 36 circle that is clear at rest and takes
             // a sidebar row's hover under the pointer (navigation round 2, section 2).
             ToolbarItem(placement: .primaryAction) {
-                Button { workspace.show(.friends) } label: {
-                    // Gallop has no outline person glyph (@cowboyinc/gallop-foundations 0.7.0 has only the filled
-                    // Posse), so this is SF Symbol person.2. At 14 semibold its stroke is about 1.4, close to Add's and
-                    // Sidebar.Expanded's beside it.
-                    ToolbarCircleLabel {
-                        Image(systemName: "person.2")
-                            .font(.system(size: 14, weight: .semibold))
+                ToolbarCircleHover { isHovering in
+                    Button { workspace.show(.friends) } label: {
+                        // Gallop has no outline person glyph (@cowboyinc/gallop-foundations 0.7.0 has only the filled
+                        // Posse), so this is SF Symbol person.2. At 14 semibold its stroke is about 1.4, close to Add's
+                        // and Sidebar.Expanded's beside it.
+                        ToolbarCircleLabel(isHovering: isHovering) {
+                            Image(systemName: "person.2")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
                     }
+                    .buttonStyle(.plain)
+                    // copy:
+                    .help("Friends")
+                    .macAccessibleAction(label: "Open Friends") { workspace.show(.friends) }
                 }
-                .buttonStyle(.plain)
-                // copy:
-                .help("Friends")
-                .macAccessibleAction(label: "Open Friends") { workspace.show(.friends) }
             }
             ToolbarItem(placement: .navigation) {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
-                } label: {
-                    // Gallop's Sidebar.Expanded while the sidebar shows and Sidebar.Collapsed while it is hidden, as
-                    // the prototype site's rail swaps them.
-                    ToolbarCircleLabel {
-                        GallopIconView(icon: isSidebarVisible ? .sidebarExpanded : .sidebarCollapsed,
-                                       fallbackSystemName: "sidebar.left", size: 20)
+                ToolbarCircleHover { isHovering in
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
+                    } label: {
+                        // Gallop's Sidebar.Expanded while the sidebar shows and Sidebar.Collapsed while it is hidden,
+                        // as the prototype site's rail swaps them.
+                        ToolbarCircleLabel(isHovering: isHovering) {
+                            GallopIconView(icon: isSidebarVisible ? .sidebarExpanded : .sidebarCollapsed,
+                                           fallbackSystemName: "sidebar.left", size: 20)
+                        }
                     }
-                }
-                .buttonStyle(.plain)
-                .focusable(false)
-                .help(isSidebarVisible ? "Hide sidebar" : "Show sidebar")
-                .macAccessibleAction(label: "Toggle sidebar") {
-                    withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .help(isSidebarVisible ? "Hide sidebar" : "Show sidebar")
+                    .macAccessibleAction(label: "Toggle sidebar") {
+                        withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
+                    }
                 }
             }
             ToolbarItem(placement: .navigation) {
                 // The New menu holds every way to start something (navigation note, section 7.1). It stays in reach
                 // while the sidebar is hidden.
-                Menu {
-                    NewMenuItems(workspace: workspace)
-                } label: {
-                    ToolbarCircleLabel {
-                        GallopIconView(icon: .add, fallbackSystemName: "plus", size: 20)
+                ToolbarCircleHover { isHovering in
+                    Menu {
+                        NewMenuItems(workspace: workspace)
+                    } label: {
+                        ToolbarCircleLabel(isHovering: isHovering) {
+                            GallopIconView(icon: .add, fallbackSystemName: "plus", size: 20)
+                        }
                     }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    // copy:
+                    .help("New")
+                    .accessibilityLabel("New")
                 }
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                // copy:
-                .help("New")
-                .accessibilityLabel("New")
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .cowchatToggleSidebar)) { _ in
@@ -239,8 +245,8 @@ struct ContentView: View {
 /// that is clear at rest and takes a sidebar row's hover under the pointer, whose capsule is a circle at 36. It has no
 /// pressed state, since a SwiftUI menu can't show one and the three buttons must look alike.
 private struct ToolbarCircleLabel<Glyph: View>: View {
+    let isHovering: Bool
     @ViewBuilder let glyph: () -> Glyph
-    @State private var isHovering = false
 
     var body: some View {
         glyph()
@@ -249,6 +255,17 @@ private struct ToolbarCircleLabel<Glyph: View>: View {
             .frame(width: 36, height: 36)
             .background(SidebarRowBackground(state: .init(isSelected: false, isHovering: isHovering)))
             .contentShape(Circle())
+    }
+}
+
+/// A toolbar button's hover, taken on the button or the menu itself, as the sidebar's filter button and
+/// `SheetMenuField` take theirs, so the three toolbar buttons take it the same way.
+private struct ToolbarCircleHover<Control: View>: View {
+    @ViewBuilder let control: (_ isHovering: Bool) -> Control
+    @State private var isHovering = false
+
+    var body: some View {
+        control(isHovering)
             .onHover { isHovering = $0 }
     }
 }
