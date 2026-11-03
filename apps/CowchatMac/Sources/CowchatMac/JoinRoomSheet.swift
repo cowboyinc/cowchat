@@ -56,9 +56,9 @@ struct SocialInvitationReview: View {
         }
     }
 
-    /// "No session" first, then the sessions Home's sidebar picks, in Home's order, and the more row for the rest.
+    /// "No session" first, then the sessions `LiveSessions.pick` chooses, newest first, and the more row for the rest.
     private var sessionChoice: some View {
-        let picked = HomeSessions.pick(from: sessions)
+        let picked = LiveSessions.pick(from: sessions)
         let hidden = sessions.count - picked.count
         return VStack(alignment: .leading, spacing: 4) {
             // copy:
@@ -77,7 +77,7 @@ struct SocialInvitationReview: View {
                     }
                 }
                 if hidden > 0 {
-                    SessionsMoreRow(title: HomeSessions.moreTitle(hidden: hidden, showsAll: showsAllSessions),
+                    SessionsMoreRow(title: LiveSessions.moreTitle(hidden: hidden, showsAll: showsAllSessions),
                                     indent: JoinSessionRow.nameLeading, surface: .page) {
                         showsAllSessions.toggle()
                     }

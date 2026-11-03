@@ -120,22 +120,11 @@ enum ChatPresencePresentation {
 enum RoomSidebarPresentation {
     /// The rooms a server's list shows before a search narrows it. The local
     /// lobby is an ordinary room in the This Mac list (Patrick removed the Lobby
-    /// page, 2 November). A hosted server's lobby stays hidden. Home has its own
-    /// row above the lists, so the account list leaves it out unless a search
-    /// is looking for it.
-    static func listedRooms(
-        _ rooms: [Room],
-        on server: WorkspaceStore.Server,
-        searching: Bool,
-        homeRoomID: String?
-    ) -> [Room] {
-        var listed = server == .local
+    /// page, 2 November). A hosted server's lobby stays hidden.
+    static func listedRooms(_ rooms: [Room], on server: WorkspaceStore.Server) -> [Room] {
+        server == .local
             ? rooms
             : rooms.filter { $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame }
-        if server == .accountGlobal, !searching, let homeRoomID {
-            listed.removeAll { $0.id == homeRoomID }
-        }
-        return listed
     }
 
     static func filteredRooms(

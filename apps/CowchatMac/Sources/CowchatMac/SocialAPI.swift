@@ -25,10 +25,36 @@ struct SocialFriendRequest: Decodable, Identifiable {
     let status: String
 }
 struct SocialRoom: Decodable, Identifiable {
+    /// The session an account room was made for, which the server records when the session registers and keeps for
+    /// the room's life (navigation note, section 4.1; a question for Chad beside his task 4).
+    struct Session: Decodable, Equatable {
+        let agentId: String
+        let harness: String
+        let folder: String
+        let branch: String
+        let startedAt: String
+        /// When the session ended, or nil while it is live. A resumed session clears it.
+        let endedAt: String?
+    }
+
     let roomId: String
     let name: String
     let ownerId: String
+    /// "session" or "company" (Chad's task 4), or nil for any other room.
+    var kind: String?
+    var session: Session?
     var id: String { roomId }
+
+    init(roomId: String, name: String, ownerId: String, kind: String? = nil, session: Session? = nil) {
+        self.roomId = roomId
+        self.name = name
+        self.ownerId = ownerId
+        self.kind = kind
+        self.session = session
+    }
+
+    /// Whether the room was made for one session, which is what makes an agent's marked message count in the Inbox.
+    var isSessionRoom: Bool { kind == "session" }
 }
 struct SocialRoomInvitation: Decodable, Identifiable {
     let id: String
@@ -92,13 +118,12 @@ enum SocialHandleCheck: Equatable {
         }
     }
 }
+/// What `POST /social/v1/setup` made: the account's bot, and no room, since every session gets its own room when it
+/// registers (Chad's task 4).
 struct SocialSetup: Decodable {
     let agentId: String
     let agentName: String
-    let roomId: String
-    let roomName: String
     let agent: SocialAgent?
-    let room: SocialRoom?
     let botAdmitted: Bool
 }
 struct SocialSetupReply: Decodable { let setup: SocialSetup? }
@@ -118,7 +143,6 @@ enum SocialStarterNames {
         return value.isEmpty ? "Cowboy" : value
     }
     static func bot(_ name: String) -> String { stem(name) + "_bot" }
-    static func home(_ name: String) -> String { stem(name) + "_Home" }
 }
 struct SocialAcknowledgement: Decodable { let ok: Bool }
 struct SocialAgents: Decodable { let agents: [SocialAgent] }

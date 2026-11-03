@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 enum GlobalSignupError: LocalizedError, Equatable {
@@ -50,15 +51,15 @@ final class WorkspaceStore: ObservableObject {
 
     let local: ChatStore
     let notifications: SocialNotifications
-    /// The person's live sessions, read from the agents in their Home.
-    let homeSessions = HomeSessions()
+    /// The person's live sessions, each with its room, read from the account's rooms and `session_state`.
+    let liveSessions = LiveSessions()
     let inbox: InboxStore
     let team = TeamStore()
     /// The page the main area shows, or nil while it shows the open room.
     @Published private(set) var page: Page?
-    /// Where first run stands, and its wait for the first session to join Home.
+    /// Where first run stands, and its wait for the first session to register.
     lazy var firstRun: FirstRun = {
-        let firstRun = FirstRun(sessions: homeSessions, defaults: defaults)
+        let firstRun = FirstRun(sessions: liveSessions, defaults: defaults)
         firstRun.onFirstSession = { [weak self] session in Task { await self?.finishFirstRun(opening: session) } }
         return firstRun
     }()
@@ -79,8 +80,10 @@ final class WorkspaceStore: ObservableObject {
     @Published var roomDraft: SocialRoomDraft?
     /// A room's people, as its menu's People… shows them.
     @Published var roomPeople: SocialParticipants?
-    /// True from launch until a room is opened, so the app opens on Home once the account's Home is known.
-    private var opensHomeWhenReady = true
+    /// The session rooms the archive rule is asking the server about now, so a room is asked about once at a time.
+    private var sessionRoomArchiveChecks: Set<String> = []
+    private var sessionRoomArchiveScheduled = false
+    private var watchingAccount: Set<AnyCancellable> = []
     @Published private(set) var global: ChatStore?
     @Published private(set) var accountGlobal: ChatStore?
     @Published private(set) var activeServer: Server = .local
@@ -116,9 +119,16 @@ final class WorkspaceStore: ObservableObject {
             guard let self, self.social.savedSession != nil else { return }
             Task { try? await self.accountGlobal?.refreshRooms() }
         }
-        social.onSetupChanged = { [weak self] setup in self?.useHome(roomID: setup?.roomId) }
+        social.$rooms.dropFirst().sink { [weak self] rooms in
+            guard let self else { return }
+            self.liveSessions.update(from: rooms, viewerID: self.social.account?.id)
+            self.scheduleSessionRoomArchive()
+        }
+        .store(in: &self.watchingSocial)
         return social
     }()
+
+    private var watchingSocial: Set<AnyCancellable> = []
 
     @Published private(set) var pendingFriendInvitation: FriendInvitationRoute?
     private static let pendingFriendInvitationKey = "CowchatMac.pendingFriendInvitation"
@@ -138,16 +148,20 @@ final class WorkspaceStore: ObservableObject {
     func useSocialSession(_ session: SocialSession?) {
         accountGlobal?.shutdownForRemoval()
         accountGlobal = nil
-        homeSessions.clear()
+        watchingAccount = []
+        liveSessions.clear()
         inbox.use(account: session?.account, scope: session.map(Self.accountScope))
         team.use(accountID: session?.account.id)
-        if session == nil { page = nil }
+        // Signed in, the app opens on the Inbox, which gathers what needs the person across rooms (Patrick, 2
+        // November). The account store still selects a room underneath, which shows when its cell is pressed.
+        page = session == nil ? nil : .inbox
         if let session, let profile = try? ConnectionProfile.socialSession(session) {
             let store = makeAccountStore(profile)
             store.searchText = searchText
             accountGlobal = store
-            watchHome(on: store)
+            watchSessions(on: store)
             store.start()
+            liveSessions.update(from: social.rooms, viewerID: session.account.id)
         }
         if activeServer == .accountGlobal, accountGlobal == nil {
             // Signed out, the window opens on this Mac's lobby, whose chat the sidebar lists. A hosted lobby is hidden.
@@ -155,76 +169,94 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    // MARK: Home
+    // MARK: Sessions and their rooms
 
-    /// The account's Home room, once its setup has named it and the account's rooms list it.
-    var homeRoom: Room? {
-        guard let roomID = homeSessions.roomID else { return nil }
-        return accountGlobal?.rooms.first { $0.id == roomID }
+    /// The account room made for one of the person's live sessions, once the account's rooms list it.
+    func room(of session: LiveSession) -> Room? {
+        accountGlobal?.rooms.first { $0.id == session.roomID }
     }
 
-    /// Opens the account's Home. Returns false when there is none yet.
-    @discardableResult
-    func openHome() async -> Bool {
-        guard let room = homeRoom else { return false }
-        await select(room: room, on: .accountGlobal)
-        return true
+    /// The name of one of the person's own sessions, live or ended: its room's name, which the Inbox's titles use.
+    func ownSessionName(of agentID: String) -> String? {
+        guard let viewer = social.account?.id else { return nil }
+        return social.rooms.first { $0.ownerId == viewer && $0.session?.agentId == agentID }?.name
     }
 
-    /// Pressing a session's row: the room made for the session when the person is in one, or else Home with the
-    /// session's @name in the composer and the cursor after it.
+    /// Opens a session's room, as first run and New session do when the session registers. Nothing is drafted.
     func openSession(_ session: LiveSession) async {
-        guard let store = accountGlobal, let home = homeRoom else { return }
-        let name = homeSessions.name(of: session)
-        if let room = await sessionRoom(for: session, named: name, in: store, home: home), accountGlobal === store {
-            if !isSelected(room, on: .accountGlobal) { await select(room: room, on: .accountGlobal) }
-            return
-        }
-        guard accountGlobal === store else { return }
-        // Opening the room again would load its messages again, so Home already open stays as it is.
-        if !isSelected(home, on: .accountGlobal) { await select(room: home, on: .accountGlobal) }
-        guard accountGlobal === store, store.selectedRoomID == home.id else { return }
-        store.startDraft(with: "@\(name) ")
+        guard let store = accountGlobal else { return }
+        if !store.rooms.contains(where: { $0.id == session.roomID }) { try? await store.refreshRooms() }
+        guard accountGlobal === store, let room = store.rooms.first(where: { $0.id == session.roomID }) else { return }
+        if !isSelected(room, on: .accountGlobal) { await select(room: room, on: .accountGlobal) }
     }
 
-    /// The room made for a session: one of the person's account rooms named as the session is, with the session among
-    /// its agents. The server has no field yet saying which session a room was made for, so the name and the agent
-    /// list stand in for it.
-    private func sessionRoom(for session: LiveSession, named name: String, in store: ChatStore,
-                             home: Room) async -> Room? {
-        let candidates = store.unarchivedRooms.filter {
-            $0.id != home.id && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+    /// Hands the account store's `session_state` frames to the live sessions, lists the rooms again when one names a
+    /// room the account has not listed, and runs the archive rule on each frame and when the rooms change.
+    private func watchSessions(on store: ChatStore) {
+        store.onSessionState = { [weak self, weak store] event in
+            guard let self, let store, self.accountGlobal === store else { return }
+            if !self.liveSessions.apply(event) { Task { await self.social.refreshRooms() } }
+            // An ended session's room may archive, and a resumed one's may come back.
+            self.scheduleSessionRoomArchive()
         }
-        for room in candidates {
-            if let agents = try? await store.agents(in: room.id), agents.contains(where: { $0.agentID == session.id }) {
-                return room
+        store.$rooms.map(\.count).removeDuplicates().sink { [weak self] _ in self?.scheduleSessionRoomArchive() }
+            .store(in: &watchingAccount)
+    }
+
+    /// Runs the archive rule on the next turn, once however many changes ask for it.
+    func scheduleSessionRoomArchive() {
+        guard !sessionRoomArchiveScheduled else { return }
+        sessionRoomArchiveScheduled = true
+        Task { [weak self] in
+            guard let self else { return }
+            self.sessionRoomArchiveScheduled = false
+            await self.applySessionRoomArchive()
+        }
+    }
+
+    /// The archive rule for ended sessions (`SessionRoomArchive`): a resumed session's room comes back, and each ended
+    /// session's room the rule has not handled, or that waits to be read, is checked against its participants. A
+    /// failed participants call leaves the room for the next run.
+    func applySessionRoomArchive() async {
+        guard let store = accountGlobal, store.connectionStatus.isConnected, let viewer = social.account?.id else { return }
+        let outcomes = store.sessionRoomArchiveOutcomes
+        for roomID in SessionRoomArchive.resumed(social.rooms, viewerID: viewer, hasEnded: liveSessions.hasEnded,
+                                                 outcomes: outcomes) {
+            if outcomes[roomID] == .archived, let room = store.rooms.first(where: { $0.id == roomID }) {
+                store.unarchive(room)
+            }
+            store.recordSessionRoomArchive(nil, roomID: roomID)
+        }
+        let candidates = SessionRoomArchive.roomsToCheck(social.rooms, viewerID: viewer, hasEnded: liveSessions.hasEnded,
+                                                         outcomes: store.sessionRoomArchiveOutcomes)
+        for candidate in candidates where !sessionRoomArchiveChecks.contains(candidate.roomId) {
+            guard let room = store.rooms.first(where: { $0.id == candidate.roomId }) else { continue }
+            if store.isArchived(room) {
+                store.recordSessionRoomArchive(.archived, roomID: room.id)
+                continue
+            }
+            if store.sessionRoomArchiveOutcomes[room.id] == .waiting,
+               !SessionRoomArchive.isReady(isUnread: store.isUnread(room), isOpen: isSelected(room, on: .accountGlobal)) {
+                continue
+            }
+            sessionRoomArchiveChecks.insert(room.id)
+            defer { sessionRoomArchiveChecks.remove(room.id) }
+            guard let api = try? social.readingAPI(),
+                  let participants: SocialParticipants = try? await api.social(["rooms", room.id, "participants"]),
+                  accountGlobal === store, social.account?.id == viewer else { continue }
+            let decision = SessionRoomArchive.decide(
+                hasSomeoneElse: SessionRoomArchive.hasSomeoneElse(members: participants.members, viewerID: viewer,
+                                                                  roomID: room.id,
+                                                                  sentInvitations: social.sentInvitations),
+                isUnread: store.isUnread(room), isOpen: isSelected(room, on: .accountGlobal))
+            switch decision {
+            case .keep: store.recordSessionRoomArchive(.kept, roomID: room.id)
+            case .wait: store.recordSessionRoomArchive(.waiting, roomID: room.id)
+            case .archive:
+                await store.archive(room)
+                store.recordSessionRoomArchive(.archived, roomID: room.id)
             }
         }
-        return nil
-    }
-
-    private func useHome(roomID: String?) {
-        guard homeSessions.roomID != roomID else { return }
-        homeSessions.clear()
-        homeSessions.roomID = roomID
-        accountGlobal?.watchedRoomID = roomID
-    }
-
-    /// Keeps Home's sessions current from the account store, which lists Home's agents with its rooms and as they
-    /// change, and opens Home the first time it is listed after launch.
-    private func watchHome(on store: ChatStore) {
-        store.watchedRoomID = homeSessions.roomID
-        store.onWatchedRoomAgents = { [weak self, weak store] agents in
-            guard let self, let store, self.accountGlobal === store else { return }
-            self.homeSessions.update(from: agents)
-            self.openHomeIfWaiting()
-        }
-    }
-
-    private func openHomeIfWaiting() {
-        guard opensHomeWhenReady, let room = homeRoom else { return }
-        opensHomeWhenReady = false
-        Task { await select(room: room, on: .accountGlobal) }
     }
 
     var activeStore: ChatStore {
@@ -235,16 +267,18 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    func openStarterHome(roomID: String, session: SocialSession) async -> Bool {
+    /// First run's Continue, which skips the wait for the first session: the account's rooms are listed again and the
+    /// Inbox shows. Returns false when the account changed or its rooms could not be listed.
+    func openStarter(session: SocialSession) async -> Bool {
         guard social.savedSession?.scopeId == session.scopeId,
               social.savedSession?.deviceKey == session.deviceKey,
               let store = accountGlobal else { return false }
         do { try await store.refreshRooms() } catch { return false }
         guard social.savedSession?.scopeId == session.scopeId,
               social.savedSession?.deviceKey == session.deviceKey,
-              accountGlobal === store,
-              let room = store.rooms.first(where: { $0.id == roomID }) else { return false }
-        await select(room: room, on: .accountGlobal)
+              accountGlobal === store else { return false }
+        await social.refreshRooms()
+        show(.inbox)
         return social.savedSession?.scopeId == session.scopeId && accountGlobal === store
     }
 
@@ -253,7 +287,6 @@ final class WorkspaceStore: ObservableObject {
         do { try await store.refreshRooms() } catch { return false }
         guard let room = store.rooms.first(where: { $0.id == roomID }) else { return false }
         await select(room: room, on: .accountGlobal)
-        store.secondAgentHintRoom = room
         return true
     }
 
@@ -361,18 +394,19 @@ final class WorkspaceStore: ObservableObject {
 
     func select(room: Room, on server: Server) async {
         guard let store = store(for: server) else { return }
-        opensHomeWhenReady = false
         page = nil
         activeServer = server
         await store.select(room: room)
+        // The room that was open may be an ended session's, which archives once something else opens.
+        scheduleSessionRoomArchive()
     }
 
     // MARK: The Inbox and Team
 
     /// Shows a page in the main area in place of the room, which stays open under it.
     func show(_ page: Page) {
-        opensHomeWhenReady = false
         self.page = page
+        scheduleSessionRoomArchive()
     }
 
     /// The scope the Inbox keeps its read state under: the server and the account, as the social notifications'.
@@ -389,8 +423,8 @@ final class WorkspaceStore: ObservableObject {
         let people = social.friends.map(\.account) + [session.account]
         await inbox.refresh(social: social, community: global, people: people) { [team] in team.owner(of: $0) }
         guard social.savedSession?.account.id == session.account.id, inbox.isLoaded else { return }
-        notifications.receiveInbox(inbox.items, session: session) { [homeSessions] item in
-            item.title { id in homeSessions.sessions.first { $0.id == id }.map(homeSessions.name(of:)) }
+        notifications.receiveInbox(inbox.items, session: session) { [weak self] item in
+            item.title { id in self?.ownSessionName(of: id) }
         }
     }
 

@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// One Claude Code or Codex session running on the person's Mac, as the server lists it among the agents in their
-/// Home. Its hook registers it under the person's bot as `<bot id>.<session>` and puts `harness:`, `folder:` and
-/// `branch:` in its capabilities; its presence status is what its hooks last reported. (Chad's plan, tasks 1 and 9.)
+/// One Claude Code or Codex session running on the person's Mac, with the account room the server made for it when it
+/// registered. The room's `session` field says which session it was made for, with its harness, folder and branch,
+/// and `session_state` says what it is doing (navigation note, section 4.1; Chad's plan, tasks 1 and 9).
 struct LiveSession: Identifiable, Equatable {
     enum Harness: String {
         case claudeCode = "claude-code"
@@ -42,34 +42,23 @@ struct LiveSession: Identifiable, Equatable {
     /// The branch its worktree has checked out, or empty when the hook sent none.
     let branch: String
     let state: State
-    /// When it registered, which orders Home newest first.
+    /// When it registered.
     let startedAt: Date
+    /// The account room the server made for it.
+    let roomID: String
+    /// The last moment the app saw it stop at a prompt, which lifts its room's cell to the top of the list.
+    let waitingSince: Date?
 
-    /// A session from one of Home's agents, or nil for an agent that is not a session, such as the person's Mac.
-    init?(agent: AgentPresence) {
-        var fields: [String: String] = [:]
-        for capability in agent.capabilities {
-            guard let colon = capability.firstIndex(of: ":") else { continue }
-            let key = String(capability[..<colon])
-            if fields[key] == nil { fields[key] = String(capability[capability.index(after: colon)...]) }
-        }
-        guard let harness = fields["harness"].flatMap(Harness.init(rawValue:)),
-              let folder = fields["folder"], !folder.isEmpty else { return nil }
-        id = agent.agentID
-        self.harness = harness
-        self.folder = folder
-        branch = fields["branch"] ?? ""
-        state = State(presence: agent.status)
-        startedAt = agent.connectedAt?.cowchatDate ?? .distantPast
-    }
-
-    init(id: String, harness: Harness, folder: String, branch: String, state: State = .idle, startedAt: Date) {
+    init(id: String, harness: Harness, folder: String, branch: String, state: State = .idle, startedAt: Date,
+         roomID: String = "", waitingSince: Date? = nil) {
         self.id = id
         self.harness = harness
         self.folder = folder
         self.branch = branch
         self.state = state
         self.startedAt = startedAt
+        self.roomID = roomID
+        self.waitingSince = waitingSince
     }
 
     /// The name before any number: its branch without the person's prefix, or its folder on main, as the plugin names
@@ -79,74 +68,133 @@ struct LiveSession: Identifiable, Equatable {
         return last.isEmpty || last == "main" || last == "master" ? folder : last
     }
 
-    /// Its second fact in a row: its folder, or its branch when the name already says the folder.
+    /// Its second fact: its folder, or its branch when the name already says the folder.
     var place: String {
         baseName == folder && !branch.isEmpty ? branch : folder
     }
 }
 
-/// The person's live sessions, read from their Home's agents, and what the sidebar and composer make of them: the
-/// names, the five rows under Home, the row for the rest, and the @ completion.
+/// A `session_state` frame: one of the person's sessions registered, changed state or ended. The server sends it to the
+/// person's own account connections, since the app hears presence only for the room it has joined (navigation note,
+/// section 4.1; a question for Chad beside his task 9).
+struct SessionStateEvent: Equatable {
+    enum Value: String {
+        case working, prompt, idle, ended
+    }
+
+    let agentID: String
+    let roomID: String
+    let state: Value
+
+    init(agentID: String, roomID: String, state: Value) {
+        self.agentID = agentID
+        self.roomID = roomID
+        self.state = state
+    }
+
+    init?(payload: [String: Any]) {
+        guard let agentID = payload["agent_id"] as? String, let roomID = payload["room_id"] as? String,
+              let state = (payload["state"] as? String).flatMap(Value.init(rawValue:)) else { return nil }
+        self.init(agentID: agentID, roomID: roomID, state: state)
+    }
+}
+
+/// The person's live sessions, each with its room, read from the account rooms' `session` field and kept current by
+/// `session_state`, and what the cells, the composer and the sheets make of them: the names, the pick of five, and the
+/// @ mentions.
 @MainActor
-final class HomeSessions: ObservableObject {
-    /// How many of Home's sessions the sidebar shows before its more row.
+final class LiveSessions: ObservableObject {
+    /// How many sessions a list shows before its more row.
     static let sidebarLimit = 5
 
-    /// The account's Home room, from its setup.
-    @Published var roomID: String?
-    /// Every live session, newest started first, as Home lists them.
+    /// Every live session, newest started first.
     @Published private(set) var sessions: [LiveSession] = []
-    /// Whether the more row is open, showing every session.
-    @Published var showsAll = false
-    /// Each session's name, settled when it was first seen.
-    @Published private(set) var names: [String: String] = [:]
+    /// Each live session's room's name, by agent ID, which is the session's one name.
+    @Published private(set) var roomNames: [String: String] = [:]
+    /// The person's session rooms as the account last listed them, live or ended.
+    private var listed: [SocialRoom] = []
+    private var viewerID: String?
+    /// What `session_state` last said of each session.
+    private var states: [String: SessionStateEvent.Value] = [:]
+    private var waitingSince: [String: Date] = [:]
 
-    /// Takes Home's agents as the server listed them.
-    func update(from agents: [AgentPresence]) {
-        let live = agents.compactMap(LiveSession.init(agent:))
-            .sorted { ($0.startedAt, $0.id) > ($1.startedAt, $1.id) }
-        let settled = Self.settledNames(for: live, keeping: names)
-        if settled != names { names = settled }
+    /// Takes the account's rooms as the server listed them. A session is live while it has not ended (`hasEnded`).
+    func update(from rooms: [SocialRoom], viewerID: String?) {
+        self.viewerID = viewerID
+        listed = rooms.filter { $0.session != nil && $0.ownerId == viewerID && viewerID != nil }
+        rebuild()
+    }
+
+    /// Takes a `session_state`. Returns false when the event names a room the account has not listed yet, which asks
+    /// the caller to list the rooms again so the new session's cell appears at once.
+    @discardableResult
+    func apply(_ event: SessionStateEvent, at now: Date = Date()) -> Bool {
+        let previous = states[event.agentID]
+        states[event.agentID] = event.state
+        // The app can tell when a session stops at a prompt only when it knew what the session did before.
+        if event.state == .prompt, let previous, previous != .prompt { waitingSince[event.agentID] = now }
+        rebuild()
+        return listed.contains { $0.roomId == event.roomID }
+    }
+
+    /// Sign out: every session goes with the account.
+    func clear() {
+        listed = []
+        viewerID = nil
+        states = [:]
+        waitingSince = [:]
+        sessions = []
+        roomNames = [:]
+    }
+
+    /// A session's one name: its room's name, which the cells, the composer and the sheets show and which others write
+    /// after @.
+    func name(of session: LiveSession) -> String {
+        roomNames[session.id] ?? session.baseName
+    }
+
+    /// The live session a room was made for, when the room is one of the person's and its session is live.
+    func session(inRoom roomID: String) -> LiveSession? {
+        sessions.first { $0.roomID == roomID }
+    }
+
+    /// Whether a room's session has ended. A `session_state` heard since launch is newer than the rooms list, which
+    /// refreshes every 30 seconds, so it wins: a session that ended says so at once, and a resumed one is live again
+    /// before its room's `ended_at` clears.
+    func hasEnded(_ session: SocialRoom.Session) -> Bool {
+        if let state = states[session.agentId] { return state == .ended }
+        return session.endedAt != nil
+    }
+
+    private func rebuild() {
+        var live: [LiveSession] = []
+        var names: [String: String] = [:]
+        for room in listed {
+            guard let session = room.session, !hasEnded(session),
+                  let harness = LiveSession.Harness(rawValue: session.harness) else { continue }
+            let state: LiveSession.State
+            switch states[session.agentId] {
+            case .working: state = .working
+            case .prompt: state = .prompt
+            default: state = .idle
+            }
+            live.append(LiveSession(id: session.agentId, harness: harness, folder: session.folder,
+                                    branch: session.branch, state: state,
+                                    startedAt: session.startedAt.cowchatDate ?? .distantPast, roomID: room.roomId,
+                                    waitingSince: waitingSince[session.agentId]))
+            names[session.agentId] = room.name
+        }
+        live.sort { ($0.startedAt, $0.id) > ($1.startedAt, $1.id) }
+        if names != roomNames { roomNames = names }
         if live != sessions { sessions = live }
     }
 
-    func clear() {
-        sessions = []
-        names = [:]
-        showsAll = false
-    }
+    // MARK: Lists
 
-    /// A session's one name, which its row and the @ completion show and which others write after @.
-    func name(of session: LiveSession) -> String {
-        names[session.id] ?? session.baseName
-    }
-
-    /// Names new sessions in the order they started and keeps every name already given, so a name never changes while
-    /// people use it. A session takes its base name, or when a live one holds it, the lowest free number after it
-    /// ("unread-counts-2"). An ended session frees its name for the next.
-    nonisolated static func settledNames(for sessions: [LiveSession], keeping previous: [String: String])
-        -> [String: String] {
-        let live = Set(sessions.map(\.id))
-        var names = previous.filter { live.contains($0.key) }
-        for session in sessions.sorted(by: { ($0.startedAt, $0.id) < ($1.startedAt, $1.id) })
-        where names[session.id] == nil {
-            let taken = Set(names.values)
-            let base = session.baseName
-            var number = 1
-            while taken.contains(number == 1 ? base : "\(base)-\(number)") { number += 1 }
-            names[session.id] = number == 1 ? base : "\(base)-\(number)"
-        }
-        return names
-    }
-
-    // MARK: The sidebar
-
-    /// The rows under Home while the more row is closed: every session stopped at a prompt, since its person must
-    /// answer it there, then the most recently started of the rest, up to five rows in all, in Home's order so a row
-    /// never jumps when it is picked. With five or fewer live, all of them. More than five at a prompt all show.
-    var picked: [LiveSession] { Self.pick(from: sessions) }
-
-    /// The pick from `sessions`, kept in their order. The Join sheet's rows use it too.
+    /// The rows a list shows while its more row is closed: every session stopped at a prompt, since its person must
+    /// answer it, then the most recently started of the rest, up to five rows in all, kept in their order so a row
+    /// never jumps when it is picked. With five or fewer, all of them. More than five at a prompt all show. The Join
+    /// sheet and the Team page use it.
     static func pick(from sessions: [LiveSession]) -> [LiveSession] {
         guard sessions.count > sidebarLimit else { return sessions }
         let prompted = sessions.filter { $0.state == .prompt }
@@ -154,14 +202,6 @@ final class HomeSessions: ObservableObject {
         let ids = Set(prompted.map(\.id)).union(rest.map(\.id))
         return sessions.filter { ids.contains($0.id) }
     }
-
-    /// The rows under Home: the pick, or every session once the more row is pressed.
-    var shown: [LiveSession] { showsAll ? sessions : picked }
-
-    /// How many sessions the pick leaves out. The more row shows only when it is more than none.
-    var hiddenCount: Int { sessions.count - picked.count }
-
-    var moreTitle: String { Self.moreTitle(hidden: hiddenCount, showsAll: showsAll) }
 
     // copy:
     /// The more row's words: how many more it shows, or once open, how many it hides again.
@@ -171,32 +211,13 @@ final class HomeSessions: ObservableObject {
     }
 
     // copy:
-    /// A session's second line: where its person answers it while it is stopped at a prompt, or else its place.
+    /// What a session's cell says under the pointer: where its person answers it while it is stopped at a prompt, or
+    /// else its place.
     func line(for session: LiveSession) -> String {
         session.state == .prompt ? "Waiting in \(session.harness.appName)" : session.place
     }
 
-    /// How Home's header names an agent at work: a live session by its name alone, since every session in Home is
-    /// its person's, and any other agent as the server names it.
-    func headerName(of agent: AgentPresence) -> String {
-        sessions.first { $0.id == agent.agentID }.map(name(of:)) ?? agent.name
-    }
-
-    // copy:
-    /// What Home's header puts between the names of the sessions at work.
-    static let headerNameSeparator = ", "
-
     // MARK: Mentions
-
-    /// What the @ completion offers for what is typed after the @: every live session in Home's order whose name,
-    /// folder or branch holds it.
-    func options(matching query: String) -> [LiveSession] {
-        let query = query.lowercased()
-        return sessions.filter { session in
-            query.isEmpty || [name(of: session), session.folder, session.branch]
-                .contains { $0.lowercased().contains(query) }
-        }
-    }
 
     /// The agent IDs of the live sessions a text mentions by name, in the order it names them.
     func mentions(in text: String) -> [String] {
@@ -207,22 +228,6 @@ final class HomeSessions: ObservableObject {
             found.append(session.id)
         }
         return found
-    }
-
-    /// What follows the @ being typed at the end of a draft, or nil when its last word is not a mention being typed.
-    /// The @ starts the text or follows a space, and what follows holds only the characters a name can.
-    nonisolated static func mentionQuery(in text: String) -> String? {
-        guard let at = text.lastIndex(of: "@"), startsMention(text, at: at) else { return nil }
-        let typed = text[text.index(after: at)...]
-        guard typed.allSatisfy(isNameCharacter) else { return nil }
-        return String(typed)
-    }
-
-    /// The draft with its last @ word replaced by a session's name and a space, as picking it in the completion does.
-    nonisolated static func completing(_ text: String, with name: String) -> String {
-        var text = text
-        if let at = text.lastIndex(of: "@"), !text[at...].contains(" ") { text.removeSubrange(at...) }
-        return text + "@\(name) "
     }
 
     /// The words after each @ that starts a mention, up to the first character a name cannot hold.
@@ -257,7 +262,7 @@ final class HomeSessions: ObservableObject {
     }
 }
 
-/// The @names a room's messages draw in the accent, as the approved Home draws them: the live sessions of the room's
+/// The @names a room's messages draw in the accent, as the approved design draws them: the live sessions of the room's
 /// owner, and the people the app knows, by handle or by first name ("@Patrick-Mandia" or "@Patrick"). A mention of the
 /// viewer also sits on a fill. Names are kept lowercased, without their @.
 struct MentionMarks: Equatable {
@@ -281,7 +286,7 @@ struct MentionMarks: Equatable {
     /// the text, which is still being typed, is left out.
     func marks(in text: String, completedOnly: Bool = false) -> [Mark] {
         guard !names.isEmpty else { return [] }
-        return HomeSessions.mentionRanges(in: text).compactMap { range in
+        return LiveSessions.mentionRanges(in: text).compactMap { range in
             let name = text[text.index(after: range.lowerBound)..<range.upperBound].lowercased()
             guard names.contains(name), !completedOnly || range.upperBound < text.endIndex else { return nil }
             return Mark(range: range, namesViewer: viewerNames.contains(name))
@@ -305,7 +310,7 @@ struct MentionMarks: Equatable {
         return result
     }
 
-    /// The fill behind a mention of the viewer: Nugget 100 in light mode and Nugget 900 in dark, as the approved Home
+    /// The fill behind a mention of the viewer: Nugget 100 in light mode and Nugget 900 in dark, as the approved design
     /// draws it. The accent keeps 4.5:1 on either.
     static let viewerFill = Color(nsColor: NSColor(name: nil) { appearance in
         HexColor.isDark(appearance) ? NSColor(Palette.nugget900) : NSColor(Palette.nugget100)

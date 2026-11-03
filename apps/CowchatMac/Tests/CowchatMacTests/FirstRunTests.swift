@@ -25,12 +25,15 @@ final class FirstRunTests: XCTestCase {
 
     private let start = Date(timeIntervalSince1970: 1_800_000_000)
 
-    private func agent(_ id: String, minute: Int) -> AgentPresence {
+    /// The room the server made for a session as it registered.
+    private func room(_ id: String, minute: Int) -> SocialRoom {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return AgentPresence(agentID: id, name: id, capabilities: ["harness:claude-code", "folder:cowboy", "branch:\(id)"],
-                             connectedAt: formatter.string(from: start.addingTimeInterval(TimeInterval(minute * 60))),
-                             status: "idle")
+        return SocialRoom(roomId: "session-\(id)", name: id, ownerId: "patrick", kind: "session",
+                          session: SocialRoom.Session(
+                              agentId: id, harness: "claude-code", folder: "cowboy", branch: id,
+                              startedAt: formatter.string(from: start.addingTimeInterval(TimeInterval(minute * 60))),
+                              endedAt: nil))
     }
 
     private func friend(_ id: String, _ name: String, agents: [String] = []) -> SocialFriend {
@@ -48,7 +51,7 @@ final class FirstRunTests: XCTestCase {
         XCTAssertEqual(firstRun.step, .login)
         XCTAssertFalse(firstRun.recovered(hasSetup: false))
         XCTAssertEqual(firstRun.step, .name)
-        firstRun.homeCreated()
+        firstRun.setUp()
         XCTAssertEqual(firstRun.step, .agents)
         firstRun.agentsDone()
         XCTAssertEqual(firstRun.step, .ready)
@@ -75,12 +78,12 @@ final class FirstRunTests: XCTestCase {
         XCTAssertTrue(installer.calls.isEmpty)
     }
 
-    /// An account that signs in with its Home already made skips first run, and the wizard opens Home. One that made
-    /// its Home in this first run stays where it is.
-    func testAnAccountThatComesBackWithAHomeSkipsFirstRun() {
+    /// An account that signs in already set up skips first run, and the wizard shows the Inbox. One that was set up in
+    /// this first run stays where it is.
+    func testAnAccountThatComesBackSetUpSkipsFirstRun() {
         let returning = FirstRun()
         XCTAssertTrue(returning.recovered(hasSetup: true))
-        XCTAssertEqual(returning.step, .login, "The signed-out page finds Home while it opens")
+        XCTAssertEqual(returning.step, .login, "The signed-out page finds the setup while it opens")
         XCTAssertFalse(returning.waitsForFirstSession)
 
         let onTheName = FirstRun(step: .name)
@@ -161,25 +164,25 @@ final class FirstRunTests: XCTestCase {
     // MARK: The first session
 
     func testTheLastStepOpensOnTheFirstSessionToJoinAfterItStartsWaiting() {
-        let sessions = HomeSessions()
-        sessions.update(from: [agent("already-here", minute: 0)])
+        let sessions = LiveSessions()
+        sessions.update(from: [room("already-here", minute: 0)], viewerID: "patrick")
         let firstRun = FirstRun(step: .agents, sessions: sessions)
         var opened: [String] = []
         firstRun.onFirstSession = { opened.append($0.id) }
 
-        sessions.update(from: [agent("already-here", minute: 0), agent("before-ready", minute: 1)])
+        sessions.update(from: [room("already-here", minute: 0), room("before-ready", minute: 1)], viewerID: "patrick")
         XCTAssertTrue(opened.isEmpty, "Nothing opens before the last step")
 
         firstRun.agentsDone()
-        sessions.update(from: [agent("already-here", minute: 0), agent("before-ready", minute: 1)])
-        XCTAssertTrue(opened.isEmpty, "Sessions already in Home do not count")
+        sessions.update(from: [room("already-here", minute: 0), room("before-ready", minute: 1)], viewerID: "patrick")
+        XCTAssertTrue(opened.isEmpty, "Sessions that were live before the wait do not count")
 
-        sessions.update(from: [agent("already-here", minute: 0), agent("before-ready", minute: 1),
-                               agent("first-look", minute: 2)])
+        sessions.update(from: [room("already-here", minute: 0), room("before-ready", minute: 1),
+                               room("first-look", minute: 2)], viewerID: "patrick")
         XCTAssertEqual(opened, ["first-look"])
         XCTAssertFalse(firstRun.waitsForFirstSession)
 
-        sessions.update(from: [agent("first-look", minute: 2), agent("second", minute: 3)])
+        sessions.update(from: [room("first-look", minute: 2), room("second", minute: 3)], viewerID: "patrick")
         XCTAssertEqual(opened, ["first-look"], "Only the first one opens")
     }
 

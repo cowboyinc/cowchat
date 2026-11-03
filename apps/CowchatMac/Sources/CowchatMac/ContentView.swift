@@ -53,7 +53,7 @@ struct ContentView: View {
             Group {
                 switch MainArea.content(page: workspace.page, selectedRoom: store.selectedRoom) {
                 case .page(.inbox):
-                    InboxPage(inbox: workspace.inbox, home: workspace.homeSessions)
+                    InboxPage(inbox: workspace.inbox, sessions: workspace.liveSessions, social: workspace.social)
                 case .page(.team):
                     TeamPage(team: workspace.team, account: workspace.accountGlobal ?? workspace.local)
                 case .page(.friends):
@@ -80,7 +80,7 @@ struct ContentView: View {
             .padding(.leading, isSidebarVisible ? 0 : 8)
         }
         .background(SemanticColor.surface400)
-        .environmentObject(workspace.homeSessions)
+        .environmentObject(workspace.liveSessions)
         // The unified toolbar otherwise paints its own system strip; tint it
         // with the same surface400 shell so the nav reads as one tan surface.
         .toolbarBackground(SemanticColor.surface400, for: .windowToolbar)
@@ -192,16 +192,9 @@ struct ContentView: View {
                     .environmentObject(store)
                     .padding(18)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if let room = store.secondAgentHintRoom {
-                SecondAgentHintNotice(room: room)
-                    .id(room.id)
-                    .environmentObject(store)
-                    .padding(18)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.2), value: store.roomReadyNotice?.id)
-        .animation(.easeInOut(duration: 0.2), value: store.secondAgentHintRoom?.id)
     }
 
     // copy:
@@ -258,14 +251,10 @@ private struct SidebarView: View {
             InboxNavRow(inbox: workspace.inbox)
                 .padding(.trailing, listsScrollerWidth)
 
-            HomeNavRow(account: workspace.accountGlobal ?? workspace.local, home: workspace.homeSessions)
-                .padding(.trailing, listsScrollerWidth)
-
             SidebarRoomLists(
                 local: workspace.local,
                 globalOrLocal: workspace.global ?? workspace.local,
                 accountOrLocal: workspace.accountGlobal ?? workspace.local,
-                home: workspace.homeSessions,
                 hasAccountGlobal: workspace.accountGlobal != nil,
                 hasGlobal: workspace.global != nil
             )
@@ -406,142 +395,6 @@ private struct TeamNavRow: View {
             // The scroll view's lists sit 8 in, so 4 more puts the row 12 in, as Home's is.
             .padding(.horizontal, 4)
             .padding(.bottom, 10)
-        }
-    }
-}
-
-/// Home, pinned above the room lists' scroll view under the Inbox, so it
-/// never scrolls away. Its live sessions scroll
-/// under it at the top of the lists (`HomePlaces`).
-private struct HomeNavRow: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @ObservedObject var account: ChatStore
-    @ObservedObject var home: HomeSessions
-
-    var body: some View {
-        if workspace.accountGlobal != nil,
-           let room = account.rooms.first(where: { $0.id == home.roomID }) {
-            // copy:
-            SidebarNavRow(title: "Home", isSelected: workspace.isSelected(room, on: .accountGlobal)) {
-                Task { await workspace.select(room: room, on: .accountGlobal) }
-            }
-            // The nav rows sit 12 in, and Home's sessions 2 under it.
-            .padding(.horizontal, 12)
-            .padding(.bottom, 2)
-        }
-    }
-}
-
-/// The person's live sessions under Home's pinned row: at most five
-/// (`HomeSessions.picked`), then a row for the rest. They sit at the top of
-/// the room lists' scroll view, so however many sessions are live the rooms
-/// stay in reach.
-private struct HomePlaces: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @ObservedObject var account: ChatStore
-    @ObservedObject var home: HomeSessions
-
-    var body: some View {
-        if workspace.accountGlobal != nil, account.rooms.contains(where: { $0.id == home.roomID }) {
-            VStack(spacing: 2) {
-                ForEach(home.shown) { session in
-                    SessionRow(home: home, session: session)
-                        .sidebarListItem("session/\(session.id)")
-                }
-                if home.hiddenCount > 0 {
-                    // The session names start after the harness mark's 16 and the 8 beside it.
-                    SessionsMoreRow(title: home.moreTitle, indent: SessionRow.indent + 16 + 8) {
-                        home.showsAll.toggle()
-                    }
-                    .sidebarListItem("sessions-more")
-                }
-            }
-            // The lists sit 8 in; the nav rows sit 12 in.
-            .padding(.horizontal, 4)
-            // Home's row and the first list keep the 10 between them they had.
-            .padding(.bottom, home.shown.isEmpty ? 8 : 10)
-        }
-    }
-}
-
-/// One of the person's live sessions under Home: its harness mark lined up
-/// with Home's title, its name in Body S and its second line in Caption, and
-/// the turning mark at the row's end while it works. Pressing it opens the
-/// room made for the session, or Home with the session mentioned in the
-/// composer. It never draws selected; the room it opens shows the selection.
-private struct SessionRow: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @ObservedObject var home: HomeSessions
-    let session: LiveSession
-    @State private var isHovering = false
-
-    /// Home's title starts 38 in from the row's edge: 10 of padding, the 18
-    /// icon and 10 between them.
-    static let indent: CGFloat = 38
-
-    var body: some View {
-        Button {
-            Task { await workspace.openSession(session) }
-        } label: {
-            SessionRowLabel(home: home, session: session, line: home.line(for: session), showsWork: true)
-                .padding(.leading, Self.indent)
-                .padding(.trailing, 6)
-                .frame(height: 40)
-                .background(SidebarRowBackground(state: .init(isSelected: false, isHovering: isHovering)))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
-        .macAccessibleAction(label: "Open \(home.name(of: session))", value: accessibilityValue) {
-            Task { await workspace.openSession(session) }
-        }
-    }
-
-    // copy:
-    private var accessibilityValue: String? {
-        switch session.state {
-        case .working: return "Working"
-        case .prompt: return home.line(for: session)
-        case .idle: return nil
-        }
-    }
-}
-
-/// A session's mark, name and second line, as Home's rows and the @
-/// completion draw them: the harness mark at 16, 8 before the name in Body S,
-/// the line under it in Caption (Text/Tertiary, or the warning colour while
-/// the session waits at a prompt), and with `showsWork`, a slot at the end as
-/// wide as an XS button holding the turning mark while it works.
-private struct SessionRowLabel: View {
-    @ObservedObject var home: HomeSessions
-    let session: LiveSession
-    let line: String
-    let showsWork: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            HarnessMark(harness: session.harness)
-                .help(session.harness.appName)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(home.name(of: session))
-                    .gallopText(.bodyS, color: SemanticColor.textPrimary)
-                    .lineLimit(1)
-                Text(line)
-                    .gallopText(
-                        .caption,
-                        color: session.state == .prompt && showsWork
-                            ? SemanticColor.warning : SemanticColor.textTertiary
-                    )
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer(minLength: 0)
-            if showsWork {
-                Group {
-                    if session.state == .working { SessionWorkingMark() }
-                }
-                .frame(width: 28, height: 16)
-            }
         }
     }
 }
@@ -747,7 +600,6 @@ private struct SidebarRoomLists: View {
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
     @ObservedObject var accountOrLocal: ChatStore
-    @ObservedObject var home: HomeSessions
     let hasAccountGlobal: Bool
     let hasGlobal: Bool
     /// Where the rows sat when the lists last laid out, kept apart from state so scrolling redraws nothing.
@@ -763,7 +615,6 @@ private struct SidebarRoomLists: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        HomePlaces(account: accountOrLocal, home: home)
                         TeamNavRow()
                         if visibleRoomsEmpty && isSearchActive {
                             emptyRoomsState
@@ -855,10 +706,7 @@ private struct SidebarRoomLists: View {
     static func rowID(_ roomID: String, on server: WorkspaceStore.Server) -> String { "\(server.rawValue)/\(roomID)" }
 
     private func baseRooms(in store: ChatStore, server: WorkspaceStore.Server) -> [Room] {
-        let searching = !workspace.searchText
-            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let source = RoomSidebarPresentation.listedRooms(store.unarchivedRooms, on: server, searching: searching,
-                                                         homeRoomID: home.roomID)
+        let source = RoomSidebarPresentation.listedRooms(store.unarchivedRooms, on: server)
         return RoomSidebarPresentation.filteredRooms(
             from: source,
             query: workspace.searchText,
@@ -1317,58 +1165,12 @@ private struct RoomReadyNotice: View {
     }
 }
 
-private struct SecondAgentHintNotice: View {
-    @EnvironmentObject private var store: ChatStore
-    let room: Room
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Text("Now connect your agent to this room. Copy the connect prompt from the ⋯ menu.")
-                .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
-            Button {
-                store.secondAgentHintRoom = nil
-            } label: {
-                GallopIconView(icon: .dismiss, fallbackSystemName: "xmark", size: 11)
-                    .foregroundStyle(SemanticColor.iconTertiary)
-            }
-            .buttonStyle(.plain)
-            .macAccessibleAction(label: "Dismiss hint") {
-                store.secondAgentHintRoom = nil
-            }
-        }
-        .padding(14)
-        .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(SemanticColor.surfaceGlass500)
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(SemanticColor.surfaceGlassBorderHighlight, lineWidth: 1)
-                }
-        }
-        .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
-        .shadow(color: .black.opacity(0.04), radius: 0, y: 0.5)
-        .task {
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
-            if !Task.isCancelled { store.secondAgentHintRoom = nil }
-        }
-    }
-}
-
 private struct ChatRoomView: View {
     @EnvironmentObject private var store: ChatStore
     @EnvironmentObject private var workspace: WorkspaceStore
-    @EnvironmentObject private var home: HomeSessions
+    @EnvironmentObject private var sessions: LiveSessions
     let room: Room
     @Binding var isSidebarVisible: Bool
-    /// Bumped to focus the composer with the cursor after the draft.
-    @State private var composerFocusRequest = 0
-    @State private var mentionHighlight = 0
-    /// The draft the @ completion was closed on with Escape. It stays closed until the draft changes.
-    @State private var mentionClosedDraft: String?
     @State private var isRoomKeyPresented = false
     @State private var roomKeyDraft = ""
     @State private var roomKeyError: String?
@@ -1382,7 +1184,7 @@ private struct ChatRoomView: View {
     @State private var isArtifactPresented = false
     @State private var isMessageListNearBottom = true
     @State private var newMessageCount = 0
-    @State private var hasCopiedQuietRoomPrompt = false
+    @State private var hasCopiedEmptyRoomPrompt = false
     /// The list is revealed only after the initial bottom-anchor scroll, so a
     /// room switch never paints top-anchored content and animates it away.
     @State private var hasPositionedInitialScroll = false
@@ -1394,56 +1196,38 @@ private struct ChatRoomView: View {
         return store.rooms.first { $0.id == parentID }
     }
 
-    /// Whether this is the account's Home, which the sidebar and the header call Home whatever its room name.
-    private var isHome: Bool {
-        workspace.activeServer == .accountGlobal && room.id == home.roomID
+    private var title: String { room.name }
+
+    private var isAccountRoom: Bool { workspace.activeServer == .accountGlobal }
+
+    /// Whether the viewer owns this account room, which is where a typed @name of one of their live sessions becomes a
+    /// mention, since the app knows only the viewer's sessions.
+    private var ownsRoom: Bool {
+        let social = workspace.social
+        let owner = social.rooms.first { $0.roomId == room.id }?.ownerId
+        return isAccountRoom && owner != nil && owner == social.account?.id
     }
 
-    // copy:
-    private var title: String { isHome ? "Home" : room.name }
-
-    /// Every session in Home is its person's, so Home names a session's messages by its name alone, without the handle
-    /// the server adds. Other rooms keep the server's name.
+    /// In every account room the person's own sessions are named by their name alone, without the handle the server
+    /// adds. Other senders keep the server's name.
     private func senderName(of message: ChatMessage) -> String? {
-        guard isHome, let session = home.sessions.first(where: { $0.id == message.agentID }) else { return nil }
-        return home.name(of: session)
+        guard isAccountRoom, let session = sessions.sessions.first(where: { $0.id == message.agentID }) else { return nil }
+        return sessions.name(of: session)
     }
 
     /// The @names this room's messages and composer draw in the accent: the live sessions of the room's owner when
-    /// that is the viewer, since the app knows only the viewer's sessions, and the people the app knows.
+    /// that is the viewer, and the people the app knows.
     private var mentionMarks: MentionMarks {
         let social = workspace.social
-        let owner = isHome ? social.account?.id : social.rooms.first { $0.roomId == room.id }?.ownerId
-        let ownsRoom = workspace.activeServer == .accountGlobal && owner != nil && owner == social.account?.id
-        return MentionMarks(sessionNames: ownsRoom ? home.sessions.map(home.name(of:)) : [],
+        return MentionMarks(sessionNames: ownsRoom ? sessions.sessions.map(sessions.name(of:)) : [],
                             people: social.friends.map(\.account), viewer: social.account)
     }
 
-    /// The live sessions the @ being typed in Home's draft can name, or none while no @ is being typed.
-    private var mentionOptions: [LiveSession] {
-        guard isHome, isComposerExpanded, store.draft != mentionClosedDraft,
-              let query = HomeSessions.mentionQuery(in: store.draft) else { return [] }
-        return home.options(matching: query)
-    }
-
-    private func paneState(at now: Date) -> RoomPaneState {
+    private var paneState: RoomPaneState {
         RoomPaneState.state(
             connectionStatus: store.connectionStatus,
             isLoadingMessages: store.isLoadingMessages,
-            hasMessages: !store.messages.isEmpty,
-            hasOtherMembers: hasCollaborators(at: now)
-        )
-    }
-
-    private func hasCollaborators(at now: Date) -> Bool {
-        ChatPresencePresentation.hasCollaboratorSignal(
-            members: store.roomMembers,
-            currentAgentID: store.agentID,
-            fallbackMemberCount: room.memberCount,
-            fallbackMemberCountIncludesCurrentAgent:
-                store.fallbackMemberCountIncludesCurrentAgent(in: room.id),
-            recentActivityByAgent: store.recentAgentActivityAt[room.id],
-            now: now
+            hasMessages: !store.messages.isEmpty
         )
     }
 
@@ -1459,40 +1243,15 @@ private struct ChatRoomView: View {
                         .controlSize(.small)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                TimelineView(.periodic(from: .now, by: 10)) { timeline in
-                    let state = paneState(at: timeline.date)
-                    ZStack {
-                        if case .connectPrompt(let variant) = state {
-                            RoomConnectStateView(
-                                roomName: room.name,
-                                prompt: store.connectPrompt(for: room),
-                                variant: variant,
-                                makeCopyPrompt: { await store.copyableConnectPrompt(for: room) }
-                            )
-                            .onAppear { store.ensurePromptInvite(for: room) }
-                        } else if state == .quiet {
-                            quietRoom
-                                .allowsHitTesting(true)
-                        }
-                        if RoomPaneState.showsInviteNudge(
-                            state: state,
-                            hasOtherMembers: hasCollaborators(at: timeline.date)
-                        ) {
-                            InviteCollaboratorNudge {
-                                await store.copyableConnectPrompt(for: room)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                            .padding(.top, 12)
-                        }
-                    }
+                switch paneState {
+                case .empty: emptyRoom
+                case .unreachable(let reason): unreachableRoom(reason)
+                case .loading, .chat: EmptyView()
                 }
                 composer
             }
         }
         .background(SemanticColor.surface500)
-        // The request is current when this view appears with the room, so the subscription's first value covers
-        // opening Home from another room.
-        .onReceive(store.$composerRequestRoomID.receive(on: RunLoop.main)) { takeComposerRequest($0) }
         .sheet(isPresented: $isRoomKeyPresented) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Room key for \(room.name)").font(.headline)
@@ -1691,10 +1450,7 @@ private struct ChatRoomView: View {
                 store.fallbackMemberCountIncludesCurrentAgent(in: room.id),
             recentActivityByAgent: store.recentAgentActivityAt[room.id],
             now: now,
-            connectionStatus: store.connectionStatus,
-            // Every session in Home is its person's, so Home names them without the handle the server adds.
-            name: isHome ? home.headerName(of:) : \.name,
-            nameSeparator: isHome ? HomeSessions.headerNameSeparator : " · "
+            connectionStatus: store.connectionStatus
         )
     }
 
@@ -1886,55 +1642,66 @@ private struct ChatRoomView: View {
         }
     }
 
-    /// Whether the room's quiet state offers the connect prompt: not in Home while one of the person's sessions is live
-    /// there, since an agent is already in.
-    private var offersConnectPrompt: Bool {
-        RoomPaneState.quietOffersConnectPrompt(isHome: isHome, liveSessions: home.sessions.count)
-    }
-
-    private var quietRoom: some View {
-        VStack(spacing: 10) {
+    /// A connected room with no messages: the message glyph and "No messages yet", centred in the feed above the
+    /// composer, and in This Mac and API-key rooms Copy connect prompt 16 under it (navigation note, section 5.1).
+    private var emptyRoom: some View {
+        VStack(spacing: 0) {
             GallopIconView(icon: .message, fallbackSystemName: "bubble.left", size: 24)
                 .foregroundStyle(SemanticColor.iconTertiary)
-            Text("This room is quiet")
+            // copy:
+            Text("No messages yet")
                 .gallopText(.h5, color: SemanticColor.textPrimary)
-            // copy: with a session live in Home, the line drops the connect prompt along with its button.
-            Text(offersConnectPrompt ? "Bring an agent in with the connect prompt, or open the composer and say hello."
-                                     : "Open the composer and say hello.")
-                .gallopText(.bodyM, color: SemanticColor.textTertiary)
-                .multilineTextAlignment(.center)
-
-            if offersConnectPrompt { quietRoomPromptButton }
+                .padding(.top, 10)
+            if RoomPaneState.emptyOffersConnectPrompt(isAccountRoom: isAccountRoom) {
+                emptyRoomPromptButton
+                    .padding(.top, 16)
+            }
         }
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var quietRoomPromptButton: some View {
+    private var emptyRoomPromptButton: some View {
         Button {
             copyConnectPrompt()
-            hasCopiedQuietRoomPrompt = true
+            hasCopiedEmptyRoomPrompt = true
         } label: {
-            // Reserve the wider label's width (no resize on click) and keep
-            // the chrome inside the label so the whole capsule is clickable.
+            // Reserve the wider label's width, so the pill does not resize when its label turns to Copied.
             ZStack {
+                // copy:
                 Text("Copy connect prompt").hidden()
-                Text(hasCopiedQuietRoomPrompt ? "Copied" : "Copy connect prompt")
+                Text(hasCopiedEmptyRoomPrompt ? "Copied" : "Copy connect prompt")
             }
-            .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-            .padding(.horizontal, 18)
-            .frame(height: 38)
-            .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
-            .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
-        .padding(.top, 6)
+        .buttonStyle(CowchatPillButtonStyle(prominent: true))
         .macAccessibleAction(label: "Copy connect prompt") {
             copyConnectPrompt()
-            hasCopiedQuietRoomPrompt = true
+            hasCopiedEmptyRoomPrompt = true
         }
     }
 
+    /// Offline or connecting with nothing loaded: the empty state's layout with the retry glyph, the connection's state
+    /// as the title, and Reconnect while offline. `EmptyChatView`'s failed state without its caption or its
+    /// troubleshooting text.
+    private func unreachableRoom(_ reason: RoomPaneState.Unreachable) -> some View {
+        VStack(spacing: 0) {
+            GallopIconView(icon: .retry, fallbackSystemName: "arrow.clockwise", size: 24)
+                .foregroundStyle(SemanticColor.iconTertiary)
+            // copy:
+            Text(reason == .connecting ? "Connecting…" : "Offline")
+                .gallopText(.h5, color: SemanticColor.textPrimary)
+                .padding(.top, 10)
+            if reason == .offline {
+                // copy:
+                Button("Reconnect") { store.reconnect() }
+                    .buttonStyle(CowchatPillButtonStyle(prominent: true))
+                    .padding(.top, 16)
+                    .macAccessibleAction(label: "Reconnect", action: store.reconnect)
+            }
+        }
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
     @ViewBuilder
     private var composer: some View {
@@ -1989,8 +1756,6 @@ private struct ChatRoomView: View {
                     onCancel: {
                         withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
                     },
-                    onKey: handleComposerKey,
-                    focusRequest: composerFocusRequest,
                     mentionMarks: mentionMarks
                 )
                 .frame(height: ComposerTextField.naturalHeight)
@@ -2022,170 +1787,22 @@ private struct ChatRoomView: View {
                     action: sendDraft
                 )
             }
-            // The completion floats over the feed, 8 above the field and lined up with its start, as a menu would: a
-            // frame with no height at the field's top holds it by its bottom edge.
-            .overlay(alignment: .topLeading) {
-                let options = mentionOptions
-                if !options.isEmpty {
-                    MentionCompletion(
-                        options: options,
-                        highlight: min(mentionHighlight, options.count - 1),
-                        pick: pickMention
-                    )
-                    .frame(height: 0, alignment: .bottomLeading)
-                    .offset(y: -8)
-                }
-            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
         .background(SemanticColor.surface500)
-        .onChange(of: HomeSessions.mentionQuery(in: store.draft)) { _ in mentionHighlight = 0 }
     }
 
-    /// Sends the draft, with the live sessions it names after an @ as its mentions when it is Home's.
+    /// Sends the draft, with the live sessions it names after an @ as its mentions in an account room the person owns.
     private func sendDraft() {
-        store.sendDraft(mentions: isHome ? home.mentions(in: store.draft) : [])
-    }
-
-    /// The arrow keys move through the @ completion, Return or Tab puts the highlighted name in the draft, and Escape
-    /// closes it. With the completion closed the field takes every key itself.
-    private func handleComposerKey(_ key: ComposerTextField.Key) -> Bool {
-        let options = mentionOptions
-        guard !options.isEmpty else { return false }
-        let current = min(mentionHighlight, options.count - 1)
-        switch key {
-        case .up: mentionHighlight = max(0, current - 1)
-        case .down: mentionHighlight = min(options.count - 1, current + 1)
-        case .tab, .enter: pickMention(options[current])
-        case .escape: mentionClosedDraft = store.draft
-        }
-        return true
-    }
-
-    private func pickMention(_ session: LiveSession) {
-        store.draft = HomeSessions.completing(store.draft, with: home.name(of: session))
-        composerFocusRequest += 1
-    }
-
-    /// Opening Home from a session's row starts its draft with the session's @name; the composer opens with the
-    /// cursor after it.
-    private func takeComposerRequest(_ roomID: String?) {
-        guard roomID == room.id else { return }
-        store.composerRequestRoomID = nil
-        isComposerExpanded = true
-        composerFocusRequest += 1
+        store.sendDraft(mentions: ownsRoom ? sessions.mentions(in: store.draft) : [])
     }
 
     private var canSend: Bool {
         store.connectionStatus.isConnected
             && (!room.encrypted || store.unlockedRoomIDs.contains(room.id))
             && !store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-}
-
-/// The @ completion over Home's composer: the live sessions the typed name matches, each with its harness mark, its
-/// one name and where it runs, as Home's rows name them. The app has no menu that floats over a text field without
-/// taking its keys, so this draws the demo's picker (a Gallop Submenu of MenuItem rows, 320 wide) on the app's
-/// floating glass: Body L names, Body S lines, 16 at the sides and 12 above and below each row. The highlighted row
-/// takes the glass hover, since Return or Tab picks it. Past five rows it stops at five and a half, so the cut row
-/// says it scrolls, and the highlighted row scrolls into view as the arrows move it.
-private struct MentionCompletion: View {
-    @EnvironmentObject private var home: HomeSessions
-    let options: [LiveSession]
-    let highlight: Int
-    let pick: (LiveSession) -> Void
-
-    /// A row: 12 above and below, a 24 name line, 2 between and a 20 line under it.
-    private static let rowHeight: CGFloat = 12 + 24 + 2 + 20 + 12
-    private static let rowSpacing: CGFloat = 2
-    private static let padding: CGFloat = 8
-    private static let rowsShown = 5
-    private static var cappedHeight: CGFloat {
-        padding + CGFloat(rowsShown) * (rowHeight + rowSpacing) + rowHeight / 2
-    }
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 32, style: .continuous)
-        Group {
-            if options.count > Self.rowsShown {
-                ScrollViewReader { proxy in
-                    ScrollView { rows }
-                        .frame(height: Self.cappedHeight)
-                        .onAppear { proxy.scrollTo(highlight) }
-                        .onChange(of: highlight) { proxy.scrollTo($0) }
-                }
-            } else {
-                rows
-            }
-        }
-        .frame(width: 320)
-        .background {
-            shape.fill(.ultraThinMaterial)
-                .overlay { shape.fill(SemanticColor.surfaceGlass500) }
-        }
-        .clipShape(shape)
-        .overlay { shape.stroke(SemanticColor.surfaceGlassBorderHighlight, lineWidth: 1) }
-        .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
-        .shadow(color: .black.opacity(0.04), radius: 0, y: 0.5)
-    }
-
-    private var rows: some View {
-        VStack(alignment: .leading, spacing: Self.rowSpacing) {
-            ForEach(Array(options.enumerated()), id: \.element.id) { index, session in
-                MentionCompletionRow(
-                    name: home.name(of: session),
-                    line: session.place,
-                    harness: session.harness,
-                    isHighlighted: index == highlight
-                ) { pick(session) }
-                .id(index)
-            }
-        }
-        .padding(Self.padding)
-    }
-}
-
-private struct MentionCompletionRow: View {
-    let name: String
-    let line: String
-    let harness: LiveSession.Harness
-    let isHighlighted: Bool
-    let action: () -> Void
-    @State private var isHovering = false
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
-        let lit = isHighlighted || isHovering
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 12) {
-                    HarnessMark(harness: harness, size: 20)
-                        .frame(minHeight: 24)
-                    Text(name)
-                        .gallopText(
-                            .bodyL,
-                            color: lit ? SemanticColor.surfaceGlassOffTextHover : SemanticColor.surfaceGlassOffTextDefault
-                        )
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                Text(line)
-                    .gallopText(.bodyS, color: SemanticColor.textTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.leading, 32)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(lit ? SemanticColor.surfaceGlassOffHover : .clear, in: shape)
-            .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
-        .help(harness.appName)
-        .macAccessibleAction(label: "Mention \(name)", value: isHighlighted ? "selected" : nil, action: action)
     }
 }
 
@@ -2205,7 +1822,7 @@ private struct MessageFeedRow: View {
     /// A message the room hides by default, drawn because its run is open or the room's switch is on. Its text takes
     /// Text/Tertiary.
     var quiet = false
-    /// The name over the message when the room names its sender itself, as Home does its own sessions.
+    /// The name over the message when the room names its sender itself, as account rooms do the person's own sessions.
     var senderName: String?
     var onSaveAttachment: ((FileAttachment) -> Void)?
     var onOpenAttachment: ((FileAttachment) -> Void)?
@@ -2939,7 +2556,7 @@ private enum SettingsPage {
         case .account: return nil
         case .connection: return "Choose where Cowchat stores and syncs your rooms."
         // copy:
-        case .agents: return "Connect Claude Code and Codex to your Home."
+        case .agents: return "Connect Claude Code and Codex to Cowchat."
         case .theme: return "Choose how Cowchat appears on this Mac."
         case .roomIcons: return "Every room gets the same icon on every Mac — it is drawn from the room name."
         case .updates: return "Keep Cowchat up to date."
@@ -3170,7 +2787,7 @@ private struct SettingsView: View {
                         Spacer()
                         ServerStatusBadge(store: accountGlobal)
                     }
-                    Text("Your Home and rooms shared with friends. Only invited people and approved agents can join.")
+                    Text("Your sessions' rooms and rooms shared with friends. Only invited people and approved agents can join.")
                         .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 }.gallopCard(cornerRadius: 14)
             }

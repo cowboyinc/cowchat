@@ -5,7 +5,8 @@ import SwiftUI
 struct InboxPage: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var inbox: InboxStore
-    @ObservedObject var home: HomeSessions
+    @ObservedObject var sessions: LiveSessions
+    @ObservedObject var social: SocialStore
     /// The rows' width with their insets, which the header takes.
     @State private var rowsWidth: CGFloat?
 
@@ -36,7 +37,7 @@ struct InboxPage: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onPreferenceChange(PageRowsWidthKey.self) { rowsWidth = $0 }
         .sheet(item: $inbox.joining) { item in
-            InboxJoinSheet(item: item, inbox: inbox, home: home)
+            InboxJoinSheet(item: item, inbox: inbox, sessions: sessions)
                 .environmentObject(workspace)
         }
     }
@@ -66,13 +67,11 @@ struct InboxPage: View {
     }
 
     private func title(of item: InboxItem) -> String {
-        item.title { id in home.sessions.first { $0.id == id }.map(home.name(of:)) }
+        item.title { workspace.ownSessionName(of: $0) }
     }
 
-    // copy:
-    /// The room as the sidebar shows it: "Home" for the account's Home.
     private func roomTitle(of item: InboxItem) -> String {
-        item.server == .accountGlobal && item.roomID == home.roomID ? "Home" : item.roomName
+        item.roomColumn(rooms: social.rooms)
     }
 
     /// A message opens its room; an open invitation opens the Join sheet and stays unread until it is answered.
@@ -227,13 +226,13 @@ struct InboxJoinSheet: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     let item: InboxItem
     @ObservedObject var inbox: InboxStore
-    @ObservedObject var home: HomeSessions
+    @ObservedObject var sessions: LiveSessions
     @State private var session: String?
 
     var body: some View {
         if let invitation = inbox.invitation(for: item) {
             SocialInvitationReview(
-                invitation: invitation, sessions: home.sessions, sessionName: home.name(of:),
+                invitation: invitation, sessions: sessions.sessions, sessionName: sessions.name(of:),
                 selectedSession: $session, busy: workspace.social.busy, error: workspace.social.errorMessage,
                 onCancel: { inbox.joining = nil },
                 onDecline: {
@@ -242,7 +241,7 @@ struct InboxJoinSheet: View {
                     }
                 },
                 onAccept: {
-                    let chosen = home.sessions.first { $0.id == session }
+                    let chosen = sessions.sessions.first { $0.id == session }
                     Task {
                         if await workspace.accept(item, with: chosen) { inbox.joining = nil }
                     }

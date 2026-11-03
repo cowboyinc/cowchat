@@ -1,8 +1,8 @@
 import Foundation
 
 /// A page of `GET /social/v1/inbox?cursor=` (Chad's plan, task 5): across the account's rooms, open invitations,
-/// messages that mention the person, and messages agents marked for people in their Home and session rooms. In company
-/// rooms only mentions count. `next_cursor` names the next page, or is missing on the last.
+/// messages that mention the person, and messages agents marked for people in a room made for one session. In company
+/// and community rooms only mentions count. `next_cursor` names the next page, or is missing on the last.
 struct InboxReply: Decodable {
     let items: [InboxWireItem]
     let nextCursor: String?
@@ -16,7 +16,7 @@ struct InboxWireItem: Decodable {
         /// The person who wrote it, or the person whose session it is.
         let account: SocialAccount?
         let agentId: String?
-        /// The person's display name, or the session's name as its person's Home names it.
+        /// The person's display name, or the session's name.
         let name: String
     }
 
@@ -45,7 +45,7 @@ struct InboxItem: Identifiable, Equatable {
     let id: String
     let sender: Sender
     let roomID: String
-    /// The room's name as the server gives it. The page shows "Home" for the account's Home.
+    /// The room's name as the server gives it.
     let roomName: String
     /// Where the room is: the account's rooms, or the community rooms the API key reaches.
     let server: WorkspaceStore.Server
@@ -56,12 +56,15 @@ struct InboxItem: Identifiable, Equatable {
     var invitationID: String?
     /// Whether the invitation still waits for an answer.
     var isOpen = false
+    /// The agent ID of the session that sent it, when a session did.
+    var senderAgentID: String?
 
     var isInvitation: Bool { invitationID != nil }
     var isOpenInvitation: Bool { isInvitation && isOpen }
 
     // copy:
-    /// The row's title: who sent it. `ownSessionName` gives the name Home shows for one of the person's sessions.
+    /// The row's title: who sent it. `ownSessionName` gives the name of one of the person's sessions, which is its
+    /// room's name, live or ended.
     func title(ownSessionName: (String) -> String?) -> String {
         switch sender {
         case let .person(name): return name
@@ -69,6 +72,14 @@ struct InboxItem: Identifiable, Equatable {
         case let .session(owner?, name): return "\(owner)'s \(name)"
         case let .session(nil, name): return name
         }
+    }
+
+    /// The Room column: the room's name, or nothing when the item came from the session the room was made for, since
+    /// the title already says that name (navigation note, section 4.5).
+    func roomColumn(rooms: [SocialRoom]) -> String {
+        guard server == .accountGlobal, let senderAgentID,
+              rooms.first(where: { $0.roomId == roomID })?.session?.agentId == senderAgentID else { return roomName }
+        return ""
     }
 }
 
@@ -98,7 +109,8 @@ extension InboxItem {
             from = .person(sender.account?.displayName ?? sender.name)
         }
         self.init(id: wire.id, sender: from, roomID: wire.roomId, roomName: wire.roomName, server: .accountGlobal,
-                  at: at, message: Self.line(for: content, viewer: viewer))
+                  at: at, message: Self.line(for: content, viewer: viewer),
+                  senderAgentID: sender.kind == "agent" ? sender.agentId : nil)
     }
 
     /// The Inbox's order: open invitations first, newest first, then every other item, newest first.
@@ -304,7 +316,7 @@ final class InboxStore: ObservableObject {
                                             viewer: SocialAccount,
                                             owner: (LiveSession) -> SocialAccount?) -> InboxItem.Sender {
         if message.metadata.senderKind == .agent {
-            let session = agents.first { $0.agentID == message.agentID }.flatMap(LiveSession.init(agent:))
+            let session = agents.first { $0.agentID == message.agentID }.flatMap(Self.session(of:))
             guard let person = session.flatMap(owner) else { return .session(owner: nil, name: message.agentName) }
             if person.id == viewer.id { return .ownSession(agentID: message.agentID, name: message.agentName) }
             return .session(owner: InboxItem.firstName(of: person.displayName), name: message.agentName)
@@ -315,5 +327,22 @@ final class InboxStore: ObservableObject {
                 || InboxItem.firstName(of: $0.displayName).lowercased() == name
         }
         return .person(person?.displayName ?? message.agentName)
+    }
+
+    /// A community room's agent as a session, from the `harness:`, `folder:` and `branch:` its hook registers, or nil
+    /// for an agent that is not a session. The API key's connection carries no account, so the folder and branch are
+    /// what say whose session it is.
+    nonisolated static func session(of agent: AgentPresence) -> LiveSession? {
+        var fields: [String: String] = [:]
+        for capability in agent.capabilities {
+            guard let colon = capability.firstIndex(of: ":") else { continue }
+            let key = String(capability[..<colon])
+            if fields[key] == nil { fields[key] = String(capability[capability.index(after: colon)...]) }
+        }
+        guard let harness = fields["harness"].flatMap(LiveSession.Harness.init(rawValue:)),
+              let folder = fields["folder"], !folder.isEmpty else { return nil }
+        return LiveSession(id: agent.agentID, harness: harness, folder: folder, branch: fields["branch"] ?? "",
+                           state: LiveSession.State(presence: agent.status),
+                           startedAt: agent.connectedAt?.cowchatDate ?? .distantPast)
     }
 }

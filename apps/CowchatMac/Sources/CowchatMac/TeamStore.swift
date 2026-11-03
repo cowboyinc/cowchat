@@ -23,7 +23,7 @@ struct TeamSession: Decodable, Equatable {
     let id: String
     let folder: String
     let branch: String
-    /// Its presence status, as Home reads it.
+    /// Its presence status, as `LiveSession.State(presence:)` reads it.
     let state: String?
     let startedAt: String
     let room: RoomRef?
@@ -31,7 +31,7 @@ struct TeamSession: Decodable, Equatable {
     /// When the message carrying the pull request was sent.
     let pullRequestAt: String?
 
-    /// The session as Home's rows hold one, for its name and state.
+    /// The session as `LiveSession` holds one, for its name and state.
     var live: LiveSession {
         LiveSession(id: id, harness: .claudeCode, folder: folder, branch: branch, state: LiveSession.State(presence: state),
                     startedAt: startedAt.cowchatDate ?? .distantPast)
@@ -42,7 +42,7 @@ struct TeamSession: Decodable, Equatable {
 struct TeamBranch: Identifiable, Equatable {
     /// The person's account ID, the folder and the branch.
     let id: String
-    /// The branch as Home names a session: without its person's prefix, or the folder on main. Never numbered.
+    /// The branch as a session is named: without its person's prefix, or the folder on main. Never numbered.
     let name: String
     let folder: String
     let branch: String

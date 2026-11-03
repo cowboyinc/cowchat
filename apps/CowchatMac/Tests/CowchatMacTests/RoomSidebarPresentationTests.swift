@@ -65,8 +65,7 @@ final class RoomSidebarPresentationTests: XCTestCase {
         let scratch = makeRoom(id: "scratch", name: "scratch")
 
         XCTAssertEqual(
-            RoomSidebarPresentation.listedRooms([lobby, scratch], on: .local, searching: false, homeRoomID: nil)
-                .map(\.id),
+            RoomSidebarPresentation.listedRooms([lobby, scratch], on: .local).map(\.id),
             ["lobby", "scratch"]
         )
     }
@@ -76,31 +75,12 @@ final class RoomSidebarPresentationTests: XCTestCase {
         let general = makeRoom(id: "general", name: "general")
 
         for server in [WorkspaceStore.Server.global, .accountGlobal] {
-            for searching in [false, true] {
-                XCTAssertEqual(
-                    RoomSidebarPresentation.listedRooms([lobby, general], on: server, searching: searching,
-                                                        homeRoomID: nil).map(\.id),
-                    ["general"],
-                    "\(server) searching: \(searching)"
-                )
-            }
+            XCTAssertEqual(
+                RoomSidebarPresentation.listedRooms([lobby, general], on: server).map(\.id),
+                ["general"],
+                "\(server)"
+            )
         }
-    }
-
-    func testHomeLeavesTheAccountListUnlessASearchLooksForIt() {
-        let home = makeRoom(id: "home", name: "home")
-        let general = makeRoom(id: "general", name: "general")
-
-        XCTAssertEqual(
-            RoomSidebarPresentation.listedRooms([home, general], on: .accountGlobal, searching: false,
-                                                homeRoomID: "home").map(\.id),
-            ["general"]
-        )
-        XCTAssertEqual(
-            RoomSidebarPresentation.listedRooms([home, general], on: .accountGlobal, searching: true,
-                                                homeRoomID: "home").map(\.id),
-            ["home", "general"]
-        )
     }
 
     func testChatPresenceNamesOnlyActiveCollaboratorsAndNeverThisMacClient() throws {

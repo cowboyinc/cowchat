@@ -46,7 +46,7 @@ final class SocialStore: ObservableObject {
         didSet { onSetupChanged?(setup) }
     }
     @Published private(set) var setupLoaded = false
-    /// Called when the account's setup, which names its Home, is loaded or forgotten.
+    /// Called when the account's setup is loaded or forgotten.
     var onSetupChanged: ((SocialSetup?) -> Void)?
     @Published private(set) var identities: [SocialMe.Identity] = []
     @Published private(set) var oauthFlow: OAuthFlow?
@@ -54,6 +54,9 @@ final class SocialStore: ObservableObject {
     @Published private(set) var requests: [SocialFriendRequest] = []
     @Published private(set) var agents: [SocialAgent] = []
     @Published private(set) var invitations: [SocialRoomInvitation] = []
+    /// The invitations the person sent that are still open, which keep an ended session's room out of Archived
+    /// (navigation note, section 4.4).
+    @Published private(set) var sentInvitations: [SocialRoomInvitation] = []
     @Published private(set) var rooms: [SocialRoom] = []
     @Published var errorMessage: String?
     @Published var busy = false
@@ -166,7 +169,6 @@ final class SocialStore: ObservableObject {
             guard ticket == generation, !Task.isCancelled else { return }
             let roomList: SocialRooms = try await boundAPI.social(["rooms"])
             guard ticket == generation, !Task.isCancelled else { return }
-            // The setup names the account's Home, which the sidebar opens.
             var loadedSetup: SocialSetupReply?
             if setupSupported, !setupLoaded {
                 loadedSetup = try await boundAPI.social(["setup"])
@@ -178,6 +180,7 @@ final class SocialStore: ObservableObject {
             requests = requestList.requests.filter { $0.status == "pending" }
             agents = agentList.agents
             invitations = invitationList.invitations.filter { $0.status == "pending" && $0.to.id == me.account.id }
+            sentInvitations = invitationList.invitations.filter { $0.status == "pending" && $0.from.id == me.account.id }
             rooms = roomList.rooms
             if let loadedSetup {
                 setup = loadedSetup.setup
@@ -272,10 +275,10 @@ final class SocialStore: ObservableObject {
     func closeFriends() { cancel(keepingSetup: phase == .signedIn) }
 
     /// Settings › Account's Cancel, or the page closing while a link is under way: cancels the link, and keeps a
-    /// signed-in account's setup, which names its Home.
+    /// signed-in account's setup.
     func cancelLink() { cancel(keepingSetup: phase == .signedIn) }
 
-    /// First run closing on Home: the same as cancelling a link, so the Home it set up stays in the sidebar.
+    /// First run closing on the session's room or the Inbox: the same as cancelling a link, so the setup it made stays.
     func closeOnboarding() { cancel(keepingSetup: phase == .signedIn) }
 
     private func cancel(keepingSetup: Bool) {
@@ -315,7 +318,7 @@ final class SocialStore: ObservableObject {
         savedSession = nil
         account = nil
         identities = []
-        friends = []; requests = []; agents = []; invitations = []; rooms = []; issuedAgent = nil
+        friends = []; requests = []; agents = []; invitations = []; sentInvitations = []; rooms = []; issuedAgent = nil
         phase = .signedOut
         let ticket = generation
         onSessionChanged?(nil)
@@ -335,6 +338,15 @@ final class SocialStore: ObservableObject {
             await refresh()
             onRoomsChanged?()
         } catch { if ticket == generation { errorMessage = error.localizedDescription } }
+    }
+
+    /// Lists the account's rooms again on their own, as a `session_state` that names a room not yet listed asks, so a
+    /// new session's cell appears at once (navigation note, section 4.1).
+    func refreshRooms() async {
+        guard phase == .signedIn, savedSession != nil else { return }
+        let ticket = generation
+        guard let list: SocialRooms = try? await boundAPI().social(["rooms"]), ticket == generation else { return }
+        rooms = list.rooms
     }
 
     /// The signed-in account's social API, for the Inbox's and Team's reads, which poll with the friends. It throws

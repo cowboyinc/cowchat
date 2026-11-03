@@ -112,7 +112,7 @@ struct TeamGroupHead: View {
     }
 }
 
-/// One branch on the Team page, drawn from Home's session row: 40 tall and one line, the name starting under the
+/// One branch on the Team page, drawn from the old session row: 40 tall and one line, the name starting under the
 /// person's name at 51, then the Repo (120, right-aligned), the Pull request (72), the turning mark while any session
 /// on it works, and the chevron on a row that opens a room. Only those rows are buttons.
 struct TeamRow: View {

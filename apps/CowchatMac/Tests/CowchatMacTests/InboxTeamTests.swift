@@ -42,7 +42,7 @@ final class InboxTeamTests: XCTestCase {
     }
 
     private func message(_ id: String, kind: String, sender: String, at: String, content: String,
-                         room: String = "home-chad", roomName: String = "Chad's Home") -> String {
+                         room: String = "session-c-store", roomName: String = "hire-fees") -> String {
         #"""
         {"id":"message.\#(id)","kind":"\#(kind)","room_id":"\#(room)","room_name":"\#(roomName)","at":"\#(at)",
          "content":"\#(content)","sender":\#(sender)}
@@ -95,10 +95,31 @@ final class InboxTeamTests: XCTestCase {
         XCTAssertEqual(items[1].message, "can you confirm which price District should use?")
         XCTAssertEqual(items[2].sender, .ownSession(agentID: "bot-chad.c-store", name: "hire-fees"))
         XCTAssertEqual(items[2].title { $0 == "bot-chad.c-store" ? "hire-fees-2" : nil }, "hire-fees-2",
-                       "One of his own sessions, as his Home names it")
+                       "One of his own sessions, as its room names it")
         XCTAssertEqual(items[3].title { _ in nil }, "Nico's fee-ledger")
         XCTAssertEqual(items[3].message, "The ledger is ready. @Patrick please look too.", "Only a leading mention goes")
         XCTAssertTrue(items.allSatisfy { $0.server == .accountGlobal })
+    }
+
+    /// The Room column names the room, unless the item came from the session the room was made for (navigation note,
+    /// section 4.5).
+    func testTheRoomColumnIsEmptyForAnItemFromTheRoomsOwnSession() throws {
+        let items = try items(chadsWire)
+        func session(_ agent: String) -> SocialRoom.Session {
+            SocialRoom.Session(agentId: agent, harness: "claude-code", folder: "dashboard", branch: "chad/hire-fees",
+                               startedAt: "2026-11-01T08:00:00.000Z", endedAt: nil)
+        }
+        let rooms = [
+            SocialRoom(roomId: "session-c-store", name: "hire-fees", ownerId: "chad", kind: "session",
+                       session: session("bot-chad.c-store")),
+            SocialRoom(roomId: "fee-ledger", name: "fee-ledger", ownerId: "nico", kind: "session",
+                       session: session("bot-nico.n-other")),
+            SocialRoom(roomId: "district", name: "District", ownerId: "chad"),
+        ]
+        XCTAssertEqual(items[2].roomColumn(rooms: rooms), "", "hire-fees in its own room")
+        XCTAssertEqual(items[3].roomColumn(rooms: rooms), "fee-ledger", "A session in another session's room")
+        XCTAssertEqual(items[1].roomColumn(rooms: rooms), "District", "A person")
+        XCTAssertEqual(items[2].roomColumn(rooms: []), "hire-fees", "A room the account has not listed")
     }
 
     func testALeadingMentionOfTheViewerIsDropped() {
@@ -326,7 +347,7 @@ final class InboxTeamTests: XCTestCase {
         let groups = TeamList.groups(from: try reply().people, viewer: "patrick")
         let ledger = try XCTUnwrap(groups[1].branches.first { $0.name == "fee-ledger" })
         XCTAssertTrue(TeamList.opensRoom(ledger, accountRoomIDs: ["fee-ledger"]))
-        XCTAssertFalse(TeamList.opensRoom(ledger, accountRoomIDs: ["home-patrick"]), "Not one of his rooms")
+        XCTAssertFalse(TeamList.opensRoom(ledger, accountRoomIDs: ["session-p-site"]), "Not one of his rooms")
         XCTAssertFalse(TeamList.opensRoom(groups[1].branches[0], accountRoomIDs: ["fee-ledger"]), "No room")
         XCTAssertEqual(TeamList.help(for: try XCTUnwrap(ledger.pullRequest)),
                        "dashboard #1806, Fee ledger 1806, checks running")

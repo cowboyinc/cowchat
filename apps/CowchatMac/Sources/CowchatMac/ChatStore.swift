@@ -49,7 +49,6 @@ final class ChatStore: ObservableObject {
     @Published private(set) var thinkingPulses: [String: [String: AgentThinkingPulse]] = [:]
     @Published private(set) var recentAgentActivityAt: [String: [String: Date]] = [:]
     @Published var roomReadyNotice: Room?
-    @Published var secondAgentHintRoom: Room?
     @Published var roomBeingRenamed: Room?
     @Published var connectionStatus: ConnectionStatus = .disconnected
     @Published private(set) var connectionProfile: ConnectionProfile
@@ -61,23 +60,11 @@ final class ChatStore: ObservableObject {
     @Published var isLoadingMessages = false
     @Published var isCreateRoomPresented = false
     @Published var createRoomParentID: String?
-    /// A room whose composer should open with the cursor at the end of its draft, as opening Home from a session's
-    /// row asks. The room's view takes the request and clears it.
-    @Published var composerRequestRoomID: String?
-    /// A room whose agents the store keeps listed while another room is open: the account's Home, whose agents are
-    /// the person's live sessions. They are listed again with the rooms, and on every join, leave and presence change
-    /// while it is the open room.
-    var watchedRoomID: String? {
-        didSet {
-            guard watchedRoomID != oldValue else { return }
-            watchedRoomAgents = []
-            onWatchedRoomAgents?([])
-            Task { [weak self] in await self?.refreshWatchedRoom() }
-        }
-    }
-    @Published private(set) var watchedRoomAgents: [AgentPresence] = []
-    /// Called with the watched room's agents each time they are listed.
-    var onWatchedRoomAgents: (([AgentPresence]) -> Void)?
+    /// Called with each `session_state` frame, which says one of the person's sessions registered, changed state or
+    /// ended (navigation note, section 4.1).
+    var onSessionState: ((SessionStateEvent) -> Void)?
+    /// What the archive rule for ended sessions did with each session room on this Mac (navigation note, section 4.4).
+    @Published private(set) var sessionRoomArchiveOutcomes: [String: SessionRoomArchive.Outcome] = [:]
 
     private let connection: any CowchatConnectionProtocol
     private let connectionPreferences: ConnectionProfilePreferences?
@@ -125,7 +112,6 @@ final class ChatStore: ObservableObject {
     private var pendingDestructionRoomIDs: Set<String> = []
     private var confirmedDestructionRoomIDs: Set<String> = []
     private var destroyedRoomIDs: Set<String> = []
-    private var secondAgentHintShownRoomIDs: Set<String> = []
     private var draftsByRoomID: [String: String] = [:]
     private var failedDraftRestorationsByRoomID: [String: FailedDraftRestoration] = [:]
     private var sendGeneration = 0
@@ -258,6 +244,7 @@ final class ChatStore: ObservableObject {
         )
         localPreferences = Self.roomPreferences(defaults: defaults, profile: connectionProfile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
+        sessionRoomArchiveOutcomes = localPreferences.sessionRoomArchiveOutcomes
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
         showsAllMessagesRoomIDs = localPreferences.showsAllMessagesRoomIDs
@@ -880,8 +867,6 @@ final class ChatStore: ObservableObject {
         thinkingPulses = [:]
         recentAgentActivityAt = [:]
         roomReadyNotice = nil
-        secondAgentHintRoom = nil
-        secondAgentHintShownRoomIDs = []
         roomBeingRenamed = nil
         isLoadingMessages = false
         isCreateRoomPresented = false
@@ -899,11 +884,10 @@ final class ChatStore: ObservableObject {
         shownActivityByRoomID = [:]
         activeMessageSearchContext = nil
         completedMessageSearchContext = nil
-        composerRequestRoomID = nil
-        setWatchedRoomAgents([])
 
         localPreferences = Self.roomPreferences(defaults: defaults, profile: profile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
+        sessionRoomArchiveOutcomes = localPreferences.sessionRoomArchiveOutcomes
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
         showsAllMessagesRoomIDs = localPreferences.showsAllMessagesRoomIDs
@@ -1015,24 +999,6 @@ final class ChatStore: ObservableObject {
         if selectedRoomID == joinedRoomID {
             await refreshMembers()
         }
-        if watchedRoomID != joinedRoomID || selectedRoomID != joinedRoomID {
-            await refreshWatchedRoom()
-        }
-    }
-
-    /// Lists the watched room's agents again.
-    func refreshWatchedRoom() async {
-        guard connectionStatus.isConnected, let roomID = watchedRoomID,
-              rooms.contains(where: { $0.id == roomID }) else { return }
-        let expectedProfileGeneration = profileGeneration
-        guard let agents = try? await connection.listAgents(roomID: roomID),
-              expectedProfileGeneration == profileGeneration, watchedRoomID == roomID else { return }
-        setWatchedRoomAgents(agents)
-    }
-
-    private func setWatchedRoomAgents(_ agents: [AgentPresence]) {
-        if agents != watchedRoomAgents { watchedRoomAgents = agents }
-        onWatchedRoomAgents?(agents)
     }
 
     /// The agents in a room, as the server lists them, whether or not it is open.
@@ -1306,6 +1272,13 @@ final class ChatStore: ObservableObject {
         localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
     }
 
+    /// Records what the archive rule did with an ended session's room, or forgets it when its session resumes.
+    func recordSessionRoomArchive(_ outcome: SessionRoomArchive.Outcome?, roomID: String) {
+        guard sessionRoomArchiveOutcomes[roomID] != outcome else { return }
+        sessionRoomArchiveOutcomes[roomID] = outcome
+        localPreferences.saveSessionRoomArchiveOutcomes(sessionRoomArchiveOutcomes)
+    }
+
     func canDestroy(_ room: Room) -> Bool {
         room.roomID != "lobby"
             && room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
@@ -1522,14 +1495,6 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// Starts the open room's draft with `lead`, such as a session's @name and a space, when the draft is empty, and
-    /// asks the room's composer to open with the cursor at the draft's end. A draft with text in it stays as it is.
-    func startDraft(with lead: String) {
-        guard let roomID = selectedRoomID else { return }
-        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { draft = lead }
-        composerRequestRoomID = roomID
-    }
-
     private func handleEvent(type: String, payload: [String: Any]) {
         switch type {
         case "message_received":
@@ -1594,9 +1559,6 @@ final class ChatStore: ObservableObject {
                 }
             }
         case "agent_joined", "agent_left":
-            if let roomID = payload["room_id"] as? String, roomID == watchedRoomID, roomID != selectedRoomID {
-                Task { [weak self] in await self?.refreshWatchedRoom() }
-            }
             guard payload["room_id"] as? String == selectedRoomID else { break }
             // Join/leave bursts can be much faster than a Cloud list request.
             // Funnel them through one request plus a dirty-bit rerun rather
@@ -1606,8 +1568,13 @@ final class ChatStore: ObservableObject {
             recordPresenceActivity(from: payload)
             if joinedRoomID == selectedRoomID, !updatePresence(from: payload) {
                 scheduleMemberRefresh()
-            } else if joinedRoomID == selectedRoomID, joinedRoomID == watchedRoomID {
-                setWatchedRoomAgents(roomMembers)
+            }
+        case "session_state":
+            guard let event = SessionStateEvent(payload: payload) else { break }
+            onSessionState?(event)
+            // A new session's room may not be listed yet: list the rooms now, so its cell appears at once.
+            if !rooms.contains(where: { $0.id == event.roomID }) {
+                Task { [weak self] in try? await self?.refreshRooms() }
             }
         case "thinking":
             // Live thinking pulses arrive as this dedicated event, not
@@ -1822,7 +1789,6 @@ final class ChatStore: ObservableObject {
         roomMembers = members.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
-        if roomID == watchedRoomID { setWatchedRoomAgents(members) }
         updateRoomMemberCount(
             roomID: roomID,
             count: members.count,
@@ -2253,7 +2219,6 @@ final class ChatStore: ObservableObject {
         recentAgentActivityAt.removeValue(forKey: roomID)
         memberCountIncludesCurrentAgentRoomIDs.remove(roomID)
         if roomReadyNotice?.id == roomID { roomReadyNotice = nil }
-        if secondAgentHintRoom?.id == roomID { secondAgentHintRoom = nil }
         if roomBeingRenamed?.id == roomID { roomBeingRenamed = nil }
         if createRoomParentID == roomID {
             createRoomParentID = nil
@@ -2324,8 +2289,6 @@ final class ChatStore: ObservableObject {
         localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
         if selectedRoomID != roomID {
             roomReadyNotice = room
-        } else if secondAgentHintShownRoomIDs.insert(roomID).inserted {
-            secondAgentHintRoom = room
         }
     }
 

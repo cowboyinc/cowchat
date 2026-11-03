@@ -120,13 +120,13 @@ final class SocialTests: XCTestCase {
         XCTAssertNil(store.setup)
         await store.loadSetup()
         XCTAssertEqual(store.setup?.agentId, "starter-agent")
-        XCTAssertEqual(store.setup?.roomId, "starter-home")
+        XCTAssertEqual(store.setup?.agentName, "Chad_DePue_bot")
         XCTAssertEqual(store.account?.displayName, "Chad DePue")
         XCTAssertEqual(store.savedSession?.account, store.account)
         let restored = fixture.store()
         XCTAssertEqual(restored.account?.displayName, "Chad DePue")
         await restored.loadSetup()
-        XCTAssertEqual(restored.setup?.roomId, store.setup?.roomId)
+        XCTAssertEqual(restored.setup?.agentId, store.setup?.agentId)
         XCTAssertEqual(fixture.setupPosts, 1)
         XCTAssertEqual(fixture.credentialPosts, 0)
         await store.connectAgent("starter-agent")
@@ -135,9 +135,9 @@ final class SocialTests: XCTestCase {
         let savedBot = try Data(contentsOf: fixture.credentialDirectory.appendingPathComponent("hosted-bot.json"))
         let botValues = try JSONSerialization.jsonObject(with: savedBot) as! [String: String]
         XCTAssertEqual(botValues["url"], "wss://fixture.example/ws")
-        try render(CowchatSetupWizard(social: restored, initialStep: .name, name: "Chad DePue", onLocal: {}, onOpenHome: { _, _ in false }), name: "mac-wizard-name")
-        try render(CowchatSetupWizard(social: restored, initialStep: .agents, onLocal: {}, onOpenHome: { _, _ in false }), name: "mac-wizard-agents")
-        try render(CowchatSetupWizard(social: restored, initialStep: .ready, onLocal: {}, onOpenHome: { _, _ in false }), name: "mac-wizard-ready")
+        try render(CowchatSetupWizard(social: restored, initialStep: .name, name: "Chad DePue", onLocal: {}, onOpenStarter: { _ in false }), name: "mac-wizard-name")
+        try render(CowchatSetupWizard(social: restored, initialStep: .agents, onLocal: {}, onOpenStarter: { _ in false }), name: "mac-wizard-agents")
+        try render(CowchatSetupWizard(social: restored, initialStep: .ready, onLocal: {}, onOpenStarter: { _ in false }), name: "mac-wizard-ready")
     }
 
     @MainActor
@@ -193,22 +193,22 @@ final class SocialTests: XCTestCase {
         fixture.supported = false
         let unsupported = fixture.store()
         await unsupported.loadSetup()
-        try render(CowchatSetupWizard(social: unsupported, onLocal: {}, onOpenHome: { _, _ in false }), name: "mac-wizard-unsupported")
+        try render(CowchatSetupWizard(social: unsupported, onLocal: {}, onOpenStarter: { _ in false }), name: "mac-wizard-unsupported")
         let signedOut = SocialStore(endpoint: fixture.endpoint, credentials: SocialMemoryCredentials(), session: fixture.session)
         await signedOut.refresh()
-        try render(CowchatSetupWizard(social: signedOut, onLocal: {}, onOpenHome: { _, _ in false }), name: "mac-wizard-welcome")
+        try render(CowchatSetupWizard(social: signedOut, onLocal: {}, onOpenStarter: { _ in false }), name: "mac-wizard-welcome")
     }
 
     @MainActor
-    func testCancellingALinkKeepsTheSetupThatNamesHome() async throws {
+    func testCancellingALinkKeepsTheSetup() async throws {
         let fixture = try SetupFixture()
         defer { fixture.close() }
         fixture.established = true
         let store = fixture.store()
         await store.loadSetup()
-        XCTAssertEqual(store.setup?.roomId, "starter-home")
+        XCTAssertEqual(store.setup?.agentId, "starter-agent")
         store.cancelLink()
-        XCTAssertEqual(store.setup?.roomId, "starter-home")
+        XCTAssertEqual(store.setup?.agentId, "starter-agent")
         XCTAssertTrue(store.setupLoaded)
         store.cancelSignIn()
         XCTAssertNil(store.setup)
@@ -233,7 +233,7 @@ final class SocialTests: XCTestCase {
         var capabilityReads = 0
         let agent = #"{"id":"starter-agent","owner_id":"me","name":"Chad_DePue_bot","discoverable":false}"#
         var setupJSON: String {
-            established ? "{\"setup\":{\"agent_id\":\"starter-agent\",\"agent_name\":\"Chad_DePue_bot\",\"room_id\":\"starter-home\",\"room_name\":\"Chad_DePue_Home\",\"agent\":\(agent),\"room\":{\"room_id\":\"starter-home\",\"name\":\"Chad_DePue_Home\",\"owner_id\":\"me\"},\"bot_admitted\":true}}" : "{\"setup\":null}"
+            established ? "{\"setup\":{\"agent_id\":\"starter-agent\",\"agent_name\":\"Chad_DePue_bot\",\"agent\":\(agent),\"bot_admitted\":true}}" : "{\"setup\":null}"
         }
         init() throws {
             let config = URLSessionConfiguration.ephemeral

@@ -12,6 +12,7 @@ struct RoomLocalPreferences {
     static let pendingSetupScreenRoomIDsKey = "CowchatMac.pendingSetupScreenRoomIDs"
     static let roomReadStateKey = "CowchatMac.roomReadState"
     static let showsAllMessagesRoomIDsKey = "CowchatMac.showsAllMessagesRoomIDs"
+    static let sessionRoomArchiveKey = "CowchatMac.sessionRoomArchive"
 
     private let defaults: UserDefaults
     private let scope: String?
@@ -32,6 +33,17 @@ struct RoomLocalPreferences {
     /// Rooms whose switch shows every message.
     var showsAllMessagesRoomIDs: Set<String> {
         loadIDs(forKey: Self.showsAllMessagesRoomIDsKey)
+    }
+
+    /// What the archive rule for ended sessions did with each session room, so it handles each ended session once.
+    var sessionRoomArchiveOutcomes: [String: SessionRoomArchive.Outcome] {
+        guard let stored = defaults.dictionary(forKey: scopedKey(Self.sessionRoomArchiveKey)) as? [String: String]
+        else { return [:] }
+        return stored.compactMapValues(SessionRoomArchive.Outcome.init(rawValue:))
+    }
+
+    func saveSessionRoomArchiveOutcomes(_ outcomes: [String: SessionRoomArchive.Outcome]) {
+        defaults.set(outcomes.mapValues(\.rawValue), forKey: scopedKey(Self.sessionRoomArchiveKey))
     }
 
     var roomReadState: RoomReadState? {

@@ -15,8 +15,8 @@ enum CowchatOnboarding {
     }
 }
 
-/// First run's steps, in the app's order: sign in, the name (which makes Home), the agents, and the wait for the first
-/// session.
+/// First run's steps, in the app's order: sign in, the name (which sets up the account's bot), the agents, and the wait
+/// for the first session.
 enum WizardStep: Equatable, CaseIterable {
     case login, name, agents, ready
 }
@@ -30,8 +30,8 @@ struct CowchatOnboardingView: View {
                            onLocal: {
             workspace.activate(server: .local)
             onComplete()
-        }, onOpenHome: { setup, session in
-            guard await workspace.openStarterHome(roomID: setup.roomId, session: session) else { return false }
+        }, onOpenStarter: { session in
+            guard await workspace.openStarter(session: session) else { return false }
             onComplete()
             return true
         }, onSignOut: {
@@ -49,7 +49,8 @@ struct CowchatOnboardingView: View {
 struct CowchatSetupWizard: View {
     @ObservedObject var social: SocialStore
     let onLocal: () -> Void
-    let onOpenHome: (SocialSetup, SocialSession) async -> Bool
+    /// Continue on the last step, or an account that comes back already set up: the Inbox shows.
+    let onOpenStarter: (SocialSession) async -> Bool
     let onSignOut: () async -> Void
     @ObservedObject private var firstRun: FirstRun
     @ObservedObject private var agents: AgentConnections
@@ -63,11 +64,11 @@ struct CowchatSetupWizard: View {
     /// `initialStep` with nothing connected.
     init(social: SocialStore, firstRun: FirstRun? = nil, agents: AgentConnections? = nil,
          initialStep: WizardStep = .login, name: String = "", onLocal: @escaping () -> Void,
-         onOpenHome: @escaping (SocialSetup, SocialSession) async -> Bool,
+         onOpenStarter: @escaping (SocialSession) async -> Bool,
          onSignOut: @escaping () async -> Void = {}) {
         self.social = social
         self.onLocal = onLocal
-        self.onOpenHome = onOpenHome
+        self.onOpenStarter = onOpenStarter
         self.onSignOut = onSignOut
         self.firstRun = firstRun ?? FirstRun(step: initialStep)
         self.agents = agents ?? AgentConnections()
@@ -100,8 +101,8 @@ struct CowchatSetupWizard: View {
     // MARK: Signed out
 
     /// The signed-out page: what Cowchat does, then a door for each provider, and Local rooms under the card. While
-    /// the browser is out, the pressed door waits and the link cancels. Once signed in, the card finds the account's
-    /// Home.
+    /// the browser is out, the pressed door waits and the link cancels. Once signed in, the card waits while the
+    /// account's setup loads.
     private var login: some View {
         VStack(spacing: 0) {
             SetupTitle(
@@ -117,7 +118,7 @@ struct CowchatSetupWizard: View {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small).frame(width: 16, height: 16)
                         // copy:
-                        Text("Finding your Home").gallopText(.bodyM, color: SemanticColor.textSecondary)
+                        Text("Setting up").gallopText(.bodyM, color: SemanticColor.textSecondary)
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -182,7 +183,7 @@ struct CowchatSetupWizard: View {
 
     // MARK: Name
 
-    /// The name and handle the account will go by. Continue makes the account's Home and bot.
+    /// The name and handle the account will go by. Continue sets up the account's bot.
     private var confirmName: some View {
         VStack(spacing: 0) {
             // copy:
@@ -203,7 +204,7 @@ struct CowchatSetupWizard: View {
                                 .padding(.top, 6)
                         }
                     }
-                    Button(action: createHome) {
+                    Button(action: setUp) {
                         HStack(spacing: 8) {
                             if social.busy { ProgressView().controlSize(.small).frame(width: 16, height: 16) }
                             // copy:
@@ -212,7 +213,7 @@ struct CowchatSetupWizard: View {
                         .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(CowchatPillButtonStyle(prominent: true))
-                    .disabled(!canCreateHome)
+                    .disabled(!canSetUp)
                     .padding(.top, 20)
                 }
             }
@@ -239,14 +240,14 @@ struct CowchatSetupWizard: View {
         }
     }
 
-    private var canCreateHome: Bool {
+    private var canSetUp: Bool {
         !social.busy && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && (!social.handleAvailabilitySupported || handleCheck.permits(SocialAPI.normalizedHandle(handle)))
     }
 
-    private func createHome() {
+    private func setUp() {
         let handle = social.handleAvailabilitySupported ? SocialAPI.normalizedHandle(handle) : nil
-        Task { if await social.establishSetup(displayName: name, handle: handle) { firstRun.homeCreated() } }
+        Task { if await social.establishSetup(displayName: name, handle: handle) { firstRun.setUp() } }
     }
 
     // MARK: Agents
@@ -276,8 +277,8 @@ struct CowchatSetupWizard: View {
 
     // MARK: The first session
 
-    /// The agents as they stand, and a last row that waits for the first session to join Home, which then opens
-    /// (`FirstRun.sessionsChanged`). Open Home skips the wait.
+    /// The agents as they stand, and a last row that waits for the first session to register, whose room then opens
+    /// (`FirstRun.sessionsChanged`). Continue skips the wait and shows the Inbox.
     private var waitForSession: some View {
         VStack(spacing: 0) {
             // copy:
@@ -298,7 +299,7 @@ struct CowchatSetupWizard: View {
             }
             failure(navigationError ?? agents.errorMessage)
             // copy:
-            Button(action: openHome) { Text("Open Home") }
+            Button(action: openStarter) { Text("Continue") }
                 .buttonStyle(CowchatPillButtonStyle())
                 .fixedSize()
                 .disabled(opening || social.setup == nil)
@@ -324,16 +325,16 @@ struct CowchatSetupWizard: View {
         }
     }
 
-    private func openHome() {
-        guard let setup = social.setup, let session = social.savedSession else { return }
+    private func openStarter() {
+        guard social.setup != nil, let session = social.savedSession else { return }
         opening = true
         navigationError = nil
         Task {
-            let opened = await onOpenHome(setup, session)
+            let opened = await onOpenStarter(session)
             if social.savedSession?.scopeId == session.scopeId {
                 opening = false
                 // copy:
-                if !opened { navigationError = "Home could not be opened." }
+                if !opened { navigationError = "Your rooms could not be opened." }
             }
         }
     }
@@ -355,8 +356,8 @@ struct CowchatSetupWizard: View {
         }
     }
 
-    /// Loads the account's setup as the wizard appears or the account changes. An account that comes back with its
-    /// Home already made skips the rest of first run, and Home opens.
+    /// Loads the account's setup as the wizard appears or the account changes. An account that comes back already set
+    /// up skips the rest of first run, and the Inbox shows.
     private func recover() async {
         let scope = social.savedSession?.scopeId
         navigationError = nil
@@ -365,7 +366,7 @@ struct CowchatSetupWizard: View {
         guard social.phase == .signedIn, social.setupLoaded else { return }
         name = social.account?.displayName ?? ""
         handle = social.account?.handle ?? ""
-        if firstRun.recovered(hasSetup: social.setup != nil) { openHome() }
+        if firstRun.recovered(hasSetup: social.setup != nil) { openStarter() }
     }
 }
 
