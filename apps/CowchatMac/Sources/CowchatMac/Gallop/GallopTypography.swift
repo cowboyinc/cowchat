@@ -60,6 +60,8 @@ public struct GallopTextStyle: Sendable, Equatable {
 
 struct GallopLineLayout: Sendable, Equatable {
     let lineSpacing: CGFloat
+    /// Half the leading. The earlier path pads the line by it above and below; on the exact path it is the distance
+    /// the glyphs move down.
     let verticalPadding: CGFloat
 
     init(targetLineHeight: CGFloat, naturalLineHeight: CGFloat) {
@@ -171,10 +173,20 @@ private struct GallopTextModifier: ViewModifier {
     func body(content: Content) -> some View {
         #if compiler(>=6.2)
         if #available(macOS 26.0, *), GallopLineBox.path(for: alignment) == .exactLineHeight {
+            let layout = GallopLineLayout(
+                targetLineHeight: style.lineHeight,
+                naturalLineHeight: provider.naturalLineHeight(for: style)
+            )
             content
                 .font(provider.font(for: style))
                 .tracking(style.tracking)
                 .lineHeight(.exact(points: style.lineHeight))
+                // The exact line height puts all the leading under the line. Moving the glyphs down by half of it
+                // centres them as the earlier path does, and the baselines move with them so baseline-aligned stacks
+                // still line up.
+                .offset(y: layout.verticalPadding)
+                .alignmentGuide(.firstTextBaseline) { $0[.firstTextBaseline] + layout.verticalPadding }
+                .alignmentGuide(.lastTextBaseline) { $0[.lastTextBaseline] + layout.verticalPadding }
         } else {
             legacyBody(content: content)
         }
