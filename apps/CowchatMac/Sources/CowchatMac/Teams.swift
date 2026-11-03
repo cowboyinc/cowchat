@@ -66,19 +66,19 @@ final class TeamChoice: ObservableObject {
 }
 
 /// The Team page's team field (navigation round 2, section 4.3): the menu field at 36, the search's size, with the
-/// chosen team's room icon at 20, its name in Body M at most 160 wide and the chevron, at its own width. Its menu is the
-/// system menu of the account's teams, each with its room icon and a toggle that ticks the chosen one. It is drawn only
-/// with two or more teams, since with one there is nothing to switch.
+/// chosen team's mark at 20, its name in Body M at most 160 wide and the chevron, at its own width. Its menu is the
+/// system menu of the account's teams, each with its mark and a toggle that ticks the chosen one. A team's mark is its
+/// uppercase initial drawn as a person's avatar draws theirs. The field is drawn only with two or more teams, since
+/// with one there is nothing to switch.
 struct TeamMenuField: View {
     @ObservedObject var teams: TeamChoice
-    @AppStorage(RoomIconStyle.storageKey) private var iconStyle = RoomIconStyle.fallback.rawValue
 
     var body: some View {
         if let chosen = teams.chosen, teams.hasChoice {
             // copy:
             SheetMenuField(title: chosen.name, help: "Switch team", accessibilityLabel: "Team", height: 36,
                            leadingInset: 8, titleMaxWidth: 160, hovers: true) {
-                RoomAvatar(name: chosen.name, size: 20, accented: false)
+                SocialPersonAvatar(name: chosen.name, size: 20, letters: 1)
             } items: {
                 ForEach(teams.teams) { team in
                     // A toggle per team, so the menu ticks the chosen one.
@@ -86,7 +86,7 @@ struct TeamMenuField: View {
                         Label {
                             Text(team.name)
                         } icon: {
-                            Image(nsImage: TeamIconImage.make(team, style: RoomIconStyle(rawValue: iconStyle) ?? .fallback))
+                            Image(nsImage: TeamIconImage.make(team))
                         }
                     }
                 }
@@ -96,13 +96,12 @@ struct TeamMenuField: View {
     }
 }
 
-/// A team's icon as an image for the system menu, which draws images and not views: the room icon the sidebar would
-/// draw for a room of that name.
+/// A team's mark as an image for the system menu, which draws images and not views: its uppercase initial, as the team
+/// field draws it.
 enum TeamIconImage {
     @MainActor
-    static func make(_ team: SocialTeam, style: RoomIconStyle, size: CGFloat = 16) -> NSImage {
-        let renderer = ImageRenderer(content: RoomAvatar(name: team.name, size: size, accented: false,
-                                                         styleOverride: style))
+    static func make(_ team: SocialTeam, size: CGFloat = 16) -> NSImage {
+        let renderer = ImageRenderer(content: SocialPersonAvatar(name: team.name, size: size, letters: 1))
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
         return renderer.nsImage ?? NSImage()
     }
