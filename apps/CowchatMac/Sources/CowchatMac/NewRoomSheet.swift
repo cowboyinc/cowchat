@@ -83,8 +83,9 @@ enum NewRoomOutcome: Equatable {
 
 /// New room (add-new-company note, section 3b): one menu at the top chooses the kind, then the kind's fields. An
 /// account room has Name and People, a room on this Mac has Name, and a room on the API key has Name and the server it
-/// goes to. No room is made inside another, since the app shows no folders (navigation round 2, section 3.7). It replaces `RoomCreationSheet`, `CreateRoomView` and P6's `SocialRoomCreationView`, and keeps
-/// their create logic in `WorkspaceStore.createRoom`.
+/// goes to. No room is made inside another, since the app shows no folders (navigation round 2, section 3.7). People
+/// lists only the friends picked, and its search suggests the rest (section 6.2). It replaces `RoomCreationSheet`,
+/// `CreateRoomView` and P6's `SocialRoomCreationView`, and keeps their create logic in `WorkspaceStore.createRoom`.
 struct NewRoomSheet: View {
     @ObservedObject var workspace: WorkspaceStore
     @ObservedObject var social: SocialStore
@@ -141,7 +142,7 @@ struct NewRoomSheet: View {
             if kind == .account {
                 // copy:
                 SheetGroup(label: "People") {
-                    PeoplePicker(people: people, picked: $draft.friendIDs, placeholder: "Search friends",
+                    PickedPeople(people: people, picked: $draft.friendIDs, placeholder: "Search friends",
                                  emptyLine: "No friends yet", submitEmpty: create)
                 }
             }

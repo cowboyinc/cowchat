@@ -58,6 +58,22 @@ enum FriendsList {
         count == 0 ? nil : "\(count) \(count == 1 ? "friend" : "friends")"
     }
 
+    /// A live session a friend can be added to, named as its sidebar cell names it.
+    struct Session: Identifiable, Equatable {
+        let name: String
+        let session: LiveSession
+
+        var id: String { session.id }
+    }
+
+    /// The person's live sessions in the sidebar's order, which a friend's "Add to session" lists (navigation round 2,
+    /// section 6.1).
+    static func sessions(_ rooms: [SidebarRoom]) -> [Session] {
+        RoomSidebarPresentation.ordered(rooms.filter { $0.session != nil && !$0.isArchived }).compactMap { room in
+            room.session.map { Session(name: room.room.name, session: $0) }
+        }
+    }
+
     /// Copy link: the person's friend link on the pasteboard.
     static func copy(_ link: SocialFriendLink, to pasteboard: NSPasteboard = .general) {
         pasteboard.clearContents()
@@ -66,12 +82,13 @@ enum FriendsList {
 }
 
 /// The Friends page: the header with the handle field, Add and Copy link, then Requests, Sent and Friends in one column
-/// capped at 760. A friend's row opens New room with that friend, and its ⋯ holds Remove friend. Signed out, it says to
-/// sign in.
+/// capped at 760. A friend's ⋯ and right-click hold Add to session and Remove friend. Signed out, it says to sign in.
 struct FriendsPage: View {
     @ObservedObject var social: SocialStore
-    /// Opens New room with the friend picked.
-    let newRoom: (SocialFriend) -> Void
+    /// The live sessions a friend's "Add to session" lists, in the sidebar's order.
+    let sessions: [FriendsList.Session]
+    /// Invites a friend to a live session's room and opens it, as Add person does. False when the invitation failed.
+    let addToSession: (SocialFriend, LiveSession) async -> Bool
     /// Opens the signed-out page.
     let signIn: () -> Void
     @State private var handle = ""
@@ -163,6 +180,15 @@ struct FriendsPage: View {
         }
     }
 
+    private func add(_ friend: SocialFriend, to session: LiveSession) {
+        addError = nil
+        Task {
+            guard await !addToSession(friend, session) else { return }
+            // copy:
+            addError = "Could not add \(friend.account.displayName). Try again."
+        }
+    }
+
     private func copyLink() {
         Task {
             if social.friendLink == nil { await social.loadFriendLink() }
@@ -237,9 +263,8 @@ struct FriendsPage: View {
         case .friends:
             ForEach(Array(social.friends.enumerated()), id: \.element.id) { index, friend in
                 if index > 0 { PageRowSeam() }
-                FriendButtonRow(friend: friend, endWidth: endWidth, newRoom: { newRoom(friend) }, remove: {
-                    Task { await social.removeFriend(friend.id) }
-                })
+                FriendMenuRow(friend: friend, endWidth: endWidth, sessions: sessions, add: { add(friend, to: $0) },
+                              remove: { Task { await social.removeFriend(friend.id) } })
             }
         }
     }
@@ -324,42 +349,50 @@ private struct FriendRequestButtons: View {
     }
 }
 
-/// A friend's row: a button that opens New room with them, the page rows' hover and press, and a 24 ⋯ that shows on
-/// hover. The ⋯ and right-click give New room and Remove friend.
-private struct FriendButtonRow: View {
+/// A friend's row (navigation round 2, section 6.1). It is not a button and has no hover fill. Its 24 ⋯ shows while
+/// the pointer is over the row, and the ⋯ and right-click give Add to session and Remove friend. Its accessible element
+/// reads the name and handle, with the menu's items as its actions.
+private struct FriendMenuRow: View {
     let friend: SocialFriend
     let endWidth: CGFloat
-    let newRoom: () -> Void
+    let sessions: [FriendsList.Session]
+    let add: (LiveSession) -> Void
     let remove: () -> Void
     @State private var isHovering = false
 
     var body: some View {
-        ZStack(alignment: .trailing) {
-            Button(action: newRoom) {
-                FriendRow(person: friend.account, endWidth: endWidth) {
-                    Color.clear.frame(width: 24, height: 24)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(PageRowButtonStyle())
-            // copy:
-            .help("New room with \(friend.account.displayName)")
-            .macAccessibleAction(label: "\(friend.account.displayName), @\(friend.account.handle)", action: newRoom)
+        FriendRow(person: friend.account, endWidth: endWidth) {
             // copy:
             PageRowMoreMenu(isVisible: isHovering, accessibilityLabel: "Actions for \(friend.account.displayName)") {
                 items
             }
-            .padding(.trailing, 16)
         }
+        .contentShape(Rectangle())
         .contextMenu { items }
         .onHover { isHovering = $0 }
+        // The row does nothing when pressed, so its element's press does nothing either.
+        .macAccessibleAction(label: "\(friend.account.displayName), @\(friend.account.handle)",
+                             namedActions: namedActions) {}
     }
 
     @ViewBuilder private var items: some View {
         // copy:
-        Button("New room", action: newRoom)
+        Menu("Add to session") {
+            ForEach(sessions) { room in
+                Button(room.name) { add(room.session) }
+            }
+        }
+        .disabled(sessions.isEmpty)
+        Divider()
         // copy:
         Button("Remove friend", role: .destructive, action: remove)
+    }
+
+    private var namedActions: [MacNamedAction] {
+        // copy:
+        sessions.map { room in MacNamedAction(name: "Add to \(room.name)") { add(room.session) } }
+            // copy:
+            + [MacNamedAction(name: "Remove friend", action: remove)]
     }
 }
 

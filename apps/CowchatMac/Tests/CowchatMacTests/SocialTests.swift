@@ -450,7 +450,7 @@ final class SocialTests: XCTestCase {
         SocialFixtureProtocol.contentType = "text/html"
         SocialFixtureProtocol.handler = { _ in (200, "<!doctype html><html>Cowchat</html>") }
         await store.refresh()
-        try render(FriendsPage(social: store, newRoom: { _ in }, signIn: {}), name: "mac-friends-server-update")
+        try render(FriendsPage(social: store, sessions: [], addToSession: { _, _ in true }, signIn: {}), name: "mac-friends-server-update")
     }
 
     func testCopiedHandleCanBePastedIntoFriendRequest() {
@@ -536,7 +536,7 @@ final class SocialTests: XCTestCase {
         XCTAssertNil(store.errorMessage)
         XCTAssertEqual(store.friends.first?.account.handle, "renzo")
         XCTAssertEqual(store.requests.first?.from.handle, "rachel")
-        try render(FriendsPage(social: store, newRoom: { _ in }, signIn: {}), name: "mac-friends-signed-in")
+        try render(FriendsPage(social: store, sessions: [], addToSession: { _, _ in true }, signIn: {}), name: "mac-friends-signed-in")
         try render(ScrollView { BotSettings(social: store).padding(24) }, name: "mac-settings-bots")
         try render(NewBotSheet(social: store, cancel: {}), name: "mac-bot-new")
         let issued = SocialCreatedAgent(agent: SocialAgent(id: "agent", ownerId: account.id, name: "Release bot",
@@ -549,7 +549,7 @@ final class SocialTests: XCTestCase {
         XCTAssertNil(credentials.value)
         XCTAssertTrue(store.friends.isEmpty)
         XCTAssertEqual(store.phase, .signedOut)
-        try render(FriendsPage(social: store, newRoom: { _ in }, signIn: {}), name: "mac-friends-sign-in")
+        try render(FriendsPage(social: store, sessions: [], addToSession: { _, _ in true }, signIn: {}), name: "mac-friends-sign-in")
     }
 
     @MainActor

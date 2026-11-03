@@ -556,14 +556,6 @@ final class WorkspaceStore: ObservableObject {
         return true
     }
 
-    // MARK: Friends and New room
-
-    /// Pressing a friend's row on the Friends page: New room for an account room with that friend picked. Inside
-    /// starts on None, as New room's does, since a room inside a company room starts with all its people picked.
-    func newRoom(with friend: SocialFriend) {
-        starting = .newRoom(NewRoomRequest(kind: .account, draft: SocialRoomDraft(friendIDs: [friend.id])))
-    }
-
     // MARK: Starting things
 
     /// "New room…" in the New menu and the File menu. Rooms are made with no parent, since the app shows no folders
@@ -664,6 +656,21 @@ final class WorkspaceStore: ObservableObject {
         await social.refresh()
         if failed.count < friendIDs.count { await openSession(session) }
         return failed
+    }
+
+    /// A friend's "Add to session" on the Friends page (navigation round 2, section 6.1): the friend is invited to the
+    /// session's room through `addPeople`, as Add person invites them, and the room opens. A friend already in the room
+    /// or invited to it is sent nothing, and the room opens. False when the invitation failed.
+    func addFriend(_ friendID: String, to session: LiveSession) async -> Bool {
+        let invited = social.sentInvitations.contains {
+            $0.roomId == session.roomID && $0.status == "pending" && $0.to.id == friendID
+        }
+        let isMember = await people(of: session.roomID).contains { $0.id == friendID }
+        guard !invited, !isMember else {
+            await openSession(session)
+            return true
+        }
+        return await addPeople([friendID], to: session).isEmpty
     }
 
     /// The agent New session starts on: the one used last on this Mac.

@@ -104,54 +104,86 @@ struct SheetButtons: View {
 /// One choice in a sheet's list, the Join sheet's session row made shared: 44 tall, 16 in, a 24 mark slot, 12, the
 /// name in Body M, a 100 fact column in Body S Text/Tertiary aligned right, 12, a 16 slot that holds the tick on a
 /// chosen row, then 16. The hover is the page rows'. Rows are separated by `PageRowSeam`.
+///
+/// Given `remove` in place of `choose`, the row is not a button and its 16 slot holds Remove (navigation round 2,
+/// section 6.2), as New room's picked people have it.
 struct SheetChoiceRow<Mark: View>: View {
     /// Where the names start: the 16 in, the 24 mark and the 12 after it.
     static var nameLeading: CGFloat { 16 + 24 + 12 }
 
     let name: String
     var fact: String?
-    let isChosen: Bool
+    var isChosen = false
     var isEnabled = true
-    let choose: () -> Void
+    private let choose: (() -> Void)?
+    private let remove: (() -> Void)?
     @ViewBuilder let mark: () -> Mark
 
+    init(name: String, fact: String? = nil, isChosen: Bool, isEnabled: Bool = true,
+         choose: @escaping () -> Void, @ViewBuilder mark: @escaping () -> Mark) {
+        self.name = name
+        self.fact = fact
+        self.isChosen = isChosen
+        self.isEnabled = isEnabled
+        self.choose = choose
+        remove = nil
+        self.mark = mark
+    }
+
+    init(name: String, fact: String? = nil, remove: @escaping () -> Void, @ViewBuilder mark: @escaping () -> Mark) {
+        self.name = name
+        self.fact = fact
+        choose = nil
+        self.remove = remove
+        self.mark = mark
+    }
+
     var body: some View {
-        Button(action: choose) {
-            HStack(spacing: 0) {
-                ZStack { mark() }
-                    .frame(width: 24, height: 24)
-                Spacer().frame(width: 12)
-                Text(name)
-                    .gallopText(.bodyM, color: SemanticColor.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if let fact {
-                    Text(fact)
-                        .gallopText(.bodyS, color: SemanticColor.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(width: 100, alignment: .trailing)
-                }
-                Spacer().frame(width: 12)
-                ZStack {
+        if let remove {
+            row { SheetRemoveButton(name: name, remove: remove) }
+        } else {
+            let choose = choose ?? {}
+            Button(action: choose) {
+                row {
                     if isChosen {
                         GallopIconView(icon: .checkmark, fallbackSystemName: "checkmark", size: 16)
                             .foregroundStyle(SemanticColor.iconPrimary)
                     }
                 }
-                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+                .opacity(isEnabled ? 1 : 0.45)
             }
-            .padding(.horizontal, 16)
-            .frame(height: 44)
-            .contentShape(Rectangle())
-            .opacity(isEnabled ? 1 : 0.45)
+            .buttonStyle(PageRowButtonStyle())
+            .disabled(!isEnabled)
+            // copy:
+            .macAccessibleAction(label: [name, fact].compactMap { $0 }.joined(separator: ", "),
+                                 value: isChosen ? "chosen" : nil, isEnabled: isEnabled, action: choose)
         }
-        .buttonStyle(PageRowButtonStyle())
-        .disabled(!isEnabled)
-        // copy:
-        .macAccessibleAction(label: [name, fact].compactMap { $0 }.joined(separator: ", "),
-                             value: isChosen ? "chosen" : nil, isEnabled: isEnabled, action: choose)
+    }
+
+    private func row(@ViewBuilder end: () -> some View) -> some View {
+        HStack(spacing: 0) {
+            ZStack { mark() }
+                .frame(width: 24, height: 24)
+            Spacer().frame(width: 12)
+            Text(name)
+                .gallopText(.bodyM, color: SemanticColor.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let fact {
+                Text(fact)
+                    .gallopText(.bodyS, color: SemanticColor.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: 100, alignment: .trailing)
+            }
+            Spacer().frame(width: 12)
+            ZStack { end() }
+                .frame(width: 16, height: 16)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 44)
     }
 }
 
@@ -159,6 +191,30 @@ extension SheetChoiceRow where Mark == EmptyView {
     /// A row with nothing in its mark slot, as the Join sheet's "No session".
     init(name: String, fact: String? = nil, isChosen: Bool, isEnabled: Bool = true, choose: @escaping () -> Void) {
         self.init(name: name, fact: fact, isChosen: isChosen, isEnabled: isEnabled, choose: choose) { EmptyView() }
+    }
+}
+
+/// Remove in a picked person's tick slot: Gallop's `dismiss` at 16 in Icon/Tertiary, Icon/Primary under the pointer,
+/// with a 24 by 24 press area centred on the slot.
+private struct SheetRemoveButton: View {
+    let name: String
+    let remove: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: remove) {
+            GallopIconView(icon: .dismiss, fallbackSystemName: "xmark.circle.fill", size: 16)
+                .foregroundStyle(isHovering ? SemanticColor.iconPrimary : SemanticColor.iconTertiary)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .onHover { isHovering = $0 }
+        // copy:
+        .help("Remove")
+        // copy:
+        .macAccessibleAction(label: "Remove \(name)", action: remove)
     }
 }
 
@@ -262,6 +318,32 @@ enum PeopleList {
         return CGFloat(shown) * 44 + CGFloat(shown - 1) * 8 + (count > limit ? 32 : 0)
     }
 
+    /// New room's suggestions while the person types (navigation round 2, section 6.2): the people who match by name
+    /// or handle and are not picked, in the server's order, at most `limit`.
+    static func suggestions(_ people: [SocialAccount], picked: [String], query: String,
+                            limit: Int = 3) -> [SocialAccount] {
+        let typed = query.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty else { return [] }
+        return Array(people.filter { !picked.contains($0.id) && FriendSearch.holds($0, query: typed) }.prefix(limit))
+    }
+
+    /// The picks with `id` first, so New room shows the newest pick at the top. A person is picked once.
+    static func picking(_ id: String, into picked: [String]) -> [String] {
+        [id] + picked.filter { $0 != id }
+    }
+
+    /// What Return in New room's search does: pick the first suggestion, or with nothing typed, submit the sheet.
+    enum Submit: Equatable {
+        case pick(String)
+        case submitEmpty
+        case nothing
+    }
+
+    static func submit(_ people: [SocialAccount], picked: [String], query: String) -> Submit {
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return .submitEmpty }
+        return suggestions(people, picked: picked, query: query, limit: 1).first.map { .pick($0.id) } ?? .nothing
+    }
+
     // copy:
     /// The more row's words, with the list's noun: how many more it shows, or once open, how many it hides again.
     static func moreTitle(hidden: Int, showsAll: Bool, noun: (one: String, many: String)) -> String {
@@ -340,5 +422,105 @@ struct PeoplePicker: View {
         else { return }
         picked.append(first.id)
         query = ""
+    }
+}
+
+/// New room's People (navigation round 2, section 6.2): the friend search, then 8 under it an area 148 tall, three 44
+/// rows and their two 8 seams, whatever it shows, so the sheet keeps one height while the person types and picks.
+/// When the window is too short for the sheet, the area gives up height first, down to one row.
+///
+/// With nothing typed the area shows the people picked, newest first, each with Remove, or "No one added". While the
+/// person types it suggests up to three friends who match and are not picked. Pressing one, or Return for the first,
+/// picks them and clears the field, and the focus stays in the field. Escape clears the text. Return with nothing
+/// typed calls `submitEmpty`.
+struct PickedPeople: View {
+    let people: [SocialAccount]
+    @Binding var picked: [String]
+    let placeholder: String
+    /// The line when there are no people at all.
+    let emptyLine: String
+    var submitEmpty: () -> Void = {}
+    @State private var query = ""
+    @FocusState private var isFocused: Bool
+
+    static var areaHeight: CGFloat { 3 * 44 + 2 * 8 }
+
+    private var isTyped: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            CapsuleField(placeholder: placeholder, text: $query, showsSearchIcon: true, clearsOnEscape: true,
+                         onSubmit: submit) {
+                if !query.isEmpty {
+                    Button { query = "" } label: {
+                        GallopIconView(icon: .dismiss, fallbackSystemName: "xmark.circle.fill", size: 13)
+                            .foregroundStyle(SemanticColor.iconTertiary)
+                    }
+                    .buttonStyle(.plain)
+                    // copy:
+                    .macAccessibleAction(label: "Clear search") { query = "" }
+                }
+            }
+            .focused($isFocused)
+            ScrollView {
+                VStack(spacing: 0) {
+                    if people.isEmpty {
+                        SheetEmptyRow(text: emptyLine)
+                    } else if isTyped {
+                        suggestions
+                    } else {
+                        pickedRows
+                    }
+                }
+            }
+            .scrollIndicators(.automatic)
+            .frame(minHeight: 44, idealHeight: Self.areaHeight, maxHeight: Self.areaHeight, alignment: .top)
+        }
+    }
+
+    @ViewBuilder private var suggestions: some View {
+        let shown = PeopleList.suggestions(people, picked: picked, query: query)
+        if shown.isEmpty {
+            // copy:
+            SheetEmptyRow(text: "No friends found")
+        }
+        ForEach(Array(shown.enumerated()), id: \.element.id) { index, person in
+            if index > 0 { PageRowSeam() }
+            SheetChoiceRow(name: person.displayName, fact: "@\(person.handle)", isChosen: false) {
+                pick(person.id)
+            } mark: {
+                SocialPersonAvatar(name: person.displayName, size: 24, letters: 1)
+            }
+        }
+    }
+
+    @ViewBuilder private var pickedRows: some View {
+        let shown = picked.compactMap { id in people.first { $0.id == id } }
+        if shown.isEmpty {
+            // copy:
+            SheetEmptyRow(text: "No one added")
+        }
+        ForEach(Array(shown.enumerated()), id: \.element.id) { index, person in
+            if index > 0 { PageRowSeam() }
+            SheetChoiceRow(name: person.displayName, fact: "@\(person.handle)") {
+                picked.removeAll { $0 == person.id }
+            } mark: {
+                SocialPersonAvatar(name: person.displayName, size: 24, letters: 1)
+            }
+        }
+    }
+
+    private func pick(_ id: String) {
+        picked = PeopleList.picking(id, into: picked)
+        query = ""
+        isFocused = true
+    }
+
+    private func submit() {
+        switch PeopleList.submit(people, picked: picked, query: query) {
+        case let .pick(id): pick(id)
+        case .submitEmpty: submitEmpty()
+        case .nothing: break
+        }
     }
 }

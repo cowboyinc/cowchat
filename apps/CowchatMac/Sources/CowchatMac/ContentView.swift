@@ -56,8 +56,8 @@ struct ContentView: View {
                 case .page(.team):
                     TeamPage(team: workspace.team, account: workspace.accountGlobal ?? workspace.local)
                 case .page(.friends):
-                    FriendsPage(social: workspace.social, newRoom: { workspace.newRoom(with: $0) },
-                                signIn: onShowOnboarding)
+                    FriendsPage(social: workspace.social, sessions: FriendsList.sessions(workspace.sidebarRooms),
+                                addToSession: { await workspace.addFriend($0.id, to: $1) }, signIn: onShowOnboarding)
                 case .chat(let room):
                     ChatRoomView(room: room, isSidebarVisible: $isSidebarVisible)
                         .id(room.id)

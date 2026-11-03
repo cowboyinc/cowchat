@@ -219,17 +219,21 @@ struct CapsuleField<Trailing: View>: View {
     var leading: String?
     var showsSearchIcon = false
     var isSecure = false
+    /// Escape clears the text, as `SearchCapsule`'s does, while there is text to clear (navigation round 2, section
+    /// 6.2). With none, Escape is left to the sheet's Cancel.
+    var clearsOnEscape = false
     var onSubmit: (() -> Void)?
     @ViewBuilder let trailing: Trailing
 
     init(placeholder: String, text: Binding<String>, leading: String? = nil, showsSearchIcon: Bool = false,
-         isSecure: Bool = false, onSubmit: (() -> Void)? = nil,
+         isSecure: Bool = false, clearsOnEscape: Bool = false, onSubmit: (() -> Void)? = nil,
          @ViewBuilder trailing: () -> Trailing = { EmptyView() }) {
         self.placeholder = placeholder
         _text = text
         self.leading = leading
         self.showsSearchIcon = showsSearchIcon
         self.isSecure = isSecure
+        self.clearsOnEscape = clearsOnEscape
         self.onSubmit = onSubmit
         self.trailing = trailing()
     }
@@ -252,6 +256,7 @@ struct CapsuleField<Trailing: View>: View {
             .textFieldStyle(.plain)
             .gallopText(.bodyM, color: SemanticColor.textPrimary)
             .onSubmit { onSubmit?() }
+            .onExitCommand(perform: clearsOnEscape && !text.isEmpty ? { text = "" } : nil)
             .accessibilityLabel(placeholder)
             trailing
         }
