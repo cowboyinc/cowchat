@@ -10,9 +10,10 @@ final class PageLayoutTests: XCTestCase {
     func testAHeaderWithNoLineEndsUnderItsTitleOrItsAccessory() {
         XCTAssertEqual(PageLayout.titleTop, 11.5, "Where a room's header puts its title")
         XCTAssertEqual(height(of: PageHeader(title: "Friends", caption: "4 friends")), 58)
-        XCTAssertEqual(height(of: PageHeader(title: "Friends")), 11.5 + 28, "Under the title's line")
+        // A hosting view's fitting size rounds up to whole points.
+        XCTAssertEqual(height(of: PageHeader(title: "Friends")), (11.5 + 28).rounded(.up), "Under the title's line")
         let inbox = PageHeader(title: "Inbox") { Color.clear.frame(width: 120, height: CowchatPillButtonStyle.height) }
-        XCTAssertEqual(height(of: inbox), 11.5 + 36, "Under the accessory, whose top is the title's")
+        XCTAssertEqual(height(of: inbox), (11.5 + 36).rounded(.up), "Under the accessory, whose top is the title's")
     }
 
     func testEachListsFirstLineOfTextSits32UnderTheHeadersLastText() {
