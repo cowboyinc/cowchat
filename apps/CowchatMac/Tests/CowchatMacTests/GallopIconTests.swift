@@ -20,6 +20,17 @@ final class GallopIconTests: XCTestCase {
         }
     }
 
+    /// The toolbar's sidebar button and the search's filter button (navigation round 2, sections 2 and 3.4). The old
+    /// `sidebar` crop went with the button that was its only user.
+    func testTheToolbarAndFilterIconsResolve() {
+        let icons: [GallopIcon] = [.sidebarExpanded, .sidebarCollapsed, .settingsSlider]
+        XCTAssertEqual(icons.map(\.rawValue), ["sidebar-expanded", "sidebar-collapsed", "settings-slider"])
+        for icon in icons {
+            XCTAssertNotNil(icon.image, icon.rawValue)
+        }
+        XCTAssertNil(GallopIcon(rawValue: "sidebar"))
+    }
+
     func testBundleHasNoOrphanSVGs() throws {
         let bundle = try XCTUnwrap(
             SeasonFontProvider.resourceBundle(searching: SeasonFontProvider.resourceBundleCandidates)

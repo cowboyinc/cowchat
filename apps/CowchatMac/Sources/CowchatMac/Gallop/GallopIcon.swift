@@ -80,7 +80,13 @@ public enum GallopIcon: String, CaseIterable, Sendable {
     case search
     case send
     case settings
-    case sidebar
+    /// From the gallop web set (Settings.Slider), for the sidebar search's filter button (navigation round 2,
+    /// section 3.4).
+    case settingsSlider = "settings-slider"
+    /// From the gallop web set (Sidebar.Collapsed and Sidebar.Expanded). The toolbar's sidebar button draws Expanded
+    /// while the sidebar shows and Collapsed while it is hidden, as the prototype site's rail swaps them.
+    case sidebarCollapsed = "sidebar-collapsed"
+    case sidebarExpanded = "sidebar-expanded"
     /// A pull request whose checks passed.
     case success
     /// Dash Overview's destination glyph — used for the Lobby home row.

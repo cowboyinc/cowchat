@@ -92,11 +92,20 @@ struct ContentView: View {
         .toolbarBackground(SemanticColor.surface400, for: .windowToolbar)
         .navigationTitle(windowTitle)
         .toolbar {
+            // The three buttons are one set: a 20 glyph in Icon/Secondary in a 36 circle that is clear at rest and takes
+            // a sidebar row's hover under the pointer (navigation round 2, section 2).
             ToolbarItem(placement: .primaryAction) {
-                // copy:
                 Button { workspace.show(.friends) } label: {
-                    Label("Friends", systemImage: "person.2")
+                    // Gallop has no outline person glyph (@cowboyinc/gallop-foundations 0.7.0 has only the filled
+                    // Posse), so this is SF Symbol person.2. At 14 semibold its stroke is about 1.4, close to Add's and
+                    // Sidebar.Expanded's beside it.
+                    ToolbarCircleLabel {
+                        Image(systemName: "person.2")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
                 }
+                .buttonStyle(.plain)
+                // copy:
                 .help("Friends")
                 .macAccessibleAction(label: "Open Friends") { workspace.show(.friends) }
             }
@@ -104,11 +113,12 @@ struct ContentView: View {
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
                 } label: {
-                    GallopIconView(icon: .sidebar, fallbackSystemName: "sidebar.left", size: 17)
-                        .foregroundStyle(SemanticColor.iconTertiary)
-                        .frame(width: 36, height: 36)
-                        .background(Circle().fill(SemanticColor.surface700))
-                        .contentShape(Circle())
+                    // Gallop's Sidebar.Expanded while the sidebar shows and Sidebar.Collapsed while it is hidden, as
+                    // the prototype site's rail swaps them.
+                    ToolbarCircleLabel {
+                        GallopIconView(icon: isSidebarVisible ? .sidebarExpanded : .sidebarCollapsed,
+                                       fallbackSystemName: "sidebar.left", size: 20)
+                    }
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
@@ -118,20 +128,18 @@ struct ContentView: View {
                 }
             }
             ToolbarItem(placement: .navigation) {
-                // The New menu holds every way to start something, in the pencil's place and size (navigation note,
-                // section 7.1). It stays in reach while the sidebar is hidden.
+                // The New menu holds every way to start something (navigation note, section 7.1). It stays in reach
+                // while the sidebar is hidden.
                 Menu {
                     NewMenuItems(workspace: workspace)
                 } label: {
-                    GallopIconView(icon: .add, fallbackSystemName: "plus", size: 17)
-                        .foregroundStyle(SemanticColor.iconSecondary)
-                        .frame(width: 36, height: 36)
-                        .contentShape(Circle())
+                    ToolbarCircleLabel {
+                        GallopIconView(icon: .add, fallbackSystemName: "plus", size: 20)
+                    }
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
                 .menuIndicator(.hidden)
-                // A borderless menu tints its label with the accent colour, so the + takes Icon/Secondary as its tint.
-                .tint(SemanticColor.iconSecondary)
                 .fixedSize()
                 // copy:
                 .help("New")
@@ -224,6 +232,24 @@ struct ContentView: View {
         case .friends: return "Friends"
         case nil: return store.selectedRoom?.name ?? "Cowchat"
         }
+    }
+}
+
+/// A toolbar button's label (navigation round 2, section 2): its 20 glyph in Icon/Secondary, centred in a 36 circle
+/// that is clear at rest and takes a sidebar row's hover under the pointer, whose capsule is a circle at 36. It has no
+/// pressed state, since a SwiftUI menu can't show one and the three buttons must look alike.
+private struct ToolbarCircleLabel<Glyph: View>: View {
+    @ViewBuilder let glyph: () -> Glyph
+    @State private var isHovering = false
+
+    var body: some View {
+        glyph()
+            .foregroundStyle(SemanticColor.iconSecondary)
+            .frame(width: 20, height: 20)
+            .frame(width: 36, height: 36)
+            .background(SidebarRowBackground(state: .init(isSelected: false, isHovering: isHovering)))
+            .contentShape(Circle())
+            .onHover { isHovering = $0 }
     }
 }
 
