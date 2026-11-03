@@ -34,6 +34,13 @@ final class TeamChoice: ObservableObject {
     /// Lists the signed-in account's teams and reads its stored choice. A server without the route lists none, and
     /// the Team page then draws no team field.
     func load(for session: SocialSession?) async {
+        struct Reply: Decodable { let teams: [SocialTeam] }
+        var reply: Reply?
+        if let session {
+            reply = try? await SocialAPI(endpoint: session.endpoint, key: session.deviceKey).social(["teams"])
+            guard !Task.isCancelled else { return }
+        }
+        // Taken once the reply is in, so a load that answers after another one doesn't report its change again.
         let before = chosen?.id
         defer { if chosen?.id != before { onChoiceChanged?() } }
         guard let session else {
@@ -42,9 +49,6 @@ final class TeamChoice: ObservableObject {
             accountID = nil
             return
         }
-        struct Reply: Decodable { let teams: [SocialTeam] }
-        let reply: Reply? = try? await SocialAPI(endpoint: session.endpoint, key: session.deviceKey).social(["teams"])
-        guard !Task.isCancelled else { return }
         accountID = session.account.id
         teams = reply?.teams ?? []
         chosenID = defaults.string(forKey: Self.key(for: session.account.id))
