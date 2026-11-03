@@ -388,6 +388,22 @@ final class InboxTeamTests: XCTestCase {
         XCTAssertEqual(TeamList.count(shown: 1, total: 1, narrowed: false), "1 branch")
     }
 
+    /// Switching teams keeps the typed search, so the caption counts the new team; another account starts with none.
+    func testSwitchingTeamsKeepsTheSearch() throws {
+        let team = TeamStore()
+        team.use(accountID: "patrick")
+        team.use(teamID: "cowboy")
+        team.receive(try reply())
+        team.query = "fee-ledger"
+        team.use(teamID: "district")
+        XCTAssertEqual(team.query, "fee-ledger")
+        XCTAssertFalse(team.isLoaded, "The new team's work is still to come")
+        team.receive(try reply())
+        XCTAssertEqual(team.countLine, "1 of 9 branches")
+        team.use(accountID: "chad")
+        XCTAssertEqual(team.query, "", "Another account starts with no search")
+    }
+
     func testWhichRowsOpenARoomAndThePullRequestHelp() throws {
         let groups = TeamList.groups(from: try reply().people, viewer: "patrick")
         let ledger = try XCTUnwrap(groups[1].branches.first { $0.name == "fee-ledger" })

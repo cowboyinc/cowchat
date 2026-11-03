@@ -235,15 +235,17 @@ final class TeamStore: ObservableObject {
     private var generation = 0
     private var people: [TeamPerson] = []
 
-    /// Starts over for the account signed in.
+    /// Starts over for the account signed in, with no search.
     func use(accountID: String?) {
         guard accountID != self.accountID else { return }
         self.accountID = accountID
         teamID = nil
+        query = ""
         startOver()
     }
 
-    /// Starts over for the team chosen in the Team page's team field.
+    /// Starts over for the team chosen in the Team page's team field. The typed search stays, so the caption's count is
+    /// the new team's (navigation round 2, section 4.3).
     func use(teamID: String?) {
         guard teamID != self.teamID else { return }
         self.teamID = teamID
@@ -256,7 +258,6 @@ final class TeamStore: ObservableObject {
         people = []
         isLoaded = false
         sharing = nil
-        query = ""
         expanded = []
     }
 
