@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// The Team page: the header with the count under the title and the search at its end, then one group per person who
-/// shares their work, each with a head, up to five rows and a row for the rest, in one column capped at 760.
+/// The Team page: the header with the count under the title and the team field and the search at its end, then 32 under
+/// it the column labels and one group per person who shares their work, 32 apart, each with a head, up to five rows and
+/// a row for the rest, in one column capped at 760.
 struct TeamPage: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var team: TeamStore
@@ -14,9 +15,13 @@ struct TeamPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             PageHeader(title: "Team", caption: caption, rowsWidth: rowsWidth) {
-                // copy: the spec's "Search people, branches or repos" does not fit the 240 capsule in Body M.
-                SearchCapsule(placeholder: "Search people or branches", text: $team.query,
-                              isFocused: $isSearchFocused, clearLabel: "Clear team search", width: 240)
+                HStack(spacing: 8) {
+                    // Switching keeps the typed search, so the caption's count is the new team's.
+                    TeamMenuField(teams: workspace.teams)
+                    // copy: the spec's "Search people, branches or repos" does not fit the 240 capsule in Body M.
+                    SearchCapsule(placeholder: "Search people or branches", text: $team.query,
+                                  isFocused: $isSearchFocused, clearLabel: "Clear team search", width: 240)
+                }
             }
             if team.isLoaded {
                 if team.groups.isEmpty {
@@ -50,13 +55,15 @@ struct TeamPage: View {
     private var list: some View {
         let roomIDs = Set(account.rooms.map(\.id))
         return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 24) {
+            LazyVStack(alignment: .leading, spacing: 32) {
                 ForEach(team.shownGroups) { group in
                     VStack(alignment: .leading, spacing: 0) {
+                        // The labels are the list's column heads, on their own line 4 over the first shown head.
+                        if group.id == team.shownGroups.first?.id {
+                            TeamColumnLabels()
+                                .padding(.bottom, 4)
+                        }
                         TeamGroupHead(person: group.person)
-                            .overlay(alignment: Alignment(horizontal: .leading, vertical: .firstTextBaseline)) {
-                                if group.id == team.shownGroups.first?.id { TeamColumnLabels() }
-                            }
                         ForEach(team.rows(of: group)) { branch in
                             TeamRow(branch: branch,
                                     opens: TeamList.opensRoom(branch, accountRoomIDs: roomIDs)) {
@@ -73,7 +80,7 @@ struct TeamPage: View {
                 }
             }
             .frame(maxWidth: PageLayout.listWidth, alignment: .leading)
-            .padding(.top, 4)
+            .padding(.top, PageLayout.listTop)
             .padding(.bottom, 16)
             .padding(.horizontal, PageLayout.listInset)
             .reportsPageRowsWidth()
@@ -115,26 +122,35 @@ struct TeamGroupHead: View {
     }
 }
 
-/// The Team page's column labels (navigation note, section 9.1), once, on the first shown person's head line: "Repo",
-/// "Pull request" and "State" in Body S, Text/Tertiary, each ending where its column ends, laid out with the rows' own
-/// widths. The name column has none, since the person's name holds that place. A screen reader hears the columns in
-/// each row's label instead.
+/// The Team page's column labels (navigation round 2, section 4.3), once, on their own 20 line over the first shown
+/// person's head: "Branch" over the branch names, then "Repo", "Pull request" and "State" in Body S, Text/Tertiary,
+/// laid out with the rows' own widths. Repo ends where its column ends. Pull request and State end where their words
+/// end, 22 before their columns end, since a 16 mark slot and its 6 follow the words. A screen reader hears the
+/// columns in each row's label instead.
 struct TeamColumnLabels: View {
+    /// The 6 and the 16 mark slot after a pull request's number and a state's word.
+    private static let markSlot: CGFloat = 6 + 16
+
     var body: some View {
         HStack(spacing: 0) {
-            Spacer(minLength: TeamRow.nameMinWidth)
+            // copy:
+            Text("Branch")
+                .gallopText(.bodyS, color: SemanticColor.textTertiary)
+                .lineLimit(1)
+                .frame(minWidth: TeamRow.nameMinWidth, maxWidth: .infinity, alignment: .leading)
             Spacer().frame(width: TeamRow.gap)
             // copy:
             label("Repo", width: TeamRow.repoWidth)
             Spacer().frame(width: TeamRow.gap)
             // copy:
-            label("Pull request", width: TeamRow.pullRequestWidth)
-            Spacer().frame(width: TeamRow.gap)
+            label("Pull request", width: TeamRow.pullRequestWidth - Self.markSlot)
+            Spacer().frame(width: Self.markSlot + TeamRow.gap)
             // copy:
-            label("State", width: TeamRow.stateWidth)
-            Spacer().frame(width: TeamRow.endWidth)
+            label("State", width: TeamRow.stateWidth - Self.markSlot)
+            Spacer().frame(width: Self.markSlot + TeamRow.endWidth)
         }
         .padding(.leading, TeamRow.leading)
+        .frame(height: 20)
         .frame(maxWidth: .infinity)
         .accessibilityHidden(true)
     }

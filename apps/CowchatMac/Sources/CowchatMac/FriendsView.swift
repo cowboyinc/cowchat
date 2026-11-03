@@ -198,7 +198,7 @@ struct FriendsPage: View {
 
     private func list(_ groups: [FriendsList.Group]) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 32) {
                 ForEach(groups, id: \.title) { group in
                     VStack(alignment: .leading, spacing: 0) {
                         TeamGroupHead(title: group.title)
@@ -207,7 +207,7 @@ struct FriendsPage: View {
                 }
             }
             .frame(maxWidth: PageLayout.listWidth, alignment: .leading)
-            .padding(.top, 4)
+            .padding(.top, PageLayout.listTop)
             .padding(.bottom, 16)
             .padding(.horizontal, PageLayout.listInset)
             .reportsPageRowsWidth()

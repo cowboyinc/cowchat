@@ -230,7 +230,7 @@ final class TeamStore: ObservableObject {
     @Published var expanded: Set<String> = []
 
     private var accountID: String?
-    /// The team chosen in the sidebar's team row, or nil for the server's choice when the account has no teams.
+    /// The team chosen in the Team page's team field, or nil for the server's choice when the account has no teams.
     private(set) var teamID: String?
     private var generation = 0
     private var people: [TeamPerson] = []
@@ -243,7 +243,7 @@ final class TeamStore: ObservableObject {
         startOver()
     }
 
-    /// Starts over for the team chosen in the sidebar's team row.
+    /// Starts over for the team chosen in the Team page's team field.
     func use(teamID: String?) {
         guard teamID != self.teamID else { return }
         self.teamID = teamID

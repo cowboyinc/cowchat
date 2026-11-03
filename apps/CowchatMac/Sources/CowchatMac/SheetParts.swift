@@ -177,8 +177,12 @@ struct SheetEmptyRow: View {
 
 /// The 40 field as the label of a menu (add-new-company note, section 0): Body M on Textfield/Default with a 1-point
 /// Border/Default edge, 13 in at the start, a leading mark 8 before the text, and Gallop's `chevronDown` at 16 in
-/// Icon/Tertiary 11 from the end. The menu is the system menu. It is built as the team switcher's menu is, a plain
-/// button-style menu with the indicator hidden, so the label draws as it is.
+/// Icon/Tertiary 11 from the end. The menu is the system menu. It is built as a plain button-style menu with the
+/// indicator hidden, so the label draws as it is.
+///
+/// In a page header it is 36, as the search beside it is, with its 20 avatar 8 in so it sits centred in the end cap, a
+/// title of at most `titleMaxWidth`, and Gallop's Dropdown hover: Textfield/Hover with Border/Hover under the pointer
+/// (navigation round 2, section 4.3).
 struct SheetMenuField<Leading: View, Items: View>: View {
     let title: String
     /// Draws the title in Text/Tertiary, as a placeholder.
@@ -186,8 +190,13 @@ struct SheetMenuField<Leading: View, Items: View>: View {
     var isEnabled = true
     var help: String?
     let accessibilityLabel: String
+    var height: CGFloat = 40
+    var leadingInset: CGFloat = 13
+    var titleMaxWidth: CGFloat?
+    var hovers = false
     @ViewBuilder let leading: () -> Leading
     @ViewBuilder let items: () -> Items
+    @State private var isHovering = false
 
     var body: some View {
         Menu(content: items) {
@@ -197,25 +206,31 @@ struct SheetMenuField<Leading: View, Items: View>: View {
                     .gallopText(.bodyM, color: isPlaceholder ? SemanticColor.textTertiary : SemanticColor.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: titleMaxWidth ?? .infinity, alignment: .leading)
                 GallopIconView(icon: .chevronDown, fallbackSystemName: "chevron.down", size: 16)
                     .foregroundStyle(SemanticColor.iconTertiary)
             }
-            .padding(.leading, 13)
+            .padding(.leading, leadingInset)
             .padding(.trailing, 11)
-            .frame(height: 40)
-            .background(SemanticColor.textfieldDefault, in: Capsule())
-            .overlay { Capsule().strokeBorder(SemanticColor.borderDefault, lineWidth: 1) }
+            .frame(height: height)
+            .background(isHovered ? SemanticColor.textfieldHover : SemanticColor.textfieldDefault, in: Capsule())
+            .overlay {
+                Capsule().strokeBorder(isHovered ? SemanticColor.borderHover : SemanticColor.borderDefault,
+                                       lineWidth: 1)
+            }
             .contentShape(Capsule())
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
+        .onHover { isHovering = $0 }
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1 : 0.45)
         .help(help ?? "")
         .accessibilityLabel("\(accessibilityLabel), \(title)")
     }
+
+    private var isHovered: Bool { hovers && isHovering && isEnabled }
 }
 
 extension SheetMenuField where Leading == EmptyView {

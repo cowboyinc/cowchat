@@ -56,7 +56,7 @@ struct InboxPage: View {
                     }
                 }
                 .frame(maxWidth: PageLayout.listWidth, alignment: .leading)
-                .padding(.top, 4)
+                .padding(.top, PageLayout.listTop)
                 .padding(.bottom, 16)
             }
             .padding(.horizontal, PageLayout.listInset)
