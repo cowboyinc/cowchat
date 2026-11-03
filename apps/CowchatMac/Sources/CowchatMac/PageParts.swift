@@ -12,8 +12,14 @@ enum PageLayout {
     /// The gap from the header's last line of text to a page list's first line of text, as production puts 32 under a
     /// page head and the house rule spaces sections (navigation round 2, section 4.2 as amended).
     static let headerGap: CGFloat = 32
-    /// A header's title line, Heading 4's.
+    /// A header's title line, Heading 4's, and its line's, Caption's, 1 under it.
     static let titleLine: CGFloat = 28
+    static let captionLine: CGFloat = 16
+    /// A header with a line is 58 tall, as a room's is.
+    static let headerHeight: CGFloat = 58
+    /// Where a header's title line starts: where a room's header puts it, which centres its title and line in the 48
+    /// under its 10 above. So the title sits at one height on every page and in every room.
+    static var titleTop: CGFloat { 10 + (headerHeight - 10 - (titleLine + 1 + captionLine)) / 2 }
 
     /// The space above a page's list: the header's gap less the list's own inset above its first line of text, and less
     /// what the header holds under its last line of text.
@@ -21,18 +27,20 @@ enum PageLayout {
         headerGap - firstTextInset - belowLastText
     }
 
-    /// What a header with no line holds under its title: half of what an accessory taller than the title adds, since
-    /// the title is centred on it.
-    static func belowTitle(accessoryHeight: CGFloat) -> CGFloat {
-        max(0, (accessoryHeight - titleLine) / 2)
+    /// What a header holds under its last line of text. With a line, the 58 header ends a little under it. With none,
+    /// it ends under its title, or under an accessory that reaches past the title's line, since the accessory's top is
+    /// level with the title's.
+    static func belowLastText(hasCaption: Bool, accessoryHeight: CGFloat = 0) -> CGFloat {
+        hasCaption ? headerHeight - titleTop - (titleLine + 1 + captionLine) : max(0, accessoryHeight - titleLine)
     }
 }
 
-/// A page's header, drawn as a room's is: 10 above, the title in Heading 4 at 18 from the card's edge, an optional line
-/// under it in Caption, Text/Tertiary, and an accessory at the trailing end, 20 in. With a line it is 58 tall, as a
-/// room's is. With none it keeps no empty line and ends under its title, or under its accessory if that is taller
-/// (navigation round 2, section 4.2 as amended). It is as wide as the page's rows and their insets (`rowsWidth`), so its
-/// end stays over theirs when a legacy scroller takes the list's right edge.
+/// A page's header, drawn as a room's is: the title in Heading 4 at 18 from the card's edge and where a room's sits
+/// (`PageLayout.titleTop`), an optional line under it in Caption, Text/Tertiary, and an accessory at the trailing end,
+/// 20 in, its top level with the title's. With a line it is 58 tall, as a room's is. With none it keeps no empty line
+/// and ends under its title, or under its accessory if that is taller (navigation round 2, section 4.2 as amended). It is
+/// as wide as the page's rows and their insets (`rowsWidth`), so its end stays over theirs when a legacy scroller takes
+/// the list's right edge.
 struct PageHeader<Accessory: View>: View {
     let title: String
     var caption: String?
@@ -48,7 +56,8 @@ struct PageHeader<Accessory: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        // Top-aligned, so a taller accessory such as Mark all read does not move the title.
+        HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                     .gallopText(.h4, color: SemanticColor.textPrimary)
@@ -63,10 +72,10 @@ struct PageHeader<Accessory: View>: View {
             Spacer(minLength: 12)
             accessory()
         }
-        .padding(.top, 10)
+        .padding(.top, PageLayout.titleTop)
         .padding(.leading, 18)
         .padding(.trailing, 20)
-        .frame(height: caption == nil ? nil : 58)
+        .frame(height: caption == nil ? nil : PageLayout.headerHeight, alignment: .top)
         .frame(maxWidth: rowsWidth ?? PageLayout.headerWidth, alignment: .leading)
     }
 }

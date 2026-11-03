@@ -80,8 +80,9 @@ struct TeamPage: View {
                 }
             }
             .frame(maxWidth: PageLayout.listWidth, alignment: .leading)
-            // The labels' line has no inset above its text.
-            .padding(.top, PageLayout.listTop(firstTextInset: 0))
+            // The labels' line has no inset above its text, and the header with its count ends a little under it.
+            .padding(.top, PageLayout.listTop(firstTextInset: 0,
+                                              belowLastText: PageLayout.belowLastText(hasCaption: true)))
             .padding(.bottom, 16)
             .padding(.horizontal, PageLayout.listInset)
             .reportsPageRowsWidth()

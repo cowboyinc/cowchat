@@ -233,7 +233,9 @@ struct FriendsPage: View {
                 }
             }
             .frame(maxWidth: PageLayout.listWidth, alignment: .leading)
-            .padding(.top, PageLayout.listTop(firstTextInset: TeamGroupHead.textInset))
+            // The header with its count ends a little under it.
+            .padding(.top, PageLayout.listTop(firstTextInset: TeamGroupHead.textInset,
+                                              belowLastText: PageLayout.belowLastText(hasCaption: true)))
             .padding(.bottom, 16)
             .padding(.horizontal, PageLayout.listInset)
             .reportsPageRowsWidth()
