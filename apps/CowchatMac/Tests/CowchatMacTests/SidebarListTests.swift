@@ -1,8 +1,9 @@
 import XCTest
 @testable import CowchatMac
 
-/// The sidebar's list model (navigation note, sections 3.3 to 3.11): the one order across the three connections, the
-/// filter, company rooms, the search's groups, the place icons and the short time.
+/// The sidebar's list model (navigation note, sections 3.3 to 3.11, with navigation round 2, section 3): the one flat
+/// order across the three connections, the filter and its placeholder, the search's groups, the cell's end slot, the
+/// place icons and the short time.
 final class SidebarListTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_793_000_000)
 
@@ -31,10 +32,7 @@ final class SidebarListTests: XCTestCase {
     private func names(_ rows: [SidebarRow]) -> [String] {
         rows.map { row in
             switch row {
-            case let .cell(room, depth, disclosure, showsDot):
-                let mark = disclosure.map { $0 == .open ? "v " : "> " } ?? ""
-                return String(repeating: "  ", count: depth) + mark + room.room.name + (showsDot ? " *" : "")
-            case let .more(_, hidden, showsAll): return showsAll ? "less" : "\(hidden) more"
+            case let .cell(room): return room.room.name + (room.isUnread ? " *" : "")
             case let .label(title): return "[\(title)]"
             case let .joinable(item): return "join " + item.name
             }
@@ -48,7 +46,7 @@ final class SidebarListTests: XCTestCase {
             room("lobby", on: .local, minutesAgo: 300), room("junction", on: .global, minutesAgo: 5),
             room("fee-ledger", minutesAgo: 9), room("scratch", on: .local, minutesAgo: 1),
         ]
-        let rows = RoomSidebarPresentation.rows(for: .all, rooms: rooms, collapsed: [], showsAllChildren: [])
+        let rows = RoomSidebarPresentation.rows(for: .all, rooms: rooms)
         XCTAssertEqual(names(rows), ["scratch", "junction", "fee-ledger", "lobby"])
     }
 
@@ -57,8 +55,7 @@ final class SidebarListTests: XCTestCase {
         let waiting = room("waiting", minutesAgo: 120,
                            session: session("b", state: .prompt, startedMinutesAgo: 600, waitingMinutesAgo: 1))
         let busy = room("busy", minutesAgo: 2)
-        let rows = RoomSidebarPresentation.rows(for: .all, rooms: [started, busy, waiting], collapsed: [],
-                                                showsAllChildren: [])
+        let rows = RoomSidebarPresentation.rows(for: .all, rooms: [started, busy, waiting])
         XCTAssertEqual(names(rows), ["waiting", "busy", "started"], "A session that starts waiting rises to the top")
     }
 
@@ -66,7 +63,7 @@ final class SidebarListTests: XCTestCase {
         // While the pointer is over the list, the times from when it came over order it, and a new room goes last.
         let rooms = [room("a", minutesAgo: 1), room("b", minutesAgo: 2), room("new", minutesAgo: 0)]
         let frozen = ["accountGlobal/a": now.addingTimeInterval(-600), "accountGlobal/b": now]
-        let rows = RoomSidebarPresentation.rows(for: .all, rooms: rooms, collapsed: [], showsAllChildren: [],
+        let rows = RoomSidebarPresentation.rows(for: .all, rooms: rooms,
                                                 activity: { frozen[$0.id] ?? .distantPast })
         XCTAssertEqual(names(rows), ["b", "a", "new"])
     }
@@ -115,12 +112,19 @@ final class SidebarListTests: XCTestCase {
             room("old", minutesAgo: 3, archived: true), room("scratch", on: .local, minutesAgo: 4),
         ]
         func list(_ filter: SidebarFilter) -> [String] {
-            names(RoomSidebarPresentation.rows(for: filter, rooms: rooms, collapsed: [], showsAllChildren: []))
+            names(RoomSidebarPresentation.rows(for: filter, rooms: rooms))
         }
         XCTAssertEqual(list(.all), ["live", "district", "scratch"])
         XCTAssertEqual(list(.sessions), ["live"])
         XCTAssertEqual(list(.rooms), ["district", "scratch"])
         XCTAssertEqual(list(.archived), ["old"])
+    }
+
+    func testEachFilterValueNamesItsSearch() {
+        XCTAssertEqual(SidebarFilter.all.searchPlaceholder, "Search")
+        XCTAssertEqual(SidebarFilter.sessions.searchPlaceholder, "Search sessions")
+        XCTAssertEqual(SidebarFilter.rooms.searchPlaceholder, "Search rooms")
+        XCTAssertEqual(SidebarFilter.archived.searchPlaceholder, "Search archived")
     }
 
     func testSignedOutOffersAllAndArchived() {
@@ -131,8 +135,7 @@ final class SidebarListTests: XCTestCase {
     func testArchivedIsFlat() {
         let rooms = [room("district", minutesAgo: 5, archived: true),
                      room("design", minutesAgo: 1, parent: "district", archived: true)]
-        XCTAssertEqual(names(RoomSidebarPresentation.rows(for: .archived, rooms: rooms, collapsed: [],
-                                                          showsAllChildren: [])),
+        XCTAssertEqual(names(RoomSidebarPresentation.rows(for: .archived, rooms: rooms)),
                        ["design", "district"])
     }
 
@@ -150,49 +153,35 @@ final class SidebarListTests: XCTestCase {
                                                          isSearchingMessages: false), "Nothing matches.")
     }
 
-    // MARK: Company rooms
+    // MARK: Rooms with a parent
 
-    func testAnActiveChildLiftsItsParentsBlock() {
+    /// A child and its parent each take their own place by their own activity, and nothing nests, collapses or hides
+    /// behind a more row (navigation round 2, sections 3.6 and 3.7).
+    func testAChildAndItsParentEachTakeTheirOwnPlace() {
         let rooms = [
             room("fee-ledger", minutesAgo: 9), room("district", minutesAgo: 60),
-            room("design", minutesAgo: 1, parent: "district"), room("ops", minutesAgo: 30, parent: "district"),
-        ]
-        let rows = RoomSidebarPresentation.rows(for: .all, rooms: rooms, collapsed: [], showsAllChildren: [])
-        XCTAssertEqual(names(rows), ["v district", "  design", "  ops", "fee-ledger"])
+            room("design", minutesAgo: 1, parent: "district", unread: true),
+            room("ops", minutesAgo: 30, parent: "district"),
+        ] + (1...7).map { room("child-\($0)", minutesAgo: 100 + Double($0), parent: "district") }
+        let rows = RoomSidebarPresentation.rows(for: .all, rooms: rooms)
+        XCTAssertEqual(names(rows), ["design *", "fee-ledger", "ops", "district"] + (1...7).map { "child-\($0)" },
+                       "A cell's unread is its own room's")
     }
 
-    func testAChildWhoseParentIsAbsentStandsAtTheTop() {
-        let rooms = [room("district", minutesAgo: 60, archived: true),
-                     room("design", minutesAgo: 1, parent: "district"),
-                     room("listings", on: .global, minutesAgo: 2, parent: "district")]
-        let rows = RoomSidebarPresentation.rows(for: .all, rooms: rooms, collapsed: [], showsAllChildren: [])
-        XCTAssertEqual(names(rows), ["design", "listings"], "Parents are matched on the same server only")
-    }
+    // MARK: The cell's end
 
-    func testARoomInsideAChildSitsUnderTheTopParent() {
-        let rooms = [room("district", minutesAgo: 60), room("design", minutesAgo: 10, parent: "district"),
-                     room("icons", minutesAgo: 1, parent: "design")]
-        XCTAssertEqual(names(RoomSidebarPresentation.rows(for: .all, rooms: rooms, collapsed: [],
-                                                          showsAllChildren: [])),
-                       ["v district", "  icons", "  design"])
-    }
-
-    func testAClosedParentHidesItsRoomsAndShowsTheirUnreadDot() {
-        let rooms = [room("district", minutesAgo: 60), room("design", minutesAgo: 1, parent: "district", unread: true)]
-        XCTAssertEqual(names(RoomSidebarPresentation.rows(for: .all, rooms: rooms,
-                                                          collapsed: ["accountGlobal/district"],
-                                                          showsAllChildren: [])),
-                       ["> district *"])
-    }
-
-    func testMoreThanFiveRoomsInsideShowTheFiveNewestAndAMoreRow() {
-        let rooms = [room("district", minutesAgo: 60)]
-            + (1...7).map { room("child-\($0)", minutesAgo: Double($0), parent: "district") }
-        let closed = RoomSidebarPresentation.rows(for: .all, rooms: rooms, collapsed: [], showsAllChildren: [])
-        XCTAssertEqual(names(closed), ["v district"] + (1...5).map { "  child-\($0)" } + ["2 more"])
-        let open = RoomSidebarPresentation.rows(for: .all, rooms: rooms, collapsed: [],
-                                                showsAllChildren: ["accountGlobal/district"])
-        XCTAssertEqual(names(open), ["v district"] + (1...7).map { "  child-\($0)" } + ["less"])
+    /// The end slot holds one thing: waiting over working, working over unread, unread over the time, and the time
+    /// while the account is down (navigation round 2, section 3.2).
+    func testTheEndSlotsPriorities() {
+        typealias End = SidebarCellEnd
+        XCTAssertEqual(End.content(mark: .waiting("Codex"), isUnread: true, time: "1h", connectionDown: false),
+                       .waiting("Codex"))
+        XCTAssertEqual(End.content(mark: .working, isUnread: true, time: "1h", connectionDown: false), .working)
+        XCTAssertEqual(End.content(mark: nil, isUnread: true, time: "1h", connectionDown: false), .unread)
+        XCTAssertEqual(End.content(mark: nil, isUnread: false, time: "1h", connectionDown: false), .time("1h"))
+        XCTAssertEqual(End.content(mark: .waiting("Codex"), isUnread: false, time: "1h", connectionDown: true),
+                       .time("1h"), "A session's state is not known while the account is down")
+        XCTAssertEqual(End.content(mark: .working, isUnread: true, time: "1h", connectionDown: true), .unread)
     }
 
     // MARK: Search
@@ -218,9 +207,9 @@ final class SidebarListTests: XCTestCase {
         let rows = RoomSidebarPresentation.searchRows(query: " store ", filter: .all, rooms: searchRooms,
                                                       joinable: searchJoinable)
         XCTAssertEqual(names(rows), [
-            "unread-counts", "scratch", "district", "  design", "general-store",
+            "unread-counts", "scratch", "design", "general-store",
             "[To join]", "join store-launch", "[Archived]", "store-pricing",
-        ], "A branch, a message, a child's description with its parent, and a name all match")
+        ], "A branch, a message, a child's description and a name all match, and the child brings no parent")
     }
 
     func testTheFilterNarrowsTheSearch() {
@@ -229,17 +218,9 @@ final class SidebarListTests: XCTestCase {
                                                      joinable: searchJoinable))
         }
         XCTAssertEqual(search(.sessions), ["unread-counts"])
-        XCTAssertEqual(search(.rooms), ["scratch", "district", "  design", "general-store", "[To join]",
+        XCTAssertEqual(search(.rooms), ["scratch", "design", "general-store", "[To join]",
                                         "join store-launch", "[Archived]", "store-pricing"])
         XCTAssertEqual(search(.archived), ["store-pricing"], "Archived shows its group without the label")
-    }
-
-    func testTheSearchIgnoresAClosedParent() {
-        let rows = RoomSidebarPresentation.rows(
-            RoomSidebarPresentation.blocks([room("district", minutesAgo: 60),
-                                            room("design", minutesAgo: 1, parent: "district")]),
-            collapsed: ["accountGlobal/district"], showsAllChildren: [], isSearching: true)
-        XCTAssertEqual(names(rows), ["district", "  design"])
     }
 
     func testASearchWithNoMatchHasNoRows() {

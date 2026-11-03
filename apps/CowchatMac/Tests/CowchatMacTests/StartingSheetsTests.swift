@@ -70,4 +70,33 @@ final class StartingSheetsTests: XCTestCase {
         XCTAssertEqual(PeopleList.moreTitle(hidden: 2, showsAll: true, noun: ("friend", "friends")), "Hide 2 friends")
         XCTAssertEqual(PeopleList.moreTitle(hidden: 1, showsAll: true, noun: ("person", "people")), "Hide 1 person")
     }
+
+    /// New room's suggestions match by name and handle, leave out the people picked, keep the server's order and stop
+    /// at three (navigation round 2, section 6.2).
+    func testNewRoomSuggestsUpToThreeUnpickedMatchesInTheServersOrder() {
+        let ids = { (rows: [SocialAccount]) in rows.map(\.id) }
+        XCTAssertEqual(ids(PeopleList.suggestions(people, picked: [], query: "")), [], "Nothing typed suggests no one")
+        XCTAssertEqual(ids(PeopleList.suggestions(people, picked: [], query: "n")), ["adrian", "logan", "martin"],
+                       "Three, in the server's order, with Nico left until more is typed")
+        XCTAssertEqual(ids(PeopleList.suggestions(people, picked: ["adrian", "logan"], query: "n")), ["martin", "nico"])
+        XCTAssertEqual(ids(PeopleList.suggestions(people, picked: [], query: "@The")), ["theo"], "A handle, with its @")
+        XCTAssertEqual(ids(PeopleList.suggestions(people, picked: [], query: "zz")), [])
+    }
+
+    /// Picking puts the friend first, once, and Remove takes them out. Return picks the first suggestion, and with
+    /// nothing typed it submits the sheet.
+    func testNewRoomPicksNewestFirstAndReturnPicksTheFirstSuggestion() {
+        XCTAssertEqual(PeopleList.picking("chad", into: []), ["chad"])
+        XCTAssertEqual(PeopleList.picking("theo", into: ["chad"]), ["theo", "chad"], "The newest pick first")
+        XCTAssertEqual(PeopleList.picking("chad", into: ["theo", "chad"]), ["chad", "theo"], "A person is picked once")
+        XCTAssertEqual(PeopleList.removing("theo", from: ["theo", "chad"]), ["chad"])
+
+        XCTAssertEqual(PeopleList.submit(people, picked: ["adrian"], query: "n"), .pick("logan"))
+        XCTAssertEqual(PeopleList.submit(people, picked: [], query: "  "), .submitEmpty)
+        XCTAssertEqual(PeopleList.submit(people, picked: [], query: "zz"), .nothing)
+    }
+
+    func testNewRoomsPeopleAreaIsThreeRowsTall() {
+        XCTAssertEqual(PickedPeople.areaHeight, 148)
+    }
 }

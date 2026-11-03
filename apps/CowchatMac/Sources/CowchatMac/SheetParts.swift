@@ -332,6 +332,11 @@ enum PeopleList {
         [id] + picked.filter { $0 != id }
     }
 
+    /// The picks without `id`, as Remove leaves them.
+    static func removing(_ id: String, from picked: [String]) -> [String] {
+        picked.filter { $0 != id }
+    }
+
     /// What Return in New room's search does: pick the first suggestion, or with nothing typed, submit the sheet.
     enum Submit: Equatable {
         case pick(String)
@@ -503,7 +508,7 @@ struct PickedPeople: View {
         ForEach(Array(shown.enumerated()), id: \.element.id) { index, person in
             if index > 0 { PageRowSeam() }
             SheetChoiceRow(name: person.displayName, fact: "@\(person.handle)") {
-                picked.removeAll { $0 == person.id }
+                picked = PeopleList.removing(person.id, from: picked)
             } mark: {
                 SocialPersonAvatar(name: person.displayName, size: 24, letters: 1)
             }

@@ -71,7 +71,9 @@ final class WorkspaceStore: ObservableObject {
         teams.onChoiceChanged = { [weak self] in
             guard let self else { return }
             self.team.use(teamID: teams.chosen?.id)
-            Task { await self.refreshPages() }
+            // Only the Team page reads the team. The teams load as the account signs in, before its friends have, and
+            // an Inbox read then would keep community senders' short names (navigation round 2, section 4.1).
+            Task { await self.team.refresh(social: self.social) }
         }
         return teams
     }()

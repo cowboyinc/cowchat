@@ -28,6 +28,9 @@ final class TeamChoice: ObservableObject {
     /// The chosen team, or the first one when none was chosen or the chosen one is gone.
     var chosen: SocialTeam? { teams.first { $0.id == chosenID } ?? teams.first }
 
+    /// Whether the Team page draws its team field: with two or more teams, since with one there is nothing to switch.
+    var hasChoice: Bool { teams.count > 1 }
+
     /// Lists the signed-in account's teams and reads its stored choice. A server without the route lists none, and
     /// the Team page then draws no team field.
     func load(for session: SocialSession?) async {
@@ -67,7 +70,7 @@ struct TeamMenuField: View {
     @AppStorage(RoomIconStyle.storageKey) private var iconStyle = RoomIconStyle.fallback.rawValue
 
     var body: some View {
-        if let chosen = teams.chosen, teams.teams.count > 1 {
+        if let chosen = teams.chosen, teams.hasChoice {
             // copy:
             SheetMenuField(title: chosen.name, help: "Switch team", accessibilityLabel: "Team", height: 36,
                            leadingInset: 8, titleMaxWidth: 160, hovers: true) {
