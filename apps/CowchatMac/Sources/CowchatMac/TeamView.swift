@@ -54,6 +54,9 @@ struct TeamPage: View {
                 ForEach(team.shownGroups) { group in
                     VStack(alignment: .leading, spacing: 0) {
                         TeamGroupHead(person: group.person)
+                            .overlay(alignment: Alignment(horizontal: .leading, vertical: .firstTextBaseline)) {
+                                if group.id == team.shownGroups.first?.id { TeamColumnLabels() }
+                            }
                         ForEach(team.rows(of: group)) { branch in
                             TeamRow(branch: branch,
                                     opens: TeamList.opensRoom(branch, accountRoomIDs: roomIDs)) {
@@ -112,9 +115,44 @@ struct TeamGroupHead: View {
     }
 }
 
-/// One branch on the Team page, drawn from the old session row: 40 tall and one line, the name starting under the
-/// person's name at 51, then the Repo (120, right-aligned), the Pull request (72), the turning mark while any session
-/// on it works, and the chevron on a row that opens a room. Only those rows are buttons.
+/// The Team page's column labels (navigation note, section 9.1), once, on the first shown person's head line: "Repo",
+/// "Pull request" and "State" in Body S, Text/Tertiary, each ending where its column ends, laid out with the rows' own
+/// widths. The name column has none, since the person's name holds that place. A screen reader hears the columns in
+/// each row's label instead.
+struct TeamColumnLabels: View {
+    var body: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: TeamRow.nameMinWidth)
+            Spacer().frame(width: TeamRow.gap)
+            // copy:
+            label("Repo", width: TeamRow.repoWidth)
+            Spacer().frame(width: TeamRow.gap)
+            // copy:
+            label("Pull request", width: TeamRow.pullRequestWidth)
+            Spacer().frame(width: TeamRow.gap)
+            // copy:
+            label("State", width: TeamRow.stateWidth)
+            Spacer().frame(width: TeamRow.endWidth)
+        }
+        .padding(.leading, TeamRow.leading)
+        .frame(maxWidth: .infinity)
+        .accessibilityHidden(true)
+    }
+
+    private func label(_ text: String, width: CGFloat) -> some View {
+        Text(text)
+            .gallopText(.bodyS, color: SemanticColor.textTertiary)
+            .lineLimit(1)
+            .fixedSize()
+            .frame(width: width, alignment: .trailing)
+    }
+}
+
+/// One branch on the Team page (navigation note, section 9.1): 40 tall and one line, the name starting under the
+/// person's name at 51, then Repo (120), Pull request (88, the number and a 16 slot for its checks), State (80, the
+/// word and a 16 slot for its mark), all ending on the right, and the chevron on a row that opens a room. Only those
+/// rows are buttons. The name links to GitHub when the branch has somewhere to go there, and a press on the rest of
+/// the row still opens the room.
 struct TeamRow: View {
     let branch: TeamBranch
     let opens: Bool
@@ -124,8 +162,12 @@ struct TeamRow: View {
     static let leading: CGFloat = 16 + 24 + 11
     static let height: CGFloat = 40
     static let nameMinWidth: CGFloat = 160
+    static let gap: CGFloat = 16
     static let repoWidth: CGFloat = 120
-    static let pullRequestWidth: CGFloat = 72
+    static let pullRequestWidth: CGFloat = 88
+    static let stateWidth: CGFloat = 80
+    /// The 12 before the chevron, its 16 and the 12 after it.
+    static let endWidth: CGFloat = 12 + 16 + 12
 
     var body: some View {
         if opens, let room = branch.room {
@@ -133,36 +175,48 @@ struct TeamRow: View {
                 .buttonStyle(PageRowButtonStyle())
                 // copy:
                 .help("Open \(room.name)")
-                .macAccessibleAction(label: accessibilityLabel, action: press)
+                .overlay(alignment: .leading) { nameLink }
+                .macAccessibleAction(label: TeamList.accessibilityLabel(for: branch), namedActions: gitHubAction,
+                                     action: press)
         } else {
             label
+                .overlay(alignment: .leading) { nameLink }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(accessibilityLabel)
+                .accessibilityLabel(TeamList.accessibilityLabel(for: branch))
+                .accessibilityActions {
+                    if let url = branch.gitHubURL {
+                        // copy:
+                        Button("Open on GitHub") { MessageLinks.open(url) }
+                    }
+                }
         }
     }
 
+    private var gitHubAction: [MacNamedAction] {
+        // copy:
+        branch.gitHubURL.map { url in [MacNamedAction(name: "Open on GitHub") { MessageLinks.open(url) }] } ?? []
+    }
+
     private var label: some View {
-        HStack(spacing: 0) {
+        columns {
             Text(branch.name)
                 .gallopText(.bodyM, color: SemanticColor.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .frame(minWidth: Self.nameMinWidth, maxWidth: .infinity, alignment: .leading)
-            Spacer().frame(width: 16)
+                .opacity(branch.gitHubURL == nil ? 1 : 0)
+        } rest: {
             Text(branch.repo)
                 .gallopText(.bodyS, color: SemanticColor.textTertiary)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(width: Self.repoWidth, alignment: .trailing)
-            Spacer().frame(width: 16)
+            Spacer().frame(width: Self.gap)
             pullRequest
-                .frame(width: Self.pullRequestWidth, alignment: .leading)
+                .frame(width: Self.pullRequestWidth, alignment: .trailing)
+            Spacer().frame(width: Self.gap)
+            state
+                .frame(width: Self.stateWidth, alignment: .trailing)
             Spacer().frame(width: 12)
-            ZStack {
-                if branch.isWorking { SessionWorkingMark() }
-            }
-            .frame(width: 28, height: 16)
-            Spacer().frame(width: 4)
             ZStack {
                 if opens {
                     GallopIconView(icon: .chevronRightSmall, fallbackSystemName: "chevron.right", size: 16)
@@ -172,12 +226,38 @@ struct TeamRow: View {
             .frame(width: 16, height: 16)
             Spacer().frame(width: 12)
         }
-        .padding(.leading, Self.leading)
-        .frame(height: Self.height)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
 
+    /// The name as a link over the row, outside its button, pressed only on the text itself. The space for the other
+    /// columns is empty and lets presses through to the row.
+    @ViewBuilder private var nameLink: some View {
+        if let url = branch.gitHubURL {
+            columns {
+                TextLink(title: branch.name, style: .bodyM, color: SemanticColor.textPrimary) { MessageLinks.open(url) }
+                    .help(TeamList.gitHubHelp(for: branch))
+            } rest: {
+                Spacer().frame(width: Self.repoWidth + Self.gap + Self.pullRequestWidth + Self.gap + Self.stateWidth
+                               + Self.endWidth)
+            }
+        }
+    }
+
+    /// The row's line: the name in its flexible column at 51, then the 16 gap and the fixed columns after it.
+    private func columns<Name: View, Rest: View>(@ViewBuilder name: () -> Name,
+                                                 @ViewBuilder rest: () -> Rest) -> some View {
+        HStack(spacing: 0) {
+            name()
+                .frame(minWidth: Self.nameMinWidth, maxWidth: .infinity, alignment: .leading)
+            Spacer().frame(width: Self.gap)
+            rest()
+        }
+        .padding(.leading, Self.leading)
+        .frame(height: Self.height)
+    }
+
+    /// The number, 6, then the checks mark's 16 slot, kept empty with no checks so the numbers end in one column.
     @ViewBuilder private var pullRequest: some View {
         if let pullRequest = branch.pullRequest {
             HStack(spacing: 6) {
@@ -186,6 +266,7 @@ struct TeamRow: View {
                     .lineLimit(1)
                     .fixedSize()
                 PullRequestChecksMark(checks: pullRequest.checks, showsRunning: false)
+                    .frame(width: 16, height: 16)
             }
             .help(TeamList.help(for: pullRequest))
         } else {
@@ -193,12 +274,27 @@ struct TeamRow: View {
         }
     }
 
-    // copy:
-    /// "fee-ledger, dashboard, #1806, working"
-    private var accessibilityLabel: String {
-        [branch.name, branch.repo, branch.pullRequest.map { "#\($0.number)" } ?? "", branch.isWorking ? "working" : ""]
-            .filter { !$0.isEmpty }
-            .joined(separator: ", ")
+    /// The state's word, 6, then its mark's 16 slot (navigation note, section 9.2).
+    private var state: some View {
+        HStack(spacing: 6) {
+            Text(TeamList.stateWord(branch.state))
+                .gallopText(.bodyS, color: branch.state == .idle ? SemanticColor.textTertiary
+                            : SemanticColor.textSecondary)
+                .lineLimit(1)
+                .fixedSize()
+            ZStack {
+                switch branch.state {
+                case .working:
+                    SessionWorkingMark()
+                case .prompt:
+                    GallopIconView(icon: .warning, fallbackSystemName: "exclamationmark.triangle.fill", size: 16)
+                        .foregroundStyle(SemanticColor.notificationErrorTextDefault)
+                case .idle:
+                    Color.clear
+                }
+            }
+            .frame(width: 16, height: 16)
+        }
     }
 }
 

@@ -9,9 +9,7 @@ enum ChatPresencePresentation {
         recentActivityByAgent: [String: Date]? = nil,
         now: Date = Date(),
         recentWindow: TimeInterval = 120,
-        connectionStatus: ConnectionStatus = .connected,
-        name: (AgentPresence) -> String = \.name,
-        nameSeparator: String = " · "
+        connectionStatus: ConnectionStatus = .connected
     ) -> String {
         switch connectionStatus {
         case .connecting:
@@ -28,7 +26,7 @@ enum ChatPresencePresentation {
             return status == "working" || status == "thinking"
         }
         if !active.isEmpty {
-            let names = active.prefix(2).map(name).joined(separator: nameSeparator)
+            let names = active.prefix(2).map(\.name).joined(separator: ", ")
             return "\(names) active"
         }
 
@@ -49,7 +47,8 @@ enum ChatPresencePresentation {
                 ? "1 agent active recently"
                 : "\(recentCount) agents active recently"
             guard connectedCount > 0 else { return recent }
-            return "\(recent) · \(connectedSummary(count: connectedCount))"
+            // copy:
+            return "\(recent), \(connectedCount) connected"
         }
 
         return connectedSummary(count: connectedCount)

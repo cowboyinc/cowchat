@@ -844,6 +844,11 @@ private struct ChatRoomView: View {
 
     private var isAccountRoom: Bool { workspace.activeServer == .accountGlobal }
 
+    /// Whether the room offers People…, from the ⋯ menu and the header's caption.
+    private var offersPeople: Bool {
+        RoomPeople.isOffered(isLocal: store.isLocalConnection, apiKey: store.connectionProfile.apiKey)
+    }
+
     /// Whether the viewer owns this account room, which is where a typed @name of one of their live sessions becomes a
     /// mention, since the app knows only the viewer's sessions.
     private var ownsRoom: Bool {
@@ -963,7 +968,7 @@ private struct ChatRoomView: View {
                     Button("Copy connect prompt") { copyConnectPrompt() }
                     if !store.isLocalConnection {
                         Button("Artifact…") { isArtifactPresented = true }
-                        if RoomPeople.isOffered(isLocal: store.isLocalConnection, apiKey: store.connectionProfile.apiKey) {
+                        if offersPeople {
                             // copy:
                             Button("People…") { Task { await workspace.showPeople(of: room.id) } }
                         }
@@ -1039,13 +1044,27 @@ private struct ChatRoomView: View {
                 }
                 TimelineView(.periodic(from: .now, by: 10)) { timeline in
                     let summary = presenceSummary(at: timeline.date)
+                    let isActive = summary.contains("active")
                     HStack(spacing: 0) {
-                        Text(summary)
-                            .gallopText(
-                                .caption,
-                                color: summary.contains("active")
-                                    ? SemanticColor.warning : SemanticColor.textTertiary
-                            )
+                        // The line opens People… where the room offers it and the connection is up (navigation
+                        // note, section 8). Someone active keeps the warning colour under the pointer.
+                        if offersPeople, store.connectionStatus.isConnected {
+                            TextLink(title: summary, style: .caption,
+                                     color: isActive ? SemanticColor.warning : SemanticColor.textTertiary,
+                                     hoverColor: isActive ? nil : SemanticColor.textSecondary) {
+                                Task { await workspace.showPeople(of: room.id) }
+                            }
+                            // copy:
+                            .help("People")
+                            // copy:
+                            .macAccessibleAction(label: "People in \(room.name), \(summary)") {
+                                Task { await workspace.showPeople(of: room.id) }
+                            }
+                        } else {
+                            Text(summary)
+                                .gallopText(.caption,
+                                            color: isActive ? SemanticColor.warning : SemanticColor.textTertiary)
+                        }
                     }
                     .lineLimit(1)
                 }

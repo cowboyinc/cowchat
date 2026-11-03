@@ -9,6 +9,8 @@ struct AccessibleActionOverlay: NSViewRepresentable {
     let label: String
     var value: String?
     var isEnabled = true
+    /// Actions beside the press, which a screen reader lists by name.
+    var namedActions: [MacNamedAction] = []
     let action: () -> Void
 
     func makeNSView(context: Context) -> ActionView {
@@ -26,6 +28,12 @@ struct AccessibleActionOverlay: NSViewRepresentable {
         view.accessibilityValueText = value
         view.actionIsEnabled = isEnabled
         view.action = action
+        view.setAccessibilityCustomActions(namedActions.map { named in
+            NSAccessibilityCustomAction(name: named.name) {
+                named.action()
+                return true
+            }
+        })
         view.setAccessibilityEnabled(isEnabled)
     }
 
@@ -48,11 +56,18 @@ struct AccessibleActionOverlay: NSViewRepresentable {
     }
 }
 
+/// An action an accessible element offers by name beside its press, as a Team row's "Open on GitHub".
+struct MacNamedAction {
+    let name: String
+    let action: () -> Void
+}
+
 extension View {
     func macAccessibleAction(
         label: String,
         value: String? = nil,
         isEnabled: Bool = true,
+        namedActions: [MacNamedAction] = [],
         action: @escaping () -> Void
     ) -> some View {
         accessibilityHidden(true)
@@ -61,6 +76,7 @@ extension View {
                     label: label,
                     value: value,
                     isEnabled: isEnabled,
+                    namedActions: namedActions,
                     action: action
                 )
                 .allowsHitTesting(false)

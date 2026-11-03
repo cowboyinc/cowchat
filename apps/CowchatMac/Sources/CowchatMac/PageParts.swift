@@ -255,3 +255,27 @@ struct PageRowMoreMenu<Items: View>: View {
         .accessibilityLabel(accessibilityLabel)
     }
 }
+
+/// Text that is a link, as first run's `SetupLink` draws one: in its colour now, and underlined under the pointer,
+/// where it takes `hoverColor` when one is given. Its press area is the text's own. The room header's caption opens
+/// People… with it, and a Team row's name opens GitHub (navigation note, sections 8 and 9.3).
+struct TextLink: View {
+    let title: String
+    let style: GallopTextStyle
+    let color: Color
+    var hoverColor: Color?
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .underline(isHovering)
+                .gallopText(style, color: isHovering ? hoverColor ?? color : color)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+    }
+}

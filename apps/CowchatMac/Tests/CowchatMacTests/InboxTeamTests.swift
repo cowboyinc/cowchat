@@ -294,13 +294,58 @@ final class InboxTeamTests: XCTestCase {
         XCTAssertEqual(nico.branches.map(\.name), ["store-feed", "fee-ledger", "cowboy", "extra-3", "extra-2",
                                                    "extra-1", "extra-0"])
         let ledger = nico.branches[1]
-        XCTAssertTrue(ledger.isWorking)
+        XCTAssertEqual(ledger.state, .working, "One of its sessions works")
         XCTAssertEqual(ledger.pullRequest?.number, 1806, "The newest posted")
         XCTAssertEqual(ledger.room?.roomId, "fee-ledger", "Only the older session is in a room")
         XCTAssertEqual(ledger.repo, "dashboard")
-        XCTAssertFalse(nico.branches[0].isWorking, "Stopped at a prompt draws nothing")
+        XCTAssertEqual(nico.branches[0].state, .prompt, "Stopped at a prompt")
+        XCTAssertEqual(nico.branches[2].state, .idle)
         XCTAssertEqual(nico.branches[2].repo, "", "On main the name is the folder")
         XCTAssertTrue(groups[2].isViewer)
+    }
+
+    /// A branch is working when any session on it works, else waiting when any is at a prompt, else idle.
+    func testTeamBranchState() {
+        func live(_ state: LiveSession.State) -> LiveSession {
+            LiveSession(id: UUID().uuidString, harness: .claudeCode, folder: "cowchat", branch: "main", state: state,
+                         startedAt: .distantPast)
+        }
+        XCTAssertEqual(LiveSession.State(of: [live(.idle), live(.prompt), live(.working)]), .working)
+        XCTAssertEqual(LiveSession.State(of: [live(.idle), live(.prompt)]), .prompt)
+        XCTAssertEqual(LiveSession.State(of: [live(.idle)]), .idle)
+        XCTAssertEqual(TeamList.stateWord(.prompt), "Waiting")
+    }
+
+    /// The name links to the pull request, else to the branch in the repository with each segment encoded, or to the
+    /// repository with no branch, else nowhere.
+    func testTeamBranchGitHubAddress() throws {
+        let people = try reply().people
+        let nico = TeamList.groups(from: people, viewer: "patrick").first { $0.person.id == "nico" }
+        let ledger = try XCTUnwrap(nico?.branches.first { $0.branch == "nico/fee-ledger" })
+        XCTAssertEqual(ledger.gitHubURL?.absoluteString, "https://github.com/cowboyinc/dashboard/pull/1806")
+        XCTAssertNil(nico?.branches.first { $0.branch == "nico/store-feed" }?.gitHubURL, "No repository was sent")
+
+        func branch(_ name: String, repository: String?) -> TeamBranch {
+            TeamBranch(id: name, name: name, folder: "cowchat", branch: name, state: .idle, latestStart: .distantPast,
+                       room: nil, pullRequest: nil, repository: repository)
+        }
+        XCTAssertEqual(branch("pmandia/unread #2", repository: "cowboyinc/cowchat").gitHubURL?.absoluteString,
+                       "https://github.com/cowboyinc/cowchat/tree/pmandia/unread%20%232")
+        XCTAssertEqual(branch("", repository: "cowboyinc/cowchat").gitHubURL?.absoluteString,
+                       "https://github.com/cowboyinc/cowchat")
+        XCTAssertNil(branch("main", repository: nil).gitHubURL)
+        XCTAssertEqual(TeamList.gitHubHelp(for: ledger), "Open #1806 on GitHub")
+        XCTAssertEqual(TeamList.gitHubHelp(for: branch("main", repository: "cowboyinc/cowchat")),
+                       "Open main on GitHub")
+    }
+
+    /// A row's accessible label names its columns.
+    func testTeamRowAccessibleLabel() throws {
+        let nico = TeamList.groups(from: try reply().people, viewer: "patrick").first { $0.person.id == "nico" }
+        let rows = try XCTUnwrap(nico?.branches)
+        XCTAssertEqual(TeamList.accessibilityLabel(for: rows[1]),
+                       "fee-ledger, repo dashboard, pull request 1806, checks running, working")
+        XCTAssertEqual(TeamList.accessibilityLabel(for: rows[2]), "cowboy, idle", "On main the name is the folder")
     }
 
     func testFiveAndTheMoreRow() throws {

@@ -30,6 +30,9 @@ struct TeamSession: Decodable, Equatable {
     let pullRequest: MessagePullRequest?
     /// When the message carrying the pull request was sent.
     let pullRequestAt: String?
+    /// The repository its folder's GitHub remote names, "owner/name" as `MessagePullRequest.repository` names one,
+    /// when the hook sent it (navigation note, section 9.3, a question for Chad).
+    var repository: String?
 
     /// The session as `LiveSession` holds one, for its name and state.
     var live: LiveSession {
@@ -46,17 +49,47 @@ struct TeamBranch: Identifiable, Equatable {
     let name: String
     let folder: String
     let branch: String
-    /// Whether any session on the branch is working.
-    let isWorking: Bool
+    /// Working when any session on the branch works, else at a prompt when any is at one, else idle.
+    let state: LiveSession.State
     /// The latest start of any session on the branch, which orders the person's rows.
     let latestStart: Date
     /// The room the branch's newest session in one works in, when the person is in it.
     let room: TeamSession.RoomRef?
     /// The newest pull request a session on the branch posted where the person can read it.
     let pullRequest: MessagePullRequest?
+    /// The newest session's repository, "owner/name", when the server sent one.
+    var repository: String?
 
     /// The repo column: the folder, or nothing when the name already is the folder.
     var repo: String { name == folder ? "" : folder }
+
+    /// Where the name links on GitHub (navigation note, section 9.3): the pull request's page, else the branch's page
+    /// in the repository, or the repository's page with no branch, else nowhere.
+    var gitHubURL: URL? {
+        if let url = pullRequest?.url { return url }
+        guard let repository, !repository.isEmpty else { return nil }
+        var address = "https://github.com/\(repository)"
+        if !branch.isEmpty {
+            let segments = branch.split(separator: "/", omittingEmptySubsequences: false).map {
+                $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(["/"])) ?? String($0)
+            }
+            address += "/tree/" + segments.joined(separator: "/")
+        }
+        return URL(string: address)
+    }
+}
+
+extension LiveSession.State {
+    /// A branch's state from its sessions: working when any works, else at a prompt when any is at one, else idle.
+    init(of sessions: [LiveSession]) {
+        if sessions.contains(where: { $0.state == .working }) {
+            self = .working
+        } else if sessions.contains(where: { $0.state == .prompt }) {
+            self = .prompt
+        } else {
+            self = .idle
+        }
+    }
 }
 
 /// One person on the Team page, with their branches newest first.
@@ -102,10 +135,10 @@ enum TeamList {
             }
             return TeamBranch(
                 id: "\(person)/\(first.folder)/\(first.branch)", name: first.live.baseName, folder: first.folder,
-                branch: first.branch, isWorking: sessions.contains { $0.live.state == .working },
+                branch: first.branch, state: LiveSession.State(of: sessions.map(\.live)),
                 latestStart: newestFirst.first?.startedAt.cowchatDate ?? .distantPast,
                 room: newestFirst.lazy.compactMap(\.room).first,
-                pullRequest: posted.max { $0.1 < $1.1 }?.0)
+                pullRequest: posted.max { $0.1 < $1.1 }?.0, repository: newestFirst.first?.repository)
         }
         .sorted { ($0.latestStart, $0.id) > ($1.latestStart, $1.id) }
     }
@@ -146,6 +179,33 @@ enum TeamList {
     /// A row opens a room when the person is in the room it works in, on their account.
     static func opensRoom(_ branch: TeamBranch, accountRoomIDs: Set<String>) -> Bool {
         branch.room.map { accountRoomIDs.contains($0.roomId) } ?? false
+    }
+
+    // copy:
+    /// The State column's word. "Waiting" names no harness, since a branch can hold sessions of both.
+    static func stateWord(_ state: LiveSession.State) -> String {
+        switch state {
+        case .working: return "Working"
+        case .prompt: return "Waiting"
+        case .idle: return "Idle"
+        }
+    }
+
+    // copy:
+    /// A row's accessible label, naming its columns: "fee-ledger, repo dashboard, pull request 1806, checks passed,
+    /// working".
+    static func accessibilityLabel(for branch: TeamBranch) -> String {
+        [branch.name, branch.repo.isEmpty ? nil : "repo \(branch.repo)",
+         branch.pullRequest.map { "pull request \($0.number)" }, branch.pullRequest?.checksLabel?.lowercased(),
+         stateWord(branch.state).lowercased()]
+            .compactMap { $0 }
+            .joined(separator: ", ")
+    }
+
+    // copy:
+    /// The name link's help: "Open #1806 on GitHub", or "Open fee-ledger on GitHub" with no pull request.
+    static func gitHubHelp(for branch: TeamBranch) -> String {
+        "Open \(branch.pullRequest.map { "#\($0.number)" } ?? branch.name) on GitHub"
     }
 
     // copy:

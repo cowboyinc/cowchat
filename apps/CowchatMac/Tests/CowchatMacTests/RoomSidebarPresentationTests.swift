@@ -197,7 +197,7 @@ final class RoomSidebarPresentationTests: XCTestCase {
                 recentActivityByAgent: ["claude": now.addingTimeInterval(-30)],
                 now: now
             ),
-            "1 agent active recently · 3 agents connected"
+            "1 agent active recently, 3 connected"
         )
     }
 
