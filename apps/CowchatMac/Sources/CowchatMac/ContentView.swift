@@ -33,6 +33,8 @@ struct ContentView: View {
     @State private var isSidebarVisible = true
     @State private var isSettingsPresented = false
     @State private var isWhatsNewPresented = false
+    /// The height under the toolbar, which a starting sheet keeps within.
+    @State private var contentHeight: CGFloat?
     @Environment(\.controlActiveState) private var controlActiveState
 
     init(onShowOnboarding: @escaping () -> Void = {}) {
@@ -77,6 +79,13 @@ struct ContentView: View {
             .padding(.leading, isSidebarVisible ? 0 : 8)
         }
         .background(SemanticColor.surface400)
+        .background {
+            GeometryReader { content in
+                Color.clear
+                    .onAppear { contentHeight = content.size.height }
+                    .onChange(of: content.size.height) { contentHeight = $0 }
+            }
+        }
         .environmentObject(workspace.liveSessions)
         // The unified toolbar otherwise paints its own system strip; tint it
         // with the same surface400 shell so the nav reads as one tan surface.
@@ -150,12 +159,16 @@ struct ContentView: View {
             workspace.show(.friends)
         }
         .sheet(item: $workspace.starting) { sheet in
-            switch sheet {
-            case let .newRoom(request): NewRoomSheet(workspace: workspace, request: request)
-            case .newSession: NewSessionSheet(workspace: workspace)
-            case .joinWithCode: JoinWithCodeSheet(workspace: workspace)
-            case let .addPerson(session): AddPersonSheet(workspace: workspace, session: session)
+            Group {
+                switch sheet {
+                case let .newRoom(request): NewRoomSheet(workspace: workspace, request: request)
+                case .newSession: NewSessionSheet(workspace: workspace)
+                case .joinWithCode: JoinWithCodeSheet(workspace: workspace)
+                case let .addPerson(session): AddPersonSheet(workspace: workspace, session: session)
+                }
             }
+            // 12 clear above and below the sheet.
+            .environment(\.sheetHeightLimit, contentHeight.map { $0 - 24 })
         }
         .sheet(isPresented: Binding(get: { workspace.roomPeople != nil },
                                     set: { if !$0 { workspace.roomPeople = nil } })) {

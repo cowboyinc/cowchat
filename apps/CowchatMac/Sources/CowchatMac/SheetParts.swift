@@ -4,11 +4,15 @@ import SwiftUI
 /// (add-new-company note, section 0), drawn from the Join sheet's: 480 wide on Surface/600 with 26 padding and its
 /// parts 20 apart, its height fitting its content. The title is Heading 4 on one line, truncated at the tail, with
 /// nothing under it. An error is one Caption line in Text/Error 8 above the buttons.
+///
+/// A sheet never grows past the window's height under the toolbar (`sheetHeightLimit`). When it would, its list of
+/// people gives way and scrolls, so the buttons stay in the window at its smallest size.
 struct SheetFrame<Content: View, Buttons: View>: View {
     let title: String
     var error: String?
     @ViewBuilder let content: () -> Content
     @ViewBuilder let buttons: () -> Buttons
+    @Environment(\.sheetHeightLimit) private var heightLimit
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -29,8 +33,21 @@ struct SheetFrame<Content: View, Buttons: View>: View {
         }
         .padding(26)
         .frame(width: 480, alignment: .leading)
+        .frame(maxHeight: heightLimit ?? .infinity, alignment: .top)
         .fixedSize(horizontal: false, vertical: true)
         .background(SemanticColor.surface600)
+    }
+}
+
+private struct SheetHeightLimitKey: EnvironmentKey {
+    static let defaultValue: CGFloat? = nil
+}
+
+extension EnvironmentValues {
+    /// How tall a starting sheet may be: the window's height under the toolbar, less a margin.
+    var sheetHeightLimit: CGFloat? {
+        get { self[SheetHeightLimitKey.self] }
+        set { self[SheetHeightLimitKey.self] = newValue }
     }
 }
 
@@ -274,9 +291,9 @@ struct PeoplePicker: View {
                     }
                     if people.isEmpty {
                         SheetEmptyRow(text: emptyLine)
-                    } else if isTyped, rows.count == picked.count {
+                    } else if isTyped, !people.contains(where: { FriendSearch.holds($0, query: query) }) {
                         // copy:
-                        SheetEmptyRow(text: "No one found")
+                        SheetEmptyRow(text: "No \(noun.many) found")
                     }
                     if !isTyped, rows.count > PeopleList.limit {
                         SessionsMoreRow(title: PeopleList.moreTitle(hidden: rows.count - PeopleList.limit,
@@ -288,7 +305,9 @@ struct PeoplePicker: View {
                 }
             }
             .scrollIndicators(.automatic)
-            .frame(height: PeopleList.height(count: people.count))
+            // As tall as the unfiltered list, or less when the window is too short for the sheet, down to one row.
+            .frame(minHeight: 44, idealHeight: PeopleList.height(count: people.count),
+                   maxHeight: PeopleList.height(count: people.count))
         }
         .onAppear { isFocused = true }
     }

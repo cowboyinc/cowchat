@@ -62,6 +62,8 @@ struct NewSessionSheet: View {
                     Text("New worktree").gallopText(.bodyM, color: SemanticColor.textPrimary)
                 }
                 .toggleStyle(.checkbox)
+                // copy:
+                .macAccessibleAction(label: "New worktree", value: newWorktree ? "on" : "off") { newWorktree.toggle() }
                 if newWorktree {
                     // copy:
                     CapsuleField(placeholder: "Branch", text: $branch, onSubmit: start)
