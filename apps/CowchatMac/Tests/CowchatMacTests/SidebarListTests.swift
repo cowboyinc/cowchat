@@ -181,7 +181,8 @@ final class SidebarListTests: XCTestCase {
         XCTAssertEqual(End.content(mark: nil, isUnread: false, time: "1h", connectionDown: false), .time("1h"))
         XCTAssertEqual(End.content(mark: .waiting("Codex"), isUnread: false, time: "1h", connectionDown: true),
                        .time("1h"), "A session's state is not known while the account is down")
-        XCTAssertEqual(End.content(mark: .working, isUnread: true, time: "1h", connectionDown: true), .unread)
+        XCTAssertEqual(End.content(mark: .working, isUnread: true, time: "1h", connectionDown: true), .time("1h"),
+                       "Not the dot either")
     }
 
     // MARK: Search

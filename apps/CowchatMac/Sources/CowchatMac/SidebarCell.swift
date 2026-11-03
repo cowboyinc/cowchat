@@ -10,7 +10,7 @@ enum SidebarMark: Equatable {
 /// What a cell's end slot holds (navigation round 2, section 3.2): one thing, in this order. A session waiting at a
 /// prompt shows the warning, a working one the turning mark, an unread room the dot, and any other room its time. A mark
 /// hides the dot until the session goes idle. While the account's connection is down a session's state is no longer
-/// known, so its room shows what it would with no mark.
+/// known, so the slot shows the room's time (sections 3.3 and 9).
 enum SidebarCellEnd: Equatable {
     case waiting(String)
     case working
@@ -18,7 +18,8 @@ enum SidebarCellEnd: Equatable {
     case time(String)
 
     static func content(mark: SidebarMark?, isUnread: Bool, time: String, connectionDown: Bool) -> SidebarCellEnd {
-        switch connectionDown ? nil : mark {
+        if connectionDown { return .time(time) }
+        switch mark {
         case let .waiting(app)?: return .waiting(app)
         case .working?: return .working
         case nil: return isUnread ? .unread : .time(time)
