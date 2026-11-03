@@ -65,8 +65,7 @@ final class WorkspaceStore: ObservableObject {
     }()
     /// Claude Code's plugin and Codex's hooks, as first run and Settings show them.
     let agentConnections = AgentConnections()
-    /// The account's teams and the one chosen in the sidebar's team row, which picks the team the Team page shows.
-    /// New room's Inside lists them.
+    /// The account's teams and the one chosen in the Team page's team field, which picks the team the Team page shows.
     lazy var teams: TeamChoice = {
         let teams = TeamChoice(defaults: defaults)
         teams.onChoiceChanged = { [weak self] in
@@ -137,6 +136,8 @@ final class WorkspaceStore: ObservableObject {
     }()
 
     private var watchingSocial: Set<AnyCancellable> = []
+    /// The account's teams loading, cancelled when another account signs in.
+    private var loadingTeams: Task<Void, Never>?
 
     @Published private(set) var pendingFriendInvitation: FriendInvitationRoute?
     private static let pendingFriendInvitationKey = "CowchatMac.pendingFriendInvitation"
@@ -161,6 +162,10 @@ final class WorkspaceStore: ObservableObject {
         liveSessions.clear()
         inbox.use(account: session?.account, scope: session.map(Self.accountScope))
         team.use(accountID: session?.account.id)
+        // The teams load as the account signs in. Waiting for the Team page would load the default team first and then
+        // the chosen one (navigation round 2, section 4.1).
+        loadingTeams?.cancel()
+        loadingTeams = Task { [teams] in await teams.load(for: session) }
         // Signed in, the app opens on the Inbox, which gathers what needs the person across rooms (Patrick, 2
         // November). The account store still selects a room underneath, which shows when its cell is pressed.
         page = session == nil ? nil : .inbox
@@ -406,13 +411,6 @@ final class WorkspaceStore: ObservableObject {
         guard let store = store(for: server) else { return }
         page = nil
         activeServer = server
-        // A room inside a closed company room opens its parent first, so its cell shows selected.
-        var parentID = room.parentID
-        var seen: Set<String> = [room.id]
-        while let id = parentID, seen.insert(id).inserted {
-            store.setCollapsed(false, roomID: id)
-            parentID = store.rooms.first { $0.id == id }?.parentID
-        }
         await store.select(room: room)
         // The room that was open may be an ended session's, which archives once something else opens.
         scheduleSessionRoomArchive()
@@ -444,13 +442,6 @@ final class WorkspaceStore: ObservableObject {
                             source: .room($0))
         }
         return invitations + rooms
-    }
-
-    /// The closed company rooms of the three connections, by their list IDs.
-    var sidebarCollapsed: Set<String> {
-        Set(Server.allCases.flatMap { server in
-            (store(for: server)?.collapsedParentRoomIDs ?? []).map { SidebarRoom.id($0, on: server) }
-        })
     }
 
     /// Opens a room the API key may join and the person is not in, from the sidebar search's To join group. Opening it
@@ -575,15 +566,10 @@ final class WorkspaceStore: ObservableObject {
 
     // MARK: Starting things
 
-    /// "New room…" in the New menu and the File menu, whose Inside starts on None (add-new-company note, section 3),
-    /// or a room's "New room inside…" or "Create nested room…", which starts inside that room on its connection.
-    func presentNewRoom(inside parent: Room? = nil, on server: Server? = nil) {
-        guard let parent, let server, let kind = NewRoomKind(server: server) else {
-            starting = .newRoom(NewRoomRequest())
-            return
-        }
-        starting = .newRoom(NewRoomRequest(kind: kind, parent: parent,
-                                           draft: SocialRoomDraft(parentID: kind == .account ? parent.id : nil)))
+    /// "New room…" in the New menu and the File menu. Rooms are made with no parent, since the app shows no folders
+    /// (navigation round 2, section 3.7).
+    func presentNewRoom() {
+        starting = .newRoom(NewRoomRequest())
     }
 
     /// "New session…" in the New menu and the File menu, while signed in.
@@ -614,15 +600,7 @@ final class WorkspaceStore: ObservableObject {
         await select(room: room, on: .global)
     }
 
-    /// The account's top-level company rooms New room can make a room inside: the account's teams.
-    var companyRooms: [SocialTeam] { teams.teams }
-
-    /// Whether an account room is a top-level company room, which offers "New room inside…".
-    func isTopLevelCompanyRoom(_ room: Room) -> Bool {
-        room.parentID == nil && social.rooms.contains { $0.roomId == room.id && $0.kind == "company" }
-    }
-
-    /// The people of a company room other than the viewer, which New room lists and ticks for a room made inside it.
+    /// The people of an account room other than the viewer.
     func people(of roomID: String) async -> [SocialAccount] {
         guard let api = try? social.readingAPI(),
               let participants: SocialParticipants = try? await api.social(["rooms", roomID, "participants"])
@@ -631,11 +609,10 @@ final class WorkspaceStore: ObservableObject {
     }
 
     /// New room's Create (add-new-company note, section 3b). An account room is made through `SocialStore.createRoom`
-    /// with the draft, inside its company room when it has one, with the people picked invited, and its company room
-    /// opens if it was closed. A room on this Mac or the API key is made through `ChatStore.createRoom`, inside
-    /// `parent` when the sheet came from a room's "Create nested room…". A taken name opens the room of that name when
-    /// the person can see it. The new room opens on its connection.
-    func createRoom(_ kind: NewRoomKind, name: String, parent: Room?, draft: SocialRoomDraft) async -> NewRoomOutcome {
+    /// with the draft, with no parent and with the people picked invited. A room on this Mac or the API key is made
+    /// through `ChatStore.createRoom`. A taken name opens the room of that name when the person can see it. The new room
+    /// opens on its connection.
+    func createRoom(_ kind: NewRoomKind, name: String, draft: SocialRoomDraft) async -> NewRoomOutcome {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard kind != .account else {
             var draft = draft
@@ -645,14 +622,11 @@ final class WorkspaceStore: ObservableObject {
                 return .failed(social.errorMessage ?? "The room could not be made.")
             }
             _ = await openCreatedSocialRoom(roomID: roomID)
-            if let parentID = draft.parentID, let store = accountGlobal, store.isCollapsed(parentID) {
-                store.setCollapsed(false, roomID: parentID)
-            }
             return .opened
         }
         // copy:
         guard let store = store(for: kind.server) else { return .failed("That connection isn't set up.") }
-        switch await store.createRoom(name: name, description: "", isPublic: false, parentID: parent?.id) {
+        switch await store.createRoom(name: name, description: "", isPublic: false) {
         case .created:
             page = nil
             activate(server: kind.server)

@@ -1,38 +1,54 @@
 import SwiftUI
 
-/// What a live session's room shows in its cell's state slot.
+/// A live session's state, which its room's cell shows in its end slot.
 enum SidebarMark: Equatable {
     case working
     /// The session is stopped at a prompt in the named app.
     case waiting(String)
 }
 
-/// One room's cell in the sidebar's list (navigation note, section 3.4), drawn as the Cowboy app's chat rail draws a
+/// What a cell's end slot holds (navigation round 2, section 3.2): one thing, in this order. A session waiting at a
+/// prompt shows the warning, a working one the turning mark, an unread room the dot, and any other room its time. A mark
+/// hides the dot until the session goes idle. While the account's connection is down a session's state is no longer
+/// known, so its room shows what it would with no mark.
+enum SidebarCellEnd: Equatable {
+    case waiting(String)
+    case working
+    case unread
+    case time(String)
+
+    static func content(mark: SidebarMark?, isUnread: Bool, time: String, connectionDown: Bool) -> SidebarCellEnd {
+        switch connectionDown ? nil : mark {
+        case let .waiting(app)?: return .waiting(app)
+        case .working?: return .working
+        case nil: return isUnread ? .unread : .time(time)
+        }
+    }
+}
+
+/// One room's cell in the sidebar's list (navigation round 2, section 3.2), drawn as the Cowboy app's chat rail draws a
 /// chat (`proto-site/src/components/chrome/sidebar.css:332-363`): one line, 36 tall, a capsule with the sidebar's row
 /// fill, and no avatar, preview, lock or Slack badge.
 ///
-/// Within the 264 row: 10, the 18 state slot on the nav icons' column, 6, the 16 place slot, 8, the name in Body S, 8,
-/// the 40 time slot in Caption, which grows for a wider date, the 12 dot slot and 10. A room inside a company room sits 24 further in after the state
-/// slot, so its place mark stands under its parent's name. A company room with rooms inside it draws its disclosure
-/// chevron in the state slot, as a button of its own over the cell with a 24 by 36 press area.
+/// Within the 264 row: 10, the 18 place slot on the Inbox and Team icons' column, 10, the name in Body S where their
+/// titles start, 8, and the end slot, at least 40 and ending 10 from the row's end. The end slot holds one thing
+/// (`SidebarCellEnd`): a mark or the dot centred in a 16 square at its end, so on row x 246, or the time in Caption
+/// ending at 254. A date wider than 40 grows the slot leftwards and the name gives way.
 ///
 /// This Mac's mark is SF Symbol `laptopcomputer`, since the Mac's Gallop set has no device glyph (`Bundled/Icons/svg`).
 ///
-/// A live session's cell under the pointer hides its time and dot and shows the Add person button at the end of the 52
-/// slot (navigation note, section 7.4), as Cowboy's rail swaps its end slot for the row's ⋯. The button sits over the
-/// cell, outside its button, so pressing it does not also open the room.
+/// A live session's cell under the pointer hides its end slot and shows the Add person button there (navigation note,
+/// section 7.4), as Cowboy's rail swaps its end slot for the row's ⋯. The button sits over the cell, outside its
+/// button, so pressing it does not also open the room.
 struct SidebarCell<Menu: View>: View {
     let name: String
     let placeIcon: SidebarPlaceIcon
     var connection = SidebarConnection.up
     var mark: SidebarMark?
-    var depth = 0
-    var disclosure: SidebarRow.Disclosure?
     let time: String
-    var showsDot = false
+    var isUnread = false
     let isSelected: Bool
     let open: () -> Void
-    var toggle: (() -> Void)?
     /// Add person, on the cell of one of the person's live sessions' rooms.
     var addPerson: (() -> Void)?
     @ViewBuilder var menu: () -> Menu
@@ -49,86 +65,63 @@ struct SidebarCell<Menu: View>: View {
             .contextMenu { menu() }
             .macAccessibleAction(label: accessibilityLabel, value: accessibilityValue, action: open)
 
-            if let disclosure, let toggle {
-                Button(action: toggle) {
-                    GallopIconView(icon: disclosure == .open ? .chevronDownExtraSmall : .chevronRightExtraSmall,
-                                   fallbackSystemName: disclosure == .open ? "chevron.down" : "chevron.right",
-                                   size: 10)
-                        .foregroundStyle(SemanticColor.iconTertiary)
-                        .frame(width: 16, height: 16)
-                        .frame(width: 24, height: 36)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                // The state slot's centre is 19 in, so the 24 press area starts 7 in.
-                .padding(.leading, 7)
-                .help(disclosureLabel(disclosure))
-                .macAccessibleAction(label: disclosureLabel(disclosure), action: toggle)
-            }
-
             if let addPerson {
+                // Its 28 press area ends 4 from the row's end, so its glyph is centred on the marks' 246.
                 AddPersonButton(name: name, isShown: isHovering, action: addPerson)
                     .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.trailing, 10)
+                    .padding(.trailing, 4)
             }
         }
         .onHover { isHovering = $0 }
     }
 
-    /// Whether the end slot shows Add person in place of the time and the dot.
-    private var showsAddPerson: Bool { addPerson != nil && isHovering }
+    private var end: SidebarCellEnd {
+        SidebarCellEnd.content(mark: mark, isUnread: isUnread, time: time, connectionDown: connection != .up)
+    }
 
     private var content: some View {
         HStack(spacing: 0) {
-            stateSlot
-                .frame(width: 18, height: 36)
-            Color.clear.frame(width: 6 + CGFloat(depth) * 24, height: 1)
             placeSlot
-                .frame(width: 16, height: 16)
+                .frame(width: 18, height: 36)
                 .help(placeIcon.help(connection: connection))
             Text(name)
                 .gallopText(.bodyS, color: SemanticColor.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 8)
+                .padding(.leading, 10)
                 .padding(.trailing, 8)
-            // A date such as "Sep 30" is wider than the 40 slot in Caption, so the slot grows to its time and the
-            // name gives way.
-            Text(time)
-                .gallopText(.caption, color: SemanticColor.textTertiary)
-                .lineLimit(1)
-                .fixedSize()
+            endSlot
                 .frame(minWidth: 40, alignment: .trailing)
-                .opacity(showsAddPerson ? 0 : 1)
-            ZStack {
-                if showsDot {
-                    Circle()
-                        .fill(Palette.nugget500)
-                        .frame(width: 7, height: 7)
-                }
-            }
-            .frame(width: 12)
-            .opacity(showsAddPerson ? 0 : 1)
+                .opacity(addPerson != nil && isHovering ? 0 : 1)
         }
         .padding(.horizontal, 10)
         .frame(height: 36)
     }
 
     @ViewBuilder
-    private var stateSlot: some View {
-        switch mark {
-        case .working?:
-            SessionWorkingMark()
-                // copy:
-                .help("Working")
-        case let .waiting(app)?:
+    private var endSlot: some View {
+        switch end {
+        case let .waiting(app):
             GallopIconView(icon: .warning, fallbackSystemName: "exclamationmark.triangle.fill", size: 16)
                 .foregroundStyle(SemanticColor.notificationErrorTextDefault)
                 // copy:
                 .help("Waiting in \(app)")
-        case nil:
-            Color.clear
+        case .working:
+            SessionWorkingMark()
+                .frame(width: 16, height: 16)
+                // copy:
+                .help("Working")
+        case .unread:
+            Circle()
+                .fill(Palette.nugget500)
+                .frame(width: 7, height: 7)
+                .frame(width: 16, height: 16)
+        case let .time(time):
+            Text(time)
+                .gallopText(.caption, color: SemanticColor.textTertiary)
+                .lineLimit(1)
+                .fixedSize()
         }
     }
 
@@ -161,11 +154,6 @@ struct SidebarCell<Menu: View>: View {
     }
 
     // copy:
-    private func disclosureLabel(_ disclosure: SidebarRow.Disclosure) -> String {
-        disclosure == .open ? "Hide rooms in \(name)" : "Show rooms in \(name)"
-    }
-
-    // copy:
     /// The name, the place, the state and the time, as "parity-sign-in, on this Mac, waiting in Codex, 1h".
     private var accessibilityLabel: String {
         let place: String
@@ -175,21 +163,17 @@ struct SidebarCell<Menu: View>: View {
         case .thisMacFailed, .onlineDown, .onlineFailed: place = placeIcon.help(connection: connection).lowercased()
         }
         let state: String?
-        switch mark {
-        case .working?: state = "working"
-        case let .waiting(app)?: state = "waiting in \(app)"
-        case nil: state = nil
+        switch end {
+        case .working: state = "working"
+        case let .waiting(app): state = "waiting in \(app)"
+        case .unread, .time: state = nil
         }
         return [name, place, state, time.isEmpty ? nil : time].compactMap { $0 }.joined(separator: ", ")
     }
 
     // copy:
     private var accessibilityValue: String? {
-        let parts = [
-            showsDot ? "Unread" : nil,
-            disclosure.map { $0 == .open ? "expanded" : "collapsed" },
-            isSelected ? "selected" : nil,
-        ].compactMap { $0 }
+        let parts = [isUnread ? "Unread" : nil, isSelected ? "selected" : nil].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 }

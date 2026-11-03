@@ -9,6 +9,9 @@ enum PageLayout {
     /// Where an empty page's line sits: 20 in from the card's edge and 40 under the header.
     static let emptyLeading: CGFloat = 20
     static let emptyTop: CGFloat = 40
+    /// The gap between the header and a page's list, as production puts 32 under a page head and the house rule spaces
+    /// sections (navigation round 2, section 4.2).
+    static let listTop: CGFloat = 32
 }
 
 /// A page's header, drawn as a room's is: 58 tall with 10 above, the title in Heading 4 at 18 from the card's edge, an
@@ -127,7 +130,10 @@ struct PageRowSeam: View {
 /// typed the 13 dismiss button in Icon/Tertiary, which reads as enabled in dark mode where Icon/Subtle did not. Escape clears it and gives up the focus.
 /// A field that takes something other than a search, such as Friends' handle, puts its `leading` mark in Text/Tertiary
 /// where the icon goes, and Return calls `onSubmit`.
-struct SearchCapsule: View {
+///
+/// A trailing accessory, such as the sidebar's 28 filter button, sits 8 after the text or the dismiss button, with 4 at
+/// the end in place of 11, so a 28 circle's centre falls on the end cap's own (navigation round 2, section 3.4).
+struct SearchCapsule<Accessory: View>: View {
     let placeholder: String
     @Binding var text: String
     var isFocused: FocusState<Bool>.Binding
@@ -136,6 +142,22 @@ struct SearchCapsule: View {
     var width: CGFloat?
     var leading: String?
     var onSubmit: (() -> Void)?
+    @ViewBuilder var accessory: () -> Accessory
+
+    init(placeholder: String, text: Binding<String>, isFocused: FocusState<Bool>.Binding, clearLabel: String,
+         width: CGFloat? = nil, leading: String? = nil, onSubmit: (() -> Void)? = nil,
+         @ViewBuilder accessory: @escaping () -> Accessory) {
+        self.placeholder = placeholder
+        _text = text
+        self.isFocused = isFocused
+        self.clearLabel = clearLabel
+        self.width = width
+        self.leading = leading
+        self.onSubmit = onSubmit
+        self.accessory = accessory
+    }
+
+    private var hasAccessory: Bool { Accessory.self != EmptyView.self }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -166,14 +188,24 @@ struct SearchCapsule: View {
                 .buttonStyle(.plain)
                 .macAccessibleAction(label: clearLabel) { text = "" }
             }
+            accessory()
         }
-        .padding(.horizontal, 11)
+        .padding(.leading, 11)
+        .padding(.trailing, hasAccessory ? 4 : 11)
         .frame(width: width)
         .frame(height: 36)
         .background(SemanticColor.textfieldDefault, in: Capsule())
         .overlay {
             Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
         }
+    }
+}
+
+extension SearchCapsule where Accessory == EmptyView {
+    init(placeholder: String, text: Binding<String>, isFocused: FocusState<Bool>.Binding, clearLabel: String,
+         width: CGFloat? = nil, leading: String? = nil, onSubmit: (() -> Void)? = nil) {
+        self.init(placeholder: placeholder, text: text, isFocused: isFocused, clearLabel: clearLabel, width: width,
+                  leading: leading, onSubmit: onSubmit) { EmptyView() }
     }
 }
 

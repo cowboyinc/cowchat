@@ -13,7 +13,6 @@ struct RoomLocalPreferences {
     static let roomReadStateKey = "CowchatMac.roomReadState"
     static let showsAllMessagesRoomIDsKey = "CowchatMac.showsAllMessagesRoomIDs"
     static let sessionRoomArchiveKey = "CowchatMac.sessionRoomArchive"
-    static let collapsedParentRoomIDsKey = "CowchatMac.collapsedParentRoomIDs"
 
     private let defaults: UserDefaults
     private let scope: String?
@@ -34,15 +33,6 @@ struct RoomLocalPreferences {
     /// Rooms whose switch shows every message.
     var showsAllMessagesRoomIDs: Set<String> {
         loadIDs(forKey: Self.showsAllMessagesRoomIDsKey)
-    }
-
-    /// Company rooms whose rooms the sidebar hides. Parents start open.
-    var collapsedParentRoomIDs: Set<String> {
-        loadIDs(forKey: Self.collapsedParentRoomIDsKey)
-    }
-
-    func saveCollapsedParentRoomIDs(_ roomIDs: Set<String>) {
-        save(roomIDs, forKey: Self.collapsedParentRoomIDsKey)
     }
 
     /// What the archive rule for ended sessions did with each session room, so it handles each ended session once.

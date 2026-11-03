@@ -200,8 +200,8 @@ enum RoomSidebarPresentation {
 
 // MARK: The sidebar's list
 
-/// The sidebar's filter, which its chip shows and whose menu chooses it (navigation note, section 3.3). It is not kept
-/// across launches, so the app always starts on All.
+/// The sidebar's filter, which the search field's filter button chooses (navigation round 2, section 3.4). It is not
+/// kept across launches, so the app always starts on All.
 enum SidebarFilter: String, CaseIterable, Identifiable {
     case all
     case sessions
@@ -220,10 +220,22 @@ enum SidebarFilter: String, CaseIterable, Identifiable {
         }
     }
 
-    /// The values the chip's menu lists. Signed out there are no sessions, so Sessions would be empty and Rooms would
+    /// The values the filter's menu lists. Signed out there are no sessions, so Sessions would be empty and Rooms would
     /// equal All.
     static func offered(signedIn: Bool) -> [SidebarFilter] {
         signedIn ? allCases : [.all, .archived]
+    }
+
+    // copy:
+    /// The search field's placeholder, which says what the list holds while a filter is set. Nothing else on screen
+    /// names the filter's value.
+    var searchPlaceholder: String {
+        switch self {
+        case .all: return "Search"
+        case .sessions: return "Search sessions"
+        case .rooms: return "Search rooms"
+        case .archived: return "Search archived"
+        }
     }
 
     // copy:
@@ -331,9 +343,6 @@ struct SidebarRoom: Identifiable, Equatable {
 
     var place: SidebarPlace { server == .local || session != nil ? .thisMac : .online }
 
-    /// The list ID of the room it sits inside, on the same server.
-    var parentListID: String? { room.parentID.map { Self.id($0, on: server) } }
-
     /// The time the cell shows and the list orders by: the newest shown message, and for a live session's room also
     /// the session's start and the moment the app saw it stop at a prompt, so a session that starts waiting rises to
     /// the top.
@@ -365,24 +374,11 @@ struct SidebarJoinable: Identifiable, Equatable {
     }
 }
 
-/// A company room and the rooms inside it, which move through the list as one (`add-new-company.md`, section 3).
-struct SidebarBlock: Equatable {
-    let parent: SidebarRoom
-    var children: [SidebarRoom]
-}
-
 /// A row of the sidebar's list.
 enum SidebarRow: Identifiable, Equatable {
-    enum Disclosure: Equatable {
-        case open
-        case closed
-    }
-
-    /// A room's cell, at depth 1 inside a company room. A company room with rooms inside it has its disclosure, and
-    /// `showsDot` is its unread, or a hidden room's while it is closed.
-    case cell(SidebarRoom, depth: Int, disclosure: Disclosure?, showsDot: Bool)
-    /// The row after a company room's five newest rooms.
-    case more(parentID: String, hidden: Int, showsAll: Bool)
+    /// A room's cell. A room with a parent on the server is an ordinary cell, since the list shows no folders
+    /// (navigation round 2, section 3.7).
+    case cell(SidebarRoom)
     /// A search group's label.
     case label(String)
     /// A room the person can join.
@@ -390,8 +386,7 @@ enum SidebarRow: Identifiable, Equatable {
 
     var id: String {
         switch self {
-        case let .cell(room, _, _, _): return room.id
-        case let .more(parentID, _, _): return "more/\(parentID)"
+        case let .cell(room): return room.id
         case let .label(title): return "label/\(title)"
         case let .joinable(item): return item.id
         }
@@ -399,9 +394,6 @@ enum SidebarRow: Identifiable, Equatable {
 }
 
 extension RoomSidebarPresentation {
-    /// How many rooms inside a company room show before its more row, as many as `LiveSessions.sidebarLimit`.
-    static let childLimit = 5
-
     /// Rooms newest first by `activity`, then by name.
     static func ordered(_ rooms: [SidebarRoom], activity: (SidebarRoom) -> Date = { $0.activity }) -> [SidebarRoom] {
         rooms.sorted { lhs, rhs in
@@ -411,75 +403,13 @@ extension RoomSidebarPresentation {
         }
     }
 
-    /// Each company room with the rooms inside it on the same server, as blocks in the list's order. A block's place is
-    /// its newest room's, so an active child lifts its parent, and inside a block the children follow their own
-    /// recency. A room whose parent has no cell in the list stands at the top level. There is one level, so a room
-    /// inside a child sits under the top parent.
-    static func blocks(_ rooms: [SidebarRoom],
-                       activity: (SidebarRoom) -> Date = { $0.activity }) -> [SidebarBlock] {
-        let byID = Dictionary(rooms.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        func top(of room: SidebarRoom) -> String {
-            var current = room
-            var seen: Set<String> = [room.id]
-            while let parentID = current.parentListID, let parent = byID[parentID], seen.insert(parentID).inserted {
-                current = parent
-            }
-            return current.id
-        }
-        var tops: [SidebarRoom] = []
-        var children: [String: [SidebarRoom]] = [:]
-        for room in rooms {
-            let topID = top(of: room)
-            if topID == room.id { tops.append(room) } else { children[topID, default: []].append(room) }
-        }
-        func latest(_ block: SidebarBlock) -> Date {
-            ([block.parent] + block.children).map(activity).max() ?? .distantPast
-        }
-        return tops
-            .map { SidebarBlock(parent: $0, children: ordered(children[$0.id] ?? [], activity: activity)) }
-            .sorted { lhs, rhs in
-                let l = latest(lhs), r = latest(rhs)
-                if l != r { return l > r }
-                return lhs.parent.room.name.localizedCaseInsensitiveCompare(rhs.parent.room.name) == .orderedAscending
-            }
-    }
-
-    /// The blocks as rows. A closed parent hides its rooms and shows the dot when one of them is unread. A parent with
-    /// more than five rooms shows the five newest and then its more row, unless `showsAllChildren` holds it. A search
-    /// ignores closed parents and shows every match, so its parents draw no disclosure and no more row.
-    static func rows(_ blocks: [SidebarBlock], collapsed: Set<String>, showsAllChildren: Set<String>,
-                     isSearching: Bool = false) -> [SidebarRow] {
-        var rows: [SidebarRow] = []
-        for block in blocks {
-            let hasChildren = !block.children.isEmpty
-            let isOpen = isSearching || !collapsed.contains(block.parent.id)
-            let disclosure: SidebarRow.Disclosure? = hasChildren && !isSearching ? (isOpen ? .open : .closed) : nil
-            let hiddenUnread = !isOpen && block.children.contains(where: \.isUnread)
-            rows.append(.cell(block.parent, depth: 0, disclosure: disclosure,
-                              showsDot: block.parent.isUnread || hiddenUnread))
-            guard hasChildren, isOpen else { continue }
-            let limited = !isSearching && block.children.count > childLimit
-            let showsAll = showsAllChildren.contains(block.parent.id)
-            let shown = limited && !showsAll ? Array(block.children.prefix(childLimit)) : block.children
-            rows += shown.map { .cell($0, depth: 1, disclosure: nil, showsDot: $0.isUnread) }
-            if limited {
-                rows.append(.more(parentID: block.parent.id, hidden: block.children.count - childLimit,
-                                  showsAll: showsAll))
-            }
-        }
-        return rows
-    }
-
-    /// The list under the line with no search typed: the filter's rooms in blocks, or under Archived the archived rooms
-    /// alone, flat, with no parents grouped.
-    static func rows(for filter: SidebarFilter, rooms: [SidebarRoom], collapsed: Set<String>,
-                     showsAllChildren: Set<String>,
+    /// The list under the line with no search typed: the filter's rooms, or under Archived the archived rooms, each in
+    /// its own place by its own activity (navigation round 2, section 3.6).
+    static func rows(for filter: SidebarFilter, rooms: [SidebarRoom],
                      activity: (SidebarRoom) -> Date = { $0.activity }) -> [SidebarRow] {
-        if filter == .archived {
-            return ordered(rooms.filter(\.isArchived), activity: activity).map(flatCell)
-        }
-        let listed = rooms.filter { !$0.isArchived && filter.holds($0) }
-        return rows(blocks(listed, activity: activity), collapsed: collapsed, showsAllChildren: showsAllChildren)
+        let listed = filter == .archived ? rooms.filter(\.isArchived)
+            : rooms.filter { !$0.isArchived && filter.holds($0) }
+        return ordered(listed, activity: activity).map(SidebarRow.cell)
     }
 
     /// Whether a room matches the search: its name or description, a live session's folder or branch, or a message.
@@ -494,25 +424,16 @@ extension RoomSidebarPresentation {
             || room.matchesMessages
     }
 
-    /// The search's groups under the line (navigation note, section 3.7). First the rooms the person is in that match,
-    /// in the list's order with no label, each matching child under its parent; then "To join"; then "Archived". The
+    /// The search's groups under the line (navigation note, section 3.7, flat as round 2's section 3.6 makes it). First
+    /// the rooms the person is in that match, in the list's order with no label; then "To join"; then "Archived". The
     /// filter narrows each group: Sessions shows only the first group's live sessions' rooms, Rooms shows all three
     /// without them, and Archived shows only the archived rooms, without their label. An empty group is not drawn.
     static func searchRows(query: String, filter: SidebarFilter, rooms: [SidebarRoom], joinable: [SidebarJoinable],
                            activity: (SidebarRoom) -> Date = { $0.activity }) -> [SidebarRow] {
         var rows: [SidebarRow] = []
         if filter != .archived {
-            let listed = rooms.filter { !$0.isArchived && filter.holds($0) }
-            let byID = Dictionary(listed.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-            let matching = listed.filter { matches($0, query: query) }
-            // A matching child shows under its parent, which shows with it even when it does not match.
-            var shown = Set(matching.map(\.id))
-            for room in matching {
-                var parentID = room.parentListID
-                while let id = parentID, let parent = byID[id], shown.insert(id).inserted { parentID = parent.parentListID }
-            }
-            rows += Self.rows(blocks(listed.filter { shown.contains($0.id) }, activity: activity), collapsed: [],
-                              showsAllChildren: [], isSearching: true)
+            let matching = rooms.filter { !$0.isArchived && filter.holds($0) && matches($0, query: query) }
+            rows += ordered(matching, activity: activity).map(SidebarRow.cell)
         }
         if filter == .all || filter == .rooms {
             let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -534,7 +455,7 @@ extension RoomSidebarPresentation {
             if !archived.isEmpty {
                 // copy:
                 if filter != .archived { rows.append(.label("Archived")) }
-                rows += ordered(archived, activity: activity).map(flatCell)
+                rows += ordered(archived, activity: activity).map(SidebarRow.cell)
             }
         }
         return rows
@@ -546,10 +467,6 @@ extension RoomSidebarPresentation {
     static func emptyLine(filter: SidebarFilter, isSearching: Bool, isSearchingMessages: Bool) -> String? {
         if isSearching { return isSearchingMessages ? "Searching…" : "Nothing matches." }
         return filter.emptyLine
-    }
-
-    private static func flatCell(_ room: SidebarRoom) -> SidebarRow {
-        .cell(room, depth: 0, disclosure: nil, showsDot: room.isUnread)
     }
 }
 

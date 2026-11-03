@@ -58,8 +58,6 @@ final class ChatStore: ObservableObject {
     @Published private(set) var isConnectionDown = false
     var connectionDownDelay: Duration = .seconds(3)
     private var connectionDownTask: Task<Void, Never>?
-    /// Company rooms whose rooms the sidebar hides, kept on this Mac.
-    @Published private(set) var collapsedParentRoomIDs: Set<String> = []
     /// Rooms this connection's key may join and is not in, which the sidebar's search lists under To join. A server
     /// without the list call gives none.
     @Published private(set) var joinableRooms: [Room] = []
@@ -258,7 +256,6 @@ final class ChatStore: ObservableObject {
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
         showsAllMessagesRoomIDs = localPreferences.showsAllMessagesRoomIDs
-        collapsedParentRoomIDs = localPreferences.collapsedParentRoomIDs
         // One-time cleanup: the setup-screen takeover was removed in the
         // onboarding redesign (spec 2026-08-07); stale persisted IDs would
         // otherwise sit orphaned forever.
@@ -900,7 +897,6 @@ final class ChatStore: ObservableObject {
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
         showsAllMessagesRoomIDs = localPreferences.showsAllMessagesRoomIDs
-        collapsedParentRoomIDs = localPreferences.collapsedParentRoomIDs
         connectionStatus = .disconnected
         surfacedSpawnFailureDescription = nil
     }
@@ -1278,17 +1274,6 @@ final class ChatStore: ObservableObject {
     }
 
     // MARK: The sidebar
-
-    func isCollapsed(_ roomID: String) -> Bool {
-        collapsedParentRoomIDs.contains(roomID)
-    }
-
-    /// Hides or shows the rooms inside a company room in the sidebar.
-    func setCollapsed(_ collapsed: Bool, roomID: String) {
-        guard collapsed != isCollapsed(roomID) else { return }
-        if collapsed { collapsedParentRoomIDs.insert(roomID) } else { collapsedParentRoomIDs.remove(roomID) }
-        localPreferences.saveCollapsedParentRoomIDs(collapsedParentRoomIDs)
-    }
 
     /// Lists the rooms this connection's key may join. Any failure, such as a server without the call, lists none.
     func refreshJoinableRooms() async {

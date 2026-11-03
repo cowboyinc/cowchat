@@ -271,15 +271,15 @@ private struct SidebarView: View {
     // same loop signature as the 2026-08-06 freeze).
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Pinned, and never scrolled: the team row, the search field, the filter chip, then the Inbox, Team and
-            // the line under them, 10 apart and 8 in from both sides, so they share one left edge with the cells
-            // (navigation note, section 3.1). Signed out only the search field and the chip are left.
-            VStack(alignment: .leading, spacing: 10) {
-                SidebarTeamRow(teams: workspace.teams)
-                // copy:
-                SearchCapsule(placeholder: "Search", text: $workspace.searchText, isFocused: $isSearchFocused,
-                              clearLabel: "Clear search")
-                SidebarFilterChip()
+            // Pinned, and never scrolled: the search field with its filter, 8 under the toolbar so its top is level
+            // with the main card's, then 12 under it the Inbox, Team and the line under them, 8 in from both sides, so
+            // they share one left edge with the cells (navigation round 2, section 3.1). Signed out only the search
+            // field is left.
+            VStack(alignment: .leading, spacing: 0) {
+                SearchCapsule(placeholder: workspace.sidebarFilter.searchPlaceholder, text: $workspace.searchText,
+                              isFocused: $isSearchFocused, clearLabel: "Clear search") {
+                    SidebarFilterButton()
+                }
                 AccountNavRows(inbox: workspace.inbox)
             }
             .padding(.horizontal, 8)
@@ -296,10 +296,7 @@ private struct SidebarView: View {
             )
             .onPreferenceChange(SidebarScrollerWidthKey.self) { listsScrollerWidth = $0 }
         }
-        .padding(.top, 14)
-        .task(id: workspace.social.savedSession?.scopeId) {
-            await workspace.teams.load(for: workspace.social.savedSession)
-        }
+        .padding(.top, 8)
         .onAppear {
             // The pinned search field is the window's first focusable view, so
             // AppKit hands it first-responder at launch and stray keystrokes
@@ -317,15 +314,48 @@ private struct SidebarView: View {
     }
 }
 
-/// The sidebar's filter as a Gallop Chip that opens a menu (navigation note, section 3.3). Signed out it offers All and
-/// Archived only.
-private struct SidebarFilterChip: View {
+/// The sidebar's filter as Gallop's IconButton at size XS inside the search field: a 28 circle with the 16
+/// Settings.Slider glyph that opens the filter's menu (navigation round 2, section 3.4). At All it is the ghost button;
+/// at any other value it takes the Primary button's fill, the on recipe of the Gallop Chip it replaces. Signed out the
+/// menu offers All and Archived only. A SwiftUI menu doesn't tell its label when it is pressed, so the button draws
+/// hover and not press, and pressing it leaves the search's text unfocused.
+private struct SidebarFilterButton: View {
     @EnvironmentObject private var workspace: WorkspaceStore
+    @State private var isHovering = false
 
     var body: some View {
+        let filter = workspace.sidebarFilter
+        Menu {
+            ForEach(SidebarFilter.offered(signedIn: workspace.accountGlobal != nil)) { value in
+                Toggle(value.title, isOn: Binding(get: { value == workspace.sidebarFilter },
+                                                  set: { if $0 { workspace.sidebarFilter = value } }))
+            }
+        } label: {
+            GallopIconView(icon: .settingsSlider, fallbackSystemName: "slider.horizontal.3", size: 16)
+                .foregroundStyle(glyph(isOn: filter != .all))
+                .frame(width: 28, height: 28)
+                .background(fill(isOn: filter != .all), in: Circle())
+                .contentShape(Circle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { isHovering = $0 }
         // copy:
-        GallopChipMenu(values: SidebarFilter.offered(signedIn: workspace.accountGlobal != nil),
-                       selection: $workspace.sidebarFilter, defaultValue: .all, title: \.title, help: "Show")
+        .help("Filter")
+        // copy:
+        .accessibilityLabel("Filter, \(filter.title)")
+    }
+
+    private func fill(isOn: Bool) -> Color {
+        if isOn { return isHovering ? SemanticColor.buttonPrimaryHover : SemanticColor.buttonPrimaryDefault }
+        return isHovering ? SemanticColor.buttonGhostHover : Color.clear
+    }
+
+    private func glyph(isOn: Bool) -> Color {
+        if isOn { return SemanticColor.buttonPrimaryIconDefault }
+        return isHovering ? SemanticColor.buttonGhostIconHover : SemanticColor.buttonGhostIconDefault
     }
 }
 
@@ -385,7 +415,8 @@ private struct SidebarNavRow: View {
     }
 }
 
-/// The Inbox and Team, 2 apart, and the line under them with 8 above it, once the person is signed in. The Inbox's
+/// The Inbox and Team, 12 under the search field and 2 apart, and the line under them with 8 above it, once the person
+/// is signed in. The Inbox's
 /// count is every unread item, open invitations included, and it shows nothing at zero. The line is 1 point of
 /// Border/Default at the rows' padding. The note's Surface/Glass/Border/Shadow is the dark sidebar's own colour, so the
 /// line could not be seen in dark mode.
@@ -414,6 +445,7 @@ private struct AccountNavRows: View {
                     .padding(.top, 8)
                     .accessibilityHidden(true)
             }
+            .padding(.top, 12)
         }
     }
 }
@@ -547,8 +579,6 @@ private struct SidebarList: View {
     /// Each room's time as the pointer came over the list, which orders the list until the pointer leaves. A room
     /// that appears meanwhile goes to the end.
     @State private var frozenActivity: [String: Date]?
-    /// The company rooms whose more row is open, kept while the app runs.
-    @State private var showsAllChildren: Set<String> = []
     /// The list's width and its content's, whose difference is what a legacy scroller takes.
     @State private var listsWidth: CGFloat = 0
     @State private var contentWidth: CGFloat = 0
@@ -569,8 +599,8 @@ private struct SidebarList: View {
                     }
                 }
                 .padding(.horizontal, 8)
-                // The cells start 8 under the line, or 10 under the chip when there is no line.
-                .padding(.top, hasAccountGlobal ? 8 : 10)
+                // The cells start 8 under the line, or 12 under the search field when there is no line.
+                .padding(.top, hasAccountGlobal ? 8 : 12)
                 .padding(.bottom, 12)
                 .background {
                     GeometryReader { content in
@@ -615,9 +645,7 @@ private struct SidebarList: View {
                                                       rooms: rooms, joinable: workspace.sidebarJoinable,
                                                       activity: activity)
         }
-        return RoomSidebarPresentation.rows(for: workspace.sidebarFilter, rooms: rooms,
-                                            collapsed: workspace.sidebarCollapsed,
-                                            showsAllChildren: showsAllChildren, activity: activity)
+        return RoomSidebarPresentation.rows(for: workspace.sidebarFilter, rooms: rooms, activity: activity)
     }
 
     private var emptyLine: String? {
@@ -659,14 +687,8 @@ private struct SidebarList: View {
     @ViewBuilder
     private func row(_ row: SidebarRow, now: Date) -> some View {
         switch row {
-        case let .cell(room, depth, disclosure, showsDot):
-            cell(room, depth: depth, disclosure: disclosure, showsDot: showsDot, now: now)
-        case let .more(parentID, hidden, showsAll):
-            // The label sits at the names of the rooms inside the parent.
-            SessionsMoreRow(title: LiveSessions.moreTitle(hidden: hidden, showsAll: showsAll), indent: 82) {
-                if showsAllChildren.contains(parentID) { showsAllChildren.remove(parentID) }
-                else { showsAllChildren.insert(parentID) }
-            }
+        case let .cell(room):
+            cell(room, now: now)
         case let .label(title):
             Text(title)
                 .gallopText(.caption, color: SemanticColor.textTertiary)
@@ -688,14 +710,12 @@ private struct SidebarList: View {
         }
     }
 
-    private func cell(_ room: SidebarRoom, depth: Int, disclosure: SidebarRow.Disclosure?, showsDot: Bool,
-                      now: Date) -> some View {
+    private func cell(_ room: SidebarRoom, now: Date) -> some View {
         let store = store(for: room.server)
         let connection = connection(of: room.server)
         let placeIcon = SidebarPlaceIcon.icon(place: room.place, isLocalServer: room.server == .local,
                                               connection: connection)
-        // While the account's connection is down, a session's state is no longer known.
-        let mark: SidebarMark? = connection != .up ? nil : room.session.flatMap { session in
+        let mark: SidebarMark? = room.session.flatMap { session in
             switch session.state {
             case .working: return .working
             case .prompt: return .waiting(session.harness.appName)
@@ -704,14 +724,9 @@ private struct SidebarList: View {
         }
         return SidebarCell(
             name: room.room.name, placeIcon: placeIcon, connection: connection, mark: mark,
-            depth: depth, disclosure: disclosure, time: room.activity.cowchatShortTime(relativeTo: now),
-            showsDot: showsDot, isSelected: workspace.isSelected(room.room, on: room.server),
+            time: room.activity.cowchatShortTime(relativeTo: now), isUnread: room.isUnread,
+            isSelected: workspace.isSelected(room.room, on: room.server),
             open: { Task { await workspace.select(room: room.room, on: room.server) } },
-            toggle: {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    store.setCollapsed(!store.isCollapsed(room.room.id), roomID: room.room.id)
-                }
-            },
             addPerson: room.session.map { session in { workspace.presentAddPerson(to: session) } }
         ) {
             if room.isArchived {
@@ -727,10 +742,6 @@ private struct SidebarList: View {
                     Button("Archive") {
                         Task { await store.archive(room.room) }
                     }
-                }
-                if room.server == .accountGlobal, workspace.isTopLevelCompanyRoom(room.room) {
-                    // copy:
-                    Button("New room inside…") { workspace.presentNewRoom(inside: room.room, on: .accountGlobal) }
                 }
             }
             if placeIcon.isDown {
@@ -756,7 +767,7 @@ enum SidebarRowState {
 }
 
 /// Cowboy's SidebarRowPill recipe, a capsule, which on the sidebar's 36 rows is Cowboy's pill. Every row in the sidebar
-/// takes it: the team row, the Inbox, Team and every cell.
+/// takes it: the Inbox, Team and every cell. The toolbar's buttons take its hover, as a circle at 36.
 struct SidebarRowBackground: View {
     let state: SidebarRowState
     private var shape: Capsule { Capsule(style: .continuous) }
@@ -861,11 +872,6 @@ private struct ChatRoomView: View {
     @State private var hasPositionedInitialScroll = false
     /// The runs of hidden agent messages opened in place, by their first message.
     @State private var openRuns: Set<String> = []
-
-    private var parentRoom: Room? {
-        guard let parentID = room.parentID else { return nil }
-        return store.rooms.first { $0.id == parentID }
-    }
 
     private var title: String { room.name }
 
@@ -1016,15 +1022,6 @@ private struct ChatRoomView: View {
                         Button("Rename room") { store.presentRename(room) }
                     }
                     Button("Archive room") { Task { await store.archive(room) } }
-                    if isAccountRoom {
-                        // An account room is made inside a top-level company room only, since there is one level.
-                        if workspace.isTopLevelCompanyRoom(room) {
-                            // copy:
-                            Button("New room inside…") { workspace.presentNewRoom(inside: room, on: .accountGlobal) }
-                        }
-                    } else {
-                        Button("Create nested room…") { workspace.presentNewRoom(inside: room, on: workspace.activeServer) }
-                    }
                     if !store.connectionStatus.isConnected {
                         Button("Reconnect") { store.start() }
                     }
@@ -1049,19 +1046,6 @@ private struct ChatRoomView: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    if let parentRoom {
-                        Button(parentRoom.name) {
-                            Task { await store.select(room: parentRoom) }
-                        }
-                        .buttonStyle(.plain)
-                        .gallopText(.bodySStrong, color: SemanticColor.textTertiary)
-                        .lineLimit(1)
-                        .macAccessibleAction(label: "Open parent room \(parentRoom.name)") {
-                            Task { await store.select(room: parentRoom) }
-                        }
-                        GallopIconView(icon: .chevronRightExtraSmall, fallbackSystemName: "chevron.right", size: 10)
-                            .foregroundStyle(SemanticColor.iconSubtle)
-                    }
                     Text(title)
                         .gallopText(.h4, color: SemanticColor.textPrimary)
                     if room.encrypted {

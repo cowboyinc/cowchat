@@ -9,8 +9,6 @@ struct SocialRoomDraft: Identifiable {
     var agentIDs: Set<String> = []
     /// The friends' agents suggested for the room, across every friend picked.
     var proposedAgentIDs: Set<String> = []
-    /// The company room the room is made inside: the team chosen in the sidebar's team row, or none.
-    var parentID: String?
 
     /// The first friend picked, whom room creation invites.
     var friendID: String? {
@@ -25,7 +23,6 @@ struct SocialRoomDraft: Identifiable {
             "proposed_agent_ids": friendID == nil ? [] : proposedAgentIDs.sorted(),
         ]
         if let friendID { body["friend_id"] = friendID }
-        if let parentID { body["parent_id"] = parentID }
         return body
     }
 
