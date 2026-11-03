@@ -9,13 +9,22 @@ enum PageLayout {
     /// Where an empty page's line sits: 20 in from the card's edge and 40 under the header.
     static let emptyLeading: CGFloat = 20
     static let emptyTop: CGFloat = 40
-    /// The gap from the header's end to a page list's first line of text, as production puts 32 under a page head and
-    /// the house rule spaces sections (navigation round 2, section 4.2 as amended).
+    /// The gap from the header's last line of text to a page list's first line of text, as production puts 32 under a
+    /// page head and the house rule spaces sections (navigation round 2, section 4.2 as amended).
     static let headerGap: CGFloat = 32
+    /// A header's title line, Heading 4's.
+    static let titleLine: CGFloat = 28
 
-    /// The space above a page's list: the header's gap less the list's own inset above its first line of text.
-    static func listTop(firstTextInset: CGFloat) -> CGFloat {
-        headerGap - firstTextInset
+    /// The space above a page's list: the header's gap less the list's own inset above its first line of text, and less
+    /// what the header holds under its last line of text.
+    static func listTop(firstTextInset: CGFloat, belowLastText: CGFloat = 0) -> CGFloat {
+        headerGap - firstTextInset - belowLastText
+    }
+
+    /// What a header with no line holds under its title: half of what an accessory taller than the title adds, since
+    /// the title is centred on it.
+    static func belowTitle(accessoryHeight: CGFloat) -> CGFloat {
+        max(0, (accessoryHeight - titleLine) / 2)
     }
 }
 

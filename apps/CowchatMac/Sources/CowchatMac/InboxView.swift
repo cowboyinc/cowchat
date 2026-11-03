@@ -56,7 +56,10 @@ struct InboxPage: View {
                     }
                 }
                 .frame(maxWidth: PageLayout.listWidth, alignment: .leading)
-                .padding(.top, PageLayout.listTop(firstTextInset: InboxRow.textInset))
+                // The header ends under Mark all read, which reaches past the title's line.
+                .padding(.top, PageLayout.listTop(
+                    firstTextInset: InboxRow.textInset,
+                    belowLastText: PageLayout.belowTitle(accessoryHeight: CowchatPillButtonStyle.height)))
                 .padding(.bottom, 16)
             }
             .padding(.horizontal, PageLayout.listInset)

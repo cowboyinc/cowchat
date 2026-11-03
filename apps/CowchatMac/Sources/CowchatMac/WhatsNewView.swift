@@ -31,6 +31,7 @@ struct CowchatSheetHeader: View {
 }
 
 struct CowchatPillButtonStyle: ButtonStyle {
+    static let height: CGFloat = 36
     var prominent = false
     /// A sign-in provider's door, as Cowboy's sign-in draws it: Surface/700 with a 1-point Border/Default edge inside,
     /// Text/Primary, and Surface/600 on hover. Filled pills stay for Cowchat's own actions.
@@ -51,7 +52,7 @@ struct CowchatPillButtonStyle: ButtonStyle {
         return configuration.label
             .gallopText(.bodySStrong, color: destructive ? SemanticColor.notificationErrorTextDefault : prominent ? SemanticColor.buttonPrimaryTextDefault : SemanticColor.buttonSecondaryTextDefault)
             .padding(.horizontal, 18)
-            .frame(height: 36)
+            .frame(height: Self.height)
             .background(
                 destructive ? SemanticColor.notificationErrorDefault : prominent ? SemanticColor.buttonPrimaryDefault : SemanticColor.buttonSecondaryDefault,
                 in: Capsule()
