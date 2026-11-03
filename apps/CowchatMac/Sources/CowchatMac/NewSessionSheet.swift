@@ -33,7 +33,14 @@ struct NewSessionSheet: View {
     private var typedBranch: String { branch.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private var canStart: Bool {
-        folder != nil && harness.map(isConnected) == true && (!newWorktree || !typedBranch.isEmpty) && !busy
+        Self.canStart(folder: folder, harnessIsConnected: harness.map(isConnected) == true, newWorktree: newWorktree,
+                      branch: typedBranch, busy: busy)
+    }
+
+    /// Start needs a folder and a connected agent, a branch when it makes a new worktree, and no start under way.
+    static func canStart(folder: SessionFolder?, harnessIsConnected: Bool, newWorktree: Bool, branch: String,
+                         busy: Bool) -> Bool {
+        folder != nil && harnessIsConnected && (!newWorktree || !branch.isEmpty) && !busy
     }
 
     var body: some View {
@@ -102,9 +109,14 @@ struct NewSessionSheet: View {
 
     private func isConnected(_ harness: LiveSession.Harness) -> Bool { agents.state(of: harness) == .connected }
 
-    /// The agent used last on this Mac, or else the first that is connected.
     private var startingHarness: LiveSession.Harness? {
-        if let last = workspace.lastSessionHarness, isConnected(last) { return last }
+        Self.startingHarness(last: workspace.lastSessionHarness, isConnected: isConnected)
+    }
+
+    /// The agent used last on this Mac, or else the first that is connected.
+    static func startingHarness(last: LiveSession.Harness?,
+                                isConnected: (LiveSession.Harness) -> Bool) -> LiveSession.Harness? {
+        if let last, isConnected(last) { return last }
         return AgentConnections.harnesses.first(where: isConnected)
     }
 
