@@ -70,8 +70,6 @@ final class ChatStore: ObservableObject {
     @Published private(set) var promptInviteTokens: [String: String] = [:]
     @Published var errorMessage: String?
     @Published var isLoadingMessages = false
-    @Published var isCreateRoomPresented = false
-    @Published var createRoomParentID: String?
     /// Called with each `session_state` frame, which says one of the person's sessions registered, changed state or
     /// ended (navigation note, section 4.1).
     var onSessionState: ((SessionStateEvent) -> Void)?
@@ -882,8 +880,6 @@ final class ChatStore: ObservableObject {
         roomReadyNotice = nil
         roomBeingRenamed = nil
         isLoadingMessages = false
-        isCreateRoomPresented = false
-        createRoomParentID = nil
         joinedRoomID = nil
         memberCountIncludesCurrentAgentRoomIDs = []
         agentID = ""
@@ -1170,7 +1166,7 @@ final class ChatStore: ObservableObject {
     /// create sheet renders them inline. Routing them at the store's alert
     /// used to be silently dropped when the sheet was presented (or when the
     /// target store wasn't the active one).
-    func createRoom(name: String, description: String, isPublic: Bool) async -> CreateRoomOutcome {
+    func createRoom(name: String, description: String, isPublic: Bool, parentID: String? = nil) async -> CreateRoomOutcome {
         let expectedProfileGeneration = profileGeneration
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedName.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
@@ -1182,7 +1178,7 @@ final class ChatStore: ObservableObject {
             let room = try await connection.createRoom(
                 name: trimmedName,
                 description: description.trimmingCharacters(in: .whitespacesAndNewlines),
-                parentID: createRoomParentID,
+                parentID: parentID,
                 isPublic: isPublic
             )
             guard expectedProfileGeneration == profileGeneration else {
@@ -1195,8 +1191,6 @@ final class ChatStore: ObservableObject {
             rooms.sort(by: roomSort)
             setupRoomIDs.insert(room.id)
             localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
-            isCreateRoomPresented = false
-            createRoomParentID = nil
             await select(room: room)
             guard expectedProfileGeneration == profileGeneration else {
                 return .failed("The connection changed while creating the room.")
@@ -1213,11 +1207,6 @@ final class ChatStore: ObservableObject {
             }
             return .failed(error.localizedDescription)
         }
-    }
-
-    func presentCreateRoom(parentID: String? = nil) {
-        createRoomParentID = parentID
-        isCreateRoomPresented = true
     }
 
     func isArchived(_ room: Room) -> Bool {
@@ -2262,11 +2251,6 @@ final class ChatStore: ObservableObject {
            !validRoomIDs.contains(roomBeingRenamed.id) {
             self.roomBeingRenamed = nil
         }
-        if let createRoomParentID,
-           !validRoomIDs.contains(createRoomParentID) {
-            self.createRoomParentID = nil
-            isCreateRoomPresented = false
-        }
     }
 
     private func removeRoom(roomID: String) {
@@ -2286,10 +2270,6 @@ final class ChatStore: ObservableObject {
         memberCountIncludesCurrentAgentRoomIDs.remove(roomID)
         if roomReadyNotice?.id == roomID { roomReadyNotice = nil }
         if roomBeingRenamed?.id == roomID { roomBeingRenamed = nil }
-        if createRoomParentID == roomID {
-            createRoomParentID = nil
-            isCreateRoomPresented = false
-        }
         localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
         recordRoomMutation(roomID: roomID)
 

@@ -168,8 +168,7 @@ struct CowchatMacApp: App {
                     .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(after: .newItem) {
-                Button("New Room") { workspace.activeStore.presentCreateRoom() }
-                    .keyboardShortcut("n", modifiers: .command)
+                NewMenuItems(workspace: workspace)
                     .disabled(completedOnboardingVersion < CowchatOnboarding.currentVersion)
             }
             CommandGroup(after: .help) {

@@ -345,11 +345,6 @@ final class SocialTests: XCTestCase {
         XCTAssertEqual(changes, 2)
         XCTAssertEqual(store.rooms.count, 2)
         XCTAssertTrue(store.errorMessage?.contains("Room creation unavailable") == true)
-        roomList = []
-        let emptyStore = SocialStore(endpoint: endpoint, credentials: credentials, session: session)
-        await emptyStore.refresh()
-        try render(SocialRoomCreationView(social: emptyStore), name: "mac-room-create-solo")
-        try render(SocialRoomCreationView(social: emptyStore, draft: draft), name: "mac-room-create-friend")
     }
 
     @MainActor

@@ -179,28 +179,37 @@ struct SearchCapsule: View {
 
 /// The app's 40 text field, as Settings and first run draw theirs: Body M on a Textfield/Default capsule with a 1-point
 /// Border/Default edge drawn inside it, and 13 at the sides. A leading mark, such as a handle's "@", sits in
-/// Text/Tertiary, and a trailing view 11 from the end. Return calls `onSubmit`.
+/// Text/Tertiary, and a trailing view 11 from the end. A sheet's search field puts the 13 search icon in Icon/Tertiary
+/// 8 before the text, as `SearchCapsule` draws it. Return calls `onSubmit`.
 struct CapsuleField<Trailing: View>: View {
     let placeholder: String
     @Binding var text: String
     var leading: String?
+    var showsSearchIcon = false
     var isSecure = false
     var onSubmit: (() -> Void)?
     @ViewBuilder let trailing: Trailing
 
-    init(placeholder: String, text: Binding<String>, leading: String? = nil, isSecure: Bool = false,
-         onSubmit: (() -> Void)? = nil, @ViewBuilder trailing: () -> Trailing = { EmptyView() }) {
+    init(placeholder: String, text: Binding<String>, leading: String? = nil, showsSearchIcon: Bool = false,
+         isSecure: Bool = false, onSubmit: (() -> Void)? = nil,
+         @ViewBuilder trailing: () -> Trailing = { EmptyView() }) {
         self.placeholder = placeholder
         _text = text
         self.leading = leading
+        self.showsSearchIcon = showsSearchIcon
         self.isSecure = isSecure
         self.onSubmit = onSubmit
         self.trailing = trailing()
     }
 
     var body: some View {
-        HStack(spacing: 2) {
-            if let leading { Text(leading).gallopText(.bodyM, color: SemanticColor.textTertiary) }
+        HStack(spacing: showsSearchIcon ? 8 : 2) {
+            if showsSearchIcon {
+                GallopIconView(icon: .search, fallbackSystemName: "magnifyingglass", size: 13)
+                    .foregroundStyle(SemanticColor.iconTertiary)
+            } else if let leading {
+                Text(leading).gallopText(.bodyM, color: SemanticColor.textTertiary)
+            }
             Group {
                 if isSecure {
                     SecureField(placeholder, text: $text)

@@ -17,6 +17,10 @@ enum SidebarMark: Equatable {
 /// chevron in the state slot, as a button of its own over the cell with a 24 by 36 press area.
 ///
 /// This Mac's mark is SF Symbol `laptopcomputer`, since the Mac's Gallop set has no device glyph (`Bundled/Icons/svg`).
+///
+/// A live session's cell under the pointer hides its time and dot and shows the Add person button at the end of the 52
+/// slot (navigation note, section 7.4), as Cowboy's rail swaps its end slot for the row's ⋯. The button sits over the
+/// cell, outside its button, so pressing it does not also open the room.
 struct SidebarCell<Menu: View>: View {
     let name: String
     let placeIcon: SidebarPlaceIcon
@@ -29,6 +33,8 @@ struct SidebarCell<Menu: View>: View {
     let isSelected: Bool
     let open: () -> Void
     var toggle: (() -> Void)?
+    /// Add person, on the cell of one of the person's live sessions' rooms.
+    var addPerson: (() -> Void)?
     @ViewBuilder var menu: () -> Menu
     @State private var isHovering = false
 
@@ -59,9 +65,18 @@ struct SidebarCell<Menu: View>: View {
                 .help(disclosureLabel(disclosure))
                 .macAccessibleAction(label: disclosureLabel(disclosure), action: toggle)
             }
+
+            if let addPerson {
+                AddPersonButton(name: name, isShown: isHovering, action: addPerson)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.trailing, 10)
+            }
         }
         .onHover { isHovering = $0 }
     }
+
+    /// Whether the end slot shows Add person in place of the time and the dot.
+    private var showsAddPerson: Bool { addPerson != nil && isHovering }
 
     private var content: some View {
         HStack(spacing: 0) {
@@ -85,6 +100,7 @@ struct SidebarCell<Menu: View>: View {
                 .lineLimit(1)
                 .fixedSize()
                 .frame(minWidth: 40, alignment: .trailing)
+                .opacity(showsAddPerson ? 0 : 1)
             ZStack {
                 if showsDot {
                     Circle()
@@ -93,6 +109,7 @@ struct SidebarCell<Menu: View>: View {
                 }
             }
             .frame(width: 12)
+            .opacity(showsAddPerson ? 0 : 1)
         }
         .padding(.horizontal, 10)
         .frame(height: 36)
@@ -183,5 +200,34 @@ extension SidebarCell where Menu == EmptyView {
          isSelected: Bool, open: @escaping () -> Void) {
         self.init(name: name, placeIcon: placeIcon, connection: connection, time: time, isSelected: isSelected,
                   open: open, menu: { EmptyView() })
+    }
+}
+
+/// The Add person button at the end of a live session's cell (add-new-company note, section 1): SF Symbol
+/// `person.badge.plus` at 13 medium, since the Mac's Gallop set has no person-add glyph (`Bundled/Icons/svg`), in
+/// Icon/Tertiary and Icon/Primary under the pointer, centred in a 28 by 36 press area. It stays laid out while hidden,
+/// with no hit testing, so its accessible action and the tour can reach it.
+private struct AddPersonButton: View {
+    let name: String
+    let isShown: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "person.badge.plus")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(isHovering ? SemanticColor.iconPrimary : SemanticColor.iconTertiary)
+                .opacity(isShown ? 1 : 0)
+                .frame(width: 28, height: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .allowsHitTesting(isShown)
+        .onHover { isHovering = $0 }
+        // copy:
+        .help("Add person")
+        // copy:
+        .macAccessibleAction(label: "Add person to \(name)", action: action)
     }
 }

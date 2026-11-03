@@ -65,8 +65,8 @@ final class WorkspaceStore: ObservableObject {
     }()
     /// Claude Code's plugin and Codex's hooks, as first run and Settings show them.
     let agentConnections = AgentConnections()
-    /// The account's teams and the one chosen in the sidebar's team row, which picks the team the Team page shows and the
-    /// company room New room makes a room in.
+    /// The account's teams and the one chosen in the sidebar's team row, which picks the team the Team page shows.
+    /// New room's Inside lists them.
     lazy var teams: TeamChoice = {
         let teams = TeamChoice(defaults: defaults)
         teams.onChoiceChanged = { [weak self] in
@@ -76,8 +76,13 @@ final class WorkspaceStore: ObservableObject {
         }
         return teams
     }()
-    /// New room with an account room's draft, as a friend's row on the Friends page opens it.
-    @Published var roomDraft: SocialRoomDraft?
+    /// The sheet that starts something, from the New menu, the File menu, a cell's right-click menu, a room's ⋯ menu
+    /// or a friend's row on the Friends page (navigation note, section 7).
+    @Published var starting: StartSheet?
+    /// Starts New session's agents. The prototype puts its own in.
+    var sessionLauncher: any SessionLauncher = UnavailableSessionLauncher()
+    /// Follows the live sessions after New session's Start, until the first new one registers and its room opens.
+    private var awaitingSession: AnyCancellable?
     /// A room's people, as its menu's People… shows them.
     @Published var roomPeople: SocialParticipants?
     /// The session rooms the archive rule is asking the server about now, so a room is asked about once at a time.
@@ -152,6 +157,7 @@ final class WorkspaceStore: ObservableObject {
         accountGlobal?.shutdownForRemoval()
         accountGlobal = nil
         watchingAccount = []
+        awaitingSession = nil
         liveSessions.clear()
         inbox.use(account: session?.account, scope: session.map(Self.accountScope))
         team.use(accountID: session?.account.id)
@@ -561,14 +567,168 @@ final class WorkspaceStore: ObservableObject {
 
     // MARK: Friends and New room
 
-    /// A draft for an account room, made inside the chosen team's company room when the account has teams.
-    func newRoomDraft(friendIDs: [String] = []) -> SocialRoomDraft {
-        SocialRoomDraft(friendIDs: friendIDs, parentID: teams.chosen?.id)
+    /// Pressing a friend's row on the Friends page: New room for an account room with that friend picked. Inside
+    /// starts on None, as New room's does, since a room inside a company room starts with all its people picked.
+    func newRoom(with friend: SocialFriend) {
+        starting = .newRoom(NewRoomRequest(kind: .account, draft: SocialRoomDraft(friendIDs: [friend.id])))
     }
 
-    /// Pressing a friend's row on the Friends page: New room with that friend picked.
-    func newRoom(with friend: SocialFriend) {
-        roomDraft = newRoomDraft(friendIDs: [friend.id])
+    // MARK: Starting things
+
+    /// "New room…" in the New menu and the File menu, whose Inside starts on None (add-new-company note, section 3),
+    /// or a room's "New room inside…" or "Create nested room…", which starts inside that room on its connection.
+    func presentNewRoom(inside parent: Room? = nil, on server: Server? = nil) {
+        guard let parent, let server, let kind = NewRoomKind(server: server) else {
+            starting = .newRoom(NewRoomRequest())
+            return
+        }
+        starting = .newRoom(NewRoomRequest(kind: kind, parent: parent,
+                                           draft: SocialRoomDraft(parentID: kind == .account ? parent.id : nil)))
+    }
+
+    /// "New session…" in the New menu and the File menu, while signed in.
+    func presentNewSession() {
+        guard social.phase == .signedIn else { return }
+        starting = .newSession
+    }
+
+    /// "Join with invite code…", while the API-key connection is connected.
+    func presentJoinWithCode() {
+        guard canJoinWithCode else { return }
+        starting = .joinWithCode
+    }
+
+    /// Whether Join with invite code can redeem a code: the API-key connection is connected, as Settings checked.
+    var canJoinWithCode: Bool { global?.connectionStatus.isConnected == true }
+
+    /// "Add person…" on one of the person's live sessions' rooms.
+    func presentAddPerson(to session: LiveSession) {
+        starting = .addPerson(session)
+    }
+
+    /// Join with invite code's Join: the code is redeemed for the API key, and the room it grants opens. When the room
+    /// is not listed yet, nothing opens and its cell arrives with the next list. It throws what the server said.
+    func joinWithCode(_ code: String) async throws {
+        guard let store = global else { throw CowchatConnectionError.notConnected }
+        guard let room = try await store.redeemInvite(token: code), global === store else { return }
+        await select(room: room, on: .global)
+    }
+
+    /// The account's top-level company rooms New room can make a room inside: the account's teams.
+    var companyRooms: [SocialTeam] { teams.teams }
+
+    /// Whether an account room is a top-level company room, which offers "New room inside…".
+    func isTopLevelCompanyRoom(_ room: Room) -> Bool {
+        room.parentID == nil && social.rooms.contains { $0.roomId == room.id && $0.kind == "company" }
+    }
+
+    /// The people of a company room other than the viewer, which New room lists and ticks for a room made inside it.
+    func people(of roomID: String) async -> [SocialAccount] {
+        guard let api = try? social.readingAPI(),
+              let participants: SocialParticipants = try? await api.social(["rooms", roomID, "participants"])
+        else { return [] }
+        return participants.members.filter { $0.id != social.account?.id }
+    }
+
+    /// New room's Create (add-new-company note, section 3b). An account room is made through `SocialStore.createRoom`
+    /// with the draft, inside its company room when it has one, with the people picked invited, and its company room
+    /// opens if it was closed. A room on this Mac or the API key is made through `ChatStore.createRoom`, inside
+    /// `parent` when the sheet came from a room's "Create nested room…". A taken name opens the room of that name when
+    /// the person can see it. The new room opens on its connection.
+    func createRoom(_ kind: NewRoomKind, name: String, parent: Room?, draft: SocialRoomDraft) async -> NewRoomOutcome {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard kind != .account else {
+            var draft = draft
+            draft.name = name
+            // copy:
+            guard let roomID = await social.createRoom(draft) else {
+                return .failed(social.errorMessage ?? "The room could not be made.")
+            }
+            _ = await openCreatedSocialRoom(roomID: roomID)
+            if let parentID = draft.parentID, let store = accountGlobal, store.isCollapsed(parentID) {
+                store.setCollapsed(false, roomID: parentID)
+            }
+            return .opened
+        }
+        // copy:
+        guard let store = store(for: kind.server) else { return .failed("That connection isn't set up.") }
+        switch await store.createRoom(name: name, description: "", isPublic: false, parentID: parent?.id) {
+        case .created:
+            page = nil
+            activate(server: kind.server)
+            scheduleSessionRoomArchive()
+            return .opened
+        case .nameTaken:
+            if let existing = store.rooms.first(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) {
+                // The room already exists and the person can see it, so it opens.
+                await select(room: existing, on: kind.server)
+                return .opened
+            }
+            // copy:
+            return .failed("A room named \u{201C}\(name)\u{201D} already exists on this server, but it isn't visible to you. Choose another name.")
+        case let .failed(message):
+            return .failed(message)
+        }
+    }
+
+    /// Add person's Add (navigation note, section 7.4): each picked friend is invited to the session's own room through
+    /// the room's invitations (Chad's plan, task 4). No room is made and nothing is posted, since the session already
+    /// listens in its room. The room stays open, or opens when it wasn't. Returns the friends who could not be
+    /// invited, in the order they were picked.
+    func addPeople(_ friendIDs: [String], to session: LiveSession) async -> [String] {
+        guard let api = try? social.readingAPI() else { return friendIDs }
+        var failed: [String] = []
+        for id in friendIDs {
+            do {
+                let _: SocialAcknowledgement = try await api.social(
+                    ["rooms", session.roomID, "invitations"], method: "POST",
+                    body: ["friend_id": id, "proposed_agent_ids": [String]()])
+            } catch {
+                failed.append(id)
+            }
+        }
+        await social.refresh()
+        if failed.count < friendIDs.count { await openSession(session) }
+        return failed
+    }
+
+    /// The agent New session starts on: the one used last on this Mac.
+    var lastSessionHarness: LiveSession.Harness? {
+        defaults.string(forKey: Self.lastSessionHarnessKey).flatMap(LiveSession.Harness.init(rawValue:))
+    }
+
+    static let lastSessionHarnessKey = "CowchatMac.lastSessionHarness"
+
+    /// The folders this Mac's sessions have run in, newest first, for New session's Folder menu: the folders of the
+    /// person's session rooms, live or ended, each with its path where the launcher knows it.
+    var sessionFolders: [SessionFolder] {
+        guard let viewer = social.account?.id else { return [] }
+        let made = social.rooms.compactMap { $0.ownerId == viewer ? $0.session : nil }
+            .sorted { ($0.startedAt.cowchatDate ?? .distantPast) > ($1.startedAt.cowchatDate ?? .distantPast) }
+        var seen: Set<String> = []
+        return made.compactMap { session in
+            guard seen.insert(session.folder).inserted else { return nil }
+            return SessionFolder(name: session.folder, path: sessionLauncher.path(ofFolder: session.folder))
+        }
+    }
+
+    /// The folder New session starts on: the folder of the person's newest live session.
+    var newestSessionFolder: SessionFolder? {
+        liveSessions.sessions.first.map { SessionFolder(name: $0.folder, path: sessionLauncher.path(ofFolder: $0.folder)) }
+    }
+
+    /// New session's Start (navigation note, section 7.3): the launcher starts the agent, and the first of the
+    /// person's sessions to register afterwards opens on its room, as first run opens the first session's. The agent
+    /// is kept for next time. It throws what the launcher said.
+    func startSession(_ request: SessionRequest) async throws {
+        let seen = Set(liveSessions.sessions.map(\.id))
+        try await sessionLauncher.start(request)
+        defaults.set(request.harness.rawValue, forKey: Self.lastSessionHarnessKey)
+        awaitingSession = liveSessions.$sessions.sink { [weak self] list in
+            guard let self, let new = list.first(where: { !seen.contains($0.id) }) else { return }
+            self.awaitingSession = nil
+            Task { await self.openSession(new) }
+        }
     }
 
     /// People… in an account room's menu: the room's people and agents from the server.
@@ -756,4 +916,21 @@ final class WorkspaceStore: ObservableObject {
         preferences.loadSavedCloudURL() ?? ConnectionProfile.defaultGlobalURLString
     }
 
+}
+
+/// A sheet that starts something (navigation note, section 7).
+enum StartSheet: Identifiable {
+    case newRoom(NewRoomRequest)
+    case newSession
+    case joinWithCode
+    case addPerson(LiveSession)
+
+    var id: String {
+        switch self {
+        case let .newRoom(request): return "new-room/\(request.id)"
+        case .newSession: return "new-session"
+        case .joinWithCode: return "join-with-code"
+        case let .addPerson(session): return "add-person/\(session.id)"
+        }
+    }
 }

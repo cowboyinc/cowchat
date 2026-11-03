@@ -109,17 +109,24 @@ struct ContentView: View {
                 }
             }
             ToolbarItem(placement: .navigation) {
-                Button {
-                    store.presentCreateRoom()
+                // The New menu holds every way to start something, in the pencil's place and size (navigation note,
+                // section 7.1). It stays in reach while the sidebar is hidden.
+                Menu {
+                    NewMenuItems(workspace: workspace)
                 } label: {
-                    GallopIconView(icon: .edit, fallbackSystemName: "square.and.pencil", size: 17)
+                    GallopIconView(icon: .add, fallbackSystemName: "plus", size: 17)
                         .foregroundStyle(SemanticColor.iconSecondary)
                         .frame(width: 36, height: 36)
                         .contentShape(Circle())
                 }
-                .buttonStyle(.plain)
-                .help("New room (⌘N)")
-                .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                // A borderless menu tints its label with the accent colour, so the + takes Icon/Secondary as its tint.
+                .tint(SemanticColor.iconSecondary)
+                .fixedSize()
+                // copy:
+                .help("New")
+                .accessibilityLabel("New")
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .cowchatToggleSidebar)) { _ in
@@ -133,31 +140,26 @@ struct ContentView: View {
         .onReceive(workspace.notifications.$destination.receive(on: RunLoop.main)) { destination in
             guard let destination, workspace.notifications.consumeDestination(destination) else { return }
             isSettingsPresented = false
-            store.isCreateRoomPresented = false
             isWhatsNewPresented = false
             store.roomBeingRenamed = nil
-            workspace.roomDraft = nil
+            workspace.starting = nil
             workspace.roomPeople = nil
             workspace.show(destination.page)
         }
         .onReceive(NotificationCenter.default.publisher(for: .cowchatShowFriends)) { _ in
             workspace.show(.friends)
         }
-        .sheet(item: $workspace.roomDraft) { draft in
-            SocialRoomCreationView(social: workspace.social, draft: draft) { roomID in
-                Task { _ = await workspace.openCreatedSocialRoom(roomID: roomID) }
+        .sheet(item: $workspace.starting) { sheet in
+            switch sheet {
+            case let .newRoom(request): NewRoomSheet(workspace: workspace, request: request)
+            case .newSession: NewSessionSheet(workspace: workspace)
+            case .joinWithCode: JoinWithCodeSheet(workspace: workspace)
+            case let .addPerson(session): AddPersonSheet(workspace: workspace, session: session)
             }
         }
         .sheet(isPresented: Binding(get: { workspace.roomPeople != nil },
                                     set: { if !$0 { workspace.roomPeople = nil } })) {
             RoomParticipantsSheet(social: workspace.social, participants: $workspace.roomPeople)
-        }
-        .sheet(
-            isPresented: $store.isCreateRoomPresented,
-            onDismiss: { store.createRoomParentID = nil }
-        ) {
-            RoomCreationSheet(initialSource: workspace.activeServer)
-                .environmentObject(store)
         }
         .onReceive(NotificationCenter.default.publisher(for: .cowchatShowSettings)) { _ in
             // The app menu's command reaches the key window. A post while the app is in the background, which only
@@ -669,17 +671,26 @@ private struct SidebarList: View {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     store.setCollapsed(!store.isCollapsed(room.room.id), roomID: room.room.id)
                 }
-            }
+            },
+            addPerson: room.session.map { session in { workspace.presentAddPerson(to: session) } }
         ) {
             if room.isArchived {
                 Button("Unarchive") { store.unarchive(room.room) }
             } else {
+                if let session = room.session {
+                    // copy:
+                    Button("Add person…") { workspace.presentAddPerson(to: session) }
+                }
                 Button("Rename") { store.presentRename(room.room) }
                     .disabled(!store.canRename(room.room))
                 if room.room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame {
                     Button("Archive") {
                         Task { await store.archive(room.room) }
                     }
+                }
+                if room.server == .accountGlobal, workspace.isTopLevelCompanyRoom(room.room) {
+                    // copy:
+                    Button("New room inside…") { workspace.presentNewRoom(inside: room.room, on: .accountGlobal) }
                 }
             }
             if placeIcon.isDown {
@@ -949,6 +960,10 @@ private struct ChatRoomView: View {
                         }
                     }
                     Divider()
+                    if isAccountRoom, let session = sessions.session(inRoom: room.id) {
+                        // copy:
+                        Button("Add person…") { workspace.presentAddPerson(to: session) }
+                    }
                     // Rename and destroy are creator-only, so for other
                     // agents' rooms they are hidden rather than left as
                     // permanently disabled clutter.
@@ -956,8 +971,14 @@ private struct ChatRoomView: View {
                         Button("Rename room") { store.presentRename(room) }
                     }
                     Button("Archive room") { Task { await store.archive(room) } }
-                    if !store.connectionProfile.apiKey.hasPrefix("csoc_") {
-                        Button("Create nested room…") { store.presentCreateRoom(parentID: room.id) }
+                    if isAccountRoom {
+                        // An account room is made inside a top-level company room only, since there is one level.
+                        if workspace.isTopLevelCompanyRoom(room) {
+                            // copy:
+                            Button("New room inside…") { workspace.presentNewRoom(inside: room, on: .accountGlobal) }
+                        }
+                    } else {
+                        Button("Create nested room…") { workspace.presentNewRoom(inside: room, on: workspace.activeServer) }
                     }
                     if !store.connectionStatus.isConnected {
                         Button("Reconnect") { store.start() }
@@ -2084,6 +2105,7 @@ enum MainArea: Equatable {
 
 private struct EmptyChatView: View {
     @EnvironmentObject private var store: ChatStore
+    @EnvironmentObject private var workspace: WorkspaceStore
 
     var body: some View {
         Group {
@@ -2101,11 +2123,11 @@ private struct EmptyChatView: View {
 
                     if store.rooms.isEmpty {
                         // copy:
-                        Button("New room") { store.presentCreateRoom() }
+                        Button("New room") { workspace.presentNewRoom() }
                             .buttonStyle(CowchatPillButtonStyle(prominent: true))
                             .keyboardShortcut(.defaultAction)
                             .padding(.top, 6)
-                            .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
+                            .macAccessibleAction(label: "Create room") { workspace.presentNewRoom() }
                     }
                 }
                 .padding(.horizontal, 24)
@@ -2214,9 +2236,6 @@ private struct SettingsView: View {
     @State private var cloudURL = ""
     @State private var cloudAPIKey = ""
     @State private var isConnectingGlobal = false
-    @State private var inviteToken = ""
-    @State private var isRedeemingInvite = false
-    @State private var inviteRedeemError: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -2446,41 +2465,6 @@ private struct SettingsView: View {
                     store: workspace.global ?? workspace.local,
                     hasGlobal: workspace.global != nil
                 )
-                if workspace.isGlobalEnabled {
-                    HStack(spacing: 10) {
-                        TextField("Have an invite? Paste its cinv_… token", text: $inviteToken)
-                            .textFieldStyle(.plain)
-                            .gallopText(.bodyM, color: SemanticColor.textPrimary)
-                            .padding(.horizontal, 13)
-                            .frame(height: 36)
-                            .background(SemanticColor.textfieldDefault, in: Capsule())
-                            .overlay {
-                                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
-                            }
-                        Button(isRedeemingInvite ? "Redeeming…" : "Redeem") { redeemInvite() }
-                            .buttonStyle(.plain)
-                            .gallopText(.bodySStrong, color: SemanticColor.buttonSecondaryTextDefault)
-                            .padding(.horizontal, 14)
-                            .frame(height: 36)
-                            .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
-                            .overlay {
-                                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
-                            }
-                            .disabled(!canRedeemInvite)
-                            .opacity(canRedeemInvite ? 1 : 0.45)
-                            .fixedSize()
-                            .macAccessibleAction(
-                                label: "Redeem invite",
-                                isEnabled: canRedeemInvite,
-                                action: redeemInvite
-                            )
-                    }
-                    if let inviteRedeemError {
-                        Text(inviteRedeemError)
-                            .gallopText(.caption, color: SemanticColor.textError)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
                 HStack(spacing: 10) {
                     Spacer()
                     if workspace.isGlobalEnabled {
@@ -2710,31 +2694,6 @@ private struct SettingsView: View {
         }
     }
 
-    private var canRedeemInvite: Bool {
-        !isRedeemingInvite
-            && !inviteToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && workspace.global?.connectionStatus.isConnected == true
-    }
-
-    private func redeemInvite() {
-        guard canRedeemInvite, let global = workspace.global else { return }
-        isRedeemingInvite = true
-        inviteRedeemError = nil
-        Task {
-            do {
-                let room = try await global.redeemInvite(token: inviteToken)
-                inviteToken = ""
-                if let room {
-                    await workspace.select(room: room, on: .global)
-                    isPresented = false
-                }
-            } catch {
-                inviteRedeemError = error.localizedDescription
-            }
-            isRedeemingInvite = false
-        }
-    }
-
     private func themePreview(title: String, dark: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             RoundedRectangle(cornerRadius: 9)
@@ -2921,299 +2880,5 @@ private struct GlobalServerNotice: View {
     private var noticeMessage: String? {
         workspace.globalSetupError
             ?? (hasGlobal ? store.connectionStatus.failureMessage : nil)
-    }
-}
-
-private struct RoomCreationSheet: View {
-    private enum Location: String, CaseIterable { case local = "Local", global = "Online" }
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @EnvironmentObject private var store: ChatStore
-    @State private var location: Location
-    @State private var preferPrivate: Bool
-
-    init(initialSource: WorkspaceStore.Server) {
-        _location = State(initialValue: initialSource == .local ? .local : .global)
-        _preferPrivate = State(initialValue: initialSource != .global)
-    }
-
-    private var hasGlobal: Bool { workspace.global != nil || workspace.accountGlobal != nil }
-    private var usePrivateGlobal: Bool {
-        location == .global && workspace.accountGlobal != nil && (workspace.global == nil || preferPrivate)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if store.createRoomParentID == nil {
-                VStack(alignment: .leading, spacing: 12) {
-                    if hasGlobal {
-                        Picker("Room location", selection: $location) {
-                            ForEach(Location.allCases, id: \.self) { location in
-                                Text(location.rawValue).tag(location)
-                            }
-                        }.pickerStyle(.segmented)
-                    } else {
-                        Text("Local · This Mac").gallopText(.bodySStrong)
-                    }
-                    if location == .global, workspace.global != nil, workspace.accountGlobal != nil {
-                        Picker("Room audience", selection: $preferPrivate) {
-                            Text("You and friends").tag(true)
-                            Text("With API key").tag(false)
-                        }.pickerStyle(.segmented)
-                    }
-                }
-                .padding(.horizontal, 28).padding(.top, 20).padding(.bottom, 8)
-            }
-            if usePrivateGlobal, store.createRoomParentID == nil {
-                SocialRoomCreationView(social: workspace.social, draft: workspace.newRoomDraft())
-            } else if location == .global && !hasGlobal {
-                Text("The online connection was disconnected. Choose Local to create a room on this Mac.")
-                    .gallopText(.bodyM).padding(28)
-                Button("Create a local room") { location = .local }.padding(.bottom, 28)
-            } else {
-                CreateRoomView(
-                    local: workspace.local,
-                    globalOrLocal: workspace.global ?? workspace.local,
-                    hasGlobal: workspace.global != nil,
-                    source: location == .local ? .local : .global
-                )
-            }
-        }.background(SemanticColor.surface600)
-    }
-}
-
-private struct CreateRoomView: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @EnvironmentObject private var store: ChatStore
-    @ObservedObject var local: ChatStore
-    @ObservedObject var globalOrLocal: ChatStore
-    let hasGlobal: Bool
-    var source: WorkspaceStore.Server? = nil
-    @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var description = ""
-    @State private var isCreating = false
-    @State private var chosenServer: WorkspaceStore.Server?
-    @State private var creationError: String?
-    /// Ready-made name shown as the field's grey placeholder; an empty field
-    /// creates the room under this name.
-    @State private var suggestedName = RoomNameSuggestion.generate()
-
-    private var effectiveName: String {
-        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return typed.isEmpty ? suggestedName : typed
-    }
-
-    private var parentRoom: Room? {
-        guard let parentID = store.createRoomParentID else { return nil }
-        return store.rooms.first { $0.id == parentID }
-    }
-
-    /// Nested rooms stay on their parent's server; top-level rooms default to
-    /// whichever server owns the current selection.
-    private var targetServer: WorkspaceStore.Server {
-        if parentRoom != nil { return workspace.activeServer }
-        return source ?? chosenServer ?? workspace.activeServer
-    }
-
-    private var targetStore: ChatStore {
-        switch targetServer {
-        case .local: return local
-        case .global: return hasGlobal ? globalOrLocal : local
-        case .accountGlobal: return workspace.accountGlobal ?? local
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(parentRoom == nil ? "New room" : "New nested room")
-                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                    Text(
-                        parentRoom.map {
-                            "Create a separate conversation inside \($0.name). Membership and history stay independent."
-                        }
-                            ?? (targetServer == .local
-                                ? "Create a conversation on this Mac's local Cowchat server."
-                                : "Create a conversation on the community Cowchat server.")
-                    )
-                        .gallopText(.bodyM, color: SemanticColor.textTertiary)
-                }
-                Spacer()
-                CircleIconButton(
-                    icon: .dismiss,
-                    fallbackSystemName: "xmark",
-                    help: "Close",
-                    action: cancel
-                )
-            }
-
-            VStack(spacing: 12) {
-                if hasGlobal, parentRoom == nil, source == nil {
-                    Picker("Server", selection: serverSelection) {
-                        ForEach([WorkspaceStore.Server.local, .global]) { server in
-                            Text(server.label).tag(server)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-                styledField(suggestedName, text: $name)
-                if !name.isEmpty, let nameValidationMessage {
-                    Text(nameValidationMessage)
-                        .gallopText(.caption, color: SemanticColor.textError)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 4)
-                }
-                styledField("Description (optional)", text: $description)
-                if let creationError {
-                    Text(creationError)
-                        .gallopText(.caption, color: SemanticColor.textError)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 4)
-                }
-            }
-            .onChange(of: name) { _ in creationError = nil }
-            .onChange(of: chosenServer) { _ in creationError = nil }
-
-            Spacer()
-
-            HStack(spacing: 10) {
-                Spacer()
-                Button("Cancel", action: cancel)
-                    .keyboardShortcut(.cancelAction)
-                    .buttonStyle(.plain)
-                    .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
-                    .padding(.horizontal, 16)
-                    .frame(height: 38)
-                    .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
-                    .macAccessibleAction(label: "Cancel", action: cancel)
-
-                Button(createButtonTitle) {
-                    createRoom()
-                }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.plain)
-                .gallopText(
-                    .bodyMStrong,
-                    color: canCreate ? SemanticColor.buttonPrimaryTextDefault : SemanticColor.textDisabled
-                )
-                .padding(.horizontal, 18)
-                .frame(height: 38)
-                .background(
-                    canCreate ? SemanticColor.buttonPrimaryDefault : SemanticColor.buttonSecondaryDefault,
-                    in: Capsule()
-                )
-                .disabled(!canCreate)
-                .macAccessibleAction(
-                    label: "Create room",
-                    isEnabled: canCreate,
-                    action: createRoom
-                )
-            }
-        }
-        .padding(26)
-        .frame(width: 480, height: 350)
-        .background(SemanticColor.surface600)
-    }
-
-    private func styledField(_ placeholder: String, text: Binding<String>) -> some View {
-        TextField(placeholder, text: text)
-            .textFieldStyle(.plain)
-            .gallopText(.bodyM, color: SemanticColor.textPrimary)
-            .padding(.horizontal, 14)
-            .frame(height: 42)
-            .background(SemanticColor.textfieldDefault, in: Capsule())
-            .overlay {
-                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
-            }
-    }
-
-    private var serverSelection: Binding<WorkspaceStore.Server> {
-        Binding(
-            get: { targetServer },
-            set: { chosenServer = $0 }
-        )
-    }
-
-    private var canCreate: Bool {
-        nameValidationMessage == nil
-            && !isCreating
-            && targetStore.connectionStatus.isConnected
-    }
-
-    private var nameValidationMessage: String? {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Empty is fine — the suggested placeholder name is used instead.
-        if trimmedName.isEmpty { return nil }
-        if trimmedName.unicodeScalars.count > 100 {
-            return "Room names can contain at most 100 characters."
-        }
-        if trimmedName.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
-            return "Room names cannot contain control characters."
-        }
-        return nil
-    }
-
-    private var createButtonTitle: String {
-        if isCreating { return "Creating…" }
-        return targetStore.connectionStatus.isConnected ? "Create Room" : "Connecting…"
-    }
-
-    private func createRoom() {
-        guard canCreate else { return }
-        isCreating = true
-        creationError = nil
-        let server = targetServer
-        let target = targetStore
-        let presenting = store
-        let usedSuggestion = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let creatingName = effectiveName
-        Task {
-            let outcome = await target.createRoom(
-                name: creatingName,
-                description: description,
-                isPublic: false
-            )
-            isCreating = false
-            switch outcome {
-            case .created:
-                // The room was created and selected on `server`; make that
-                // server active so the chat pane shows it, and close the
-                // sheet on whichever store presented it.
-                workspace.activate(server: server)
-                closeSheet(presenting: presenting)
-            case .nameTaken:
-                if let existing = target.rooms.first(where: {
-                    $0.name.localizedCaseInsensitiveCompare(creatingName) == .orderedSame
-                }) {
-                    // The room already exists and this key can see it — just
-                    // go there instead of arguing about the name.
-                    await workspace.select(room: existing, on: server)
-                    closeSheet(presenting: presenting)
-                } else if usedSuggestion {
-                    // Suggested name collided with a room this key can't
-                    // see; deal a fresh suggestion rather than arguing.
-                    suggestedName = RoomNameSuggestion.generate()
-                    creationError = "\u{201C}\(creatingName)\u{201D} was already taken — here's a fresh suggestion."
-                } else {
-                    creationError = "A room named \u{201C}\(creatingName)\u{201D} already exists on this server, but it isn't visible to you. Choose another name."
-                }
-            case let .failed(message):
-                creationError = message
-            }
-        }
-    }
-
-    private func closeSheet(presenting: ChatStore) {
-        presenting.isCreateRoomPresented = false
-        presenting.createRoomParentID = nil
-        dismiss()
-    }
-
-    private func cancel() {
-        store.createRoomParentID = nil
-        dismiss()
     }
 }

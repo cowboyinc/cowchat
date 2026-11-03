@@ -541,20 +541,24 @@ final class SocialStore: ObservableObject {
         }
     }
 
+    /// Makes an account room from New room's draft and invites the people picked. They are friends, or people of the
+    /// company room it is made inside, whom the server lets the person invite (a question for Chad beside his task 4).
     func createRoom(_ draft: SocialRoomDraft) async -> String? {
         let ticket = generation
         var roomID: String?
-        let others = draft.friendIDs.dropFirst().compactMap { id in friends.first { $0.id == id } }
+        let others = Array(draft.friendIDs.dropFirst())
         let first = friends.first { $0.id == draft.friendID }
         let body = !others.isEmpty ? first.map(draft.requestBody(inviting:)) ?? draft.requestBody : draft.requestBody
         await perform { api in
             struct Reply: Decodable { let roomId: String }
             let reply: Reply = try await api.social(["rooms"], method: "POST", body: body)
             roomID = ticket == self.generation ? reply.roomId : nil
-            // Room creation invites one friend; the rest go through the room's invitations (Chad's plan, task 4).
-            for friend in others where ticket == self.generation {
+            // Room creation invites one person; the rest go through the room's invitations (Chad's plan, task 4).
+            for id in others where ticket == self.generation {
+                let invitation = self.friends.first { $0.id == id }.map(draft.invitationBody(for:))
+                    ?? ["friend_id": id, "proposed_agent_ids": [String]()]
                 let _: SocialAcknowledgement = try await api.social(["rooms", reply.roomId, "invitations"],
-                                                                     method: "POST", body: draft.invitationBody(for: friend))
+                                                                     method: "POST", body: invitation)
             }
         }
         return roomID

@@ -66,19 +66,21 @@ struct SocialInvitationReview: View {
                 .gallopText(.caption, color: SemanticColor.textTertiary)
             VStack(spacing: 0) {
                 // copy:
-                JoinSessionRow(harness: nil, name: "No session", place: nil, isChosen: selectedSession == nil) {
+                SheetChoiceRow(name: "No session", isChosen: selectedSession == nil) {
                     selectedSession = nil
                 }
                 ForEach(showsAllSessions ? sessions : picked) { session in
                     PageRowSeam()
-                    JoinSessionRow(harness: session.harness, name: sessionName(session), place: session.place,
+                    SheetChoiceRow(name: sessionName(session), fact: session.place,
                                    isChosen: selectedSession == session.id) {
                         selectedSession = session.id
+                    } mark: {
+                        HarnessMark(harness: session.harness, size: 24)
                     }
                 }
                 if hidden > 0 {
                     SessionsMoreRow(title: LiveSessions.moreTitle(hidden: hidden, showsAll: showsAllSessions),
-                                    indent: JoinSessionRow.nameLeading, surface: .page) {
+                                    indent: SheetChoiceRow<EmptyView>.nameLeading, surface: .page) {
                         showsAllSessions.toggle()
                     }
                 }
@@ -112,59 +114,5 @@ struct SocialInvitationReview: View {
         }
         .buttonStyle(CowchatPillButtonStyle())
         .disabled(busy)
-    }
-}
-
-/// One choice in the Join sheet, from the agents row's parts with Inbox spacing: 44 tall, 16 in, the 24 harness mark,
-/// 12, the name in Body M, the place in Body S Text/Tertiary (100, right-aligned), 12, and a 16 slot that holds the
-/// tick on the chosen row, then 16. "No session" has no mark and no place. The choice has no fill, and the hover is the
-/// page rows'.
-private struct JoinSessionRow: View {
-    /// Where the names start: the 16 in, the 24 mark and the 12 after it.
-    static let nameLeading: CGFloat = 16 + 24 + 12
-
-    let harness: LiveSession.Harness?
-    let name: String
-    let place: String?
-    let isChosen: Bool
-    let choose: () -> Void
-
-    var body: some View {
-        Button(action: choose) {
-            HStack(spacing: 0) {
-                ZStack {
-                    if let harness { HarnessMark(harness: harness, size: 24) }
-                }
-                .frame(width: 24, height: 24)
-                Spacer().frame(width: 12)
-                Text(name)
-                    .gallopText(.bodyM, color: SemanticColor.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if let place {
-                    Text(place)
-                        .gallopText(.bodyS, color: SemanticColor.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(width: 100, alignment: .trailing)
-                }
-                Spacer().frame(width: 12)
-                ZStack {
-                    if isChosen {
-                        GallopIconView(icon: .checkmark, fallbackSystemName: "checkmark", size: 16)
-                            .foregroundStyle(SemanticColor.iconPrimary)
-                    }
-                }
-                .frame(width: 16, height: 16)
-            }
-            .padding(.horizontal, 16)
-            .frame(height: 44)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PageRowButtonStyle())
-        // copy:
-        .macAccessibleAction(label: [name, place].compactMap { $0 }.joined(separator: ", "),
-                             value: isChosen ? "chosen" : nil, action: choose)
     }
 }

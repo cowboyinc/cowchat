@@ -52,6 +52,10 @@ struct ConnectionProfile: Equatable, CustomStringConvertible, CustomDebugStringC
     /// default; only an API key is required to join.
     static let defaultGlobalURLString = "wss://chat.cowchat.cowboy.inc/ws"
 
+    /// A connection's server as a sheet names it, such as New room's Server line: its address's host. The key is never
+    /// shown. The prototype puts its own in, so the sheet shows Cowboy's host and not its simulated server's.
+    @MainActor static var displayHost: (ConnectionProfile) -> String? = { $0.endpointURL?.host }
+
     static let local = ConnectionProfile(
         kind: .local,
         localHost: "127.0.0.1",

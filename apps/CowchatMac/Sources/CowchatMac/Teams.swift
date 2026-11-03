@@ -10,8 +10,8 @@ struct SocialTeam: Decodable, Identifiable, Equatable {
 }
 
 /// The account's teams and the one chosen in the sidebar's team row. The choice is kept on this Mac, per
-/// account. The Team page lists the chosen team's people, and New room puts a room inside the chosen team's company
-/// room. With no teams listed, both do what they did before.
+/// account. The Team page lists the chosen team's people, and New room's Inside lists the teams' company rooms. With no
+/// teams listed, the Team page does what it did before.
 @MainActor
 final class TeamChoice: ObservableObject {
     @Published private(set) var teams: [SocialTeam] = []

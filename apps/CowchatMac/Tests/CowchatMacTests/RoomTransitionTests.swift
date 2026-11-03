@@ -2052,13 +2052,12 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
-    func testDestroyedRoomClearsRenameAndSubroomCreationState() throws {
+    func testDestroyedRoomClearsRenameState() throws {
         let parent = try decodeRoom(id: "parent", name: "Parent")
         let connection = MockRoomConnection()
         let store = makeStore(connection: connection)
         store.rooms = [parent]
         store.roomBeingRenamed = parent
-        store.presentCreateRoom(parentID: parent.id)
 
         connection.onEvent?("room_destroyed", ["room_id": parent.id])
         connection.onEvent?("room_updated", [
@@ -2069,8 +2068,6 @@ final class RoomTransitionTests: XCTestCase {
         ])
 
         XCTAssertNil(store.roomBeingRenamed)
-        XCTAssertNil(store.createRoomParentID)
-        XCTAssertFalse(store.isCreateRoomPresented)
         XCTAssertFalse(store.rooms.contains(where: { $0.id == parent.id }))
     }
 
