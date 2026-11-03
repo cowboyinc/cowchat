@@ -80,7 +80,8 @@ struct TeamPage: View {
                 }
             }
             .frame(maxWidth: PageLayout.listWidth, alignment: .leading)
-            .padding(.top, PageLayout.listTop)
+            // The labels' line has no inset above its text.
+            .padding(.top, PageLayout.listTop(firstTextInset: 0))
             .padding(.bottom, 16)
             .padding(.horizontal, PageLayout.listInset)
             .reportsPageRowsWidth()
@@ -95,6 +96,10 @@ struct TeamPage: View {
 struct TeamGroupHead: View {
     let title: String
     let person: SocialAccount?
+
+    static let height: CGFloat = 32
+    /// How far under the head's top its title's line of 20 starts, centred in the head.
+    static var textInset: CGFloat { (height - 20) / 2 }
 
     init(person: SocialAccount) {
         title = person.displayName
@@ -116,7 +121,7 @@ struct TeamGroupHead: View {
             Spacer(minLength: 0)
         }
         .padding(.leading, 16)
-        .frame(height: 32)
+        .frame(height: Self.height)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
     }

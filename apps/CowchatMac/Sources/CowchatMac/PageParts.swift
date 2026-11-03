@@ -9,16 +9,21 @@ enum PageLayout {
     /// Where an empty page's line sits: 20 in from the card's edge and 40 under the header.
     static let emptyLeading: CGFloat = 20
     static let emptyTop: CGFloat = 40
-    /// The gap between the header and a page's list, as production puts 32 under a page head and the house rule spaces
-    /// sections (navigation round 2, section 4.2).
-    static let listTop: CGFloat = 32
+    /// The gap from the header's end to a page list's first line of text, as production puts 32 under a page head and
+    /// the house rule spaces sections (navigation round 2, section 4.2 as amended).
+    static let headerGap: CGFloat = 32
+
+    /// The space above a page's list: the header's gap less the list's own inset above its first line of text.
+    static func listTop(firstTextInset: CGFloat) -> CGFloat {
+        headerGap - firstTextInset
+    }
 }
 
-/// A page's header, drawn as a room's is: 58 tall with 10 above, the title in Heading 4 at 18 from the card's edge, an
-/// optional line under it in Caption, Text/Tertiary, and an accessory at the trailing end, 20 in. The title keeps its
-/// place whether or not there is a line under it, so it does not move between a room and a page. It is as wide as the
-/// page's rows and their insets (`rowsWidth`), so its end stays over theirs when a legacy scroller takes the list's
-/// right edge.
+/// A page's header, drawn as a room's is: 10 above, the title in Heading 4 at 18 from the card's edge, an optional line
+/// under it in Caption, Text/Tertiary, and an accessory at the trailing end, 20 in. With a line it is 58 tall, as a
+/// room's is. With none it keeps no empty line and ends under its title, or under its accessory if that is taller
+/// (navigation round 2, section 4.2 as amended). It is as wide as the page's rows and their insets (`rowsWidth`), so its
+/// end stays over theirs when a legacy scroller takes the list's right edge.
 struct PageHeader<Accessory: View>: View {
     let title: String
     var caption: String?
@@ -40,12 +45,11 @@ struct PageHeader<Accessory: View>: View {
                     .gallopText(.h4, color: SemanticColor.textPrimary)
                     .lineLimit(1)
                     .accessibilityAddTraits(.isHeader)
-                // A page with no line holds its place, so the title sits where a room's does.
-                Text(caption ?? " ")
-                    .gallopText(.caption, color: SemanticColor.textTertiary)
-                    .lineLimit(1)
-                    .opacity(caption == nil ? 0 : 1)
-                    .accessibilityHidden(caption == nil)
+                if let caption {
+                    Text(caption)
+                        .gallopText(.caption, color: SemanticColor.textTertiary)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 12)
             accessory()
@@ -53,7 +57,7 @@ struct PageHeader<Accessory: View>: View {
         .padding(.top, 10)
         .padding(.leading, 18)
         .padding(.trailing, 20)
-        .frame(height: 58)
+        .frame(height: caption == nil ? nil : 58)
         .frame(maxWidth: rowsWidth ?? PageLayout.headerWidth, alignment: .leading)
     }
 }

@@ -56,7 +56,7 @@ struct InboxPage: View {
                     }
                 }
                 .frame(maxWidth: PageLayout.listWidth, alignment: .leading)
-                .padding(.top, PageLayout.listTop)
+                .padding(.top, PageLayout.listTop(firstTextInset: InboxRow.textInset))
                 .padding(.bottom, 16)
             }
             .padding(.horizontal, PageLayout.listInset)
@@ -108,6 +108,9 @@ struct InboxRow: View {
     let decline: (() -> Void)?
 
     static let height: CGFloat = 74
+    /// How far under the row's top its first line of text starts: the title's and the message's lines of 20, with 2
+    /// between, are centred in the row.
+    static var textInset: CGFloat { (height - 20 - 2 - 20) / 2 }
     static let roomWidth: CGFloat = 160
     static let whenWidth: CGFloat = 80
     static let titleMinWidth: CGFloat = 240

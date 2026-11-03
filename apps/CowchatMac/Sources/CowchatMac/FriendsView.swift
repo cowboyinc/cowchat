@@ -233,7 +233,7 @@ struct FriendsPage: View {
                 }
             }
             .frame(maxWidth: PageLayout.listWidth, alignment: .leading)
-            .padding(.top, PageLayout.listTop)
+            .padding(.top, PageLayout.listTop(firstTextInset: TeamGroupHead.textInset))
             .padding(.bottom, 16)
             .padding(.horizontal, PageLayout.listInset)
             .reportsPageRowsWidth()
