@@ -35,8 +35,6 @@ final class OriginalNativeImageCache: @unchecked Sendable {
 public enum GallopIcon: String, CaseIterable, Sendable {
     case add
     case arrowUpRight = "arrow-up-right"
-    /// The menu bar item's glyph, which carries the Inbox's unread count beside it.
-    case bell
     /// A run of agent messages a room folds away.
     case chatbot
     /// The Join sheet's tick on the chosen session.
@@ -138,9 +136,6 @@ public enum GallopIcon: String, CaseIterable, Sendable {
     static func nativeImage(for icon: GallopIcon, in bundle: Bundle?) -> NSImage? {
         icon.nativeImage(in: bundle)
     }
-
-    /// The glyph as a template image from the app's bundle, for AppKit places such as the menu bar.
-    var templateImage: NSImage? { nativeImage(in: Self.resourceBundle) }
 
     private func nativeImage(in bundle: Bundle?) -> NSImage? {
         guard let url = bundle?.url(forResource: "Icons/svg/\(rawValue)", withExtension: "svg"),

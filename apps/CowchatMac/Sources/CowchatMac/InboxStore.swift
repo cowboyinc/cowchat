@@ -136,8 +136,6 @@ extension InboxItem {
 final class InboxStore: ObservableObject {
     /// How many of a community room's newest messages are read for mentions when the room has moved on.
     static let communityDepth = 50
-    /// How many items the menu bar's panel shows.
-    static let panelLimit = 4
 
     /// Every item, in the Inbox's order.
     @Published private(set) var items: [InboxItem] = []
@@ -146,8 +144,6 @@ final class InboxStore: ObservableObject {
     @Published private(set) var readIDs: Set<String> = []
     /// The open invitation whose Join sheet is showing.
     @Published var joining: InboxItem?
-    /// Whether the menu bar's panel is open.
-    @Published var isPanelShown = false
 
     /// Where the read state is kept: the workspace's defaults, which also hold the app's settings.
     let defaults: UserDefaults
@@ -173,7 +169,6 @@ final class InboxStore: ObservableObject {
         items = []
         isLoaded = false
         joining = nil
-        isPanelShown = false
         invitations = [:]
         communityMentions = [:]
         readIDs = scope.flatMap { defaults.array(forKey: Self.readStateKey(accountScope: $0)) as? [String] }
@@ -184,16 +179,11 @@ final class InboxStore: ObservableObject {
 
     func isUnread(_ item: InboxItem) -> Bool { !readIDs.contains(item.id) }
 
-    /// Every unread item, open invitations included, which the sidebar, the menu bar and the Dock show.
+    /// Every unread item, open invitations included, which the sidebar and the Dock show.
     var unreadCount: Int { items.filter(isUnread).count }
 
     /// Whether Mark all read has anything to do: an unread item that is not an open invitation.
     var hasUnreadMessages: Bool { items.contains { !$0.isOpenInvitation && isUnread($0) } }
-
-    /// The menu bar panel's items: the newest unread ones.
-    var newestUnread: [InboxItem] {
-        Array(items.filter(isUnread).sorted { ($0.at, $0.id) > ($1.at, $1.id) }.prefix(Self.panelLimit))
-    }
 
     func markRead(_ item: InboxItem) { setRead(readIDs.union([item.id])) }
 

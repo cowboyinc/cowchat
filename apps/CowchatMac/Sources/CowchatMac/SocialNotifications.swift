@@ -117,8 +117,8 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
     private var activeScope: String?
     private var sessionConfigured = false
     private var pendingOpen: (String, SocialDestination)?
-    /// Opens the Inbox, for a click on an Inbox item's notification.
-    var onOpenInbox: (() -> Void)?
+    /// Opens an Inbox message's room, for a click on its notification, by the item's ID.
+    var onOpenInboxItem: ((String) -> Void)?
     private static let enabledKey = "CowchatMac.notifications.enabled"
     private static let requestsKey = "CowchatMac.notifications.friendRequests"
     private static let acceptedKey = "CowchatMac.notifications.acceptedRequests"
@@ -191,7 +191,7 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
     }
 
     /// A notification for each Inbox message that arrived since the last poll. Invitations notify as room invitations
-    /// already do, so they are left out here. Clicking one opens the Inbox.
+    /// already do, so they are left out here. Clicking one opens the message's room.
     func receiveInbox(_ items: [InboxItem], session: SocialSession, title: (InboxItem) -> String) {
         let snapshot = SocialNotificationSnapshot(session: session, requests: [], invitations: [])
         guard activeScope == snapshot.deliveryScope else { return }
@@ -204,15 +204,8 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
         let arrived = messages.filter { fresh.contains($0.id) }
         guard enabled, let center, !arrived.isEmpty else { return }
         let scope = snapshot.deliveryScope
-        let contents = arrived.map { item -> (String, UNMutableNotificationContent) in
-            let content = UNMutableNotificationContent()
-            content.title = title(item)
-            content.subtitle = item.roomName
-            content.body = item.message
-            content.sound = .default
-            content.threadIdentifier = "cowchat-inbox.\(scope)"
-            content.userInfo = ["scope": scope, "inbox": true]
-            return ("\(scope).inbox.\(item.id)", content)
+        let contents = arrived.map { item in
+            ("\(scope).inbox.\(item.id)", Self.inboxContent(for: item, title: title(item), scope: scope))
         }
         Task {
             let status = await center.notificationSettings().authorizationStatus
@@ -224,6 +217,20 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
                 catch { errorMessage = "The notification could not be delivered. \(error.localizedDescription)" }
             }
         }
+    }
+
+    nonisolated static let inboxItemKey = "inboxItem"
+
+    /// An Inbox message's notification: who sent it, the room, the message, and the item's ID, which a click opens.
+    static func inboxContent(for item: InboxItem, title: String, scope: String) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.subtitle = item.roomName
+        content.body = item.message
+        content.sound = .default
+        content.threadIdentifier = "cowchat-inbox.\(scope)"
+        content.userInfo = ["scope": scope, inboxItemKey: item.id]
+        return content
     }
 
     func refreshAuthorization() async {
@@ -292,13 +299,13 @@ final class SocialNotifications: NSObject, ObservableObject, UNUserNotificationC
         let info = response.notification.request.content.userInfo
         let scope = info["scope"] as? String
         let section = (info["section"] as? String).flatMap(SocialDestination.init(rawValue:))
-        let opensInbox = info["inbox"] as? Bool == true
+        let inboxItemID = info[Self.inboxItemKey] as? String
         Task { @MainActor in
             if response.actionIdentifier == UNNotificationDefaultActionIdentifier, let scope {
                 if let section {
                     open(scope: scope, section: section)
-                } else if opensInbox, scope == activeScope {
-                    onOpenInbox?()
+                } else if let inboxItemID, scope == activeScope {
+                    onOpenInboxItem?(inboxItemID)
                     NSApplication.shared.activate(ignoringOtherApps: true)
                     NSApplication.shared.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
                 }

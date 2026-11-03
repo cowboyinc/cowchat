@@ -328,7 +328,7 @@ final class WorkspaceStore: ObservableObject {
 
     func start() {
         local.start()
-        notifications.onOpenInbox = { [weak self] in self?.show(.inbox) }
+        notifications.onOpenInboxItem = { [weak self] id in Task { await self?.openInboxItem(id: id) } }
         notifications.setSession(social.savedSession)
         social.startMonitoring()
         global?.start()
@@ -411,6 +411,16 @@ final class WorkspaceStore: ObservableObject {
         }
         await select(room: room, on: item.server)
         if isSelected(room, on: item.server) { inbox.markRead(item) }
+    }
+
+    /// A click on an Inbox message's notification: the message's room opens, as pressing its row does. An item the
+    /// Inbox no longer holds, or an open invitation, opens the Inbox.
+    func openInboxItem(id: String) async {
+        guard let item = inbox.items.first(where: { $0.id == id }), !item.isOpenInvitation else {
+            show(.inbox)
+            return
+        }
+        await open(item)
     }
 
     /// Join in the Join sheet: accepts the invitation with the chosen session, or none, then opens the room. The item

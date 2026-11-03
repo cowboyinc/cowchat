@@ -195,20 +195,31 @@ final class InboxTeamTests: XCTestCase {
         XCTAssertNil(inbox.items.first { $0.id == open.id })
     }
 
-    func testThePanelShowsTheFourNewestUnread() throws {
+    /// The Dock's badge is the unread count, open invitations included, with nothing at zero or while signed out.
+    func testTheDockBadge() throws {
+        let inbox = InboxStore(defaults: defaults())
+        XCTAssertNil(InboxDockBadge.label(for: inbox), "Signed out")
+        inbox.use(account: chad, scope: "scope")
+        XCTAssertNil(InboxDockBadge.label(for: inbox), "Nothing yet")
+        try receive(chadsWire, into: inbox)
+        XCTAssertEqual(InboxDockBadge.label(for: inbox), "\(inbox.unreadCount)")
+        inbox.markAllRead()
+        XCTAssertEqual(InboxDockBadge.label(for: inbox), "1", "The open invitation")
+    }
+
+    /// A message's notification carries the item's ID, which a click opens, and no section, which would open a page.
+    func testAMessagesNotificationCarriesItsItem() throws {
         let inbox = InboxStore(defaults: defaults())
         inbox.use(account: chad, scope: "scope")
-        let more = (0..<4).map { index in
-            message("extra-\(index)", kind: "marked",
-                    sender: #"{"kind":"agent","account":\#(account(chad)),"agent_id":"a","name":"x"}"#,
-                    at: "2026-11-01T17:0\(index):00.000Z", content: "Older \(index)")
-        }
-        try receive(chadsWire + more, into: inbox)
-        XCTAssertEqual(inbox.newestUnread.map(\.id), [
-            "message.ledger-5", "invitation.invitation-1", "message.home-c-4", "message.district-3",
-        ])
-        inbox.markRead(try XCTUnwrap(inbox.items.first { $0.id == "message.ledger-5" }))
-        XCTAssertEqual(inbox.newestUnread.last?.id, "message.extra-3")
+        try receive(chadsWire, into: inbox)
+        let message = try XCTUnwrap(inbox.items.first { !$0.isInvitation })
+        let content = SocialNotifications.inboxContent(for: message, title: "Theo Park", scope: "scope.session")
+        XCTAssertEqual(content.title, "Theo Park")
+        XCTAssertEqual(content.subtitle, message.roomName)
+        XCTAssertEqual(content.body, message.message)
+        XCTAssertEqual(content.userInfo[SocialNotifications.inboxItemKey] as? String, message.id)
+        XCTAssertEqual(content.userInfo["scope"] as? String, "scope.session")
+        XCTAssertNil(content.userInfo["section"])
     }
 
     // MARK: Team
