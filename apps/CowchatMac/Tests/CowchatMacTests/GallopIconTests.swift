@@ -10,6 +10,16 @@ final class GallopIconTests: XCTestCase {
         }
     }
 
+    /// The sidebar's online place icon and its two down states, from Gallop's Network family (navigation note,
+    /// sections 3.4 and 3.11).
+    func testTheNetworkIconsResolve() {
+        let icons: [GallopIcon] = [.network, .networkDown, .networkError]
+        XCTAssertEqual(icons.map(\.rawValue), ["network", "network-down", "network-error"])
+        for icon in icons {
+            XCTAssertNotNil(icon.image, icon.rawValue)
+        }
+    }
+
     func testBundleHasNoOrphanSVGs() throws {
         let bundle = try XCTUnwrap(
             SeasonFontProvider.resourceBundle(searching: SeasonFontProvider.resourceBundleCandidates)

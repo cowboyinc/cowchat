@@ -164,7 +164,7 @@ struct CowchatMacApp: App {
             }
             CommandGroup(replacing: .appSettings) {
                 // copy:
-                Button("Settings…") { NotificationCenter.default.post(name: .cowchatShowSettings, object: nil) }
+                Button("Settings…", action: SettingsCommand.perform)
                     .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(after: .newItem) {
@@ -183,6 +183,13 @@ struct CowchatMacApp: App {
                 .keyboardShortcut("s", modifiers: [.control, .command])
             }
         }
+    }
+}
+
+/// The app menu's Settings… (⌘,): the window shows its Settings sheet, since the app has no Settings scene.
+enum SettingsCommand {
+    static func perform() {
+        NotificationCenter.default.post(name: .cowchatShowSettings, object: nil)
     }
 }
 
