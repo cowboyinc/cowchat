@@ -58,10 +58,11 @@ struct TeamPage: View {
             LazyVStack(alignment: .leading, spacing: 32) {
                 ForEach(team.shownGroups) { group in
                     VStack(alignment: .leading, spacing: 0) {
-                        // The labels are the list's column heads, on their own line 4 over the first shown head.
+                        // The labels are the list's column heads, on their own line over the first shown head, 16 clear
+                        // of its avatar, which sits 4 into the head.
                         if group.id == team.shownGroups.first?.id {
                             TeamColumnLabels()
-                                .padding(.bottom, 4)
+                                .padding(.bottom, 12)
                         }
                         TeamGroupHead(person: group.person)
                         ForEach(team.rows(of: group)) { branch in
@@ -130,13 +131,10 @@ struct TeamGroupHead: View {
 
 /// The Team page's column labels (navigation round 2, section 4.3), once, on their own 20 line over the first shown
 /// person's head: "Branch" over the branch names, then "Repo", "Pull request" and "State" in Body S, Text/Tertiary,
-/// laid out with the rows' own widths. Repo ends where its column ends. Pull request and State end where their words
-/// end, 22 before their columns end, since a 16 mark slot and its 6 follow the words. A screen reader hears the
-/// columns in each row's label instead.
+/// laid out with the rows' own widths. Each of the three ends where its column ends, as its values do, so a pull
+/// request's checks mark and a state's spinner end under their label's end. A screen reader hears the columns in each
+/// row's label instead.
 struct TeamColumnLabels: View {
-    /// The 6 and the 16 mark slot after a pull request's number and a state's word.
-    private static let markSlot: CGFloat = 6 + 16
-
     var body: some View {
         HStack(spacing: 0) {
             // copy:
@@ -149,11 +147,11 @@ struct TeamColumnLabels: View {
             label("Repo", width: TeamRow.repoWidth)
             Spacer().frame(width: TeamRow.gap)
             // copy:
-            label("Pull request", width: TeamRow.pullRequestWidth - Self.markSlot)
-            Spacer().frame(width: Self.markSlot + TeamRow.gap)
+            label("Pull request", width: TeamRow.pullRequestWidth)
+            Spacer().frame(width: TeamRow.gap)
             // copy:
-            label("State", width: TeamRow.stateWidth - Self.markSlot)
-            Spacer().frame(width: Self.markSlot + TeamRow.endWidth)
+            label("State", width: TeamRow.stateWidth)
+            Spacer().frame(width: TeamRow.endWidth)
         }
         .padding(.leading, TeamRow.leading)
         .frame(height: 20)
