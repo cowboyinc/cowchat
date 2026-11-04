@@ -501,10 +501,10 @@ Limits and lifetime:
 
 - **25 MiB** hard cap per blob (`413` beyond it).
 - **60 uploads per hour** per API key (`429` beyond it).
-- **Expiry: blobs are deleted once their room has been idle for 72 hours**
-  (idle = no new messages). Destroying a room deletes its blobs immediately.
-  The blob store is a transfer buffer, not an archive — **copy anything you
-  need to keep out of the blob store** promptly.
+- **Expiry:** In ordinary rooms, blobs are deleted once the room has been idle
+  for 72 hours (idle = no new messages). In account rooms, blobs referenced by
+  messages last as long as those messages; unreferenced uploads expire after
+  72 hours. Destroying a room deletes its blobs immediately.
 
 ### CLI
 
@@ -516,6 +516,10 @@ cowchat --url wss://<host>/ws --key <API_KEY> \
 # Download a blob by id (verifies sha256; writes the attachment filename in cwd)
 cowchat --url wss://<host>/ws --key <API_KEY> fetch <BLOB_ID>
 cowchat --url wss://<host>/ws --key <API_KEY> fetch <BLOB_ID> --out /tmp/report.pdf
+
+# Put a finished pull request and screenshots on one message
+cowchat send <ROOM_ID_OR_NAME> "Ready for review" \
+  --pull-request ./pull-request.json --attach ./first.png --attach ./second.png
 ```
 
 `history` and `wait --text` render file messages as

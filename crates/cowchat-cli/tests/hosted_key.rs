@@ -346,6 +346,53 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
     .unwrap();
     assert!(!oversized.status.success());
     assert_eq!(store.get_presence(&id).unwrap().unwrap().0, "prompt");
+    let pull_request = dir.path().join("pull-request.json");
+    std::fs::write(
+        &pull_request,
+        serde_json::json!({
+            "repository":"cowboyinc/cowchat", "number":90, "title":"Finish work",
+            "checks":"passing", "additions":12, "deletions":3,
+            "address":"https://github.com/cowboyinc/cowchat/pull/90"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let screenshot_a = dir.path().join("first.png");
+    let screenshot_b = dir.path().join("second.png");
+    std::fs::write(&screenshot_a, b"first screenshot").unwrap();
+    std::fs::write(&screenshot_b, b"second screenshot").unwrap();
+    let finished = bound_command(&[
+        "--agent-id",
+        &id,
+        "send",
+        room,
+        "ready for review",
+        "--pull-request",
+        pull_request.to_str().unwrap(),
+        "--attach",
+        screenshot_a.to_str().unwrap(),
+        "--attach",
+        screenshot_b.to_str().unwrap(),
+    ])
+    .await
+    .unwrap();
+    assert!(
+        finished.status.success(),
+        "{}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    let history = store.get_history(room, 10, None).unwrap();
+    let finished_message = history.last().unwrap();
+    assert_eq!(finished_message.metadata["pull_request"]["number"], 90);
+    let attachments = finished_message.metadata["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 2);
+    let blob_ids = attachments
+        .iter()
+        .map(|file| file["blob_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    for blob_id in &blob_ids {
+        assert!(store.get_blob(blob_id).unwrap().is_some());
+    }
     let shared = store
         .social_action(
             owner["device_key"].as_str().unwrap(),

@@ -1757,13 +1757,21 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT blob_id FROM blobs b
                  WHERE b.room_id NOT IN (SELECT room_id FROM rooms)
-                    OR MAX(
+                    OR (b.room_id IN (SELECT room_id FROM social_rooms)
+                        AND b.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+                        AND NOT EXISTS (
+                            SELECT 1 FROM messages m WHERE m.room_id = b.room_id
+                            AND (json_extract(m.metadata, '$.blob_id') = b.blob_id
+                                OR EXISTS (SELECT 1 FROM json_each(m.metadata, '$.attachments') a
+                                    WHERE json_extract(a.value, '$.blob_id') = b.blob_id))
+                        ))
+                    OR (b.room_id NOT IN (SELECT room_id FROM social_rooms) AND MAX(
                          COALESCE(
                              (SELECT MAX(m.created_at) FROM messages m WHERE m.room_id = b.room_id),
                              b.created_at
                          ),
                          b.created_at
-                       ) < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+                       ) < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1))",
             )?;
             let ids = stmt
                 .query_map(params![modifier], |row| row.get::<_, String>(0))?
@@ -3770,6 +3778,75 @@ mod tests {
             assert!(store.get_blob(&gone.blob_id).unwrap().is_none());
             assert!(!store.blob_file_path(&gone.blob_id).exists());
         }
+        let _ = std::fs::remove_dir_all(store.blob_dir());
+    }
+
+    #[test]
+    fn social_room_attachment_outlives_idle_window_until_its_message_is_removed() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room("social", "social", None, None, Some("a"))
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO social_rooms(room_id,owner_id) VALUES('social','owner')",
+                [],
+            )
+            .unwrap();
+        let attached = store
+            .add_blob("social", "screen.png", b"screenshot")
+            .unwrap();
+        let abandoned = store
+            .add_blob("social", "abandoned.png", b"unused")
+            .unwrap();
+        store
+            .insert_message(
+                "finished",
+                "social",
+                "a",
+                "A",
+                "done",
+                None,
+                &serde_json::json!({"attachments":[{"blob_id":attached.blob_id}]}),
+            )
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE messages SET created_at='2000-01-01T00:00:00.000Z' WHERE room_id='social'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE blobs SET created_at='2000-01-01T00:00:00.000Z' WHERE room_id='social'",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            store
+                .sweep_blobs(3600, std::time::Duration::from_secs(3600))
+                .unwrap(),
+            1
+        );
+        assert!(store.get_blob(&attached.blob_id).unwrap().is_some());
+        assert!(store.get_blob(&abandoned.blob_id).unwrap().is_none());
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM messages WHERE message_id='finished'", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .sweep_blobs(3600, std::time::Duration::from_secs(3600))
+                .unwrap(),
+            1
+        );
+        assert!(store.get_blob(&attached.blob_id).unwrap().is_none());
         let _ = std::fs::remove_dir_all(store.blob_dir());
     }
 

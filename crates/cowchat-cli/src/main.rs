@@ -292,6 +292,12 @@ enum Commands {
         /// to `addressed`-mode actor subscriptions.
         #[arg(long = "mention")]
         mentions: Vec<String>,
+        /// JSON file describing a finished pull request to show with the message.
+        #[arg(long)]
+        pull_request: Option<PathBuf>,
+        /// Attach a file to this message (repeatable).
+        #[arg(long = "attach")]
+        attachments: Vec<PathBuf>,
     },
 
     /// Post a "thinking out loud" pulse to a room (persisted to history,
@@ -1257,6 +1263,112 @@ fn content_disposition_filename(header: &str) -> Option<String> {
     (!base.is_empty()).then(|| base.to_string())
 }
 
+fn read_pull_request(
+    path: &std::path::Path,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    if bytes.len() > 16 * 1024 {
+        return Err("pull request JSON exceeds 16 KiB".into());
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let required_text = |field: &str| value[field].as_str().is_some_and(|s| !s.trim().is_empty());
+    let address_valid = value["address"].as_str().is_some_and(|address| {
+        reqwest::Url::parse(address).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+        })
+    });
+    if !required_text("repository")
+        || !required_text("title")
+        || !address_valid
+        || !value["number"].as_i64().is_some_and(|n| n > 0)
+        || ["additions", "deletions"].iter().any(|key| {
+            value
+                .get(*key)
+                .is_some_and(|n| !n.is_null() && !n.as_i64().is_some_and(|n| n >= 0))
+        })
+        || value.get("checks").is_some_and(|checks| {
+            !checks.is_null() && !matches!(checks.as_str(), Some("passing" | "failing" | "running"))
+        })
+    {
+        return Err("invalid pull request JSON".into());
+    }
+    Ok(value)
+}
+
+async fn upload_attachments(
+    cli: &Cli,
+    room: &str,
+    paths: &[PathBuf],
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    if paths.len() > 10 {
+        return Err("a message can carry at most 10 attachments".into());
+    }
+    for path in paths {
+        if !path.is_file() || std::fs::metadata(path)?.len() > 25 * 1024 * 1024 {
+            return Err(format!(
+                "attachment must be a file of at most 25 MiB: {}",
+                path.display()
+            )
+            .into());
+        }
+    }
+    let base = attachment_http_base(cli.url.as_deref())?;
+    let (room_id, key) =
+        if let Some(id) = resolve_agent_id(cli).filter(|id| id.starts_with("session:")) {
+            let url = cli
+                .url
+                .as_deref()
+                .ok_or("session attachment requires --url")?;
+            let (record, _) = session::load_bound(&id, url)?;
+            let room_id = session::room_id(&id, url, &record.session_token, room).await?;
+            (room_id, record.session_token)
+        } else {
+            let client = connect(cli).await?;
+            let room_id = resolve_room_id(&client, room).await?;
+            client.join_room(&room_id).await?;
+            if client.room_info(&room_id).await?["room"]["encrypted"] == true {
+                return Err("attachments cannot be sent to an encrypted room".into());
+            }
+            (room_id, load_key(&cli.key, cli.url.as_deref()))
+        };
+    let mut attached = Vec::with_capacity(paths.len());
+    for path in paths {
+        let bytes = std::fs::read(path)?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("attachment has no usable file name")?;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/api/rooms/{room_id}/blobs"))
+            .query(&[("name", name)])
+            .header("x-cowchat-key", &key)
+            .body(bytes.clone())
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.bytes().await?;
+        if status != reqwest::StatusCode::CREATED {
+            return Err(format!(
+                "upload failed ({status}): {}",
+                String::from_utf8_lossy(&body)
+            )
+            .into());
+        }
+        let blob: serde_json::Value = serde_json::from_slice(&body)?;
+        if blob["sha256"] != sha256_hex(&bytes) {
+            return Err("upload corrupted: sha256 mismatch".into());
+        }
+        attached.push(serde_json::json!({
+            "blob_id": blob["blob_id"], "name": blob["name"],
+            "size": blob["size"], "sha256": blob["sha256"],
+        }));
+    }
+    Ok(serde_json::Value::Array(attached))
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
@@ -2133,6 +2245,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             kind,
             end,
             mentions,
+            pull_request,
+            attachments,
         } => {
             // `--end` is sugar for `--kind conversation_end` (the two conflict at
             // the arg level, so at most one is set).
@@ -2149,6 +2263,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 external_display_flag(*display_external, resolve_agent_id(&cli).as_deref())
             {
                 metadata["display_external"] = serde_json::json!(display_external);
+            }
+            if let Some(path) = pull_request {
+                metadata["pull_request"] = read_pull_request(path)?;
+            }
+            if !attachments.is_empty() {
+                metadata["attachments"] = upload_attachments(&cli, room, attachments).await?;
             }
             let msg =
                 if let Some(id) = resolve_agent_id(&cli).filter(|id| id.starts_with("session:")) {

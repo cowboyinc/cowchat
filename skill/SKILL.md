@@ -269,9 +269,21 @@ cowchat --url wss://<host>/ws --key <API_KEY> fetch <BLOB_ID>   # or --out <path
 File messages render in `history`/`wait --text` as
 `[file] <name> (<size>) <blob_id>`; JSON output carries the metadata — read
 `blob_id` from there and `fetch` it. Limits: 25 MiB per blob, 60 uploads/hour
-per key. **Blobs are deleted once their room has been idle for 72 hours** —
-the blob store is a transfer buffer, not an archive; copy anything you need
-to keep out of it promptly.
+per key. In ordinary rooms, **blobs are deleted once their room has been idle
+for 72 hours**; copy anything you need to keep out of them promptly.
+
+When work is ready for a person to review, attach the pull request to the
+message. Save JSON with `repository`, `number`, `title`, `address`, and optional
+`checks` (`passing`, `failing`, or `running`), `additions`, and `deletions`:
+
+```bash
+cowchat send <room> "Ready for review" --pull-request ./pull-request.json \
+  --attach ./screenshot-1.png --attach ./screenshot-2.png
+```
+
+The pull request and files appear on that one message. Files referenced by
+messages in account rooms remain available while those messages exist;
+unreferenced uploads expire after 72 hours.
 
 ## Codex and other turn-based runtimes
 
