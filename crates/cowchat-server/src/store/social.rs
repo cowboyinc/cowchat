@@ -463,6 +463,18 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             });
         }
         anyhow::ensure!(p.session_id.is_none(), "invalid credential");
+        let total: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM social_sessions WHERE owner_id=?1",
+            [&p.account_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(total < 500, "session room limit reached");
+        let recent: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM social_sessions WHERE bot_id=?1 AND started_at>=unixepoch()-3600",
+            [&bot],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(recent < 60, "session creation rate limit reached");
 
         let owner_key = format!("social-account:{}:{bot}", p.account_id);
         tx.execute(
@@ -483,16 +495,22 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
         };
         let stem = super::normalize_room_name(stem).map_err(anyhow::Error::msg)?;
         let mut room_name = stem.clone();
-        let collision_stem = stem.chars().take(90).collect::<String>();
-        let mut suffix = 2;
-        while tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM rooms WHERE name=?1)",
-            [&room_name],
-            |row| row.get::<_, bool>(0),
-        )? {
-            room_name = format!("{collision_stem}-{suffix}");
-            suffix += 1;
-            room_name = super::normalize_room_name(&room_name).map_err(anyhow::Error::msg)?;
+        for attempt in 0..5 {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM rooms WHERE name=?1)",
+                [&room_name],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                break;
+            }
+            anyhow::ensure!(attempt < 4, "room name unavailable");
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            room_name = format!(
+                "{}-{}",
+                stem.chars().take(90).collect::<String>(),
+                &suffix[..8]
+            );
         }
         let room_id = uuid::Uuid::new_v4().to_string();
         tx.execute(
@@ -2476,6 +2494,9 @@ mod tests {
         );
         assert!(!store.social_identity_allowed(&first_id, bot_key));
         assert!(store.social_identity_allowed(&first_id, first_token));
+        assert!(store.social_touch_session(bot_key, &first_id).is_err());
+        assert!(store.social_end_session(bot_key, &first_id).is_err());
+        assert!(store.social_touch_session(second_token, &first_id).is_err());
         assert!(!store.social_identity_allowed(&first_id, other_bot_key));
         assert!(store
             .social_register_session(
@@ -2566,5 +2587,60 @@ mod tests {
                 "feature"
             )
             .is_err());
+        store.social_end_session(first_token, &first_id).unwrap();
+        assert!(store.social_principal(first_token).is_none());
+        assert!(store
+            .social_register_session(
+                bot_key,
+                &first_id,
+                "claude-one",
+                "claude",
+                "cowchat",
+                "main"
+            )
+            .is_err());
+        assert!(store
+            .social_register_session(
+                first_token,
+                &first_id,
+                "claude-one",
+                "claude",
+                "cowchat",
+                "main"
+            )
+            .is_err());
+        assert_eq!(
+            store.social_room_access(shared_room, first_token),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn bot_session_creation_is_hourly_bounded() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, _) = login(&store, "session-limit-owner");
+        let bot = store
+            .social_action(&owner_key, "POST", "agents", &json!({"name":"Cowbot"}))
+            .unwrap();
+        let key = bot["api_key"].as_str().unwrap();
+        let initial_rooms = store.list_rooms(None).unwrap().len();
+        for index in 0..60 {
+            let id = format!("session:{}", uuid::Uuid::new_v4());
+            store
+                .social_register_session(
+                    key,
+                    &id,
+                    "Agent",
+                    "codex",
+                    "repo",
+                    &format!("branch-{index}"),
+                )
+                .unwrap();
+        }
+        let excess = format!("session:{}", uuid::Uuid::new_v4());
+        assert!(store
+            .social_register_session(key, &excess, "Agent", "codex", "repo", "excess")
+            .is_err());
+        assert_eq!(store.list_rooms(None).unwrap().len(), initial_rooms + 60);
     }
 }
