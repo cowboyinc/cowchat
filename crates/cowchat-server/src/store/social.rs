@@ -366,7 +366,7 @@ fn invite(
 }
 impl Store {
     pub(super) fn initialize_social(&self) -> rusqlite::Result<()> {
-        self.conn.lock().unwrap().execute_batch("CREATE TABLE IF NOT EXISTS social_accounts(id TEXT PRIMARY KEY,handle TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL);
+        self.conn.lock().unwrap().execute_batch("CREATE TABLE IF NOT EXISTS social_accounts(id TEXT PRIMARY KEY,handle TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL,team_sharing INTEGER NOT NULL DEFAULT 0);
 CREATE UNIQUE INDEX IF NOT EXISTS social_accounts_handle_nocase ON social_accounts(handle COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS social_friend_links(account_id TEXT PRIMARY KEY,slug TEXT NOT NULL COLLATE NOCASE UNIQUE);
 CREATE TABLE IF NOT EXISTS social_identities(provider TEXT NOT NULL,subject TEXT NOT NULL,account_id TEXT NOT NULL,label TEXT NOT NULL,PRIMARY KEY(provider,subject));
@@ -377,7 +377,7 @@ CREATE TABLE IF NOT EXISTS social_agents(id TEXT PRIMARY KEY,owner_id TEXT NOT N
 CREATE TABLE IF NOT EXISTS social_friend_requests(id TEXT PRIMARY KEY,from_id TEXT NOT NULL,to_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE UNIQUE INDEX IF NOT EXISTS social_pending_friend ON social_friend_requests(from_id,to_id) WHERE status='pending';
 CREATE TABLE IF NOT EXISTS social_friends(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b));
-CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,kind TEXT NOT NULL DEFAULT 'chat');
 CREATE TABLE IF NOT EXISTS social_members(room_id TEXT NOT NULL,account_id TEXT NOT NULL,PRIMARY KEY(room_id,account_id));
 CREATE TABLE IF NOT EXISTS social_admissions(room_id TEXT NOT NULL,agent_id TEXT NOT NULL,PRIMARY KEY(room_id,agent_id));
 CREATE TABLE IF NOT EXISTS social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,room_name TEXT NOT NULL,token_digest TEXT UNIQUE,minted_by TEXT,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER,state TEXT NOT NULL DEFAULT 'idle');
@@ -400,6 +400,18 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             "social_sessions",
             "state",
             "TEXT NOT NULL DEFAULT 'idle'",
+        )?;
+        super::ensure_column_exists(
+            &conn,
+            "social_accounts",
+            "team_sharing",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        super::ensure_column_exists(
+            &conn,
+            "social_rooms",
+            "kind",
+            "TEXT NOT NULL DEFAULT 'chat'",
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS social_sessions_minted_by ON social_sessions(minted_by)",
@@ -655,6 +667,93 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             [session_id],
             |row| Ok(SessionState { agent_id: row.get(0)?, room_id: row.get(1)?, owner_id: row.get(2)?, state: row.get(3)? }),
         )?)
+    }
+
+    pub fn social_team(&self, key: &str, selected: Option<&str>) -> anyhow::Result<Value> {
+        let conn = self.conn.lock().unwrap();
+        let viewer = principal(&conn, key)?.ok_or_else(|| anyhow::anyhow!("unauthorized"))?;
+        anyhow::ensure!(viewer.agent_id.is_none(), "human approval required");
+        let sharing: bool = conn.query_row(
+            "SELECT team_sharing FROM social_accounts WHERE id=?1",
+            [&viewer.account_id],
+            |row| row.get(0),
+        )?;
+        let team_id: Option<String> = match selected {
+            Some(id) => conn.query_row(
+                "SELECT s.room_id FROM social_rooms s JOIN social_members m ON m.room_id=s.room_id WHERE s.room_id=?1 AND s.kind='team' AND m.account_id=?2",
+                params![id, viewer.account_id], |row| row.get(0),
+            ).optional()?,
+            None => conn.query_row(
+                "SELECT s.room_id FROM social_rooms s JOIN social_members m ON m.room_id=s.room_id JOIN rooms r ON r.room_id=s.room_id WHERE s.kind='team' AND m.account_id=?1 ORDER BY r.name,s.room_id LIMIT 1",
+                [&viewer.account_id], |row| row.get(0),
+            ).optional()?,
+        };
+        anyhow::ensure!(selected.is_none() || team_id.is_some(), "not found");
+        let Some(team_id) = team_id else {
+            return Ok(json!({"sharing":sharing,"people":[]}));
+        };
+        let mut members = conn.prepare(
+            "SELECT a.id FROM social_members m JOIN social_accounts a ON a.id=m.account_id WHERE m.room_id=?1 AND a.team_sharing=1 ORDER BY a.display_name,a.id",
+        )?;
+        let member_ids = members
+            .query_map([&team_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(members);
+        let mut people = Vec::new();
+        for member in member_ids {
+            let mut sessions = conn.prepare(
+                "SELECT s.id,s.folder,s.branch,s.state,s.started_at,s.room_id,s.room_name,\
+                 EXISTS(SELECT 1 FROM social_members m WHERE m.room_id=s.room_id AND m.account_id=?2) \
+                 FROM social_sessions s JOIN social_agents b ON b.id=s.bot_id AND b.revoked=0 \
+                 WHERE s.owner_id=?1 AND s.ended_at IS NULL ORDER BY s.started_at DESC,s.id LIMIT 100",
+            )?;
+            let rows = sessions
+                .query_map(params![member, viewer.account_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, bool>(7)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(sessions);
+            let mut shown = Vec::new();
+            for (id, folder, branch, state, started_at, room_id, room_name, room_visible) in rows {
+                let posted: Option<(String, String)> = conn.query_row(
+                    "SELECT metadata,created_at FROM messages WHERE agent_id=?1 AND room_id IN \
+                     (SELECT room_id FROM social_members WHERE account_id=?2) AND \
+                     json_extract(metadata,'$.pull_request') IS NOT NULL ORDER BY seq DESC LIMIT 1",
+                    params![id, viewer.account_id], |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                let pull_request = posted.as_ref().and_then(|(metadata, _)| {
+                    serde_json::from_str::<Value>(metadata)
+                        .ok()?
+                        .get("pull_request")
+                        .cloned()
+                });
+                let repository = pull_request
+                    .as_ref()
+                    .and_then(|pr| pr["repository"].as_str())
+                    .map(str::to_owned);
+                shown.push(json!({
+                    "id":id,"folder":folder,"branch":branch,"state":state,
+                    "started_at":chrono::DateTime::from_timestamp(started_at,0).map(|time| time.to_rfc3339()),
+                    "room":room_visible.then(|| json!({"room_id":room_id,"name":room_name})),
+                    "pull_request":pull_request,
+                    "pull_request_at":posted.map(|(_, at)| at),
+                    "repository":repository,
+                }));
+            }
+            if !shown.is_empty() {
+                people.push(json!({"account":account(&conn,&member)?,"sessions":shown}));
+            }
+        }
+        Ok(json!({"sharing":sharing,"people":people}))
     }
 
     pub fn social_end_session(&self, key: &str, session_id: &str) -> anyhow::Result<String> {
@@ -1198,6 +1297,12 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                 )?;
                 let name = super::normalize_room_name(string(body, "name")?)
                     .map_err(anyhow::Error::msg)?;
+                let kind = match body.get("kind") {
+                    None => "chat",
+                    Some(Value::String(kind)) => kind.as_str(),
+                    _ => anyhow::bail!("invalid room kind"),
+                };
+                anyhow::ensure!(matches!(kind, "chat" | "team"), "invalid room kind");
                 let friend = match body.get("friend_id") {
                     None => None,
                     Some(Value::String(id)) if !id.trim().is_empty() => Some(id.as_str()),
@@ -1211,8 +1316,8 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                 let room = uuid::Uuid::new_v4().to_string();
                 tx.execute("INSERT INTO rooms(room_id,name,visibility,owner_key,encrypted,created_by) VALUES(?1,?2,'private',?3,0,?4)",params![room,name,format!("{OWNER_PREFIX}{a}"),a])?;
                 tx.execute(
-                    "INSERT INTO social_rooms(room_id,owner_id) VALUES(?1,?2)",
-                    params![room, a],
+                    "INSERT INTO social_rooms(room_id,owner_id,kind) VALUES(?1,?2,?3)",
+                    params![room, a, kind],
                 )?;
                 tx.execute("INSERT INTO persistent_rooms(room_id) VALUES(?1)", [&room])?;
                 tx.execute(
@@ -1226,7 +1331,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                 json!({"room_id":room,"invitation":invitation})
             }
             ("GET", ["rooms"]) => {
-                let mut s=tx.prepare("SELECT r.room_id,r.name,s.owner_id,x.id,x.name,x.harness,x.folder,x.branch,x.started_at,x.last_seen,x.ended_at,x.room_name FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id JOIN social_members m ON m.room_id=r.room_id LEFT JOIN social_sessions x ON x.room_id=r.room_id WHERE m.account_id=?1 ORDER BY COALESCE(x.room_name,r.name)")?;
+                let mut s=tx.prepare("SELECT r.room_id,r.name,s.owner_id,x.id,x.name,x.harness,x.folder,x.branch,x.started_at,x.last_seen,x.ended_at,x.room_name,s.kind FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id JOIN social_members m ON m.room_id=r.room_id LEFT JOIN social_sessions x ON x.room_id=r.room_id WHERE m.account_id=?1 ORDER BY COALESCE(x.room_name,r.name)")?;
                 let rooms = s
                     .query_map([a], |r| {
                         let session_id: Option<String> = r.get(3)?;
@@ -1249,16 +1354,37 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                             Some(name) => name,
                             None => r.get(1)?,
                         };
+                        let room_kind: String = r.get(12)?;
                         Ok(json!({
                             "room_id": r.get::<_,String>(0)?,
                             "name": room_name,
                             "owner_id": r.get::<_,String>(2)?,
-                            "kind": session.as_ref().map(|_| "session"),
+                            "kind": if session.is_some() { "session" } else { &room_kind },
                             "session": session,
                         }))
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
                 json!({"rooms":rooms})
+            }
+            ("GET", ["teams"]) => {
+                let mut s = tx.prepare("SELECT s.room_id,r.name FROM social_rooms s JOIN rooms r ON r.room_id=s.room_id JOIN social_members m ON m.room_id=s.room_id WHERE s.kind='team' AND m.account_id=?1 ORDER BY r.name,s.room_id")?;
+                let teams = s
+                    .query_map([a], |row| {
+                        Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?}))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                json!({"teams":teams})
+            }
+            ("PUT", ["team", "sharing"]) => {
+                let on = body
+                    .get("sharing")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| anyhow::anyhow!("invalid sharing"))?;
+                tx.execute(
+                    "UPDATE social_accounts SET team_sharing=?2 WHERE id=?1",
+                    params![a, on],
+                )?;
+                json!({"ok":true})
             }
             ("GET", ["room-invitations"]) => {
                 let mut s=tx.prepare("SELECT id FROM social_room_invitations WHERE status='pending' AND (to_id=?1 OR from_id=?1) ORDER BY created_at DESC,id")?;
