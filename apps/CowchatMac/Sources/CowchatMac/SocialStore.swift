@@ -264,11 +264,17 @@ final class SocialStore: ObservableObject {
         return task
     }
 
-    func cancelSignIn() {
+    func cancelSignIn() { cancel(keepingSetup: false) }
+
+    func closeFriends() { cancel(keepingSetup: phase == .signedIn) }
+
+    private func cancel(keepingSetup: Bool) {
         generation = UUID()
         busy = false
-        setup = nil
-        setupLoaded = false
+        if !keepingSetup {
+            setup = nil
+            setupLoaded = false
+        }
         friendLinkState = .idle
         friendLinkLoad = UUID()
         oauthCallback?.cancel()

@@ -200,6 +200,22 @@ final class SocialTests: XCTestCase {
         try render(CowchatSetupWizard(social: signedOut, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-welcome")
     }
 
+    @MainActor
+    func testClosingFriendsKeepsTheSetupThatNamesHome() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        fixture.established = true
+        let store = fixture.store()
+        await store.loadSetup()
+        XCTAssertEqual(store.setup?.roomId, "starter-home")
+        store.closeFriends()
+        XCTAssertEqual(store.setup?.roomId, "starter-home")
+        XCTAssertTrue(store.setupLoaded)
+        store.cancelSignIn()
+        XCTAssertNil(store.setup)
+        XCTAssertFalse(store.setupLoaded)
+    }
+
     private final class SetupFixture {
         let endpoint = URL(string: "wss://fixture.example/ws")!
         let credentialDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

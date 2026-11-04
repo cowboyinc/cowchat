@@ -126,7 +126,7 @@ struct FriendsView: View {
         .tint(SemanticColor.buttonPrimaryDefault)
         .buttonStyle(CowchatPillButtonStyle())
         .task { await social.refresh(); if agentName.isEmpty { agentName = SocialStarterNames.bot(social.account?.displayName ?? "Cowboy") } }
-        .onDisappear { social.cancelSignIn(); social.dismissAgentCredential() }
+        .onDisappear { social.closeFriends(); social.dismissAgentCredential() }
         .onChange(of: social.account?.id) { _ in agentName = SocialStarterNames.bot(social.account?.displayName ?? "Cowboy") }
         .onChange(of: social.phase) { phase in
             guard phase != .signedIn else { return }
