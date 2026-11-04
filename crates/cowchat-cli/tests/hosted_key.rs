@@ -559,6 +559,82 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         .await
         .unwrap();
     assert!(sibling_end.status.success());
+    let claude_id = uuid::Uuid::new_v4().to_string();
+    let hook = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugins/cowchat-claude/hooks/session.py");
+    let env_file = dir.path().join("claude-env");
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_cowchat"));
+    let path = format!(
+        "{}:{}",
+        executable.parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run_hook = || {
+        let mut process = tokio::process::Command::new("python3");
+        process
+            .arg(&hook)
+            .arg("start")
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .env("CLAUDE_ENV_FILE", &env_file)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let mut first_hook = run_hook();
+    use tokio::io::AsyncWriteExt;
+    first_hook
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            serde_json::json!({"session_id":claude_id,"cwd":home})
+                .to_string()
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let first_hook = first_hook.wait_with_output().await.unwrap();
+    assert!(first_hook.status.success());
+    let env_text = std::fs::read_to_string(&env_file).unwrap();
+    let first_id = env_text
+        .lines()
+        .find_map(|line| line.strip_prefix("export COWCHAT_AGENT_ID="))
+        .unwrap()
+        .to_string();
+    conn.execute(
+        "UPDATE social_sessions SET last_seen=unixepoch()-301 WHERE id=?1",
+        [&first_id],
+    )
+    .unwrap();
+    store.social_expire_sessions().unwrap();
+    let mut resumed_hook = run_hook();
+    resumed_hook
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            serde_json::json!({"session_id":claude_id,"cwd":home})
+                .to_string()
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let resumed_hook = resumed_hook.wait_with_output().await.unwrap();
+    assert!(
+        resumed_hook.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed_hook.stderr)
+    );
+    let env_text = std::fs::read_to_string(&env_file).unwrap();
+    let ids = env_text
+        .lines()
+        .filter_map(|line| line.strip_prefix("export COWCHAT_AGENT_ID="))
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
     task.abort();
     std::env::remove_var("COWCHAT_SOCIAL_PUBLIC_ORIGIN");
 }
