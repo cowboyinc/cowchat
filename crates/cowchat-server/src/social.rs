@@ -120,7 +120,11 @@ pub fn routes() -> Router<AppState> {
         .route("/social/v1/capabilities", get(capabilities))
         .route(
             "/social/v1/{*path}",
-            get(action).post(action).patch(action).delete(action),
+            get(action)
+                .post(action)
+                .patch(action)
+                .put(action)
+                .delete(action),
         )
         .route("/auth/social/start", post(start))
         .route("/auth/social/exchange", post(exchange))
@@ -204,6 +208,7 @@ async fn friend_landing(State(state): State<AppState>, Path(slug): Path<String>)
 async fn action(
     State(state): State<AppState>,
     Path(path): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     headers: HeaderMap,
     method: Method,
     body: Option<Json<Value>>,
@@ -235,6 +240,9 @@ async fn action(
         Vec::new()
     };
     let result = match (method.as_str(), parts.as_slice()) {
+        ("GET", ["team"]) => state
+            .store
+            .social_team(&key, query.get("team_id").map(String::as_str)),
         ("POST", ["sessions"]) => {
             let field = |name: &str| {
                 data.get(name)
@@ -786,10 +794,157 @@ mod tests {
             .await
             .unwrap();
         let status = response.status();
-        let value: Value = response.json().await.unwrap();
+        let body = response.text().await.unwrap();
+        let value: Value = serde_json::from_str(&body)
+            .unwrap_or_else(|error| panic!("{path}: {status}: {error}: {body}"));
         assert_eq!(status, StatusCode::OK, "{path}: {value}");
         value
     }
+    #[tokio::test]
+    async fn team_rooms_require_explicit_kind_and_sharing_is_off_by_default() {
+        let (_state, base, tasks) = fixture().await;
+        let owner = login(&base, "github", "9301", None).await;
+        let friend = login(&base, "github", "9302", None).await;
+        let owner_key = owner["device_key"].as_str().unwrap();
+        let friend_key = friend["device_key"].as_str().unwrap();
+        let chat = call(
+            &base,
+            owner_key,
+            "POST",
+            "rooms",
+            json!({"name":"three person chat"}),
+        )
+        .await;
+        let team = call(
+            &base,
+            owner_key,
+            "POST",
+            "rooms",
+            json!({"name":"Cowboy","kind":"team"}),
+        )
+        .await;
+        let team_id = team["room_id"].as_str().unwrap();
+        let listed = call(&base, owner_key, "GET", "teams", json!({})).await;
+        assert_eq!(listed["teams"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["teams"][0]["id"], team_id);
+        assert_ne!(listed["teams"][0]["id"], chat["room_id"]);
+        let bot = call(
+            &base,
+            owner_key,
+            "POST",
+            "agents",
+            json!({"name":"Worker","mint_only":true}),
+        )
+        .await;
+        let id = format!("session:{}", uuid::Uuid::new_v4());
+        let session = call(
+            &base,
+            bot["api_key"].as_str().unwrap(),
+            "POST",
+            "sessions",
+            json!({"id":id,"name":"worker","harness":"claude","folder":"repo","branch":"main"}),
+        )
+        .await;
+        call(&base, session["session_token"].as_str().unwrap(), "POST",
+            &format!("sessions/{id}/messages"), json!({
+                "room_id":session["room_id"],"content":"ready",
+                "metadata":{"pull_request":{"repository":"cowboyinc/cowchat","number":91,
+                    "title":"Finished work","address":"https://github.com/cowboyinc/cowchat/pull/91"}}
+            })).await;
+        let own = call(
+            &base,
+            owner_key,
+            "GET",
+            &format!("team?team_id={team_id}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(own["sharing"], false);
+        assert!(own["people"].as_array().unwrap().is_empty());
+        call(
+            &base,
+            owner_key,
+            "PUT",
+            "team/sharing",
+            json!({"sharing":true}),
+        )
+        .await;
+        let own = call(
+            &base,
+            owner_key,
+            "GET",
+            &format!("team?team_id={team_id}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(own["people"][0]["sessions"][0]["id"], id);
+        assert!(own["people"][0]["sessions"][0]["room"].is_object());
+        assert_eq!(
+            own["people"][0]["sessions"][0]["pull_request"]["number"],
+            91
+        );
+        let outsider = reqwest::Client::new()
+            .get(format!("{base}/social/v1/team?team_id={team_id}"))
+            .header("x-cowchat-key", friend_key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(outsider.status(), StatusCode::NOT_FOUND);
+        let request = call(
+            &base,
+            owner_key,
+            "POST",
+            "friend-requests",
+            json!({"handle":friend["account"]["handle"]}),
+        )
+        .await;
+        call(
+            &base,
+            friend_key,
+            "POST",
+            &format!(
+                "friend-requests/{}/accept",
+                request["request"]["id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await;
+        let invitation = call(
+            &base,
+            owner_key,
+            "POST",
+            &format!("rooms/{team_id}/invitations"),
+            json!({"friend_id":friend["account"]["id"],"proposed_agent_ids":[]}),
+        )
+        .await;
+        call(
+            &base,
+            friend_key,
+            "POST",
+            &format!(
+                "room-invitations/{}/accept",
+                invitation["id"].as_str().unwrap()
+            ),
+            json!({"agent_ids":[]}),
+        )
+        .await;
+        let friend_team = call(
+            &base,
+            friend_key,
+            "GET",
+            &format!("team?team_id={team_id}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(friend_team["sharing"], false);
+        assert_eq!(friend_team["people"][0]["sessions"][0]["id"], id);
+        assert!(friend_team["people"][0]["sessions"][0]["room"].is_null());
+        assert!(friend_team["people"][0]["sessions"][0]["pull_request"].is_null());
+        for task in tasks {
+            task.abort();
+        }
+    }
+
     #[tokio::test]
     async fn owner_receives_session_lifecycle_without_joining_its_room() {
         let (state, base, tasks) = fixture().await;
