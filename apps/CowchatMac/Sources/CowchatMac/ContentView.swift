@@ -1116,24 +1116,30 @@ private struct SidebarFooter: View {
     let hasAccountGlobal: Bool
     let hasGlobal: Bool
     @Binding var isSettingsPresented: Bool
+    @EnvironmentObject private var workspace: WorkspaceStore
 
     var body: some View {
         HStack(spacing: 8) {
-            Button {
-                isSettingsPresented = true
-            } label: {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(connectionColor)
-                        .frame(width: 7, height: 7)
-                    Text(connectionLabel)
-                        .gallopText(.caption, color: SemanticColor.textSecondary)
+            TeamFooterLead(teams: workspace.teams) {
+                Button {
+                    isSettingsPresented = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(connectionColor)
+                            .frame(width: 7, height: 7)
+                        Text(connectionLabel)
+                            .gallopText(.caption, color: SemanticColor.textSecondary)
+                    }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .help(connectionDetails)
+                .macAccessibleAction(label: "Connection settings") { isSettingsPresented = true }
             }
-            .buttonStyle(.plain)
-            .help(connectionDetails)
-            .macAccessibleAction(label: "Connection settings") { isSettingsPresented = true }
+            .task(id: workspace.social.savedSession?.scopeId) {
+                await workspace.teams.load(for: workspace.social.savedSession)
+            }
             Spacer()
             if anyServerDisconnected {
                 CircleIconButton(
@@ -2850,7 +2856,7 @@ private struct AgentAvatar: View {
     }
 }
 
-private struct RoomAvatar: View {
+struct RoomAvatar: View {
     let name: String
     let size: CGFloat
     let accented: Bool
@@ -3111,6 +3117,7 @@ private struct EmptyChatView: View {
 
 private enum SettingsPage {
     case connection
+    case agents
     case theme
     case roomIcons
     case updates
@@ -3121,6 +3128,7 @@ private enum SettingsPage {
     var title: String {
         switch self {
         case .connection: return "Connection"
+        case .agents: return "Agents" // copy:
         case .theme: return "Theme"
         case .roomIcons: return "Room icons"
         case .updates: return "Updates"
@@ -3134,6 +3142,8 @@ private enum SettingsPage {
     var subtitle: String {
         switch self {
         case .connection: return "Choose where Cowchat stores and syncs your rooms."
+        // copy:
+        case .agents: return "Connect Claude Code and Codex to your Home."
         case .theme: return "Choose how Cowchat appears on this Mac."
         case .roomIcons: return "Every room gets the same icon on every Mac — it is drawn from the room name."
         case .updates: return "Keep Cowchat up to date."
@@ -3190,6 +3200,11 @@ private struct SettingsView: View {
                     page: .connection
                 )
                 settingsNavigationRow(
+                    "Agents",
+                    systemName: "terminal",
+                    page: .agents
+                )
+                settingsNavigationRow(
                     "Theme",
                     systemName: "circle.lefthalf.filled",
                     page: .theme
@@ -3238,6 +3253,8 @@ private struct SettingsView: View {
                         connectionSettings
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                case .agents:
+                    agentSettings
                 case .theme:
                     themeSettings
                 case .roomIcons:
@@ -3461,6 +3478,16 @@ private struct SettingsView: View {
     }
 
 
+    /// Claude Code and Codex with where each stands, and Connect on one that isn't connected, for a person who
+    /// skipped them in first run.
+    private var agentSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            AgentHookList(connections: workspace.agentConnections).gallopCard(cornerRadius: 14)
+            AgentHookError(connections: workspace.agentConnections)
+        }
+        .task { await workspace.agentConnections.refresh() }
+    }
+
     private var themeSettings: some View {
         VStack(alignment: .leading, spacing: 24) {
             Picker("Appearance", selection: $appearance) {
@@ -3595,6 +3622,7 @@ private struct SettingsView: View {
             .padding(.horizontal, 8)
         }
         .buttonStyle(.plain)
+        .macAccessibleAction(label: title, value: selectedPage == page ? "selected" : nil) { selectedPage = page }
     }
 
     private var canSaveCloudConfiguration: Bool {

@@ -84,7 +84,6 @@ final class SocialTests: XCTestCase {
         XCTAssertNil(store.friendLink)
         fixture.beforeAvailability = nil
         await store.loadFriendLink()
-        try render(CowchatSetupWizard(social: store, initialStep: .friends, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-share-link")
         try render(FriendInvitationConfirmation(social: store, invitation: invitation, onDismiss: {}), name: "mac-wizard-friend-confirmation")
     }
 
@@ -136,9 +135,9 @@ final class SocialTests: XCTestCase {
         let savedBot = try Data(contentsOf: fixture.credentialDirectory.appendingPathComponent("hosted-bot.json"))
         let botValues = try JSONSerialization.jsonObject(with: savedBot) as! [String: String]
         XCTAssertEqual(botValues["url"], "wss://fixture.example/ws")
-        try render(CowchatSetupWizard(social: restored, initialStep: .name, name: "Chad DePue", onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-name")
-        try render(CowchatSetupWizard(social: restored, initialStep: .friends, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-friends")
-        try render(CowchatSetupWizard(social: restored, initialStep: .ready, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-ready")
+        try render(CowchatSetupWizard(social: restored, initialStep: .name, name: "Chad DePue", onLocal: {}, onOpenHome: { _, _ in false }), name: "mac-wizard-name")
+        try render(CowchatSetupWizard(social: restored, initialStep: .agents, onLocal: {}, onOpenHome: { _, _ in false }), name: "mac-wizard-agents")
+        try render(CowchatSetupWizard(social: restored, initialStep: .ready, onLocal: {}, onOpenHome: { _, _ in false }), name: "mac-wizard-ready")
     }
 
     @MainActor
@@ -194,10 +193,10 @@ final class SocialTests: XCTestCase {
         fixture.supported = false
         let unsupported = fixture.store()
         await unsupported.loadSetup()
-        try render(CowchatSetupWizard(social: unsupported, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-unsupported")
+        try render(CowchatSetupWizard(social: unsupported, onLocal: {}, onOpenHome: { _, _ in false }), name: "mac-wizard-unsupported")
         let signedOut = SocialStore(endpoint: fixture.endpoint, credentials: SocialMemoryCredentials(), session: fixture.session)
         await signedOut.refresh()
-        try render(CowchatSetupWizard(social: signedOut, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-welcome")
+        try render(CowchatSetupWizard(social: signedOut, onLocal: {}, onOpenHome: { _, _ in false }), name: "mac-wizard-welcome")
     }
 
     @MainActor

@@ -128,8 +128,12 @@ private struct RoomBrowserSection: View {
             } else {
                 ForEach(matchingRooms) { room in
                     Button { Task { await open(room) } } label: {
-                        HStack {
-                            Image(systemName: "number")
+                        HStack(spacing: 10) {
+                            // The sidebar's room icon, with its Slack mark on a room linked to Slack.
+                            RoomAvatar(name: room.name, size: 32, accented: false)
+                                .overlay(alignment: .bottomTrailing) {
+                                    if store.slackConnectedRoomIDs.contains(room.id) { SlackRoomBadge().offset(x: 3, y: 3) }
+                                }
                             Text(room.name).lineLimit(1)
                             Spacer()
                             if store.isArchived(room) { Text("Archived").gallopText(.caption) }

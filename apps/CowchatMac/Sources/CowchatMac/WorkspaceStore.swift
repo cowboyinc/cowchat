@@ -54,6 +54,16 @@ final class WorkspaceStore: ObservableObject {
     let team = TeamStore()
     /// The page the main area shows, or nil while it shows the open room.
     @Published private(set) var page: Page?
+    /// Where first run stands, and its wait for the first session to join Home.
+    lazy var firstRun: FirstRun = {
+        let firstRun = FirstRun(sessions: homeSessions, defaults: defaults)
+        firstRun.onFirstSession = { [weak self] session in Task { await self?.finishFirstRun(opening: session) } }
+        return firstRun
+    }()
+    /// Claude Code's plugin and Codex's hooks, as first run and Settings show them.
+    let agentConnections = AgentConnections()
+    /// The account's teams and the one chosen in the sidebar footer.
+    lazy var teams = TeamChoice(defaults: defaults)
     /// True from launch until a room is opened, so the app opens on Home once the account's Home is known.
     private var opensHomeWhenReady = true
     @Published private(set) var global: ChatStore?

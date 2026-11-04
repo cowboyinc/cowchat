@@ -26,6 +26,8 @@ final class SocialStore: ObservableObject {
     @Published private(set) var endpoint: URL
     @Published private(set) var account: SocialAccount?
     @Published private(set) var providers: [String] = []
+    /// The provider the last sign-in went through, whose door shows the wait for the browser.
+    @Published private(set) var signInProvider: String?
     @Published private(set) var serverNeedsUpdate = false
     @Published private(set) var setupSupported = false
     @Published private(set) var handleAvailabilitySupported = false
@@ -200,6 +202,7 @@ final class SocialStore: ObservableObject {
     @discardableResult
     func signIn(provider: String, open: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }) -> Task<Void, Never>? {
         guard providers.contains(provider), phase == .signedOut else { return nil }
+        signInProvider = provider
         return startOAuth(provider: provider, flow: .signIn, open: open)
     }
 
@@ -267,6 +270,8 @@ final class SocialStore: ObservableObject {
     func cancelSignIn() { cancel(keepingSetup: false) }
 
     func closeFriends() { cancel(keepingSetup: phase == .signedIn) }
+
+    func closeOnboarding() { cancel(keepingSetup: phase == .signedIn) }
 
     private func cancel(keepingSetup: Bool) {
         generation = UUID()
@@ -483,10 +488,18 @@ final class SocialStore: ObservableObject {
     func createRoom(_ draft: SocialRoomDraft) async -> String? {
         let ticket = generation
         var roomID: String?
+        let others = draft.friendIDs.dropFirst().compactMap { id in friends.first { $0.id == id } }
+        let first = friends.first { $0.id == draft.friendID }
+        let body = !others.isEmpty ? first.map(draft.requestBody(inviting:)) ?? draft.requestBody : draft.requestBody
         await perform { api in
             struct Reply: Decodable { let roomId: String }
-            let reply: Reply = try await api.social(["rooms"], method: "POST", body: draft.requestBody)
+            let reply: Reply = try await api.social(["rooms"], method: "POST", body: body)
             roomID = ticket == self.generation ? reply.roomId : nil
+            // Room creation invites one friend; the rest go through the room's invitations (Chad's plan, task 4).
+            for friend in others where ticket == self.generation {
+                let _: SocialAcknowledgement = try await api.social(["rooms", reply.roomId, "invitations"],
+                                                                     method: "POST", body: draft.invitationBody(for: friend))
+            }
         }
         return roomID
     }

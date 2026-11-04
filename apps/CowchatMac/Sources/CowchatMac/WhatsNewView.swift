@@ -32,9 +32,21 @@ struct CowchatSheetHeader: View {
 
 struct CowchatPillButtonStyle: ButtonStyle {
     var prominent = false
+    /// A sign-in provider's door, as Cowboy's sign-in draws it: Surface/700 with a 1-point Border/Default edge inside,
+    /// Text/Primary, and Surface/600 on hover. Filled pills stay for Cowchat's own actions.
+    var identity = false
     @Environment(\.isEnabled) private var isEnabled
 
+    @ViewBuilder
     func makeBody(configuration: Configuration) -> some View {
+        if identity {
+            IdentityPill(configuration: configuration, isEnabled: isEnabled)
+        } else {
+            pill(configuration)
+        }
+    }
+
+    private func pill(_ configuration: Configuration) -> some View {
         let destructive = configuration.role == .destructive
         return configuration.label
             .gallopText(.bodySStrong, color: destructive ? SemanticColor.notificationErrorTextDefault : prominent ? SemanticColor.buttonPrimaryTextDefault : SemanticColor.buttonSecondaryTextDefault)
@@ -44,8 +56,26 @@ struct CowchatPillButtonStyle: ButtonStyle {
                 destructive ? SemanticColor.notificationErrorDefault : prominent ? SemanticColor.buttonPrimaryDefault : SemanticColor.buttonSecondaryDefault,
                 in: Capsule()
             )
-            .overlay(Capsule().stroke(SemanticColor.borderDefault, lineWidth: prominent ? 0 : 0.5))
+            .overlay(Capsule().strokeBorder(SemanticColor.borderDefault, lineWidth: prominent ? 0 : 0.5))
             .opacity(!isEnabled ? 0.45 : configuration.isPressed ? 0.75 : 1)
+    }
+
+    private struct IdentityPill: View {
+        let configuration: Configuration
+        let isEnabled: Bool
+        @State private var isHovering = false
+
+        var body: some View {
+            configuration.label
+                .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
+                .padding(.horizontal, 18)
+                .frame(height: 36)
+                .background(isHovering && isEnabled ? SemanticColor.surface600 : SemanticColor.surface700, in: Capsule())
+                .overlay(Capsule().strokeBorder(SemanticColor.borderDefault, lineWidth: 1))
+                .opacity(!isEnabled ? 0.45 : configuration.isPressed ? 0.75 : 1)
+                .contentShape(Capsule())
+                .onHover { isHovering = $0 }
+        }
     }
 }
 

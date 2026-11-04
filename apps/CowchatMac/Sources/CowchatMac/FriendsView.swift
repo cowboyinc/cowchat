@@ -73,7 +73,7 @@ struct FriendsView: View {
                     }.buttonStyle(CowchatPillButtonStyle())
                     Menu {
                         Button("Refresh") { Task { await social.refresh() } }
-                        Button("Sign out") { Task { await social.signOut() } }
+                        Button("Sign out") { Task { await workspace.signOut() } }
                     } label: {
                         Image(systemName: "ellipsis")
                             .font(.system(size: 16, weight: .semibold))
@@ -233,7 +233,7 @@ struct FriendsView: View {
                         Text("@\(friend.account.handle) · \(friend.agents.count) \(friend.agents.count == 1 ? "agent" : "agents")").gallopText(.caption, color: SemanticColor.textSecondary)
                     }
                     Spacer()
-                    Button { roomDraft = SocialRoomDraft(friendID: friend.id) } label: {
+                    Button { roomDraft = SocialRoomDraft(friendIDs: [friend.id]) } label: {
                         Label { Text("Collaborate") } icon: { CowchatCollaborateIcon() }
                     }.buttonStyle(CowchatPillButtonStyle(prominent: true))
                     Menu {
