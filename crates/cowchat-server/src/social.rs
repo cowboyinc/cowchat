@@ -210,6 +210,7 @@ async fn action(
             .store
             .social_touch_session(&key, id)
             .map(|()| json!({"ok":true})),
+        ("GET", ["sessions", id, "rooms"]) => state.store.social_session_rooms(&key, id),
         ("POST", ["sessions", id, "end"]) => state
             .store
             .social_end_session(&key, id)
@@ -609,11 +610,21 @@ mod tests {
         .unwrap();
         let room_id = session["room_id"].as_str().unwrap();
         client
-            .send_message(room_id, "hello from session", None, vec![])
+            .send_message(room_id, "hello from session", None, vec![id.clone()])
             .await
             .unwrap();
+        assert!(client
+            .send_message(
+                room_id,
+                "invalid mention",
+                None,
+                vec!["session:outsider".into()]
+            )
+            .await
+            .is_err());
         let history = client.get_history(room_id, 10, None).await.unwrap();
         assert_eq!(history.last().unwrap().content, "hello from session");
+        assert_eq!(history.last().unwrap().metadata["mentions"], json!([id]));
         for task in tasks {
             task.abort();
         }

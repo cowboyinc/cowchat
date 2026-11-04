@@ -1127,6 +1127,25 @@ async fn handle_send_message(
         None => uuid::Uuid::new_v4().to_string(),
     };
     let mut metadata = p.metadata.clone();
+    if let Some(fields) = metadata.as_object_mut() {
+        fields.remove("mentions");
+        fields.remove("sender_kind");
+    }
+    if let Some(valid) = store.social_mentions_valid(&p.room_id, &p.mentions) {
+        if !valid {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::InvalidPayload,
+                    "Mention target is not in this room",
+                ),
+            );
+        }
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        metadata["mentions"] = serde_json::json!(p.mentions);
+    }
     if let Some(principal) = store.social_principal(agent_api_key) {
         let kind = if principal.agent_id.is_some() {
             "agent"
@@ -1136,11 +1155,7 @@ async fn handle_send_message(
         if !metadata.is_object() {
             metadata = serde_json::json!({});
         }
-        if let Some(fields) = metadata.as_object_mut() {
-            fields.insert("sender_kind".into(), serde_json::Value::String(kind.into()));
-        }
-    } else if let Some(fields) = metadata.as_object_mut() {
-        fields.remove("sender_kind");
+        metadata["sender_kind"] = serde_json::Value::String(kind.into());
     }
     let append = crate::store::MessageAppend {
         message_id: &message_id,

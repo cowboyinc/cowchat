@@ -638,6 +638,58 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
     pub fn social_room_access(&self, room: &str, key: &str) -> Option<bool> {
         room_access(&self.conn.lock().unwrap(), room, key).unwrap_or(Some(false))
     }
+    pub fn social_session_rooms(&self, key: &str, session_id: &str) -> anyhow::Result<Value> {
+        let conn = self.conn.lock().unwrap();
+        let principal = principal(&conn, key)?.ok_or_else(|| anyhow::anyhow!("not found"))?;
+        anyhow::ensure!(
+            principal.session_id.as_deref() == Some(session_id),
+            "not found"
+        );
+        let mut statement = conn.prepare(
+            "SELECT r.room_id,COALESCE(s.room_name,r.name),CASE WHEN s.room_id IS NULL THEN 'shared' ELSE 'session' END \
+             FROM social_admissions a JOIN rooms r ON r.room_id=a.room_id \
+             JOIN social_rooms sr ON sr.room_id=r.room_id \
+             JOIN social_members m ON m.room_id=r.room_id AND m.account_id=?2 \
+             LEFT JOIN social_sessions s ON s.room_id=r.room_id \
+             WHERE a.agent_id=?1 ORDER BY r.room_id",
+        )?;
+        let rooms = statement
+            .query_map(params![session_id, principal.account_id], |row| {
+                Ok(json!({"room_id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"kind":row.get::<_,String>(2)?}))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(json!({"rooms":rooms}))
+    }
+    pub fn social_mentions_valid(&self, room: &str, mentions: &[String]) -> Option<bool> {
+        let conn = self.conn.lock().unwrap();
+        let managed: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM social_rooms WHERE room_id=?1)",
+                [room],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !managed {
+            return None;
+        }
+        if mentions.len() > 32 {
+            return Some(false);
+        }
+        for mention in mentions {
+            let allowed = if let Some(account) = mention.strip_prefix("account:") {
+                conn.query_row("SELECT EXISTS(SELECT 1 FROM social_members WHERE room_id=?1 AND account_id=?2)", params![room, account], |row| row.get::<_, bool>(0))
+            } else {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_sessions s ON s.id=a.agent_id JOIN social_members m ON m.room_id=a.room_id AND m.account_id=s.owner_id WHERE a.room_id=?1 AND a.agent_id=?2 AND s.ended_at IS NULL) OR EXISTS(SELECT 1 FROM social_admissions a JOIN social_agents b ON b.id=a.agent_id JOIN social_members m ON m.room_id=a.room_id AND m.account_id=b.owner_id WHERE a.room_id=?1 AND a.agent_id=?2 AND b.revoked=0)",
+                    params![room, mention], |row| row.get::<_, bool>(0),
+                )
+            };
+            if !matches!(allowed, Ok(true)) {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
     pub fn social_room_owner(&self, room: &str, key: &str) -> Option<bool> {
         room_owner(&self.conn.lock().unwrap(), room, key).unwrap_or(Some(false))
     }
@@ -1598,6 +1650,90 @@ mod tests {
         assert_eq!(
             store.social_room_access(room_id, &outsider_key),
             Some(false)
+        );
+    }
+    #[test]
+    fn social_mentions_require_current_room_membership() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, owner) = login(&store, "mention-owner");
+        let bot = store
+            .social_action(&owner_key, "POST", "agents", &json!({"name":"Bot"}))
+            .unwrap();
+        let bot_id = bot["agent"]["id"].as_str().unwrap().to_string();
+        let room = store
+            .social_action(
+                &owner_key,
+                "POST",
+                "rooms",
+                &json!({"name":"mention-room","agent_ids":[bot_id]}),
+            )
+            .unwrap();
+        let room_id = room["room_id"].as_str().unwrap();
+        assert_eq!(
+            store.social_mentions_valid(room_id, std::slice::from_ref(&bot_id)),
+            Some(true)
+        );
+        assert_eq!(
+            store.social_mentions_valid(
+                room_id,
+                &[format!("account:{}", owner["id"].as_str().unwrap())]
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            store.social_mentions_valid(room_id, &["account:outsider".into()]),
+            Some(false)
+        );
+        let session = format!("session:{}", uuid::Uuid::new_v4());
+        let session_room = store
+            .social_register_session(
+                bot["api_key"].as_str().unwrap(),
+                &session,
+                "worker",
+                "codex",
+                "repo",
+                "main",
+            )
+            .unwrap();
+        let token = session_room.session_token.as_deref().unwrap();
+        let before = store.social_session_rooms(token, &session).unwrap();
+        assert_eq!(before["rooms"].as_array().unwrap().len(), 1);
+        assert_eq!(before["rooms"][0]["room_id"], session_room.room_id);
+        assert!(store
+            .social_session_rooms(bot["api_key"].as_str().unwrap(), &session)
+            .is_err());
+        assert_eq!(
+            store.social_mentions_valid(room_id, std::slice::from_ref(&session)),
+            Some(false)
+        );
+        store
+            .social_action(
+                &owner_key,
+                "POST",
+                &format!("rooms/{room_id}/agents"),
+                &json!({"agent_ids":[session]}),
+            )
+            .unwrap();
+        assert_eq!(
+            store.social_mentions_valid(room_id, std::slice::from_ref(&session)),
+            Some(true)
+        );
+        let after = store.social_session_rooms(token, &session).unwrap();
+        assert_eq!(after["rooms"].as_array().unwrap().len(), 2);
+        assert!(after["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|room| room["room_id"] == room_id));
+        store.social_end_session(token, &session).unwrap();
+        assert!(store.social_session_rooms(token, &session).is_err());
+        assert_eq!(
+            store.social_mentions_valid(room_id, std::slice::from_ref(&session)),
+            Some(false)
+        );
+        assert_eq!(
+            store.social_mentions_valid("ordinary-room", &["anything".into()]),
+            None
         );
     }
     #[test]
