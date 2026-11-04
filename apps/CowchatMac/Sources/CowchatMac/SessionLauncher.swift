@@ -71,16 +71,22 @@ final class UnavailableSessionLauncher: SessionLauncher {
 /// argument; none of the user's text is interpreted as shell code.
 @MainActor
 final class SystemSessionLauncher: SessionLauncher {
+    private static let foldersKey = "CowchatMac.sessionFolderPaths"
     private let home: URL
+    private let defaults: UserDefaults
     private let openSession: @MainActor (URL) async throws -> Void
-    private var knownFolders: [String: URL] = [:]
+    private var knownFolders: [String: URL]
 
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+         defaults: UserDefaults = .standard,
          openSession: @escaping @MainActor (URL) async throws -> Void = { script in
              try await SystemSessionLauncher.run(URL(fileURLWithPath: "/usr/bin/open"), ["-a", "Terminal", script.path])
          }) {
         self.home = home
+        self.defaults = defaults
         self.openSession = openSession
+        let paths = defaults.dictionary(forKey: Self.foldersKey) as? [String: String] ?? [:]
+        self.knownFolders = paths.mapValues { URL(fileURLWithPath: $0) }
     }
 
     func path(ofFolder name: String) -> URL? { knownFolders[name] }
@@ -115,6 +121,7 @@ final class SystemSessionLauncher: SessionLauncher {
             throw error
         }
         knownFolders[request.folder.name] = folder
+        defaults.set(knownFolders.mapValues(\.path), forKey: Self.foldersKey)
     }
 
     private func makeWorktree(from folder: URL, branch: String) async throws -> URL {

@@ -13,11 +13,14 @@ final class SystemSessionLauncherTests: XCTestCase {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let result = home.appendingPathComponent("arguments.txt")
         let marker = home.appendingPathComponent("injected")
+        let suite = "CowchatMac.LauncherTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
         let agent = bin.appendingPathComponent("claude")
         try "#!/bin/zsh\nprintf '%s\\n' \"$PWD\" \"$1\" > '\(result.path)'\n"
             .write(to: agent, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: agent.path)
-        let launcher = SystemSessionLauncher(home: home) { script in
+        let launcher = SystemSessionLauncher(home: home, defaults: defaults) { script in
             let process = Process()
             process.executableURL = script
             try process.run()
@@ -32,5 +35,7 @@ final class SystemSessionLauncherTests: XCTestCase {
         XCTAssertEqual(String(lines[1]), message)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
         XCTAssertEqual(launcher.path(ofFolder: folder.lastPathComponent), folder)
+        XCTAssertEqual(SystemSessionLauncher(home: home, defaults: defaults).path(ofFolder: folder.lastPathComponent)?.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+                       folder.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
     }
 }
