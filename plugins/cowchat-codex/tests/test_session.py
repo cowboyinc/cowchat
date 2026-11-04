@@ -30,6 +30,9 @@ class HookTests(unittest.TestCase):
             with patch.object(hook.Path, "home", return_value=home):
                 self.assertEqual(hook.cowchat_binary(), str(cli))
                 cli.unlink()
+                with self.assertRaises(ValueError):
+                    hook.cowchat_binary()
+                config.unlink()
                 self.assertEqual(hook.cowchat_binary(), "cowchat")
 
     def test_start_and_resume_keep_private_identity_out_of_context(self):
