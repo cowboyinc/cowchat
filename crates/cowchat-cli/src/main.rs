@@ -948,9 +948,12 @@ enum ExportFormat {
 }
 
 fn default_data_dir() -> PathBuf {
-    directories::BaseDirs::new()
-        .map(|dirs| dirs.home_dir().join(".cowchat"))
-        .unwrap_or_else(|| PathBuf::from(".cowchat"))
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cowchat")
 }
 
 fn default_socket_path() -> &'static str {
