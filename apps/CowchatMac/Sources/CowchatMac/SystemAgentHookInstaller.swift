@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// Connects the installed coding agents to the Cowchat hooks. Process arguments
 /// are passed directly; neither a room credential nor user text enters a shell.
@@ -74,12 +75,37 @@ final class SystemAgentHookInstaller: AgentHookInstaller {
     private func executable(named name: String) -> URL? {
         if name == "cowchat-codex" {
             let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/cowchat-codex")
-            if FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
+            if FileManager.default.isExecutableFile(atPath: bundled.path), trustedBundledHelper(bundled) {
+                return bundled
+            }
+            #if !DEBUG
+            return nil
+            #endif
         }
         let paths = [".local/bin", ".cargo/bin", "bin"].map { home.appendingPathComponent($0) }
             + systemSearchDirectories
         return paths.map { $0.appendingPathComponent(name) }
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    private func trustedBundledHelper(_ url: URL) -> Bool {
+        var helper: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, SecCSFlags(), &helper) == errSecSuccess,
+              let helper,
+              SecStaticCodeCheckValidity(helper, SecCSFlags(), nil) == errSecSuccess else { return false }
+        var ownCode: SecCode?
+        guard SecCodeCopySelf(SecCSFlags(), &ownCode) == errSecSuccess, let ownCode else { return false }
+        var ownStatic: SecStaticCode?
+        guard SecCodeCopyStaticCode(ownCode, SecCSFlags(), &ownStatic) == errSecSuccess,
+              let ownStatic else { return false }
+        var ownInfo: CFDictionary?
+        var helperInfo: CFDictionary?
+        guard SecCodeCopySigningInformation(ownStatic, SecCSFlags(rawValue: kSecCSSigningInformation), &ownInfo) == errSecSuccess,
+              SecCodeCopySigningInformation(helper, SecCSFlags(rawValue: kSecCSSigningInformation), &helperInfo) == errSecSuccess,
+              let ownTeam = (ownInfo as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String,
+              let helperTeam = (helperInfo as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String,
+              !ownTeam.isEmpty else { return false }
+        return helperTeam == ownTeam
     }
 
     private func run(_ binary: URL, _ arguments: [String]) async throws {

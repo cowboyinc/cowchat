@@ -146,6 +146,7 @@ private struct AgentHookRow: View {
     let harness: LiveSession.Harness
     let state: AgentHookState
     let connect: () -> Void
+    @State private var confirmCodexService = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -156,6 +157,12 @@ private struct AgentHookRow: View {
         }
         .frame(height: 36)
         .padding(.vertical, 12)
+        .confirmationDialog("Start Codex service?", isPresented: $confirmCodexService) {
+            Button("Install hooks and start service") { connect() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Cowchat will install Codex hooks and start a local service that uses about 400 MB of memory. Codex will ask you to trust the hooks when it next starts.")
+        }
     }
 
     @ViewBuilder private var end: some View {
@@ -168,10 +175,14 @@ private struct AgentHookRow: View {
                 .macAccessibleAction(label: "Install \(harness.appName)") { NSWorkspace.shared.open(harness.installPage) }
         case .notConnected:
             // copy:
-            Button("Connect", action: connect)
+            Button("Connect") {
+                if harness == .codex { confirmCodexService = true } else { connect() }
+            }
                 .buttonStyle(CowchatPillButtonStyle(prominent: true))
                 .fixedSize()
-                .macAccessibleAction(label: "Connect \(harness.appName)", action: connect)
+                .macAccessibleAction(label: "Connect \(harness.appName)") {
+                    if harness == .codex { confirmCodexService = true } else { connect() }
+                }
                 .help(harness == .codex ? "Installs Cowchat hooks and starts a local Codex service using about 400 MB of memory." : "Installs the Cowchat Claude Code plugin.")
         case .connecting:
             HStack(spacing: 6) {

@@ -110,8 +110,8 @@ final class SystemSessionLauncher: SessionLauncher {
         try FileManager.default.createDirectory(at: launchDirectory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         let script = launchDirectory.appendingPathComponent("\(UUID().uuidString).command")
-        let message = request.firstMessage.isEmpty ? "" : " \(Self.shellQuote(request.firstMessage))"
-        let content = "#!/bin/zsh\ncd -- \(Self.shellQuote(workingFolder.path)) || exit 1\n/bin/rm -- \(Self.shellQuote(script.path))\nexec \(Self.shellQuote(binary.path))\(message)\n"
+        let message = request.firstMessage.isEmpty ? "" : " -- \(Self.shellQuote(request.firstMessage))"
+        let content = "#!/bin/zsh\n/bin/rm -- \(Self.shellQuote(script.path))\ncd -- \(Self.shellQuote(workingFolder.path)) || exit 1\nexec \(Self.shellQuote(binary.path))\(message)\n"
         try content.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
         do {

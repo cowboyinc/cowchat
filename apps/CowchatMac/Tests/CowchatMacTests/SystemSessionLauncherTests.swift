@@ -28,7 +28,7 @@ final class SystemSessionLauncherTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let agent = bin.appendingPathComponent("claude")
-        try "#!/bin/zsh\nprintf '%s\\n' \"$PWD\" \"$1\" > '\(result.path)'\n"
+        try "#!/bin/zsh\nprintf '%s\\n' \"$PWD\" \"$1\" \"$2\" > '\(result.path)'\n"
             .write(to: agent, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: agent.path)
         let launcher = SystemSessionLauncher(home: home, defaults: defaults) { script in
@@ -37,13 +37,15 @@ final class SystemSessionLauncherTests: XCTestCase {
             try process.run()
             process.waitUntilExit()
             XCTAssertEqual(process.terminationStatus, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: script.path))
         }
-        let message = "hello'; touch \(marker.path); echo 'world"
+        let message = "-hello'; touch \(marker.path); echo 'world"
         try await launcher.start(SessionRequest(folder: SessionFolder(path: folder), harness: .claudeCode,
                                                 branch: nil, firstMessage: message))
         let lines = try String(contentsOf: result, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: false)
         XCTAssertEqual(String(lines[0]), folder.path)
-        XCTAssertEqual(String(lines[1]), message)
+        XCTAssertEqual(String(lines[1]), "--")
+        XCTAssertEqual(String(lines[2]), message)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
         XCTAssertEqual(launcher.path(ofFolder: folder.lastPathComponent), folder)
         XCTAssertEqual(SystemSessionLauncher(home: home, defaults: defaults).path(ofFolder: folder.lastPathComponent)?.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
