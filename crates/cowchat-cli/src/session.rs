@@ -3,6 +3,55 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::PathBuf};
 
+#[derive(Deserialize)]
+struct CodexMapping {
+    id: String,
+    session_file: PathBuf,
+}
+
+pub(crate) fn codex_binding() -> Option<(String, PathBuf)> {
+    let thread = std::env::var("CODEX_SESSION_ID").ok()?;
+    let thread = uuid::Uuid::parse_str(&thread).ok()?.to_string();
+    let directory = default_data_dir().join("codex-sessions");
+    codex_binding_in(&directory, &thread)
+}
+
+fn codex_binding_in(directory: &std::path::Path, thread: &str) -> Option<(String, PathBuf)> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let secret_path = directory.join(".index-key");
+    let key = fs::read(&secret_path).ok()?;
+    if key.len() != 32 || !private_file(&secret_path) {
+        return None;
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).ok()?;
+    mac.update(thread.as_bytes());
+    let path = directory.join(format!("{}.json", hex::encode(mac.finalize().into_bytes())));
+    if !private_file(&path) {
+        return None;
+    }
+    let record: CodexMapping = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    validate_id(&record.id).ok()?;
+    Some((record.id, record.session_file))
+}
+
+fn private_file(path: &std::path::Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return false;
+        }
+    }
+    true
+}
+
 #[derive(Subcommand)]
 pub(crate) enum SessionAction {
     /// Mint a session room and save its private operating token on this machine.
@@ -45,10 +94,13 @@ pub(crate) fn load_bound(
     id: &str,
     url: &str,
 ) -> Result<(SessionRecord, PathBuf), Box<dyn std::error::Error>> {
-    let path = PathBuf::from(
-        std::env::var("COWCHAT_SESSION_FILE")
-            .map_err(|_| "COWCHAT_SESSION_FILE must be set by this session's hook")?,
-    );
+    let path = std::env::var("COWCHAT_SESSION_FILE")
+        .map(PathBuf::from)
+        .or_else(|_| {
+            codex_binding()
+                .map(|(_, path)| path)
+                .ok_or("session must be bound by its hook")
+        })?;
     let meta = fs::metadata(&path)?;
     #[cfg(unix)]
     {
@@ -353,5 +405,48 @@ mod tests {
         assert!(http_url("ws://chat.example/ws", "/social/v1/sessions").is_err());
         assert!(http_url("ws://127.0.0.1:9229/ws", "/social/v1/sessions").is_ok());
         assert!(http_url("wss://chat.example/ws", "/social/v1/sessions").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod codex_binding_tests {
+    use super::*;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    #[test]
+    fn private_hmac_mapping_resolves_only_its_thread() {
+        let root = std::env::temp_dir().join(format!("cowchat-binding-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let thread = uuid::Uuid::new_v4().to_string();
+        let key = [7_u8; 32];
+        let secret = root.join(".index-key");
+        std::fs::write(&secret, key).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        mac.update(thread.as_bytes());
+        let mapping = root.join(format!("{}.json", hex::encode(mac.finalize().into_bytes())));
+        let id = format!("session:{}", uuid::Uuid::new_v4());
+        let file = root.join("private-session.json");
+        std::fs::write(
+            &mapping,
+            serde_json::json!({"id":id,"session_file":file}).to_string(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&secret, &mapping] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+        assert_eq!(codex_binding_in(&root, &thread), Some((id, file)));
+        assert!(codex_binding_in(&root, &uuid::Uuid::new_v4().to_string()).is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mapping, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(codex_binding_in(&root, &thread).is_none());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

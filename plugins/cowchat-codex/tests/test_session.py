@@ -1,0 +1,58 @@
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+import uuid
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "hooks" / "session.py"
+spec = importlib.util.spec_from_file_location("cowchat_codex_hook", SCRIPT)
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+
+
+class HookTests(unittest.TestCase):
+    def test_start_and_resume_keep_private_identity_out_of_context(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            (home / ".cowchat").mkdir()
+            (home / ".cowchat/hosted-bot.json").write_text(json.dumps({"url": "wss://chat.example/ws"}))
+            identifier = str(uuid.uuid4())
+            payload = {"session_id": identifier, "cwd": root}
+            calls = []
+
+            def fake_run(args, session_file=None):
+                calls.append((args, session_file))
+                return subprocess.CompletedProcess(args, 0, json.dumps({
+                    "room_id": "room-1", "room_name": "test-room",
+                    "session_file": str(home / ".cowchat/sessions/private.json"),
+                }), "")
+
+            with patch.object(hook.Path, "home", return_value=home), patch.object(hook, "run", side_effect=fake_run), patch.object(hook, "start_listener"), patch("sys.stdout", new_callable=io.StringIO) as output:
+                hook.hook_main("start", payload)
+                context = json.loads(output.getvalue())["hookSpecificOutput"]["additionalContext"]
+            mapping_dir = home / ".cowchat/codex-sessions"
+            mappings = list(mapping_dir.glob("*.json"))
+            self.assertEqual(len(mappings), 1)
+            record = json.loads(mappings[0].read_text())
+            self.assertEqual(record["id"], calls[0][0][calls[0][0].index("--id") + 1])
+            self.assertNotIn(record["id"], context)
+            self.assertNotIn(record["session_file"], context)
+            self.assertNotIn(identifier, mappings[0].name)
+            self.assertEqual(os.stat(mappings[0]).st_mode & 0o077, 0)
+            Path(record["session_file"]).parent.mkdir()
+            Path(record["session_file"]).write_text("private")
+            os.chmod(record["session_file"], 0o600)
+            with patch.object(hook.Path, "home", return_value=home), patch.object(hook, "run", side_effect=fake_run), patch.object(hook, "start_listener"), patch("sys.stdout", new_callable=io.StringIO):
+                hook.hook_main("start", payload)
+            self.assertEqual(calls[1][1], record["session_file"])
+            self.assertEqual(calls[1][0][calls[1][0].index("--id") + 1], record["id"])
+
+
+if __name__ == "__main__":
+    unittest.main()

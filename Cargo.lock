@@ -498,6 +498,7 @@ dependencies = [
  "cowchat-core",
  "directories",
  "env_logger",
+ "fs2",
  "futures-util",
  "rmcp",
  "rusqlite",
@@ -507,6 +508,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "uuid",
 ]
 
 [[package]]
