@@ -1406,7 +1406,9 @@ async fn run_wait_multiple(
             if heartbeat_secs > 0 && last_session_heartbeat.elapsed().as_secs() >= heartbeat_secs {
                 if let Some((id, url)) = &approved_session {
                     let (record, _) = session::load_bound(id, url)?;
-                    session::heartbeat(url, &record).await?;
+                    if let Err(error) = session::heartbeat(url, &record).await {
+                        eprintln!("wait: session heartbeat failed: {error}");
+                    }
                 }
                 last_session_heartbeat = std::time::Instant::now();
             }
