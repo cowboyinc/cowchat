@@ -48,8 +48,14 @@ def run(args, session_file=None):
 def cowchat_binary():
     config = Path.home() / ".cowchat/app-cli-binary"
     if config.exists() or config.is_symlink():
+        if config.is_symlink() or not config.is_file() or config.stat().st_uid != os.getuid() or config.stat().st_mode & 0o077:
+            raise ValueError("Cowchat app CLI binding must be a private file owned by this user")
         candidate = Path(config.read_text().strip())
-        if not (candidate.is_absolute() and candidate.name == "cowchat" and candidate.is_file() and os.access(candidate, os.X_OK)):
+        parts = candidate.parts
+        app_helper = (len(parts) >= 4 and parts[-3:] == ("Contents", "Helpers", "cowchat")
+                      and parts[-4].endswith(".app"))
+        if not (candidate.is_absolute() and app_helper and not candidate.is_symlink()
+                and candidate.is_file() and os.access(candidate, os.X_OK)):
             raise ValueError("Cowchat app CLI is unavailable; reinstall Cowchat or remove the stale app binding")
         return str(candidate)
     return "cowchat"

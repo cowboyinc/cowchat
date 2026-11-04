@@ -26,15 +26,28 @@ class SessionHookTest(unittest.TestCase):
             cli.write_text("#!/bin/sh\n")
             cli.chmod(0o700)
             config.write_text(str(cli))
+            config.chmod(0o600)
             from unittest.mock import patch
             with patch.object(hook.Path, "home", return_value=home):
                 self.assertEqual(hook.cowchat_binary(), str(cli))
+                config.chmod(0o666)
+                with self.assertRaises(ValueError):
+                    hook.cowchat_binary()
+                config.chmod(0o600)
+                other = home / "other/cowchat"
+                other.parent.mkdir()
+                other.write_text("#!/bin/sh\n")
+                other.chmod(0o700)
+                config.write_text(str(other))
+                with self.assertRaises(ValueError):
+                    hook.cowchat_binary()
+                config.write_text(str(cli))
                 cli.unlink()
                 with self.assertRaises(ValueError):
                     hook.cowchat_binary()
                 config.unlink()
                 config.symlink_to(cli)
-                with self.assertRaises(OSError):
+                with self.assertRaises(ValueError):
                     hook.cowchat_binary()
                 config.unlink()
                 self.assertEqual(hook.cowchat_binary(), "cowchat")
