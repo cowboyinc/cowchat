@@ -964,7 +964,7 @@ fn hosted_key(path: &std::path::Path, url: &str) -> Option<String> {
         }
     }
     let saved: HostedBotCredential = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    (saved.url == url && saved.api_key.starts_with("csoc_")).then_some(saved.api_key)
+    (saved.url == url && !saved.api_key.is_empty()).then_some(saved.api_key)
 }
 
 fn load_key(key_arg: &Option<String>, url: Option<&str>) -> String {
