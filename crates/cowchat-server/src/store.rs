@@ -1688,6 +1688,23 @@ impl Store {
         if used.saturating_add(bytes.len() as i64) > 1024 * 1024 * 1024 {
             return Err(StoreError::BlobQuotaExceeded);
         }
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT owner_id FROM social_rooms WHERE room_id = ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(owner) = owner {
+            let account_used: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(b.size), 0) FROM blobs b JOIN social_rooms r ON r.room_id = b.room_id WHERE r.owner_id = ?1",
+                params![owner],
+                |row| row.get(0),
+            )?;
+            if account_used.saturating_add(bytes.len() as i64) > 1024 * 1024 * 1024 {
+                return Err(StoreError::BlobQuotaExceeded);
+            }
+        }
         std::fs::create_dir_all(&self.blob_dir)?;
         let path = self.blob_file_path(&blob_id);
         std::fs::write(&path, bytes)?;
@@ -2596,7 +2613,7 @@ pub enum RenameRoomError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("room blob storage quota exceeded (1 GiB)")]
+    #[error("blob storage quota exceeded (1 GiB per room and account)")]
     BlobQuotaExceeded,
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
@@ -3747,6 +3764,34 @@ mod tests {
             Err(StoreError::BlobQuotaExceeded)
         ));
         assert!(store.add_blob("other", "new", b"x").is_ok());
+    }
+
+    #[test]
+    fn social_blob_quota_covers_all_rooms_owned_by_account() {
+        let store = Store::open_in_memory().unwrap();
+        for room in ["first", "second"] {
+            store
+                .create_room(room, room, None, None, Some("a"))
+                .unwrap();
+        }
+        {
+            let conn = store.conn.lock().unwrap();
+            for room in ["first", "second"] {
+                conn.execute(
+                    "INSERT INTO social_rooms(room_id,owner_id) VALUES (?1,'owner')",
+                    params![room],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO blobs (blob_id,room_id,name,sha256,size) VALUES ('existing','first','old','hash',?1)",
+                params![1024_i64 * 1024 * 1024],
+            ).unwrap();
+        }
+        assert!(matches!(
+            store.add_blob("second", "new", b"x"),
+            Err(StoreError::BlobQuotaExceeded)
+        ));
     }
 
     #[test]

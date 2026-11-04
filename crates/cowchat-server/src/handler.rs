@@ -1214,6 +1214,23 @@ pub(crate) async fn handle_send_message(
     if let Some(fields) = metadata.as_object_mut() {
         fields.remove("mentions");
         fields.remove("sender_kind");
+        if let Some(pr) = fields
+            .get_mut("pull_request")
+            .and_then(|v| v.as_object_mut())
+        {
+            pr.retain(|key, _| {
+                matches!(
+                    key.as_str(),
+                    "repository"
+                        | "number"
+                        | "title"
+                        | "address"
+                        | "checks"
+                        | "additions"
+                        | "deletions"
+                )
+            });
+        }
         if let Some(items) = fields.get_mut("attachments").and_then(|v| v.as_array_mut()) {
             for (item, blob) in items.iter_mut().zip(&verified_attachments) {
                 *item = serde_json::json!({"blob_id": blob.blob_id, "name": blob.name, "size": blob.size, "sha256": blob.sha256});

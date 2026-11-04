@@ -1309,14 +1309,24 @@ async fn upload_attachments(
     for path in paths {
         let canonical = std::fs::canonicalize(path)?;
         let data_dir = std::fs::canonicalize(default_data_dir()).ok();
+        let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
         let protected = data_dir
             .as_ref()
             .is_some_and(|dir| canonical.starts_with(dir))
+            || home.as_ref().is_some_and(|home| {
+                [".ssh", ".claude", ".aws", "keys"]
+                    .iter()
+                    .any(|dir| canonical.starts_with(home.join(dir)))
+            })
+            || canonical.file_name().is_some_and(|name| name == ".env")
             || std::env::var_os("COWCHAT_SESSION_FILE")
                 .and_then(|file| std::fs::canonicalize(file).ok())
                 .is_some_and(|file| canonical == file)
             || std::fs::canonicalize(default_data_dir().join("hosted-bot.json"))
-                .is_ok_and(|file| canonical == file);
+                .is_ok_and(|file| canonical == file)
+            || data_dir
+                .as_ref()
+                .is_some_and(|dir| same_file_in_tree(&canonical, dir));
         if protected {
             return Err("Cowchat credential files cannot be attached".into());
         }
@@ -1326,6 +1336,12 @@ async fn upload_attachments(
                 path.display()
             )
             .into());
+        }
+        if std::fs::read(path)?
+            .windows(5)
+            .any(|bytes| bytes == b"csoc_")
+        {
+            return Err("attachment contains a Cowchat credential".into());
         }
     }
     let base = attachment_http_base(cli.url.as_deref())?;
@@ -1380,6 +1396,40 @@ async fn upload_attachments(
         }));
     }
     Ok(serde_json::Value::Array(attached))
+}
+
+#[cfg(unix)]
+fn same_file_in_tree(path: &std::path::Path, root: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(target) = std::fs::metadata(path) else {
+        return false;
+    };
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                dirs.push(entry.path());
+            } else if kind.is_file()
+                && entry
+                    .metadata()
+                    .is_ok_and(|file| file.dev() == target.dev() && file.ino() == target.ino())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn same_file_in_tree(_path: &std::path::Path, _root: &std::path::Path) -> bool {
+    false
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

@@ -1025,7 +1025,7 @@ async fn upload_blob(
             .into_response(),
         Err(crate::store::StoreError::BlobQuotaExceeded) => json_error(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "room blob storage quota exceeded (1 GiB)",
+            "blob storage quota exceeded (1 GiB per room and account)",
         ),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
