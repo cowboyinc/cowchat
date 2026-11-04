@@ -633,15 +633,15 @@ async fn api_room_history(
     Path(room_id): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let key = headers
+    let supplied_key = headers
         .get(API_KEY_HEADER)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    if key.starts_with(crate::store::social::PREFIX)
-        && authenticated_key(&state, &headers).is_none()
-    {
+    let authenticated = authenticated_key(&state, &headers);
+    if supplied_key.starts_with(crate::store::social::PREFIX) && authenticated.is_none() {
         return json_error(StatusCode::UNAUTHORIZED, "Invalid credential");
     }
+    let key = authenticated.as_deref().unwrap_or(supplied_key);
     if state.store.social_room_access(&room_id, key) == Some(false) {
         return json_error(StatusCode::NOT_FOUND, "Room not found");
     }
@@ -1001,7 +1001,10 @@ async fn upload_blob(
             "blob exceeds the 25 MiB attachment limit",
         );
     }
-    if !state.rate_limiter.try_register_upload(&key) {
+    if !state
+        .rate_limiter
+        .try_register_upload(&state.store.social_rate_limit_key(&key))
+    {
         return json_error(
             StatusCode::TOO_MANY_REQUESTS,
             "upload rate limit exceeded for this API key; try again later",
@@ -1139,6 +1142,143 @@ mod tests {
                 SessionAuth::new([0xab; 32], "wss://chat.example/ws".into()).unwrap(),
             )),
         }
+    }
+
+    #[tokio::test]
+    async fn session_token_scopes_http_access_to_registered_session() {
+        use base64::Engine;
+        use sha2::Digest;
+
+        let state = test_state();
+        let verifier = "v".repeat(64);
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(verifier.as_bytes()));
+        let (request, oauth_state) = state
+            .store
+            .social_oauth_start("github", &challenge, None, 49233, "test-source")
+            .unwrap();
+        state
+            .store
+            .social_oauth_claim("github", &oauth_state)
+            .unwrap();
+        let (_, code) = state
+            .store
+            .social_oauth_complete("github", &oauth_state, "owner", "Owner")
+            .unwrap();
+        let account = state
+            .store
+            .social_oauth_exchange(&request, &verifier, &code)
+            .unwrap();
+        let bot = state
+            .store
+            .social_action(
+                account["device_key"].as_str().unwrap(),
+                "POST",
+                "agents",
+                &serde_json::json!({"name":"Bot"}),
+            )
+            .unwrap();
+        let key = bot["api_key"].as_str().unwrap();
+        let session = format!("session:{}", uuid::Uuid::new_v4());
+        let room = state
+            .store
+            .social_register_session(key, &session, "Agent", "codex", "repo", "main")
+            .unwrap();
+        let token = room.session_token.as_deref().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(API_KEY_HEADER, key.parse().unwrap());
+        assert_eq!(
+            state.store.social_room_access(&room.room_id, key),
+            Some(false)
+        );
+        headers.insert("x-cowchat-session-id", session.parse().unwrap());
+        let scoped = authenticated_key(&state, &headers).unwrap();
+        assert_eq!(
+            state.store.social_room_access(&room.room_id, &scoped),
+            Some(false)
+        );
+        headers.insert(API_KEY_HEADER, token.parse().unwrap());
+        assert_eq!(authenticated_key(&state, &headers).as_deref(), Some(token));
+
+        let observed = state.clone();
+        let (server, addr) = start_test_web_server(state).await;
+        let http = reqwest::Client::new();
+        let history_url = format!("http://{addr}/api/rooms/{}/history", room.room_id);
+        assert_eq!(
+            http.get(&history_url)
+                .header(API_KEY_HEADER, key)
+                .header("x-cowchat-session-id", &session)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            http.get(&history_url)
+                .header(API_KEY_HEADER, token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let upload = || {
+            http.post(upload_url(&addr, &room.room_id))
+                .query(&[("name", "note.txt")])
+                .body("hello")
+        };
+        assert_eq!(
+            upload()
+                .header(API_KEY_HEADER, key)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let created = upload().header(API_KEY_HEADER, token).send().await.unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let blob: serde_json::Value = created.json().await.unwrap();
+        let blob_id = blob["blob_id"].as_str().unwrap();
+        assert_eq!(
+            http.get(blob_url(&addr, blob_id))
+                .header(API_KEY_HEADER, key)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            http.get(blob_url(&addr, blob_id))
+                .header(API_KEY_HEADER, token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        observed.store.social_end_session(token, &session).unwrap();
+        assert_eq!(
+            http.get(&history_url)
+                .header(API_KEY_HEADER, token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            http.get(blob_url(&addr, blob_id))
+                .header(API_KEY_HEADER, token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        server.abort();
     }
 
     async fn start_test_web_server(state: AppState) -> (tokio::task::JoinHandle<()>, SocketAddr) {

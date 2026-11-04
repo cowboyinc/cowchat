@@ -1182,7 +1182,8 @@ async fn handle_send_message(
         }
         // Charts consume the existing attachment upload allowance (60/hour)
         // as well as the normal message budget, regardless of encryption.
-        if is_chart && !rate_limiter.try_register_upload(agent_api_key) {
+        let rate_limit_key = store.social_rate_limit_key(agent_api_key);
+        if is_chart && !rate_limiter.try_register_upload(&rate_limit_key) {
             return Frame::error(
                 req_id,
                 ErrorPayload::new(
@@ -1191,7 +1192,7 @@ async fn handle_send_message(
                 ),
             );
         }
-        if !rate_limiter.check_message_rate(agent_api_key, &limits) {
+        if !rate_limiter.check_message_rate(&rate_limit_key, &limits) {
             return Frame::error(
                 req_id,
                 ErrorPayload::new(ErrorCode::RateLimitMessages, "Message rate limit exceeded"),
@@ -1213,7 +1214,7 @@ async fn handle_send_message(
 
     // Track in rate limiter
     if !agent_api_key.is_empty() {
-        rate_limiter.increment_message(agent_api_key);
+        rate_limiter.increment_message(&store.social_rate_limit_key(agent_api_key));
     }
 
     // Update last_active on the agent
@@ -1300,7 +1301,7 @@ async fn handle_thinking(
         if let Some(err) = reject_oversized(req_id, &p.content, &limits) {
             return err;
         }
-        if !rate_limiter.check_message_rate(agent_api_key, &limits) {
+        if !rate_limiter.check_message_rate(&store.social_rate_limit_key(agent_api_key), &limits) {
             return Frame::error(
                 req_id,
                 ErrorPayload::new(ErrorCode::RateLimitMessages, "Message rate limit exceeded"),
@@ -1330,7 +1331,7 @@ async fn handle_thinking(
     };
 
     if !agent_api_key.is_empty() {
-        rate_limiter.increment_message(agent_api_key);
+        rate_limiter.increment_message(&store.social_rate_limit_key(agent_api_key));
     }
 
     log::debug!(

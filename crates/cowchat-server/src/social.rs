@@ -190,12 +190,24 @@ async fn action(
     let Some(key) = crate::web::authenticated_key(&state, &headers) else {
         return fail(anyhow::anyhow!("unauthorized"));
     };
-    match state.store.social_action(
-        &key,
-        method.as_str(),
-        &path,
-        &body.map(|b| b.0).unwrap_or(json!({})),
-    ) {
+    let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    let result = match (method.as_str(), parts.as_slice()) {
+        ("POST", ["sessions", id, "heartbeat"]) => state
+            .store
+            .social_touch_session(&key, id)
+            .map(|()| json!({"ok":true})),
+        ("POST", ["sessions", id, "end"]) => state
+            .store
+            .social_end_session(&key, id)
+            .map(|room_id| json!({"ok":true,"room_id":room_id})),
+        _ => state.store.social_action(
+            &key,
+            method.as_str(),
+            &path,
+            &body.map(|b| b.0).unwrap_or(json!({})),
+        ),
+    };
+    match result {
         Ok(mut value) => {
             if path == "me/friend-link" {
                 if let Some(slug) = value["slug"].as_str() {
@@ -1643,6 +1655,221 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(state.store.get_room(rid).unwrap().is_none());
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn bot_sessions_register_into_separate_rooms() {
+        let (state, base, tasks) = fixture().await;
+        let owner = login(&base, "github", "9001", None).await;
+        let owner_key = owner["device_key"].as_str().unwrap();
+        let bot = call(&base, owner_key, "POST", "agents", json!({"name":"Cowbot"})).await;
+        let bot_key = bot["api_key"].as_str().unwrap();
+        let first_id = format!("session:{}", uuid::Uuid::new_v4());
+        let second_id = format!("session:{}", uuid::Uuid::new_v4());
+
+        let register = |id: &str, name: &str, branch: &str| {
+            json!({
+                "key": bot_key,
+                "agent_id": id,
+                "name": name,
+                "reconnect": true,
+                "protocol_version": cowchat_core::PROTOCOL_VERSION,
+                "capabilities": [format!("cowchat.session.v1:{}", json!({
+                    "harness": "claude",
+                    "folder": "cowchat",
+                    "branch": branch,
+                }))]
+            })
+        };
+        let (mut first, _) =
+            tokio_tungstenite::connect_async(format!("{}/ws", base.replacen("http", "ws", 1)))
+                .await
+                .unwrap();
+        let first_ok = frame(
+            &mut first,
+            FrameType::Register,
+            register(&first_id, "claude-one", "main"),
+        )
+        .await;
+        assert_eq!(first_ok.frame_type, FrameType::Ok, "{first_ok:?}");
+        let first_room = first_ok.payload["session_room"]["room_id"]
+            .as_str()
+            .unwrap();
+        assert_eq!(first_ok.payload["session_room"]["name"], "cowchat");
+        let first_token = first_ok.payload["session_token"].as_str().unwrap();
+        assert!(state.broker.is_agent_in_room(&first_id, first_room));
+
+        let (mut impostor, _) =
+            tokio_tungstenite::connect_async(format!("{}/ws", base.replacen("http", "ws", 1)))
+                .await
+                .unwrap();
+        assert_eq!(
+            frame(
+                &mut impostor,
+                FrameType::Register,
+                register(&first_id, "impostor", "main")
+            )
+            .await
+            .frame_type,
+            FrameType::Error
+        );
+        assert!(state.broker.is_agent_in_room(&first_id, first_room));
+
+        let (mut second, _) =
+            tokio_tungstenite::connect_async(format!("{}/ws", base.replacen("http", "ws", 1)))
+                .await
+                .unwrap();
+        let second_ok = frame(
+            &mut second,
+            FrameType::Register,
+            register(&second_id, "codex-two", "feature"),
+        )
+        .await;
+        assert_eq!(second_ok.frame_type, FrameType::Ok, "{second_ok:?}");
+        let second_room = second_ok.payload["session_room"]["room_id"]
+            .as_str()
+            .unwrap();
+        assert_ne!(first_room, second_room);
+        assert_eq!(second_ok.payload["session_room"]["name"], "feature");
+        assert_eq!(
+            frame(
+                &mut first,
+                FrameType::SendMessage,
+                json!({"room_id":first_room,"content":"private work"})
+            )
+            .await
+            .frame_type,
+            FrameType::Ok
+        );
+        assert_eq!(
+            frame(
+                &mut second,
+                FrameType::JoinRoom,
+                json!({"room_id":first_room})
+            )
+            .await
+            .frame_type,
+            FrameType::Error
+        );
+        assert_eq!(
+            frame(
+                &mut second,
+                FrameType::SendMessage,
+                json!({"room_id":first_room,"content":"wrong session"})
+            )
+            .await
+            .frame_type,
+            FrameType::Error
+        );
+        for index in 0..149 {
+            assert_eq!(
+                frame(
+                    &mut first,
+                    FrameType::SendMessage,
+                    json!({"room_id":first_room,"content":format!("first-{index}")})
+                )
+                .await
+                .frame_type,
+                FrameType::Ok
+            );
+        }
+        for index in 0..150 {
+            let reply = frame(
+                &mut second,
+                FrameType::SendMessage,
+                json!({"room_id":second_room,"content":format!("second-{index}")}),
+            )
+            .await;
+            assert_eq!(
+                reply.frame_type,
+                if index < 50 {
+                    FrameType::Ok
+                } else {
+                    FrameType::Error
+                }
+            );
+        }
+        let rooms = call(&base, owner_key, "GET", "rooms", json!({})).await;
+        let rooms = rooms["rooms"].as_array().unwrap();
+        assert!(rooms.iter().any(|room| room["room_id"] == first_room
+            && room["name"] == "cowchat"
+            && room["kind"] == "session"
+            && room["session"]["agent_id"] == first_id));
+        assert!(rooms.iter().any(|room| room["room_id"] == second_room
+            && room["kind"] == "session"
+            && room["session"]["agent_id"] == second_id));
+        let mut more_sessions = Vec::new();
+        for index in 0..28 {
+            let id = format!("session:{}", uuid::Uuid::new_v4());
+            let (mut socket, _) =
+                tokio_tungstenite::connect_async(format!("{}/ws", base.replacen("http", "ws", 1)))
+                    .await
+                    .unwrap();
+            let reply = frame(
+                &mut socket,
+                FrameType::Register,
+                register(&id, &format!("worker-{index}"), &format!("branch-{index}")),
+            )
+            .await;
+            assert_eq!(
+                reply.frame_type,
+                FrameType::Ok,
+                "session {index}: {reply:?}"
+            );
+            more_sessions.push(socket);
+        }
+        assert_eq!(state.broker.agents.len(), 30);
+        call(
+            &base,
+            first_token,
+            "POST",
+            &format!("sessions/{first_id}/heartbeat"),
+            json!({}),
+        )
+        .await;
+        call(
+            &base,
+            first_token,
+            "POST",
+            &format!("sessions/{first_id}/end"),
+            json!({}),
+        )
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.broker.agents.contains_key(&first_id) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("ended session must disconnect");
+        for credential in [bot_key, first_token] {
+            let (mut resumed, _) =
+                tokio_tungstenite::connect_async(format!("{}/ws", base.replacen("http", "ws", 1)))
+                    .await
+                    .unwrap();
+            let mut attempt = register(&first_id, "claude-one", "main");
+            attempt["key"] = json!(credential);
+            assert_eq!(
+                frame(&mut resumed, FrameType::Register, attempt)
+                    .await
+                    .frame_type,
+                FrameType::Error
+            );
+        }
+        assert_eq!(
+            state.store.social_room_access(first_room, first_token),
+            Some(false)
+        );
+        let rooms = call(&base, owner_key, "GET", "rooms", json!({})).await;
+        assert!(rooms["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|room| room["room_id"] == first_room && room["session"]["ended_at"].is_number()));
+
         for task in tasks {
             task.abort();
         }

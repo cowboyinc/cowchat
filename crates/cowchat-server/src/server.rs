@@ -21,6 +21,7 @@ use crate::connection::AgentConnection;
 use crate::handler;
 use crate::rate_limit::{RateLimiter, TierLimits};
 use crate::reconnect::ReconnectManager;
+use crate::store::social::{self, SessionRoom};
 use crate::store::Store;
 use crate::tasks::TaskManager;
 use crate::voting::VoteManager;
@@ -41,6 +42,18 @@ const BLOB_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const BLOB_ORPHAN_GRACE: Duration = Duration::from_secs(15 * 60);
 /// Default blob retention: delete once the owning room has been idle 72h.
 pub const DEFAULT_BLOB_IDLE_EXPIRY_SECS: u64 = 72 * 3600;
+const SOCIAL_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+const SOCIAL_SESSION_CAPABILITY: &str = "cowchat.session.v1:";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SocialSessionMetadata {
+    harness: String,
+    folder: String,
+    #[serde(default)]
+    branch: String,
+}
 
 fn tcp_connection_allows_keyless(allow_keyless_local: bool, peer_ip: std::net::IpAddr) -> bool {
     allow_keyless_local && peer_ip.is_loopback()
@@ -617,6 +630,25 @@ impl CowchatServer {
         // with no window (None = enterprise) are never queried, so their data is
         // kept. Runs once on start, then every PURGE_INTERVAL.
         if !self.broker.is_hosted() {
+            let session_store = self.store.clone();
+            let session_broker = self.broker.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(SOCIAL_SESSION_SWEEP_INTERVAL);
+                loop {
+                    tick.tick().await;
+                    match session_store.social_expire_sessions() {
+                        Ok(ids) => {
+                            for id in ids {
+                                if let Some(connection) = session_broker.agents.get(&id) {
+                                    connection.disconnect.notify_one();
+                                }
+                            }
+                        }
+                        Err(error) => log::warn!("social session sweep failed: {error}"),
+                    }
+                }
+            });
+
             let purge_store = self.store.clone();
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(PURGE_INTERVAL);
@@ -761,12 +793,14 @@ where
         agent_capabilities,
         session_id,
         agent_api_key,
+        rate_limit_key,
         reconnected_rooms,
         takeover_rooms,
         register_reply_to,
         mut missed_messages,
         reclaim_lease,
         member_address,
+        social_session_room,
         agent_lifecycle_guard,
     ) = loop {
         let line = tokio::time::timeout(
@@ -897,7 +931,7 @@ where
 
         // A member session carries no transport bearer credential. Hosted room
         // authorization uses the verified member principal and signed roster.
-        let authenticated_key = if member_principal.is_some() {
+        let mut authenticated_key = if member_principal.is_some() {
             String::new()
         } else if (payload.key.starts_with(crate::store::social::PREFIX)
             && !no_auth
@@ -921,13 +955,22 @@ where
             return Ok(());
         };
 
+        let rate_limit_key = store.social_rate_limit_key(&authenticated_key);
         // Check rate limit for agent count (skip in no_auth mode)
         if !no_auth && !authenticated_key.is_empty() {
             let tier = store
                 .get_key_tier(&authenticated_key)
                 .unwrap_or_else(|_| "free".to_string());
-            let limits = TierLimits::for_tier(&tier);
-            if !rate_limiter.check_agent_limit(&authenticated_key, &limits) {
+            let mut limits = TierLimits::for_tier(&tier);
+            if authenticated_key.starts_with(social::PREFIX)
+                && store
+                    .social_principal(&authenticated_key)
+                    .and_then(|principal| principal.agent_id)
+                    .is_some()
+            {
+                limits.max_agents = limits.max_agents.max(40);
+            }
+            if !rate_limiter.check_agent_limit(&rate_limit_key, &limits) {
                 let err = Frame::error(
                     frame.id.as_deref(),
                     ErrorPayload::new(
@@ -957,6 +1000,67 @@ where
             write_half.write_all(err.to_line()?.as_bytes()).await?;
             continue;
         }
+
+        let session_caps = payload
+            .capabilities
+            .iter()
+            .filter_map(|capability| capability.strip_prefix(SOCIAL_SESSION_CAPABILITY))
+            .collect::<Vec<_>>();
+        if session_caps.len() > 1 {
+            let err = Frame::error(
+                frame.id.as_deref(),
+                ErrorPayload::new(ErrorCode::InvalidPayload, "Multiple session capabilities"),
+            );
+            write_half.write_all(err.to_line()?.as_bytes()).await?;
+            continue;
+        }
+        if agent_id.starts_with("session:") && session_caps.is_empty() {
+            let err = Frame::error(
+                frame.id.as_deref(),
+                ErrorPayload::new(ErrorCode::InvalidPayload, "Session capability required"),
+            );
+            write_half.write_all(err.to_line()?.as_bytes()).await?;
+            continue;
+        }
+        let social_session_room: Option<SessionRoom> = if let Some(metadata) = session_caps.first()
+        {
+            let parsed: SocialSessionMetadata = match serde_json::from_str(metadata) {
+                Ok(value) => value,
+                Err(_) => {
+                    let err = Frame::error(
+                        frame.id.as_deref(),
+                        ErrorPayload::new(ErrorCode::InvalidPayload, "Invalid session capability"),
+                    );
+                    write_half.write_all(err.to_line()?.as_bytes()).await?;
+                    continue;
+                }
+            };
+            match store.social_register_session(
+                &authenticated_key,
+                &agent_id,
+                &payload.name,
+                &parsed.harness,
+                &parsed.folder,
+                &parsed.branch,
+            ) {
+                Ok(room) => {
+                    if let Some(token) = &room.session_token {
+                        authenticated_key = token.clone();
+                    }
+                    Some(room)
+                }
+                Err(_) => {
+                    let err = Frame::error(
+                        frame.id.as_deref(),
+                        ErrorPayload::new(ErrorCode::Unauthorized, "Invalid session credential"),
+                    );
+                    write_half.write_all(err.to_line()?.as_bytes()).await?;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
 
         if !store.social_identity_allowed(&agent_id, &authenticated_key) {
             let err = Frame::error(
@@ -1132,17 +1236,21 @@ where
 
         // Track agent in rate limiter
         if !authenticated_key.is_empty() {
-            rate_limiter.add_agent(&authenticated_key);
+            rate_limiter.add_agent(&rate_limit_key);
         }
 
         let registered_name = store
-            .social_display_name(&authenticated_key)
+            .social_display_name(&authenticated_key, &agent_id)
             .unwrap_or_else(|| payload.name.clone());
         log::info!(
             "Agent registered: {} ({}) capabilities={:?}{}",
             registered_name,
             agent_id,
-            payload.capabilities,
+            if social_session_room.is_some() {
+                &[][..]
+            } else {
+                &payload.capabilities
+            },
             if reconnected_rooms.is_some() {
                 " [RECONNECTED]"
             } else {
@@ -1165,12 +1273,14 @@ where
             payload.capabilities,
             session_id,
             authenticated_key,
+            rate_limit_key,
             reconnected_rooms,
             takeover_rooms,
             frame.id,
             missed_messages,
             reclaim_lease,
             member_address,
+            social_session_room,
             agent_lifecycle_guard,
         );
     };
@@ -1272,6 +1382,21 @@ where
         member_address.clone(),
     );
     broker.agents.insert(agent_id.clone(), conn);
+    if let Some(room) = social_session_room.as_ref() {
+        broker
+            .join_room(&agent_id, &room.room_id, || {
+                accessible_room(
+                    &room.room_id,
+                    &agent_api_key,
+                    member_address.as_deref(),
+                    no_auth,
+                    &store,
+                    &broker,
+                )
+                .is_some()
+            })
+            .map_err(|error| io::Error::other(format!("session room join failed: {error:?}")))?;
+    }
     let was_reconnected = reconnected_rooms.is_some();
     let mut restored_rooms = HashSet::new();
 
@@ -1375,6 +1500,15 @@ where
         "name": agent_name,
         "protocol_version": PROTOCOL_VERSION,
     });
+    if let Some(room) = social_session_room.as_ref() {
+        ok_payload["session_room"] = serde_json::json!({
+            "room_id": room.room_id,
+            "name": room.room_name,
+        });
+        if let Some(token) = room.session_token.as_ref() {
+            ok_payload["session_token"] = serde_json::json!(token);
+        }
+    }
     if was_reconnected {
         let mut room_list: Vec<String> = restored_rooms.into_iter().collect();
         room_list.sort();
@@ -1415,7 +1549,7 @@ where
         }
         drop(failed_registration_guard);
         if !agent_api_key.is_empty() {
-            rate_limiter.remove_agent(&agent_api_key);
+            rate_limiter.remove_agent(&rate_limit_key);
         }
         let _ = store.record_session_end(&session_id);
         return Ok(());
@@ -1476,6 +1610,7 @@ where
     });
 
     let mut last_activity = std::time::Instant::now();
+    let mut last_social_touch = std::time::Instant::now();
 
     loop {
         let read_result = tokio::select! {
@@ -1509,6 +1644,17 @@ where
                         continue;
                     }
                 };
+                if social_session_room.is_some()
+                    && last_social_touch.elapsed() >= Duration::from_secs(30)
+                {
+                    if store
+                        .social_touch_session(&agent_api_key, &agent_id)
+                        .is_err()
+                    {
+                        break;
+                    }
+                    last_social_touch = std::time::Instant::now();
+                }
 
                 // Pong responses don't need processing
                 if frame.frame_type == FrameType::Pong {
@@ -1583,7 +1729,7 @@ where
 
     // Remove from rate limiter
     if !agent_api_key.is_empty() {
-        rate_limiter.remove_agent(&agent_api_key);
+        rate_limiter.remove_agent(&rate_limit_key);
     }
 
     let cleanup_lifecycle_guard = broker.lock_agent_lifecycle();
