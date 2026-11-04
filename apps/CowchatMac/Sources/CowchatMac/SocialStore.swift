@@ -226,6 +226,9 @@ final class SocialStore: ObservableObject {
                 if case .link(_, let accountID) = flow, account.id != accountID {
                     throw CowchatConnectionError.transport("The linked provider returned a different Cowchat account. Your current sign-in was kept.")
                 }
+                if let previousSession, previousSession.account.id != account.id {
+                    try await revokeHostedCredential(using: boundAPI)
+                }
                 let scopeID = previousSession.flatMap { $0.deviceKey == key ? $0.scopeId : nil } ?? UUID().uuidString.lowercased()
                 let saved = SocialSession(endpoint: endpoint, deviceKey: key, account: account, scopeId: scopeID)
                 try credentials.setCredential(try JSONEncoder().encode(saved).base64EncodedString(), for: Self.credentialAccount)
@@ -265,6 +268,10 @@ final class SocialStore: ObservableObject {
         let oldAPI = try? boundAPI()
         cancelSignIn()
         busy = false
+        if let oldAPI {
+            do { try await revokeHostedCredential(using: oldAPI) }
+            catch { errorMessage = "Could not revoke the CLI credential: \(error.localizedDescription)"; return }
+        }
         do { try credentials.setCredential(nil, for: Self.credentialAccount) }
         catch { errorMessage = error.localizedDescription; return }
         do { try hostedCredentialFile.remove() }
@@ -419,9 +426,11 @@ final class SocialStore: ObservableObject {
     func connectAgent(_ id: String) async {
         let ticket = generation
         await perform { api in
-            let created: SocialCreatedAgent = try await api.social(["agents", id, "credentials"], method: "POST")
+            try await self.revokeHostedCredential(using: api)
+            let created: SocialCreatedAgent = try await api.social(["agents", id, "credentials"], method: "POST", body: ["mint_only": true])
             guard ticket == self.generation else { return }
-            try self.hostedCredentialFile.save(apiKey: created.apiKey, endpoint: self.endpoint)
+            guard let accountID = self.account?.id else { throw CowchatConnectionError.invalidResponse }
+            try self.hostedCredentialFile.save(apiKey: created.apiKey, endpoint: self.endpoint, accountID: accountID, agentID: id)
             self.issuedAgent = created
         }
     }
@@ -429,9 +438,11 @@ final class SocialStore: ObservableObject {
     func createAgent(name: String) async {
         let ticket = generation
         await perform { api in
-            let created: SocialCreatedAgent = try await api.social(["agents"], method: "POST", body: ["name": name])
+            try await self.revokeHostedCredential(using: api)
+            let created: SocialCreatedAgent = try await api.social(["agents"], method: "POST", body: ["name": name, "mint_only": true])
             guard ticket == self.generation else { return }
-            try self.hostedCredentialFile.save(apiKey: created.apiKey, endpoint: self.endpoint)
+            guard let accountID = self.account?.id else { throw CowchatConnectionError.invalidResponse }
+            try self.hostedCredentialFile.save(apiKey: created.apiKey, endpoint: self.endpoint, accountID: accountID, agentID: created.agent.id)
             self.issuedAgent = created
         }
     }
@@ -448,4 +459,13 @@ final class SocialStore: ObservableObject {
     }
 
     func dismissAgentCredential() { issuedAgent = nil }
+
+    private func revokeHostedCredential(using api: SocialAPI) async throws {
+        guard let saved = try hostedCredentialFile.load() else { return }
+        if let accountID = saved.accountID, accountID != account?.id {
+            throw CowchatConnectionError.transport("The CLI credential belongs to another Cowchat account.")
+        }
+        let _: SocialAcknowledgement = try await api.social(["credentials"], method: "DELETE", body: ["api_key": saved.apiKey])
+        try hostedCredentialFile.remove()
+    }
 }

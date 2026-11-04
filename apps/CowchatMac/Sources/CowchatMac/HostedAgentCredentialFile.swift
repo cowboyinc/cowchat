@@ -8,7 +8,7 @@ struct HostedAgentCredentialFile {
         self.directory = directory
     }
 
-    func save(apiKey: String, endpoint: URL) throws {
+    func save(apiKey: String, endpoint: URL, accountID: String, agentID: String) throws {
         guard apiKey.hasPrefix("csoc_") else { throw CowchatConnectionError.invalidResponse }
         let components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
         guard components?.scheme == "wss", components?.host != nil,
@@ -17,7 +17,7 @@ struct HostedAgentCredentialFile {
               components?.fragment == nil else {
             throw CowchatConnectionError.invalidResponse
         }
-        let data = try JSONEncoder().encode(Record(url: endpoint.absoluteString, apiKey: apiKey))
+        let data = try JSONEncoder().encode(Record(url: endpoint.absoluteString, apiKey: apiKey, accountID: accountID, agentID: agentID))
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let temporary = directory.appendingPathComponent(".hosted-bot-\(UUID().uuidString).tmp")
         let destination = directory.appendingPathComponent("hosted-bot.json")
@@ -39,13 +39,23 @@ struct HostedAgentCredentialFile {
         }
     }
 
-    private struct Record: Encodable {
+    func load() throws -> Record? {
+        let path = directory.appendingPathComponent("hosted-bot.json")
+        guard FileManager.default.fileExists(atPath: path.path) else { return nil }
+        return try JSONDecoder().decode(Record.self, from: Data(contentsOf: path))
+    }
+
+    struct Record: Codable {
         let url: String
         let apiKey: String
+        let accountID: String?
+        let agentID: String?
 
         enum CodingKeys: String, CodingKey {
             case url
             case apiKey = "api_key"
+            case accountID = "account_id"
+            case agentID = "agent_id"
         }
     }
 }

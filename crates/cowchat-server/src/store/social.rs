@@ -11,6 +11,7 @@ pub struct Principal {
     pub account_id: String,
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
+    pub mint_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,9 +30,9 @@ pub fn principal(conn: &Connection, key: &str) -> rusqlite::Result<Option<Princi
         return Ok(None);
     }
     let principal: Option<Principal> = conn.query_row(
-        "SELECT account_id,agent_id FROM social_credentials WHERE digest=?1 AND revoked=0 AND expires>=unixepoch()",
+        "SELECT account_id,agent_id,kind FROM social_credentials WHERE digest=?1 AND revoked=0 AND expires>=unixepoch()",
         [hash(key)],
-        |row| Ok(Principal { account_id: row.get(0)?, agent_id: row.get(1)?, session_id: None }),
+        |row| Ok(Principal { account_id: row.get(0)?, agent_id: row.get(1)?, session_id: None, mint_only: row.get::<_, String>(2)? == "mint_only" }),
     ).optional()?;
     if principal.is_some() {
         return Ok(principal);
@@ -39,7 +40,7 @@ pub fn principal(conn: &Connection, key: &str) -> rusqlite::Result<Option<Princi
     conn.query_row(
         "SELECT s.owner_id,s.bot_id,s.id FROM social_sessions s JOIN social_agents b ON b.id=s.bot_id AND b.owner_id=s.owner_id AND b.revoked=0 WHERE s.token_digest=?1 AND s.ended_at IS NULL",
         [hash(key)],
-        |row| Ok(Principal { account_id: row.get(0)?, agent_id: row.get(1)?, session_id: row.get(2)? }),
+        |row| Ok(Principal { account_id: row.get(0)?, agent_id: row.get(1)?, session_id: row.get(2)?, mint_only: false }),
     ).optional()
 }
 pub fn room_access(conn: &Connection, room: &str, key: &str) -> rusqlite::Result<Option<bool>> {
@@ -54,7 +55,9 @@ pub fn room_access(conn: &Connection, room: &str, key: &str) -> rusqlite::Result
     let Some(p) = principal(conn, key)? else {
         return Ok(Some(false));
     };
-    let allowed = if let Some(bot) = p.agent_id {
+    let allowed = if p.mint_only {
+        false
+    } else if let Some(bot) = p.agent_id {
         let requested = p.session_id.as_deref().unwrap_or(&bot);
         if requested != bot {
             conn.query_row(
@@ -359,7 +362,7 @@ impl Store {
 CREATE UNIQUE INDEX IF NOT EXISTS social_accounts_handle_nocase ON social_accounts(handle COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS social_friend_links(account_id TEXT PRIMARY KEY,slug TEXT NOT NULL COLLATE NOCASE UNIQUE);
 CREATE TABLE IF NOT EXISTS social_identities(provider TEXT NOT NULL,subject TEXT NOT NULL,account_id TEXT NOT NULL,label TEXT NOT NULL,PRIMARY KEY(provider,subject));
-CREATE TABLE IF NOT EXISTS social_credentials(digest TEXT PRIMARY KEY,account_id TEXT NOT NULL,agent_id TEXT,revoked INTEGER NOT NULL DEFAULT 0,expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS social_credentials(digest TEXT PRIMARY KEY,account_id TEXT NOT NULL,agent_id TEXT,kind TEXT NOT NULL DEFAULT 'full',revoked INTEGER NOT NULL DEFAULT 0,expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS social_oauth(request_hash TEXT PRIMARY KEY,state_hash TEXT NOT NULL UNIQUE,provider TEXT NOT NULL,challenge TEXT NOT NULL,link_account TEXT,link_digest TEXT,callback_port INTEGER NOT NULL,source_hash TEXT NOT NULL,completion_hash TEXT,provider_subject TEXT,provider_label TEXT,expires INTEGER NOT NULL,claimed INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS social_setup(account_id TEXT PRIMARY KEY,agent_id TEXT NOT NULL,agent_name TEXT NOT NULL,room_id TEXT NOT NULL,room_name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS social_agents(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,name TEXT NOT NULL,discoverable INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
@@ -370,7 +373,19 @@ CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT N
 CREATE TABLE IF NOT EXISTS social_members(room_id TEXT NOT NULL,account_id TEXT NOT NULL,PRIMARY KEY(room_id,account_id));
 CREATE TABLE IF NOT EXISTS social_admissions(room_id TEXT NOT NULL,agent_id TEXT NOT NULL,PRIMARY KEY(room_id,agent_id));
 CREATE TABLE IF NOT EXISTS social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,room_name TEXT NOT NULL,token_digest TEXT UNIQUE,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER);
-CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,from_id TEXT NOT NULL,to_id TEXT NOT NULL,proposed TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);")
+CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,from_id TEXT NOT NULL,to_id TEXT NOT NULL,proposed TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);")?;
+        let conn = self.conn.lock().unwrap();
+        let mut columns = conn.prepare("PRAGMA table_info(social_credentials)")?;
+        let has_kind = columns
+            .query_map([], |row| row.get::<_, String>(1))?
+            .any(|column| column.is_ok_and(|name| name == "kind"));
+        if !has_kind {
+            conn.execute(
+                "ALTER TABLE social_credentials ADD COLUMN kind TEXT NOT NULL DEFAULT 'full'",
+                [],
+            )?;
+        }
+        Ok(())
     }
     pub fn social_friend_link_account(&self, slug: &str) -> anyhow::Result<Value> {
         let conn = self.conn.lock().unwrap();
@@ -635,6 +650,7 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             .ok()
             .flatten();
         match principal(&conn, key).ok().flatten() {
+            Some(p) if p.mint_only => false,
             Some(p) => match p.agent_id {
                 Some(bot) => p.session_id.as_deref().map_or_else(
                     || bot == id,
@@ -927,7 +943,11 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                     "INSERT INTO social_agents(id,owner_id,name,discoverable) VALUES(?1,?2,?3,?4)",
                     params![id, a, name, discoverable],
                 )?;
-                let key = credential(&tx, a, Some(&id))?;
+                let key = if body.get("mint_only") == Some(&Value::Bool(true)) {
+                    credential_mint_only(&tx, a, &id)?
+                } else {
+                    credential(&tx, a, Some(&id))?
+                };
                 json!({"agent":{"id":id,"owner_id":a,"name":name,"discoverable":discoverable},"api_key":key})
             }
             ("POST", ["agents", id, "credentials"]) => {
@@ -940,8 +960,30 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                     [id], |row| row.get(0),
                 )?;
                 anyhow::ensure!(active < 20, "credential limit reached");
-                let key = credential(&tx, a, Some(id))?;
+                let key = if body.get("mint_only") == Some(&Value::Bool(true)) {
+                    credential_mint_only(&tx, a, id)?
+                } else {
+                    credential(&tx, a, Some(id))?
+                };
                 json!({"agent":agent,"api_key":key})
+            }
+            ("DELETE", ["agents", id, "credentials"]) => {
+                let token = string(body, "api_key")?;
+                let revoked = tx.execute(
+                    "UPDATE social_credentials SET revoked=1 WHERE digest=?1 AND account_id=?2 AND agent_id=?3 AND revoked=0",
+                    params![hash(token), a, id],
+                )?;
+                anyhow::ensure!(revoked == 1, "credential not found");
+                json!({"ok":true})
+            }
+            ("DELETE", ["credentials"]) => {
+                let token = string(body, "api_key")?;
+                let revoked = tx.execute(
+                    "UPDATE social_credentials SET revoked=1 WHERE digest=?1 AND account_id=?2 AND agent_id IS NOT NULL AND revoked=0",
+                    params![hash(token), a],
+                )?;
+                anyhow::ensure!(revoked == 1, "credential not found");
+                json!({"ok":true})
             }
             ("DELETE", ["agents", id]) => {
                 let n = tx.execute(
@@ -1133,6 +1175,18 @@ pub fn credential(conn: &Connection, account: &str, agent: Option<&str>) -> anyh
         uuid::Uuid::new_v4().simple()
     );
     conn.execute("INSERT INTO social_credentials(digest,account_id,agent_id,expires) VALUES(?1,?2,?3,unixepoch()+?4)",params![hash(&token),account,agent,if agent.is_some(){365*86400}else{30*86400}])?;
+    Ok(token)
+}
+fn credential_mint_only(conn: &Connection, account: &str, agent: &str) -> anyhow::Result<String> {
+    let token = format!(
+        "{PREFIX}{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    conn.execute(
+        "INSERT INTO social_credentials(digest,account_id,agent_id,kind,expires) VALUES(?1,?2,?3,'mint_only',unixepoch()+30*86400)",
+        params![hash(&token), account, agent],
+    )?;
     Ok(token)
 }
 impl Store {
@@ -2439,6 +2493,68 @@ mod tests {
             .social_action(&ak, "POST", "logout", &json!({}))
             .unwrap();
         assert!(store.social_oauth_claim("github", &state).is_err());
+    }
+
+    #[test]
+    fn existing_social_credentials_gain_kind_with_full_default() {
+        let store = Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch("DROP TABLE social_credentials; CREATE TABLE social_credentials(digest TEXT PRIMARY KEY,account_id TEXT NOT NULL,agent_id TEXT,revoked INTEGER NOT NULL DEFAULT 0,expires INTEGER NOT NULL); INSERT INTO social_credentials(digest,account_id,agent_id,expires) VALUES('old','owner','bot',unixepoch()+86400);").unwrap();
+        }
+        store.initialize_social().unwrap();
+        store.initialize_social().unwrap();
+        let conn = store.conn.lock().unwrap();
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM social_credentials WHERE digest='old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "full");
+    }
+
+    #[test]
+    fn mint_only_bot_credential_can_create_but_not_resume_or_act_as_bot() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, _) = login(&store, "mint-owner");
+        let bot = store
+            .social_action(
+                &owner_key,
+                "POST",
+                "agents",
+                &json!({"name":"Cowbot","mint_only":true}),
+            )
+            .unwrap();
+        let bot_id = bot["agent"]["id"].as_str().unwrap();
+        let mint_key = bot["api_key"].as_str().unwrap();
+        assert!(!store.social_identity_allowed(bot_id, mint_key));
+        let session_id = format!("session:{}", uuid::Uuid::new_v4());
+        let created = store
+            .social_register_session(mint_key, &session_id, "worker", "codex", "repo", "main")
+            .unwrap();
+        assert!(created.session_token.is_some());
+        assert_eq!(
+            store.social_room_access(&created.room_id, mint_key),
+            Some(false)
+        );
+        assert!(!store.social_identity_allowed(&session_id, mint_key));
+        assert!(store
+            .social_register_session(mint_key, &session_id, "worker", "codex", "repo", "main")
+            .is_err());
+        assert!(
+            store.social_identity_allowed(&session_id, created.session_token.as_deref().unwrap())
+        );
+        store
+            .social_action(
+                &owner_key,
+                "DELETE",
+                &format!("agents/{bot_id}/credentials"),
+                &json!({"api_key":mint_key}),
+            )
+            .unwrap();
+        assert!(store.social_principal(mint_key).is_none());
     }
 
     #[test]
