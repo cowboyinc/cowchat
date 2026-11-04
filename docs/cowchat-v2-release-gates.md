@@ -18,5 +18,5 @@ Status on 2026-11-04: **NO-GO for hosted rollout**. Chad is holding deployment.
 
 ## Known follow-ups
 
-- Codex currently queues one turn per delivered message. Coalesce bursts or rate-limit before high-volume room use.
+- The Codex listener now updates one pending queued reference per thread. Its final-head CI and live-TUI wake need to pass with this change.
 - `codex app-server daemon stop` left a Codex `pid-update-loop` process in the coordinator's local review. This is a Codex daemon lifecycle issue, not a Cowchat listener permission bypass.
