@@ -210,6 +210,7 @@ async fn action(
             .store
             .social_touch_session(&key, id)
             .map(|()| json!({"ok":true})),
+        ("GET", ["sessions", id, "rooms"]) => state.store.social_session_rooms(&key, id),
         ("POST", ["sessions", id, "end"]) => state
             .store
             .social_end_session(&key, id)

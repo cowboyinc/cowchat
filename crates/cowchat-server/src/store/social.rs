@@ -638,6 +638,28 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
     pub fn social_room_access(&self, room: &str, key: &str) -> Option<bool> {
         room_access(&self.conn.lock().unwrap(), room, key).unwrap_or(Some(false))
     }
+    pub fn social_session_rooms(&self, key: &str, session_id: &str) -> anyhow::Result<Value> {
+        let conn = self.conn.lock().unwrap();
+        let principal = principal(&conn, key)?.ok_or_else(|| anyhow::anyhow!("not found"))?;
+        anyhow::ensure!(
+            principal.session_id.as_deref() == Some(session_id),
+            "not found"
+        );
+        let mut statement = conn.prepare(
+            "SELECT r.room_id,COALESCE(s.room_name,r.name),CASE WHEN s.room_id IS NULL THEN 'shared' ELSE 'session' END \
+             FROM social_admissions a JOIN rooms r ON r.room_id=a.room_id \
+             JOIN social_rooms sr ON sr.room_id=r.room_id \
+             JOIN social_members m ON m.room_id=r.room_id AND m.account_id=?2 \
+             LEFT JOIN social_sessions s ON s.room_id=r.room_id \
+             WHERE a.agent_id=?1 ORDER BY r.room_id",
+        )?;
+        let rooms = statement
+            .query_map(params![session_id, principal.account_id], |row| {
+                Ok(json!({"room_id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"kind":row.get::<_,String>(2)?}))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(json!({"rooms":rooms}))
+    }
     pub fn social_mentions_valid(&self, room: &str, mentions: &[String]) -> Option<bool> {
         let conn = self.conn.lock().unwrap();
         let managed: bool = conn
@@ -1673,6 +1695,13 @@ mod tests {
                 "main",
             )
             .unwrap();
+        let token = session_room.session_token.as_deref().unwrap();
+        let before = store.social_session_rooms(token, &session).unwrap();
+        assert_eq!(before["rooms"].as_array().unwrap().len(), 1);
+        assert_eq!(before["rooms"][0]["room_id"], session_room.room_id);
+        assert!(store
+            .social_session_rooms(bot["api_key"].as_str().unwrap(), &session)
+            .is_err());
         assert_eq!(
             store.social_mentions_valid(room_id, std::slice::from_ref(&session)),
             Some(false)
@@ -1689,9 +1718,15 @@ mod tests {
             store.social_mentions_valid(room_id, std::slice::from_ref(&session)),
             Some(true)
         );
-        store
-            .social_end_session(session_room.session_token.as_deref().unwrap(), &session)
-            .unwrap();
+        let after = store.social_session_rooms(token, &session).unwrap();
+        assert_eq!(after["rooms"].as_array().unwrap().len(), 2);
+        assert!(after["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|room| room["room_id"] == room_id));
+        store.social_end_session(token, &session).unwrap();
+        assert!(store.social_session_rooms(token, &session).is_err());
         assert_eq!(
             store.social_mentions_valid(room_id, std::slice::from_ref(&session)),
             Some(false)
