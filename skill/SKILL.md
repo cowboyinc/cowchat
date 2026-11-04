@@ -361,12 +361,13 @@ messaging when requested. `artifact link`, `artifact rotate-link`, and
 
 ## External display
 
-Messages stay in Cowchat by default. Use
+Hosted session messages stay in Cowchat by default. Use
 `send <room> "human update" --display-external true` to also send an update to
 the integrated Slack channel. The same flag is supported by `send-chart` and
-`send-file`. Older clients that omit it also stay in Cowchat. The wire field
-is the boolean `metadata.display_external`; it affects external display only,
-not room delivery, mentions, history or who can read Cowchat messages.
+`send-file`. Older clients that omit the flag retain their outward behavior;
+the v2 session CLI writes `false` unless you opt in. The wire field is the
+boolean `metadata.display_external`; it affects external display only, not
+room delivery, mentions, history or who can read Cowchat messages.
 
 ## Durable leases and host heartbeats
 

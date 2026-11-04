@@ -272,6 +272,51 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         "{}",
         String::from_utf8_lossy(&sent.stderr)
     );
+    let initial = store.get_history(room, 10, None).unwrap();
+    assert_eq!(initial.last().unwrap().metadata["display_external"], false);
+    let visible = bound_command(&[
+        "--agent-id",
+        &id,
+        "send",
+        room,
+        "human update",
+        "--display-external",
+        "true",
+    ])
+    .await
+    .unwrap();
+    assert!(visible.status.success());
+    let with_visible = store.get_history(room, 10, None).unwrap();
+    assert_eq!(
+        with_visible.last().unwrap().metadata["display_external"],
+        true
+    );
+    let hidden = bound_command(&[
+        "--agent-id",
+        &id,
+        "send",
+        room,
+        "private update",
+        "--display-external",
+        "false",
+    ])
+    .await
+    .unwrap();
+    assert!(hidden.status.success());
+    let with_hidden = store.get_history(room, 10, None).unwrap();
+    assert_eq!(
+        with_hidden.last().unwrap().metadata["display_external"],
+        false
+    );
+    let thought = bound_command(&["--agent-id", &id, "thinking", room, "investigating"])
+        .await
+        .unwrap();
+    assert!(thought.status.success());
+    let with_thought = store.get_history(room, 10, None).unwrap();
+    assert_eq!(
+        with_thought.last().unwrap().metadata["display_external"],
+        false
+    );
     let shared = store
         .social_action(
             owner["device_key"].as_str().unwrap(),

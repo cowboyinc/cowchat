@@ -785,6 +785,7 @@ mod tests {
         let history = client.get_history(room_id, 10, None).await.unwrap();
         assert_eq!(history.last().unwrap().content, "hello from session");
         assert_eq!(history.last().unwrap().metadata["mentions"], json!([id]));
+        assert_eq!(history.last().unwrap().metadata["display_external"], false);
         for task in tasks {
             task.abort();
         }

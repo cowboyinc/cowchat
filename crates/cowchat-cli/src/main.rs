@@ -1020,6 +1020,14 @@ fn resolve_agent_id(cli: &Cli) -> Option<String> {
         .or_else(|| env_non_empty("COWCHAT_AGENT_ID"))
 }
 
+fn external_display_flag(flag: Option<bool>, agent_id: Option<&str>) -> Option<bool> {
+    flag.or_else(|| {
+        agent_id
+            .filter(|id| id.starts_with("session:"))
+            .map(|_| false)
+    })
+}
+
 fn command_represents_agent_session(command: &Commands) -> bool {
     matches!(
         command,
@@ -2127,7 +2135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(kind) = kind {
                 metadata["kind"] = serde_json::json!(kind);
             }
-            if let Some(display_external) = display_external {
+            if let Some(display_external) =
+                external_display_flag(*display_external, resolve_agent_id(&cli).as_deref())
+            {
                 metadata["display_external"] = serde_json::json!(display_external);
             }
             let msg =
@@ -2907,7 +2917,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let room_id = resolve_room_id(&client, room).await?;
             client.join_room(&room_id).await?;
             let mut metadata = serde_json::json!({"type":"chart"});
-            if let Some(display_external) = display_external {
+            if let Some(display_external) =
+                external_display_flag(*display_external, resolve_agent_id(&cli).as_deref())
+            {
                 metadata["display_external"] = serde_json::json!(display_external);
             }
             let message = client
@@ -2974,7 +2986,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "sha256": blob["sha256"],
                 "size": blob["size"],
             });
-            if let Some(display_external) = display_external {
+            if let Some(display_external) =
+                external_display_flag(*display_external, resolve_agent_id(&cli).as_deref())
+            {
                 metadata["display_external"] = serde_json::json!(display_external);
             }
             let content = note.clone().unwrap_or_else(|| file_name.to_string());
