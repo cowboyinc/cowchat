@@ -89,6 +89,8 @@ grep -q 'lipo .* -verify_arch arm64' "$ROOT/build-dmg.sh"
 grep -q 'lipo .* -verify_arch x86_64' "$ROOT/build-dmg.sh"
 grep -Fq "Contents/Helpers/\$SERVER_NAME" "$ROOT/build-app.sh"
 grep -Fq "Contents/Helpers/\$SERVER_NAME" "$ROOT/build-dmg.sh"
+grep -Fq "Contents/Helpers/\$BRIDGE_NAME" "$ROOT/build-app.sh"
+grep -Fq "Contents/Helpers/\$BRIDGE_NAME" "$ROOT/build-dmg.sh"
 grep -Fq "\"\$CARGO_BIN\" build --locked --release --package \"\$SERVER_NAME\"" "$ROOT/build-app.sh"
 grep -Fq 'MACOSX_DEPLOYMENT_TARGET=13.0' "$ROOT/build-app.sh"
 grep -Fq 'aarch64-apple-darwin x86_64-apple-darwin' "$ROOT/build-app.sh"
@@ -207,6 +209,9 @@ for test_target in aarch64-apple-darwin x86_64-apple-darwin; do
 	test_server="$APP_CARGO_TARGET/$test_target/release/cowchat-server"
 	printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-server $TEST_VERSION'" > "$test_server"
 	chmod +x "$test_server"
+	test_bridge="$APP_CARGO_TARGET/$test_target/release/cowchat-codex"
+	printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-codex $TEST_VERSION'" > "$test_bridge"
+	chmod +x "$test_bridge"
 done
 
 APP_ARTIFACTS="$APP_TEST/artifacts"
@@ -383,6 +388,9 @@ printf '%s\n' 'fake-universal-binary' > "$DMG_APP/Contents/MacOS/Cowchat"
 printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-server $TEST_VERSION'" \
 	> "$DMG_APP/Contents/Helpers/cowchat-server"
 chmod +x "$DMG_APP/Contents/Helpers/cowchat-server"
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-codex $TEST_VERSION'" \
+	> "$DMG_APP/Contents/Helpers/cowchat-codex"
+chmod +x "$DMG_APP/Contents/Helpers/cowchat-codex"
 
 cat > "$DMG_SHIMS/codesign" <<'SHIM'
 #!/bin/sh

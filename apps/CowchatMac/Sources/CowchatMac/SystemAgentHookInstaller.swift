@@ -67,6 +67,10 @@ final class SystemAgentHookInstaller: AgentHookInstaller {
     }
 
     private func executable(named name: String) -> URL? {
+        if name == "cowchat-codex" {
+            let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/cowchat-codex")
+            if FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
+        }
         let paths = [".local/bin", ".cargo/bin", "bin"].map { home.appendingPathComponent($0) }
             + [URL(fileURLWithPath: "/opt/homebrew/bin"), URL(fileURLWithPath: "/usr/local/bin"),
                URL(fileURLWithPath: "/usr/bin")]

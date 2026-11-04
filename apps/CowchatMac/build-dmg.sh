@@ -10,6 +10,8 @@ EXPECTED_TEAM_ID=${COWCHAT_EXPECTED_TEAM_ID:-}
 VOLUME_NAME="Cowchat"
 SERVER_NAME="cowchat-server"
 SERVER_RELATIVE_PATH="Contents/Helpers/$SERVER_NAME"
+BRIDGE_NAME="cowchat-codex"
+BRIDGE_RELATIVE_PATH="Contents/Helpers/$BRIDGE_NAME"
 WINDOW_WIDTH=660
 WINDOW_HEIGHT=450
 APP_POSITION_X=180
@@ -140,6 +142,33 @@ verify_server_helper() {
 	fi
 }
 
+verify_bridge_helper() {
+	app_root=$1
+	verification_phase=$2
+	bridge_path="$app_root/$BRIDGE_RELATIVE_PATH"
+	if [ ! -f "$bridge_path" ] || [ ! -x "$bridge_path" ] || \
+		! lipo "$bridge_path" -verify_arch arm64 || ! lipo "$bridge_path" -verify_arch x86_64 || \
+		! codesign --verify --strict "$bridge_path"; then
+		printf 'Cowchat Codex helper failed verification (%s): %s\n' "$verification_phase" "$bridge_path" >&2
+		exit 1
+	fi
+	bridge_signature_info=$(codesign -dv --verbose=4 "$bridge_path" 2>&1 || true)
+	bridge_team_id=$(printf '%s\n' "$bridge_signature_info" | /usr/bin/sed -n 's/^TeamIdentifier=//p' | /usr/bin/head -n 1)
+	if [ "$APP_IS_DEVELOPER_ID" -eq 1 ] && [ "$bridge_team_id" != "$APP_TEAM_ID" ]; then
+		printf 'Cowchat Codex helper TeamIdentifier does not match the app (%s).\n' "$verification_phase" >&2
+		exit 1
+	fi
+	if [ -n "$EXPECTED_TEAM_ID" ] && [ "$bridge_team_id" != "$EXPECTED_TEAM_ID" ]; then
+		printf 'Cowchat Codex helper is not signed by expected team %s (%s).\n' "$EXPECTED_TEAM_ID" "$verification_phase" >&2
+		exit 1
+	fi
+	if ! bridge_version_output=$("$bridge_path" --version 2>/dev/null) || \
+		[ "$bridge_version_output" != "$BRIDGE_NAME $VERSION" ]; then
+		printf 'Unexpected Cowchat Codex helper version (%s): %s\n' "$verification_phase" "${bridge_version_output:-<missing>}" >&2
+		exit 1
+	fi
+}
+
 verify_dmg_signer_matches_app() {
 	dmg_signature_info=$1
 	dmg_team_id=$(printf '%s\n' "$dmg_signature_info" | \
@@ -211,6 +240,7 @@ if [ -n "$NOTARY_PROFILE" ] && [ "$APP_IS_DEVELOPER_ID" -ne 1 ]; then
 	exit 1
 fi
 verify_server_helper "$SOURCE_APP" "source app"
+verify_bridge_helper "$SOURCE_APP" "source app"
 
 if [ -e "/Volumes/$VOLUME_NAME" ]; then
 	printf 'A volume named %s is already mounted; detach it before building.\n' "$VOLUME_NAME" >&2
@@ -413,6 +443,7 @@ verify_payload() {
 		exit 1
 	fi
 	verify_server_helper "$volume_root/Cowchat.app" "$verification_phase image"
+	verify_bridge_helper "$volume_root/Cowchat.app" "$verification_phase image"
 }
 
 configure_and_verify_finder() {
