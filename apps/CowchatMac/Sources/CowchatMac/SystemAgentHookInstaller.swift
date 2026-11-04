@@ -5,9 +5,14 @@ import Foundation
 @MainActor
 final class SystemAgentHookInstaller: AgentHookInstaller {
     private let home: URL
+    private let systemSearchDirectories: [URL]
 
-    init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+         systemSearchDirectories: [URL] = [URL(fileURLWithPath: "/opt/homebrew/bin"),
+                                           URL(fileURLWithPath: "/usr/local/bin"),
+                                           URL(fileURLWithPath: "/usr/bin")]) {
         self.home = home
+        self.systemSearchDirectories = systemSearchDirectories
     }
 
     func state(of harness: LiveSession.Harness) async -> AgentHookState {
@@ -72,8 +77,7 @@ final class SystemAgentHookInstaller: AgentHookInstaller {
             if FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
         }
         let paths = [".local/bin", ".cargo/bin", "bin"].map { home.appendingPathComponent($0) }
-            + [URL(fileURLWithPath: "/opt/homebrew/bin"), URL(fileURLWithPath: "/usr/local/bin"),
-               URL(fileURLWithPath: "/usr/bin")]
+            + systemSearchDirectories
         return paths.map { $0.appendingPathComponent(name) }
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
