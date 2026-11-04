@@ -154,8 +154,15 @@ verify_bridge_helper() {
 	fi
 	bridge_signature_info=$(codesign -dv --verbose=4 "$bridge_path" 2>&1 || true)
 	bridge_team_id=$(printf '%s\n' "$bridge_signature_info" | /usr/bin/sed -n 's/^TeamIdentifier=//p' | /usr/bin/head -n 1)
+	bridge_developer_authority=$(printf '%s\n' "$bridge_signature_info" | \
+		/usr/bin/grep -F 'Authority=Developer ID Application:' | /usr/bin/head -n 1 || true)
 	if [ "$APP_IS_DEVELOPER_ID" -eq 1 ] && [ "$bridge_team_id" != "$APP_TEAM_ID" ]; then
 		printf 'Cowchat Codex helper TeamIdentifier does not match the app (%s).\n' "$verification_phase" >&2
+		exit 1
+	fi
+	if [ "$APP_IS_DEVELOPER_ID" -eq 1 ] && \
+		[ "$bridge_developer_authority" != "$APP_DEVELOPER_AUTHORITY" ]; then
+		printf 'Cowchat Codex helper signing authority does not match the app (%s).\n' "$verification_phase" >&2
 		exit 1
 	fi
 	if [ -n "$EXPECTED_TEAM_ID" ] && [ "$bridge_team_id" != "$EXPECTED_TEAM_ID" ]; then

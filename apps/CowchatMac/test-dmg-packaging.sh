@@ -500,6 +500,11 @@ chmod +x "$BAD_HELPER_APP/Contents/Helpers/cowchat-server"
 NONEXEC_HELPER_APP="$DMG_TEST/NonExecutableHelper.app"
 cp -R "$DMG_APP" "$NONEXEC_HELPER_APP"
 chmod 644 "$NONEXEC_HELPER_APP/Contents/Helpers/cowchat-server"
+BAD_BRIDGE_APP="$DMG_TEST/BadBridge.app"
+cp -R "$DMG_APP" "$BAD_BRIDGE_APP"
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-codex 9.9.9'" \
+	> "$BAD_BRIDGE_APP/Contents/Helpers/cowchat-codex"
+chmod +x "$BAD_BRIDGE_APP/Contents/Helpers/cowchat-codex"
 
 run_rejected_source_helper_test() {
 	test_name=$1
@@ -543,6 +548,8 @@ run_rejected_source_helper_test wrong-version "$BAD_HELPER_APP" \
 	'Unexpected Cowchat server helper version (source app): cowchat-server 9.9.9' 0 0
 run_rejected_source_helper_test non-executable "$NONEXEC_HELPER_APP" \
 	'Cowchat server helper is missing or not executable (source app)' 0 0
+run_rejected_source_helper_test wrong-bridge-version "$BAD_BRIDGE_APP" \
+	'Unexpected Cowchat Codex helper version (source app): cowchat-codex 9.9.9' 0 0
 run_rejected_source_helper_test wrong-architecture "$DMG_APP" \
 	'Cowchat server helper is not universal (source app).' 1 0
 run_rejected_source_helper_test invalid-signature "$DMG_APP" \
