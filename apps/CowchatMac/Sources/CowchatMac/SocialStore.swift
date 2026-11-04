@@ -228,6 +228,7 @@ final class SocialStore: ObservableObject {
                 }
                 if let previousSession, previousSession.account.id != account.id {
                     try await revokeHostedCredential(using: boundAPI)
+                    try hostedCredentialFile.removeSessions()
                 }
                 let scopeID = previousSession.flatMap { $0.deviceKey == key ? $0.scopeId : nil } ?? UUID().uuidString.lowercased()
                 let saved = SocialSession(endpoint: endpoint, deviceKey: key, account: account, scopeId: scopeID)
@@ -275,6 +276,8 @@ final class SocialStore: ObservableObject {
             errorMessage = "Could not revoke the CLI credential: \(error.localizedDescription)"
             return
         }
+        do { try hostedCredentialFile.removeSessions() }
+        catch { errorMessage = "Could not remove session credentials: \(error.localizedDescription)"; return }
         do { try credentials.setCredential(nil, for: Self.credentialAccount) }
         catch { errorMessage = error.localizedDescription; return }
         do { try hostedCredentialFile.remove() }
@@ -470,5 +473,6 @@ final class SocialStore: ObservableObject {
         }
         let _: SocialAcknowledgement = try await api.social(["credentials"], method: "DELETE", body: ["api_key": saved.apiKey])
         try hostedCredentialFile.remove()
+        try hostedCredentialFile.removeSessions()
     }
 }
