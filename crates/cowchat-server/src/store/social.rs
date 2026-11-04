@@ -967,22 +967,18 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 };
                 json!({"agent":agent,"api_key":key})
             }
-            ("DELETE", ["agents", id, "credentials"]) => {
-                let token = string(body, "api_key")?;
-                let revoked = tx.execute(
-                    "UPDATE social_credentials SET revoked=1 WHERE digest=?1 AND account_id=?2 AND agent_id=?3 AND revoked=0",
-                    params![hash(token), a, id],
-                )?;
-                anyhow::ensure!(revoked == 1, "credential not found");
-                json!({"ok":true})
-            }
             ("DELETE", ["credentials"]) => {
                 let token = string(body, "api_key")?;
-                let revoked = tx.execute(
-                    "UPDATE social_credentials SET revoked=1 WHERE digest=?1 AND account_id=?2 AND agent_id IS NOT NULL AND revoked=0",
+                let known: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM social_credentials WHERE digest=?1 AND account_id=?2 AND agent_id IS NOT NULL)",
                     params![hash(token), a],
+                    |row| row.get(0),
                 )?;
-                anyhow::ensure!(revoked == 1, "credential not found");
+                anyhow::ensure!(known, "credential not found");
+                tx.execute(
+                    "UPDATE social_credentials SET revoked=1 WHERE digest=?1",
+                    [hash(token)],
+                )?;
                 json!({"ok":true})
             }
             ("DELETE", ["agents", id]) => {
@@ -2519,6 +2515,7 @@ mod tests {
     fn mint_only_bot_credential_can_create_but_not_resume_or_act_as_bot() {
         let store = Store::open_in_memory().unwrap();
         let (owner_key, _) = login(&store, "mint-owner");
+        let (other_key, _) = login(&store, "mint-other");
         let bot = store
             .social_action(
                 &owner_key,
@@ -2546,11 +2543,27 @@ mod tests {
         assert!(
             store.social_identity_allowed(&session_id, created.session_token.as_deref().unwrap())
         );
+        assert!(store
+            .social_action(
+                &other_key,
+                "DELETE",
+                "credentials",
+                &json!({"api_key":mint_key})
+            )
+            .is_err());
         store
             .social_action(
                 &owner_key,
                 "DELETE",
-                &format!("agents/{bot_id}/credentials"),
+                "credentials",
+                &json!({"api_key":mint_key}),
+            )
+            .unwrap();
+        store
+            .social_action(
+                &owner_key,
+                "DELETE",
+                "credentials",
                 &json!({"api_key":mint_key}),
             )
             .unwrap();

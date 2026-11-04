@@ -265,12 +265,15 @@ final class SocialStore: ObservableObject {
     }
 
     func signOut() async {
-        let oldAPI = try? boundAPI()
         cancelSignIn()
         busy = false
-        if let oldAPI {
-            do { try await revokeHostedCredential(using: oldAPI) }
-            catch { errorMessage = "Could not revoke the CLI credential: \(error.localizedDescription)"; return }
+        let oldAPI: SocialAPI
+        do {
+            oldAPI = try boundAPI()
+            try await revokeHostedCredential(using: oldAPI)
+        } catch {
+            errorMessage = "Could not revoke the CLI credential: \(error.localizedDescription)"
+            return
         }
         do { try credentials.setCredential(nil, for: Self.credentialAccount) }
         catch { errorMessage = error.localizedDescription; return }
@@ -283,7 +286,7 @@ final class SocialStore: ObservableObject {
         phase = .signedOut
         let ticket = generation
         onSessionChanged?(nil)
-        do { if let oldAPI { let _: SocialAcknowledgement = try await oldAPI.social(["logout"], method: "POST") } }
+        do { let _: SocialAcknowledgement = try await oldAPI.social(["logout"], method: "POST") }
         catch { if ticket == generation { errorMessage = "Signed out on this Mac. The server could not confirm session revocation. \(error.localizedDescription)" } }
     }
 
