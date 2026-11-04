@@ -25,6 +25,8 @@ thiserror.workspace = true
 env_logger.workspace = true
 clap = { version = "4", features = ["derive"] }
 directories = "5"
+uuid.workspace = true
+fs2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rmcp = { version = "3.1", features = ["transport-io"] }
 schemars = "1"

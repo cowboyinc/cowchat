@@ -60,6 +60,11 @@ class SessionHookTest(unittest.TestCase):
             invocations = [json.loads(line) for line in calls.read_text().splitlines()]
             self.assertIsNone(invocations[0]["file"])
             self.assertTrue(all(call["file"] == str(session_file) for call in invocations[1:]))
+            agent_id = invocations[0]["args"][invocations[0]["args"].index("--agent-id") + 1]
+            for heartbeat, presence in ((2, 3), (4, 5), (6, 7)):
+                self.assertEqual(invocations[heartbeat]["args"][-3:], ["session", "heartbeat", agent_id])
+                self.assertEqual(invocations[presence]["args"][-4:-2][0], "presence")
+            self.assertEqual(invocations[8]["args"][-3:], ["session", "end", agent_id])
             self.assertFalse(list((home / ".cowchat" / "claude-sessions").glob("*.json")))
 
     def test_expired_resume_mints_a_new_cowchat_identity(self):

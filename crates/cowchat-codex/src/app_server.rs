@@ -49,6 +49,59 @@ impl CodexAppServerClient {
         Self { config }
     }
 
+    pub async fn thread_exists(&self, thread_id: &str) -> Result<bool, AppServerError> {
+        let endpoint = &self.config.app_server_endpoint;
+        if let Some(path) = endpoint.strip_prefix("unix://") {
+            let socket_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+            let stream = UnixStream::connect(socket_path)
+                .await
+                .map_err(AppServerError::UnixConnect)?;
+            let request = self.websocket_request("ws://localhost/")?;
+            let (websocket, _) = client_async(request, stream)
+                .await
+                .map_err(websocket_error)?;
+            self.read_thread(websocket, thread_id).await
+        } else if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
+            let request = self.websocket_request(endpoint)?;
+            let (websocket, _) = connect_async(request).await.map_err(websocket_error)?;
+            self.read_thread(websocket, thread_id).await
+        } else {
+            Err(AppServerError::InvalidEndpoint(endpoint.clone()))
+        }
+    }
+
+    async fn read_thread<S>(
+        &self,
+        mut websocket: WebSocketStream<S>,
+        thread_id: &str,
+    ) -> Result<bool, AppServerError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let timeout = Duration::from_secs(self.config.request_timeout_seconds);
+        send_request(&mut websocket, 1, "initialize", json!({
+            "clientInfo": {"name":"cowchat_codex_probe","title":"Cowchat Codex Session Probe","version":env!("CARGO_PKG_VERSION")},
+            "capabilities": {"experimentalApi": true, "optOutNotificationMethods": ["item/agentMessage/delta"]}
+        }), timeout).await?;
+        send_notification(&mut websocket, "initialized", json!({})).await?;
+        match send_request(
+            &mut websocket,
+            2,
+            "thread/read",
+            json!({"threadId":thread_id,"includeTurns":false}),
+            timeout,
+        )
+        .await
+        {
+            Ok(read) => Ok(read
+                .pointer("/thread/status/type")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "systemError")),
+            Err(AppServerError::Rpc(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn connect_and_wake(
         &self,
         thread_id: &str,
@@ -61,7 +114,8 @@ impl CodexAppServerClient {
                     "unix endpoint requires an absolute socket path".into(),
                 ));
             }
-            let stream = UnixStream::connect(path)
+            let socket_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+            let stream = UnixStream::connect(socket_path)
                 .await
                 .map_err(AppServerError::UnixConnect)?;
             let request = self.websocket_request("ws://localhost/")?;
@@ -323,6 +377,38 @@ fn websocket_error(error: tokio_tungstenite::tungstenite::Error) -> AppServerErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires a disposable Codex thread and local app-server"]
+    async fn real_idle_thread_accepts_untrusted_reference() {
+        let thread = std::env::var("COWCHAT_CODEX_PROBE_THREAD").unwrap();
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        let mut config = CodexConfig::default();
+        config.app_server_endpoint = config
+            .app_server_endpoint
+            .replace("~/", &format!("{}/", home.display()));
+        let client = CodexAppServerClient::new(config);
+        assert!(client.thread_exists(&thread).await.unwrap());
+        let outcome = client
+            .wake(
+                &thread,
+                &WakeReference {
+                    target: "codex-session".into(),
+                    room: "probe-room".into(),
+                    after_seq: 0,
+                    observed_seq: 1,
+                    source: "cowchat".into(),
+                    event_id: "probe-event".into(),
+                    event_type: "cowchat.message".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.mode, "started");
+    }
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;

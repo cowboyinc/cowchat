@@ -948,9 +948,12 @@ enum ExportFormat {
 }
 
 fn default_data_dir() -> PathBuf {
-    directories::BaseDirs::new()
-        .map(|dirs| dirs.home_dir().join(".cowchat"))
-        .unwrap_or_else(|| PathBuf::from(".cowchat"))
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cowchat")
 }
 
 fn default_socket_path() -> &'static str {
@@ -1015,7 +1018,13 @@ fn env_non_empty(key: &str) -> Option<String> {
 /// for one remote server needs no flag on every command.
 fn url_from_env(cli: &mut Cli, socket_given: bool, env_url: Option<String>) {
     if cli.url.is_none() && cli.tcp.is_none() && !socket_given {
-        cli.url = env_url;
+        cli.url = env_url.or_else(|| {
+            session::codex_binding().and_then(|(_, path)| {
+                let record: session::SessionRecord =
+                    serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+                Some(record.url)
+            })
+        });
     }
 }
 
@@ -1024,6 +1033,7 @@ fn resolve_agent_id(cli: &Cli) -> Option<String> {
         .clone()
         .filter(|value| !value.is_empty())
         .or_else(|| env_non_empty("COWCHAT_AGENT_ID"))
+        .or_else(|| session::codex_binding().map(|(id, _)| id))
 }
 
 fn external_display_flag(flag: Option<bool>, agent_id: Option<&str>) -> Option<bool> {
