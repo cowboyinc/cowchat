@@ -1679,12 +1679,20 @@ impl Store {
     ) -> Result<BlobMeta, StoreError> {
         let blob_id = uuid::Uuid::new_v4().to_string();
         let sha256 = crate::auth::sha256_hex(bytes);
+        let conn = self.conn.lock().unwrap();
+        let used: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM blobs WHERE room_id = ?1",
+            params![room_id],
+            |row| row.get(0),
+        )?;
+        if used.saturating_add(bytes.len() as i64) > 1024 * 1024 * 1024 {
+            return Err(StoreError::BlobQuotaExceeded);
+        }
         std::fs::create_dir_all(&self.blob_dir)?;
         let path = self.blob_file_path(&blob_id);
         std::fs::write(&path, bytes)?;
 
         let inserted = {
-            let conn = self.conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO blobs (blob_id, room_id, name, sha256, size) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![blob_id, room_id, name, sha256, bytes.len() as i64],
@@ -2588,6 +2596,8 @@ pub enum RenameRoomError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("room blob storage quota exceeded (1 GiB)")]
+    BlobQuotaExceeded,
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
 
@@ -3714,6 +3724,29 @@ mod tests {
         );
         assert!(store.get_blob("missing").unwrap().is_none());
         let _ = std::fs::remove_dir_all(store.blob_dir());
+    }
+
+    #[test]
+    fn blob_quota_is_enforced_per_room_before_writing() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room("full", "full", None, None, Some("a"))
+            .unwrap();
+        store
+            .create_room("other", "other", None, None, Some("a"))
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO blobs (blob_id, room_id, name, sha256, size) VALUES ('existing', 'full', 'old', 'hash', ?1)",
+                params![1024_i64 * 1024 * 1024],
+            ).unwrap();
+        }
+        assert!(matches!(
+            store.add_blob("full", "new", b"x"),
+            Err(StoreError::BlobQuotaExceeded)
+        ));
+        assert!(store.add_blob("other", "new", b"x").is_ok());
     }
 
     #[test]

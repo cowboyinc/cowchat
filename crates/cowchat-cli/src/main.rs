@@ -1307,6 +1307,19 @@ async fn upload_attachments(
         return Err("a message can carry at most 10 attachments".into());
     }
     for path in paths {
+        let canonical = std::fs::canonicalize(path)?;
+        let data_dir = std::fs::canonicalize(default_data_dir()).ok();
+        let protected = data_dir
+            .as_ref()
+            .is_some_and(|dir| canonical.starts_with(dir))
+            || std::env::var_os("COWCHAT_SESSION_FILE")
+                .and_then(|file| std::fs::canonicalize(file).ok())
+                .is_some_and(|file| canonical == file)
+            || std::fs::canonicalize(default_data_dir().join("hosted-bot.json"))
+                .is_ok_and(|file| canonical == file);
+        if protected {
+            return Err("Cowchat credential files cannot be attached".into());
+        }
         if !path.is_file() || std::fs::metadata(path)?.len() > 25 * 1024 * 1024 {
             return Err(format!(
                 "attachment must be a file of at most 25 MiB: {}",
