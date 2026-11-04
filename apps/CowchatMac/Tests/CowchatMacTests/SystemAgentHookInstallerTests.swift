@@ -4,6 +4,32 @@ import XCTest
 
 final class SystemAgentHookInstallerTests: XCTestCase {
     @MainActor
+    func testCodexConnectStartsItsSelectedBinaryAndReportsFailure() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("cowchat-connect-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let bin = home.appendingPathComponent(".local/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let log = home.appendingPathComponent("calls.txt")
+        let bridge = bin.appendingPathComponent("cowchat-codex")
+        try "#!/bin/sh\nprintf 'bridge %s\\n' \"$*\" >> '\(log.path)'\n"
+            .write(to: bridge, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: bridge.path)
+        let codex = bin.appendingPathComponent("codex")
+        try "#!/bin/sh\nprintf 'codex %s\\n' \"$*\" >> '\(log.path)'\nexit 7\n"
+            .write(to: codex, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: codex.path)
+        let installer = SystemAgentHookInstaller(home: home, systemSearchDirectories: [])
+        do {
+            _ = try await installer.connect(.codex)
+            XCTFail("A failed daemon start must reach the user")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("Could not connect"))
+        }
+        let calls = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertEqual(calls, "bridge install\ncodex app-server daemon start\n")
+    }
+
+    @MainActor
     func testInstalledHooksAndFirstCodexSessionDriveConnectionState() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("cowchat-hooks-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: home) }

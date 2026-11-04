@@ -61,7 +61,8 @@ final class SystemAgentHookInstaller: AgentHookInstaller {
             guard let bridge = executable(named: "cowchat-codex") else {
                 throw CowchatConnectionError.transport("Install the Cowchat Codex bridge before connecting Codex.")
             }
-            try await run(bridge, ["install", "--start-daemon"])
+            try await run(bridge, ["install"])
+            try await run(binary, ["app-server", "daemon", "start"])
             return await state(of: harness)
         }
         try await run(binary, arguments)
