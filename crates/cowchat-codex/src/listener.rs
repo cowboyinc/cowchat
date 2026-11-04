@@ -117,7 +117,6 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
                     &mapping.id,
                     "session",
                     "heartbeat",
-                    "--id",
                     &mapping.id,
                 ])
                 .env("COWCHAT_SESSION_FILE", &mapping.session_file)

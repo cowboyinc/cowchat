@@ -127,10 +127,10 @@ def hook_main(event, payload):
     elif saved:
         env_file = saved["session_file"]
         if event == "end":
-            run(common + ["session", "end", "--id", agent_id], env_file)
+            run(common + ["session", "end", agent_id], env_file)
             mapping.unlink(missing_ok=True)
         elif event in ("working", "idle", "prompt"):
-            run(common + ["session", "heartbeat", "--id", agent_id], env_file)
+            run(common + ["session", "heartbeat", agent_id], env_file)
             run(common + ["presence", event, "--detail", "Claude Code session"], env_file)
 
 

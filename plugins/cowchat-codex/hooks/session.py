@@ -131,11 +131,11 @@ def hook_main(event, payload):
         session_file = saved["session_file"]
         if event == "end":
             try:
-                run(common + ["session", "end", "--id", agent_id], session_file)
+                run(common + ["session", "end", agent_id], session_file)
             finally:
                 mapping.unlink(missing_ok=True)
         elif event in ("working", "prompt", "idle"):
-            run(common + ["session", "heartbeat", "--id", agent_id], session_file)
+            run(common + ["session", "heartbeat", agent_id], session_file)
             run(common + ["presence", event, "--detail", "Codex session"], session_file)
 
 

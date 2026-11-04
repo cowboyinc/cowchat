@@ -52,6 +52,14 @@ class HookTests(unittest.TestCase):
                 hook.hook_main("start", payload)
             self.assertEqual(calls[1][1], record["session_file"])
             self.assertEqual(calls[1][0][calls[1][0].index("--id") + 1], record["id"])
+            with patch.object(hook.Path, "home", return_value=home), patch.object(hook, "run", side_effect=fake_run):
+                for event in ("working", "prompt", "idle", "end"):
+                    hook.hook_main(event, payload)
+            for heartbeat, presence in ((2, 3), (4, 5), (6, 7)):
+                self.assertEqual(calls[heartbeat][0][-3:], ["session", "heartbeat", record["id"]])
+                self.assertEqual(calls[presence][0][-4:-2], ["presence", ("working", "prompt", "idle")[(heartbeat - 2) // 2]])
+            self.assertEqual(calls[8][0][-3:], ["session", "end", record["id"]])
+            self.assertFalse(mappings[0].exists())
 
 
 if __name__ == "__main__":
