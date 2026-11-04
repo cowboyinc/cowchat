@@ -14,6 +14,7 @@ final class HostedAgentCredentialFileTests: XCTestCase {
         let values = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as! [String: String]
         XCTAssertEqual(values["url"], "wss://chat.example/ws")
         XCTAssertEqual(values["api_key"], "csoc_test")
+        XCTAssertEqual(values["kind"], "mint_only")
         XCTAssertEqual(try file.load()?.accountID, "owner-1")
         XCTAssertEqual(try file.load()?.agentID, "bot-1")
         let attributes = try FileManager.default.attributesOfItem(atPath: path.path)

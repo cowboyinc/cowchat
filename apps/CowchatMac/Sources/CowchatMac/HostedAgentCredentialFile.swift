@@ -17,7 +17,7 @@ struct HostedAgentCredentialFile {
               components?.fragment == nil else {
             throw CowchatConnectionError.invalidResponse
         }
-        let data = try JSONEncoder().encode(Record(url: endpoint.absoluteString, apiKey: apiKey, accountID: accountID, agentID: agentID))
+        let data = try JSONEncoder().encode(Record(url: endpoint.absoluteString, apiKey: apiKey, accountID: accountID, agentID: agentID, kind: "mint_only"))
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let temporary = directory.appendingPathComponent(".hosted-bot-\(UUID().uuidString).tmp")
         let destination = directory.appendingPathComponent("hosted-bot.json")
@@ -50,12 +50,14 @@ struct HostedAgentCredentialFile {
         let apiKey: String
         let accountID: String?
         let agentID: String?
+        let kind: String?
 
         enum CodingKeys: String, CodingKey {
             case url
             case apiKey = "api_key"
             case accountID = "account_id"
             case agentID = "agent_id"
+            case kind
         }
     }
 }
