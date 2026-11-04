@@ -1175,7 +1175,7 @@ mod tests {
                 account["device_key"].as_str().unwrap(),
                 "POST",
                 "agents",
-                &serde_json::json!({"name":"Bot"}),
+                &serde_json::json!({"name":"Bot","mint_only":true}),
             )
             .unwrap();
         let key = bot["api_key"].as_str().unwrap();
@@ -1272,6 +1272,24 @@ mod tests {
         assert_eq!(
             http.get(blob_url(&addr, blob_id))
                 .header(API_KEY_HEADER, token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        observed
+            .store
+            .social_action(
+                account["device_key"].as_str().unwrap(),
+                "DELETE",
+                "credentials",
+                &serde_json::json!({"api_key":key}),
+            )
+            .unwrap();
+        assert_eq!(
+            http.get(&history_url)
+                .header(API_KEY_HEADER, key)
                 .send()
                 .await
                 .unwrap()

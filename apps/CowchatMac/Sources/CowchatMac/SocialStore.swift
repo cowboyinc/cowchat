@@ -54,6 +54,7 @@ final class SocialStore: ObservableObject {
     @Published var issuedAgent: SocialCreatedAgent?
     private(set) var savedSession: SocialSession?
     private let credentials: any CowchatCredentialStore
+    private let hostedCredentialFile: HostedAgentCredentialFile
     private let session: URLSession
     private var generation = UUID()
     private var loginTask: Task<Void, Never>?
@@ -66,10 +67,11 @@ final class SocialStore: ObservableObject {
     var onSnapshot: ((SocialNotificationSnapshot) -> Void)?
     private static let credentialAccount = "cowchat-social-session-v1"
 
-    init(endpoint: URL, credentials: any CowchatCredentialStore = KeychainCowchatCredentialStore(), session: URLSession = SocialAPI.secureSession) {
+    init(endpoint: URL, credentials: any CowchatCredentialStore = KeychainCowchatCredentialStore(), session: URLSession = SocialAPI.secureSession, hostedCredentialFile: HostedAgentCredentialFile = HostedAgentCredentialFile()) {
         self.endpoint = endpoint
         self.credentials = credentials
         self.session = session
+        self.hostedCredentialFile = hostedCredentialFile
         do {
             if let encoded = try credentials.credential(for: Self.credentialAccount),
                let data = Data(base64Encoded: encoded) {
@@ -224,6 +226,10 @@ final class SocialStore: ObservableObject {
                 if case .link(_, let accountID) = flow, account.id != accountID {
                     throw CowchatConnectionError.transport("The linked provider returned a different Cowchat account. Your current sign-in was kept.")
                 }
+                if let previousSession, previousSession.account.id != account.id {
+                    try await revokeHostedCredential(using: boundAPI)
+                    try hostedCredentialFile.removeSessions()
+                }
                 let scopeID = previousSession.flatMap { $0.deviceKey == key ? $0.scopeId : nil } ?? UUID().uuidString.lowercased()
                 let saved = SocialSession(endpoint: endpoint, deviceKey: key, account: account, scopeId: scopeID)
                 try credentials.setCredential(try JSONEncoder().encode(saved).base64EncodedString(), for: Self.credentialAccount)
@@ -260,11 +266,22 @@ final class SocialStore: ObservableObject {
     }
 
     func signOut() async {
-        let oldAPI = try? boundAPI()
         cancelSignIn()
         busy = false
+        let oldAPI: SocialAPI
+        do {
+            oldAPI = try boundAPI()
+            try await revokeHostedCredential(using: oldAPI)
+        } catch {
+            errorMessage = "Could not revoke the CLI credential: \(error.localizedDescription)"
+            return
+        }
+        do { try hostedCredentialFile.removeSessions() }
+        catch { errorMessage = "Could not remove session credentials: \(error.localizedDescription)"; return }
         do { try credentials.setCredential(nil, for: Self.credentialAccount) }
         catch { errorMessage = error.localizedDescription; return }
+        do { try hostedCredentialFile.remove() }
+        catch { errorMessage = "Signed out, but could not remove the CLI credential: \(error.localizedDescription)" }
         savedSession = nil
         account = nil
         identities = []
@@ -272,7 +289,7 @@ final class SocialStore: ObservableObject {
         phase = .signedOut
         let ticket = generation
         onSessionChanged?(nil)
-        do { if let oldAPI { let _: SocialAcknowledgement = try await oldAPI.social(["logout"], method: "POST") } }
+        do { let _: SocialAcknowledgement = try await oldAPI.social(["logout"], method: "POST") }
         catch { if ticket == generation { errorMessage = "Signed out on this Mac. The server could not confirm session revocation. \(error.localizedDescription)" } }
     }
 
@@ -415,8 +432,11 @@ final class SocialStore: ObservableObject {
     func connectAgent(_ id: String) async {
         let ticket = generation
         await perform { api in
-            let created: SocialCreatedAgent = try await api.social(["agents", id, "credentials"], method: "POST")
+            try await self.revokeHostedCredential(using: api)
+            let created: SocialCreatedAgent = try await api.social(["agents", id, "credentials"], method: "POST", body: ["mint_only": true])
             guard ticket == self.generation else { return }
+            guard let accountID = self.account?.id else { throw CowchatConnectionError.invalidResponse }
+            try self.hostedCredentialFile.save(apiKey: created.apiKey, endpoint: self.endpoint, accountID: accountID, agentID: id)
             self.issuedAgent = created
         }
     }
@@ -424,8 +444,11 @@ final class SocialStore: ObservableObject {
     func createAgent(name: String) async {
         let ticket = generation
         await perform { api in
-            let created: SocialCreatedAgent = try await api.social(["agents"], method: "POST", body: ["name": name])
+            try await self.revokeHostedCredential(using: api)
+            let created: SocialCreatedAgent = try await api.social(["agents"], method: "POST", body: ["name": name, "mint_only": true])
             guard ticket == self.generation else { return }
+            guard let accountID = self.account?.id else { throw CowchatConnectionError.invalidResponse }
+            try self.hostedCredentialFile.save(apiKey: created.apiKey, endpoint: self.endpoint, accountID: accountID, agentID: created.agent.id)
             self.issuedAgent = created
         }
     }
@@ -442,4 +465,14 @@ final class SocialStore: ObservableObject {
     }
 
     func dismissAgentCredential() { issuedAgent = nil }
+
+    private func revokeHostedCredential(using api: SocialAPI) async throws {
+        guard let saved = try hostedCredentialFile.load() else { return }
+        if let accountID = saved.accountID, accountID != account?.id {
+            throw CowchatConnectionError.transport("The CLI credential belongs to another Cowchat account.")
+        }
+        let _: SocialAcknowledgement = try await api.social(["credentials"], method: "DELETE", body: ["api_key": saved.apiKey])
+        try hostedCredentialFile.remove()
+        try hostedCredentialFile.removeSessions()
+    }
 }

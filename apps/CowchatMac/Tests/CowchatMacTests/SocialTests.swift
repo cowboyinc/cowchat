@@ -133,6 +133,9 @@ final class SocialTests: XCTestCase {
         await store.connectAgent("starter-agent")
         XCTAssertEqual(store.issuedAgent?.apiKey, "csoc_agent_fixture")
         XCTAssertEqual(fixture.credentialPosts, 1)
+        let savedBot = try Data(contentsOf: fixture.credentialDirectory.appendingPathComponent("hosted-bot.json"))
+        let botValues = try JSONSerialization.jsonObject(with: savedBot) as! [String: String]
+        XCTAssertEqual(botValues["url"], "wss://fixture.example/ws")
         try render(CowchatSetupWizard(social: restored, initialStep: .name, name: "Chad DePue", onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-name")
         try render(CowchatSetupWizard(social: restored, initialStep: .friends, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-friends")
         try render(CowchatSetupWizard(social: restored, initialStep: .ready, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-ready")
@@ -199,6 +202,7 @@ final class SocialTests: XCTestCase {
 
     private final class SetupFixture {
         let endpoint = URL(string: "wss://fixture.example/ws")!
+        let credentialDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let credentials = SocialMemoryCredentials()
         let session: URLSession
         var established = false
@@ -259,8 +263,8 @@ final class SocialTests: XCTestCase {
                 }
             }
         }
-        @MainActor func store() -> SocialStore { SocialStore(endpoint: endpoint, credentials: credentials, session: session) }
-        func close() { session.invalidateAndCancel(); SocialFixtureProtocol.handler = nil }
+        @MainActor func store() -> SocialStore { SocialStore(endpoint: endpoint, credentials: credentials, session: session, hostedCredentialFile: HostedAgentCredentialFile(directory: credentialDirectory)) }
+        func close() { session.invalidateAndCancel(); SocialFixtureProtocol.handler = nil; try? FileManager.default.removeItem(at: credentialDirectory) }
     }
 
     @MainActor
