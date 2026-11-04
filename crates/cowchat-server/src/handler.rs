@@ -2350,7 +2350,7 @@ async fn handle_decision(
             "leader_id": agent_id,
             "leader_name": agent_name,
             "content": p.content,
-            "metadata": p.metadata,
+            "metadata": decision_metadata,
             "timestamp": chrono::Utc::now(),
         }),
     );
