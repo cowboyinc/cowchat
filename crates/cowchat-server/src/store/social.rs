@@ -660,6 +660,18 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             .collect::<Result<Vec<_>, _>>()?;
         Ok(json!({"rooms":rooms}))
     }
+    pub fn social_live_sessions_in_room(&self, room: &str) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT s.id FROM social_sessions s JOIN social_admissions a ON a.agent_id=s.id \
+             JOIN social_members m ON m.room_id=a.room_id AND m.account_id=s.owner_id \
+             WHERE a.room_id=?1 AND s.ended_at IS NULL ORDER BY s.id",
+        )?;
+        let sessions = statement
+            .query_map([room], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
     pub fn social_mentions_valid(&self, room: &str, mentions: &[String]) -> Option<bool> {
         let conn = self.conn.lock().unwrap();
         let managed: bool = conn

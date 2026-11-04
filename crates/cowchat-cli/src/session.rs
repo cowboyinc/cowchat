@@ -237,6 +237,33 @@ async fn heartbeat(url: &str, record: &SessionRecord) -> Result<(), Box<dyn std:
     Ok(())
 }
 
+pub(crate) async fn approved_room_ids(
+    id: &str,
+    url: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let (record, _) = load_bound(id, url)?;
+    let route = format!("/social/v1/sessions/{id}/rooms");
+    let response = reqwest::Client::new()
+        .get(http_url(url, &route)?)
+        .header("x-cowchat-key", &record.session_token)
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: serde_json::Value = response.json().await?;
+    let rooms = body["rooms"]
+        .as_array()
+        .ok_or("missing approved rooms")?
+        .iter()
+        .map(|room| {
+            room["room_id"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or("missing room ID")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rooms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::http_url;

@@ -51,6 +51,8 @@ impl RoomBridge {
                 reply_to: None,
                 metadata: json!({"bridge": true}),
                 mentions: self.mentions.clone(),
+                native_focused: None,
+                native_room_wide: None,
             },
         }
     }

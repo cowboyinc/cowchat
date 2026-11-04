@@ -6,6 +6,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use cowchat_core::{Frame, FrameType};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -224,6 +225,24 @@ async fn action(
             if path == "me/friend-link" {
                 if let Some(slug) = value["slug"].as_str() {
                     value["url"] = json!(format!("{}/friends/{}", config.origin, slug));
+                }
+            }
+            let approved_room = match (method.as_str(), parts.as_slice()) {
+                ("POST", ["rooms", room, "agents"]) => Some(*room),
+                ("POST", ["room-invitations", _, "accept"]) => value["room_id"].as_str(),
+                _ => None,
+            };
+            if let Some(room) = approved_room {
+                if let Ok(sessions) = state.store.social_live_sessions_in_room(room) {
+                    for session in sessions {
+                        state.broker.send_to_agent(
+                            &session,
+                            Frame::event(
+                                FrameType::RoomApproved,
+                                json!({"room_id":room,"agent_id":session}),
+                            ),
+                        );
+                    }
                 }
             }
             if method != Method::GET {
@@ -540,6 +559,85 @@ mod tests {
             .unwrap();
         let (base, task) = serve(crate::web::router(state.clone())).await;
         (state, base, vec![task, mock_task])
+    }
+
+    #[tokio::test]
+    async fn approved_session_receives_room_event_and_can_join() {
+        let (_state, base, tasks) = fixture().await;
+        let owner = login(&base, "github", "51", None).await;
+        let owner_key = owner["device_key"].as_str().unwrap();
+        let bot = call(&base, owner_key, "POST", "agents", json!({"name":"Worker"})).await;
+        let bot_key = bot["api_key"].as_str().unwrap();
+        let id = format!("session:{}", uuid::Uuid::new_v4());
+        let session = call(
+            &base,
+            bot_key,
+            "POST",
+            "sessions",
+            json!({"id":id,"name":"worker","harness":"codex","folder":"repo","branch":"main"}),
+        )
+        .await;
+        let token = session["session_token"].as_str().unwrap();
+        let ws_url = format!("{}/ws", base.replacen("http", "ws", 1));
+        let client = cowchat_client::CowchatClient::connect_ws(
+            &ws_url,
+            token,
+            "worker",
+            Some(&id),
+            vec![format!(
+                "cowchat.session.v1:{}",
+                json!({"harness":"codex","folder":"repo","branch":"main"})
+            )],
+        )
+        .await
+        .unwrap();
+        let mut events = client.subscribe();
+        let room = call(
+            &base,
+            owner_key,
+            "POST",
+            "rooms",
+            json!({"name":"shared-work"}),
+        )
+        .await;
+        let room_id = room["room_id"].as_str().unwrap();
+        call(
+            &base,
+            owner_key,
+            "POST",
+            &format!("rooms/{room_id}/agents"),
+            json!({"agent_ids":[id]}),
+        )
+        .await;
+        let approved = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event.frame.frame_type == FrameType::RoomApproved {
+                    break event.frame;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(approved.payload["room_id"], room_id);
+        assert_eq!(approved.payload["agent_id"], id);
+        client.join_room(room_id).await.unwrap();
+        let listed = call(
+            &base,
+            token,
+            "GET",
+            &format!("sessions/{id}/rooms"),
+            json!({}),
+        )
+        .await;
+        assert!(listed["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|room| room["room_id"] == room_id));
+        for task in tasks {
+            task.abort();
+        }
     }
     async fn call(base: &str, key: &str, method: &str, path: &str, body: Value) -> Value {
         let response = reqwest::Client::new()
