@@ -372,7 +372,7 @@ CREATE TABLE IF NOT EXISTS social_friends(a TEXT NOT NULL,b TEXT NOT NULL,PRIMAR
 CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS social_members(room_id TEXT NOT NULL,account_id TEXT NOT NULL,PRIMARY KEY(room_id,account_id));
 CREATE TABLE IF NOT EXISTS social_admissions(room_id TEXT NOT NULL,agent_id TEXT NOT NULL,PRIMARY KEY(room_id,agent_id));
-CREATE TABLE IF NOT EXISTS social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,room_name TEXT NOT NULL,token_digest TEXT UNIQUE,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER);
+CREATE TABLE IF NOT EXISTS social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,room_name TEXT NOT NULL,token_digest TEXT UNIQUE,minted_by TEXT,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER);
 CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,from_id TEXT NOT NULL,to_id TEXT NOT NULL,proposed TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);")?;
         let conn = self.conn.lock().unwrap();
         let mut columns = conn.prepare("PRAGMA table_info(social_credentials)")?;
@@ -385,6 +385,11 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 [],
             )?;
         }
+        super::ensure_column_exists(&conn, "social_sessions", "minted_by", "TEXT")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS social_sessions_minted_by ON social_sessions(minted_by)",
+            [],
+        )?;
         Ok(())
     }
     pub fn social_friend_link_account(&self, slug: &str) -> anyhow::Result<Value> {
@@ -548,8 +553,8 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             uuid::Uuid::new_v4().simple()
         );
         tx.execute(
-            "INSERT INTO social_sessions(id,bot_id,owner_id,name,harness,folder,branch,room_id,room_name,token_digest,started_at,last_seen) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,unixepoch(),unixepoch())",
-            params![session_id, bot, p.account_id, name, harness, folder, branch, room_id, room_name, hash(&token)],
+            "INSERT INTO social_sessions(id,bot_id,owner_id,name,harness,folder,branch,room_id,room_name,token_digest,minted_by,started_at,last_seen) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,unixepoch(),unixepoch())",
+            params![session_id, bot, p.account_id, name, harness, folder, branch, room_id, room_name, hash(&token), hash(key)],
         )?;
         tx.commit()?;
         Ok(SessionRoom {
@@ -999,16 +1004,19 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             }
             ("DELETE", ["credentials"]) => {
                 let token = string(body, "api_key")?;
+                let digest = hash(token);
                 let known: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM social_credentials WHERE digest=?1 AND account_id=?2 AND agent_id IS NOT NULL)",
-                    params![hash(token), a],
+                    params![digest, a],
                     |row| row.get(0),
                 )?;
                 anyhow::ensure!(known, "credential not found");
                 tx.execute(
                     "UPDATE social_credentials SET revoked=1 WHERE digest=?1",
-                    [hash(token)],
+                    [&digest],
                 )?;
+                tx.execute("DELETE FROM social_admissions WHERE agent_id IN (SELECT id FROM social_sessions WHERE minted_by=?1 AND ended_at IS NULL)", [&digest])?;
+                tx.execute("UPDATE social_sessions SET ended_at=unixepoch(),token_digest=NULL WHERE minted_by=?1 AND ended_at IS NULL", [&digest])?;
                 json!({"ok":true})
             }
             ("DELETE", ["agents", id]) => {
@@ -2578,7 +2586,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         {
             let conn = store.conn.lock().unwrap();
-            conn.execute_batch("DROP TABLE social_credentials; CREATE TABLE social_credentials(digest TEXT PRIMARY KEY,account_id TEXT NOT NULL,agent_id TEXT,revoked INTEGER NOT NULL DEFAULT 0,expires INTEGER NOT NULL); INSERT INTO social_credentials(digest,account_id,agent_id,expires) VALUES('old','owner','bot',unixepoch()+86400);").unwrap();
+            conn.execute_batch("DROP TABLE social_credentials; CREATE TABLE social_credentials(digest TEXT PRIMARY KEY,account_id TEXT NOT NULL,agent_id TEXT,revoked INTEGER NOT NULL DEFAULT 0,expires INTEGER NOT NULL); INSERT INTO social_credentials(digest,account_id,agent_id,expires) VALUES('old','owner','bot',unixepoch()+86400); DROP TABLE social_sessions; CREATE TABLE social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,room_name TEXT NOT NULL,token_digest TEXT UNIQUE,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER);").unwrap();
         }
         store.initialize_social().unwrap();
         store.initialize_social().unwrap();
@@ -2591,6 +2599,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kind, "full");
+        let has_minted_by: bool = conn
+            .prepare("PRAGMA table_info(social_sessions)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .any(|column| column.unwrap() == "minted_by");
+        assert!(has_minted_by);
     }
 
     #[test]
@@ -2641,6 +2656,15 @@ mod tests {
                 &json!({"api_key":mint_key}),
             )
             .unwrap();
+        let session_token = created.session_token.as_deref().unwrap();
+        assert!(store.social_principal(session_token).is_none());
+        assert!(store
+            .social_touch_session(session_token, &session_id)
+            .is_err());
+        assert_eq!(
+            store.social_room_access(&created.room_id, session_token),
+            Some(false)
+        );
         store
             .social_action(
                 &owner_key,

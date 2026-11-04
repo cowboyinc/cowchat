@@ -43,8 +43,14 @@ fn path(id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
         .join(format!("{suffix}.json")))
 }
 
-pub(crate) fn load(id: &str, url: &str) -> Result<SessionRecord, Box<dyn std::error::Error>> {
-    let path = path(id)?;
+pub(crate) fn load_bound(
+    id: &str,
+    url: &str,
+) -> Result<(SessionRecord, PathBuf), Box<dyn std::error::Error>> {
+    let path = PathBuf::from(
+        std::env::var("COWCHAT_SESSION_FILE")
+            .map_err(|_| "COWCHAT_SESSION_FILE must be set by this session's hook")?,
+    );
     let meta = fs::metadata(&path)?;
     #[cfg(unix)]
     {
@@ -53,14 +59,14 @@ pub(crate) fn load(id: &str, url: &str) -> Result<SessionRecord, Box<dyn std::er
             return Err("session token file permissions are too broad".into());
         }
     }
-    let record: SessionRecord = serde_json::from_slice(&fs::read(path)?)?;
+    let record: SessionRecord = serde_json::from_slice(&fs::read(&path)?)?;
     if record.id != id || record.url != url || !record.session_token.starts_with("csoc_") {
         return Err("session token does not match this ID and server".into());
     }
-    Ok(record)
+    Ok((record, path))
 }
 
-fn save(record: &SessionRecord) -> Result<(), Box<dyn std::error::Error>> {
+fn save(record: &SessionRecord) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let target = path(&record.id)?;
     let parent = target.parent().ok_or("invalid session file path")?;
     fs::create_dir_all(parent)?;
@@ -76,23 +82,36 @@ fn save(record: &SessionRecord) -> Result<(), Box<dyn std::error::Error>> {
             .open(&temporary)?;
         file.write_all(&serde_json::to_vec(record)?)?;
         file.sync_all()?;
-        fs::rename(&temporary, target)?;
+        fs::rename(&temporary, &target)?;
     }
     #[cfg(not(unix))]
     {
         return Err("hosted session files require Unix permissions".into());
     }
-    Ok(())
+    Ok(target)
 }
 
 fn http_url(url: &str, route: &str) -> Result<reqwest::Url, Box<dyn std::error::Error>> {
     let mut parsed = reqwest::Url::parse(url)?;
-    if parsed.path() != "/ws" || parsed.query().is_some() || parsed.fragment().is_some() {
+    if parsed.path() != "/ws"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
         return Err("expected a hosted /ws URL".into());
     }
     let scheme = match parsed.scheme() {
         "wss" => "https",
-        "ws" => "http",
+        "ws" if parsed.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }) =>
+        {
+            "http"
+        }
         _ => return Err("expected ws or wss URL".into()),
     };
     parsed
@@ -121,8 +140,8 @@ pub(crate) async fn run(
                 .clone()
                 .unwrap_or_else(|| format!("session:{}", uuid::Uuid::new_v4()));
             let session_path = path(&id)?;
-            if session_path.exists() {
-                let saved = load(&id, url)?;
+            if std::env::var_os("COWCHAT_SESSION_FILE").is_some() {
+                let (saved, bound_path) = load_bound(&id, url)?;
                 if saved.name != cli.name
                     || saved.harness != *harness
                     || saved.folder != *folder
@@ -133,9 +152,14 @@ pub(crate) async fn run(
                 heartbeat(url, &saved).await?;
                 println!(
                     "{}",
-                    serde_json::json!({"session_id":saved.id,"room_id":saved.room_id,"room_name":saved.room_name})
+                    serde_json::json!({"session_id":saved.id,"room_id":saved.room_id,"room_name":saved.room_name,"session_file":bound_path})
                 );
                 return Ok(());
+            }
+            if session_path.exists() {
+                return Err(
+                    "existing session requires its hook-provided COWCHAT_SESSION_FILE".into(),
+                );
             }
             let key = load_key(&cli.key, Some(url));
             if key.is_empty() {
@@ -166,14 +190,14 @@ pub(crate) async fn run(
                     .ok_or("missing session_token")?
                     .into(),
             };
-            save(&record)?;
+            let saved_path = save(&record)?;
             println!(
                 "{}",
-                serde_json::json!({"session_id":id,"room_id":record.room_id,"room_name":record.room_name})
+                serde_json::json!({"session_id":id,"room_id":record.room_id,"room_name":record.room_name,"session_file":saved_path})
             );
         }
         SessionAction::End { id } => {
-            let record = load(id, url)?;
+            let (record, bound_path) = load_bound(id, url)?;
             let endpoint = format!("/social/v1/sessions/{id}/end");
             let response = reqwest::Client::new()
                 .post(http_url(url, &endpoint)?)
@@ -182,16 +206,21 @@ pub(crate) async fn run(
                 .send()
                 .await?;
             if !response.status().is_success() {
+                if response.status() == reqwest::StatusCode::BAD_REQUEST
+                    || response.status() == reqwest::StatusCode::UNAUTHORIZED
+                {
+                    fs::remove_file(&bound_path)?;
+                }
                 return Err(format!("session end failed: {}", response.status()).into());
             }
-            fs::remove_file(path(id)?)?;
+            fs::remove_file(bound_path)?;
             println!(
                 "{}",
                 serde_json::json!({"ended":id,"room_id":record.room_id})
             );
         }
         SessionAction::Heartbeat { id } => {
-            let record = load(id, url)?;
+            let (record, _) = load_bound(id, url)?;
             heartbeat(url, &record).await?;
         }
     }
@@ -210,4 +239,16 @@ async fn heartbeat(url: &str, record: &SessionRecord) -> Result<(), Box<dyn std:
         return Err(format!("session heartbeat failed: {}", response.status()).into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::http_url;
+
+    #[test]
+    fn session_http_never_sends_tokens_to_remote_plaintext() {
+        assert!(http_url("ws://chat.example/ws", "/social/v1/sessions").is_err());
+        assert!(http_url("ws://127.0.0.1:9229/ws", "/social/v1/sessions").is_ok());
+        assert!(http_url("wss://chat.example/ws", "/social/v1/sessions").is_ok());
+    }
 }

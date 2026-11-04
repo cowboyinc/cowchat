@@ -110,6 +110,7 @@ async fn session_start_rejects_wrong_server_metadata_and_permissions() {
                 "main",
             ])
             .env("HOME", home)
+            .env("COWCHAT_SESSION_FILE", &path)
             .output()
     };
     assert!(!run("wss://other.example/ws", "repo")
@@ -222,6 +223,15 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
     );
     let started: serde_json::Value = serde_json::from_slice(&started.stdout).unwrap();
     let room = started["room_id"].as_str().unwrap();
+    let session_file = started["session_file"].as_str().unwrap();
+    let bound_command = |args: &[&str]| {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"))
+            .args(["--url", &url])
+            .args(args)
+            .env("HOME", &home)
+            .env("COWCHAT_SESSION_FILE", session_file)
+            .output()
+    };
     let direct = command(&[
         "--name",
         "worker",
@@ -234,7 +244,7 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
     .await
     .unwrap();
     assert!(!direct.status.success());
-    let resumed = command(&[
+    let resumed = bound_command(&[
         "--name",
         "worker",
         "session",
@@ -253,7 +263,7 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         "{}",
         String::from_utf8_lossy(&resumed.stderr)
     );
-    let sent = command(&["--agent-id", &id, "send", room, "hello from session"])
+    let sent = bound_command(&["--agent-id", &id, "send", room, "hello from session"])
         .await
         .unwrap();
     assert!(
@@ -261,13 +271,53 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         "{}",
         String::from_utf8_lossy(&sent.stderr)
     );
-    let beat = command(&["session", "heartbeat", &id]).await.unwrap();
+    let sibling_id = format!("session:{}", uuid::Uuid::new_v4());
+    let sibling = command(&[
+        "--name",
+        "sibling",
+        "session",
+        "start",
+        "--id",
+        &sibling_id,
+        "--harness",
+        "codex",
+        "--folder",
+        "other-repo",
+    ])
+    .await
+    .unwrap();
+    assert!(
+        sibling.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sibling.stderr)
+    );
+    let sibling: serde_json::Value = serde_json::from_slice(&sibling.stdout).unwrap();
+    let sibling_room = sibling["room_id"].as_str().unwrap();
+    let sibling_file = sibling["session_file"].as_str().unwrap();
+    assert!(
+        !bound_command(&["--agent-id", &sibling_id, "send", sibling_room, "spoofed"])
+            .await
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(!bound_command(&["session", "end", &sibling_id])
+        .await
+        .unwrap()
+        .status
+        .success());
+    assert!(!command(&["--agent-id", &id, "send", room, "unbound"])
+        .await
+        .unwrap()
+        .status
+        .success());
+    let beat = bound_command(&["session", "heartbeat", &id]).await.unwrap();
     assert!(
         beat.status.success(),
         "{}",
         String::from_utf8_lossy(&beat.stderr)
     );
-    let ended = command(&["session", "end", &id]).await.unwrap();
+    let ended = bound_command(&["session", "end", &id]).await.unwrap();
     assert!(
         ended.status.success(),
         "{}",
@@ -277,6 +327,14 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         .join("sessions")
         .join(format!("{}.json", id.trim_start_matches("session:")))
         .exists());
+    let sibling_end = tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args(["--url", &url, "session", "end", &sibling_id])
+        .env("HOME", &home)
+        .env("COWCHAT_SESSION_FILE", sibling_file)
+        .output()
+        .await
+        .unwrap();
+    assert!(sibling_end.status.success());
     task.abort();
     std::env::remove_var("COWCHAT_SOCIAL_PUBLIC_ORIGIN");
 }

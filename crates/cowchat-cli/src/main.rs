@@ -1125,7 +1125,9 @@ async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>>
         return Err("hosted sessions require --url".into());
     }
     let saved_session = match (agent_id.as_deref(), cli.url.as_deref()) {
-        (Some(id), Some(url)) if id.starts_with("session:") => Some(session::load(id, url)?),
+        (Some(id), Some(url)) if id.starts_with("session:") => {
+            Some(session::load_bound(id, url)?.0)
+        }
         _ => None,
     };
     if saved_session.is_none()

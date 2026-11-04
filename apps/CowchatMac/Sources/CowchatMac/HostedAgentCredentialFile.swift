@@ -39,6 +39,13 @@ struct HostedAgentCredentialFile {
         }
     }
 
+    func removeSessions() throws {
+        let path = directory.appendingPathComponent("sessions", isDirectory: true)
+        if FileManager.default.fileExists(atPath: path.path) {
+            try FileManager.default.removeItem(at: path)
+        }
+    }
+
     func load() throws -> Record? {
         let path = directory.appendingPathComponent("hosted-bot.json")
         guard FileManager.default.fileExists(atPath: path.path) else { return nil }
