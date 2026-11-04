@@ -10,16 +10,55 @@ pub const OWNER_PREFIX: &str = "\0cowchat:social:";
 pub struct Principal {
     pub account_id: String,
     pub agent_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
+pub fn credential_key(key: &str) -> &str {
+    key.split_once("#session:").map_or(key, |(base, _)| base)
+}
+
+pub fn session_key(key: &str, session_id: &str) -> String {
+    format!("{key}#session:{session_id}")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionRoom {
+    pub room_id: String,
+    pub room_name: String,
+    pub agent_name: String,
 }
 
 pub fn hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 pub fn principal(conn: &Connection, key: &str) -> rusqlite::Result<Option<Principal>> {
-    if !key.starts_with(PREFIX) {
+    let credential = credential_key(key);
+    if !credential.starts_with(PREFIX) {
         return Ok(None);
     }
-    conn.query_row("SELECT account_id,agent_id FROM social_credentials WHERE digest=?1 AND revoked=0 AND expires>=unixepoch()", [hash(key)], |r| Ok(Principal {account_id:r.get(0)?,agent_id:r.get(1)?})).optional()
+    let principal: Option<Principal> = conn.query_row(
+        "SELECT account_id,agent_id FROM social_credentials WHERE digest=?1 AND revoked=0 AND expires>=unixepoch()",
+        [hash(credential)],
+        |row| Ok(Principal { account_id: row.get(0)?, agent_id: row.get(1)?, session_id: None }),
+    ).optional()?;
+    let Some(mut principal) = principal else {
+        return Ok(None);
+    };
+    if let Some((_, session_id)) = key.split_once("#session:") {
+        let Some(bot_id) = principal.agent_id.as_deref() else {
+            return Ok(None);
+        };
+        let bound: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM social_sessions WHERE id=?1 AND bot_id=?2 AND owner_id=?3 AND ended_at IS NULL)",
+            params![session_id, bot_id, principal.account_id],
+            |row| row.get(0),
+        )?;
+        if !bound {
+            return Ok(None);
+        }
+        principal.session_id = Some(session_id.to_owned());
+    }
+    Ok(Some(principal))
 }
 pub fn room_access(conn: &Connection, room: &str, key: &str) -> rusqlite::Result<Option<bool>> {
     let managed: bool = conn.query_row(
@@ -33,8 +72,17 @@ pub fn room_access(conn: &Connection, room: &str, key: &str) -> rusqlite::Result
     let Some(p) = principal(conn, key)? else {
         return Ok(Some(false));
     };
-    let allowed = if let Some(agent) = p.agent_id {
-        conn.query_row("SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_members m ON m.room_id=a.room_id AND m.account_id=?3 JOIN social_agents g ON g.id=a.agent_id WHERE a.room_id=?1 AND a.agent_id=?2 AND g.revoked=0 AND g.owner_id=?3)", params![room,agent,p.account_id],|r|r.get(0))?
+    let allowed = if let Some(bot) = p.agent_id {
+        let requested = p.session_id.as_deref().unwrap_or(&bot);
+        if requested != bot {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_sessions s ON s.id=a.agent_id JOIN social_members m ON m.room_id=a.room_id AND m.account_id=s.owner_id JOIN social_agents b ON b.id=s.bot_id WHERE a.room_id=?1 AND a.agent_id=?2 AND s.bot_id=?3 AND s.owner_id=?4 AND s.ended_at IS NULL AND b.revoked=0)",
+                params![room, requested, bot, p.account_id],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_members m ON m.room_id=a.room_id AND m.account_id=?3 JOIN social_agents g ON g.id=a.agent_id WHERE a.room_id=?1 AND a.agent_id=?2 AND g.revoked=0 AND g.owner_id=?3)", params![room,bot,p.account_id],|r|r.get(0))?
+        }
     } else {
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM social_members WHERE room_id=?1 AND account_id=?2)",
@@ -271,7 +319,7 @@ fn ids(body: &Value, key: &str) -> anyhow::Result<Vec<String>> {
 fn approve(conn: &Connection, room: &str, owner: &str, ids: &[String]) -> anyhow::Result<()> {
     for id in ids {
         let owned: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM social_agents WHERE id=?1 AND owner_id=?2 AND revoked=0)",
+            "SELECT EXISTS(SELECT 1 FROM social_agents WHERE id=?1 AND owner_id=?2 AND revoked=0) OR EXISTS(SELECT 1 FROM social_sessions WHERE id=?1 AND owner_id=?2 AND ended_at IS NULL)",
             params![id, owner],
             |r| r.get(0),
         )?;
@@ -339,6 +387,7 @@ CREATE TABLE IF NOT EXISTS social_friends(a TEXT NOT NULL,b TEXT NOT NULL,PRIMAR
 CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS social_members(room_id TEXT NOT NULL,account_id TEXT NOT NULL,PRIMARY KEY(room_id,account_id));
 CREATE TABLE IF NOT EXISTS social_admissions(room_id TEXT NOT NULL,agent_id TEXT NOT NULL,PRIMARY KEY(room_id,agent_id));
+CREATE TABLE IF NOT EXISTS social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER);
 CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,from_id TEXT NOT NULL,to_id TEXT NOT NULL,proposed TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);")
     }
     pub fn social_friend_link_account(&self, slug: &str) -> anyhow::Result<Value> {
@@ -349,6 +398,188 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
     pub fn social_principal(&self, key: &str) -> Option<Principal> {
         principal(&self.conn.lock().unwrap(), key).ok().flatten()
     }
+    /// Register one stable agent session under a bot credential. A resumed
+    /// session keeps its room; a different bot cannot claim its identity.
+    pub fn social_register_session(
+        &self,
+        key: &str,
+        session_id: &str,
+        name: &str,
+        harness: &str,
+        folder: &str,
+        branch: &str,
+    ) -> anyhow::Result<SessionRoom> {
+        let suffix = session_id
+            .strip_prefix("session:")
+            .ok_or_else(|| anyhow::anyhow!("invalid session ID"))?;
+        uuid::Uuid::parse_str(suffix).map_err(|_| anyhow::anyhow!("invalid session ID"))?;
+        anyhow::ensure!(
+            !name.is_empty() && name.chars().count() <= 100 && name.chars().all(display_char),
+            "invalid session name"
+        );
+        anyhow::ensure!(
+            !harness.is_empty() && harness.len() <= 40 && harness.chars().all(display_char),
+            "invalid harness"
+        );
+        anyhow::ensure!(
+            !folder.is_empty() && folder.chars().count() <= 100 && folder.chars().all(display_char),
+            "invalid folder"
+        );
+        anyhow::ensure!(
+            branch.chars().count() <= 100 && branch.chars().all(display_char),
+            "invalid branch"
+        );
+
+        let mut conn = self.conn.lock().unwrap();
+        let p = principal(&conn, key)?.ok_or_else(|| anyhow::anyhow!("invalid credential"))?;
+        anyhow::ensure!(p.session_id.is_none(), "bot credential required");
+        let bot = p
+            .agent_id
+            .ok_or_else(|| anyhow::anyhow!("bot credential required"))?;
+        let active: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM social_agents WHERE id=?1 AND owner_id=?2 AND revoked=0)",
+            params![bot, p.account_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(active, "bot revoked");
+
+        let tx = conn.transaction()?;
+        let existing: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT bot_id,room_id,name FROM social_sessions WHERE id=?1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((owner_bot, room_id, _old_name)) = existing {
+            anyhow::ensure!(owner_bot == bot, "session belongs to another bot");
+            tx.execute(
+                "UPDATE social_sessions SET name=?2,harness=?3,folder=?4,branch=?5,last_seen=unixepoch(),ended_at=NULL WHERE id=?1",
+                params![session_id, name, harness, folder, branch],
+            )?;
+            let room_name: String = tx.query_row(
+                "SELECT name FROM rooms WHERE room_id=?1",
+                [&room_id],
+                |row| row.get(0),
+            )?;
+            tx.commit()?;
+            return Ok(SessionRoom {
+                room_id,
+                room_name,
+                agent_name: name.to_owned(),
+            });
+        }
+
+        let owner_key = format!("social-account:{}:{bot}", p.account_id);
+        tx.execute(
+            "INSERT OR IGNORE INTO agent_identities(agent_id,owner_key) VALUES(?1,?2)",
+            params![session_id, owner_key],
+        )?;
+        let claimed: String = tx.query_row(
+            "SELECT owner_key FROM agent_identities WHERE agent_id=?1",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(claimed == owner_key, "session identity already claimed");
+
+        let stem = if branch.is_empty() || branch == "main" || branch == "master" {
+            folder
+        } else {
+            branch
+        };
+        let stem = super::normalize_room_name(stem).map_err(anyhow::Error::msg)?;
+        let mut room_name = stem.clone();
+        let collision_stem = stem.chars().take(90).collect::<String>();
+        let mut suffix = 2;
+        while tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM rooms WHERE name=?1)",
+            [&room_name],
+            |row| row.get::<_, bool>(0),
+        )? {
+            room_name = format!("{collision_stem}-{suffix}");
+            suffix += 1;
+            room_name = super::normalize_room_name(&room_name).map_err(anyhow::Error::msg)?;
+        }
+        let room_id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO rooms(room_id,name,visibility,owner_key,encrypted,created_by) VALUES(?1,?2,'private',?3,0,?4)",
+            params![room_id, room_name, format!("{OWNER_PREFIX}{}", p.account_id), p.account_id],
+        )?;
+        tx.execute(
+            "INSERT INTO social_rooms(room_id,owner_id) VALUES(?1,?2)",
+            params![room_id, p.account_id],
+        )?;
+        tx.execute(
+            "INSERT INTO social_members(room_id,account_id) VALUES(?1,?2)",
+            params![room_id, p.account_id],
+        )?;
+        tx.execute(
+            "INSERT INTO social_admissions(room_id,agent_id) VALUES(?1,?2)",
+            params![room_id, session_id],
+        )?;
+        tx.execute(
+            "INSERT INTO social_sessions(id,bot_id,owner_id,name,harness,folder,branch,room_id,started_at,last_seen) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,unixepoch(),unixepoch())",
+            params![session_id, bot, p.account_id, name, harness, folder, branch, room_id],
+        )?;
+        tx.commit()?;
+        Ok(SessionRoom {
+            room_id,
+            room_name,
+            agent_name: name.to_owned(),
+        })
+    }
+
+    pub fn social_touch_session(&self, key: &str, session_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let p = principal(&conn, key)?.ok_or_else(|| anyhow::anyhow!("invalid credential"))?;
+        let bot = p
+            .agent_id
+            .ok_or_else(|| anyhow::anyhow!("bot credential required"))?;
+        let updated = conn.execute(
+            "UPDATE social_sessions SET last_seen=unixepoch() WHERE id=?1 AND bot_id=?2 AND owner_id=?3 AND ended_at IS NULL",
+            params![session_id, bot, p.account_id],
+        )?;
+        anyhow::ensure!(updated == 1, "session not found");
+        Ok(())
+    }
+
+    pub fn social_end_session(&self, key: &str, session_id: &str) -> anyhow::Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let p = principal(&conn, key)?.ok_or_else(|| anyhow::anyhow!("invalid credential"))?;
+        let bot = p
+            .agent_id
+            .ok_or_else(|| anyhow::anyhow!("bot credential required"))?;
+        let room_id: String = conn
+            .query_row(
+                "SELECT room_id FROM social_sessions WHERE id=?1 AND bot_id=?2 AND owner_id=?3",
+                params![session_id, bot, p.account_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| anyhow::anyhow!("session not found"))?;
+        conn.execute(
+            "UPDATE social_sessions SET ended_at=COALESCE(ended_at,unixepoch()) WHERE id=?1",
+            [session_id],
+        )?;
+        Ok(room_id)
+    }
+
+    pub fn social_expire_sessions(&self) -> anyhow::Result<Vec<String>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut stale = tx.prepare(
+            "SELECT id FROM social_sessions WHERE ended_at IS NULL AND last_seen<unixepoch()-300",
+        )?;
+        let ids = stale
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stale);
+        tx.execute(
+            "UPDATE social_sessions SET ended_at=unixepoch() WHERE ended_at IS NULL AND last_seen<unixepoch()-300",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(ids)
+    }
     pub fn social_room_access(&self, room: &str, key: &str) -> Option<bool> {
         room_access(&self.conn.lock().unwrap(), room, key).unwrap_or(Some(false))
     }
@@ -357,16 +588,41 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
     }
     pub fn social_identity_allowed(&self, id: &str, key: &str) -> bool {
         let conn = self.conn.lock().unwrap();
-        let assigned: Option<String> = conn
-            .query_row("SELECT id FROM social_agents WHERE id=?1", [id], |r| {
-                r.get(0)
-            })
+        let assigned: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM social_agents WHERE id=?1)",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap_or(true);
+        let session_bot: Option<String> = conn
+            .query_row(
+                "SELECT bot_id FROM social_sessions WHERE id=?1 AND ended_at IS NULL",
+                [id],
+                |row| row.get(0),
+            )
             .optional()
             .ok()
             .flatten();
-        match principal(&conn,key).ok().flatten() {Some(p)=>match p.agent_id {Some(agent)=>agent==id,None=>assigned.is_none()},None=>!key.starts_with(PREFIX)&&assigned.is_none()&&!conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_identities WHERE agent_id=?1 AND owner_key LIKE 'social-account:%')",[id],|r|r.get::<_,bool>(0)).unwrap_or(true)}
+        match principal(&conn, key).ok().flatten() {
+            Some(p) => match p.agent_id {
+                Some(bot) => p.session_id.as_deref().map_or_else(
+                    || bot == id,
+                    |session| session == id,
+                ),
+                None => !assigned && session_bot.is_none(),
+            },
+            None => !key.starts_with(PREFIX)
+                && !assigned
+                && session_bot.is_none()
+                && !conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agent_identities WHERE agent_id=?1 AND owner_key LIKE 'social-account:%')",
+                    [id],
+                    |row| row.get::<_, bool>(0),
+                ).unwrap_or(true),
+        }
     }
-    pub fn social_display_name(&self, key: &str) -> Option<String> {
+    pub fn social_display_name(&self, key: &str, agent_id: &str) -> Option<String> {
         let conn = self.conn.lock().unwrap();
         let p = principal(&conn, key).ok().flatten()?;
         let (handle, display): (String, String) = conn
@@ -376,13 +632,21 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .ok()?;
-        let name = if let Some(agent) = p.agent_id {
-            conn.query_row(
-                "SELECT name FROM social_agents WHERE id=?1 AND revoked=0",
-                [agent],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()?
+        let name = if let Some(bot) = p.agent_id {
+            if agent_id != bot {
+                conn.query_row(
+                    "SELECT name FROM social_sessions WHERE id=?1 AND bot_id=?2 AND ended_at IS NULL",
+                    params![agent_id, bot],
+                    |row| row.get::<_, String>(0),
+                ).ok()?
+            } else {
+                conn.query_row(
+                    "SELECT name FROM social_agents WHERE id=?1 AND revoked=0",
+                    [bot],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()?
+            }
         } else {
             display
         };
@@ -698,8 +962,33 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 json!({"room_id":room,"invitation":invitation})
             }
             ("GET", ["rooms"]) => {
-                let mut s=tx.prepare("SELECT r.room_id,r.name,s.owner_id FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id JOIN social_members m ON m.room_id=r.room_id WHERE m.account_id=?1 ORDER BY r.name")?;
-                let rooms=s.query_map([a],|r|Ok(json!({"room_id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"owner_id":r.get::<_,String>(2)?})))?.collect::<Result<Vec<_>,_>>()?;
+                let mut s=tx.prepare("SELECT r.room_id,r.name,s.owner_id,x.id,x.name,x.harness,x.folder,x.branch,x.started_at,x.last_seen,x.ended_at FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id JOIN social_members m ON m.room_id=r.room_id LEFT JOIN social_sessions x ON x.room_id=r.room_id WHERE m.account_id=?1 ORDER BY r.name")?;
+                let rooms = s
+                    .query_map([a], |r| {
+                        let session_id: Option<String> = r.get(3)?;
+                        let session = if let Some(id) = session_id {
+                            Some(json!({
+                                "agent_id": id,
+                                "name": r.get::<_,String>(4)?,
+                                "harness": r.get::<_,String>(5)?,
+                                "folder": r.get::<_,String>(6)?,
+                                "branch": r.get::<_,String>(7)?,
+                                "started_at": r.get::<_,i64>(8)?,
+                                "last_seen": r.get::<_,i64>(9)?,
+                                "ended_at": r.get::<_,Option<i64>>(10)?,
+                            }))
+                        } else {
+                            None
+                        };
+                        Ok(json!({
+                            "room_id": r.get::<_,String>(0)?,
+                            "name": r.get::<_,String>(1)?,
+                            "owner_id": r.get::<_,String>(2)?,
+                            "kind": session.as_ref().map(|_| "session"),
+                            "session": session,
+                        }))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
                 json!({"rooms":rooms})
             }
             ("GET", ["room-invitations"]) => {
@@ -1375,7 +1664,7 @@ mod tests {
         );
         assert!(store
             .social_action(
-                &agent["api_key"].as_str().unwrap(),
+                agent["api_key"].as_str().unwrap(),
                 "GET",
                 "friends",
                 &json!({})
@@ -2115,5 +2404,134 @@ mod tests {
             .social_action(&ak, "POST", "logout", &json!({}))
             .unwrap();
         assert!(store.social_oauth_claim("github", &state).is_err());
+    }
+
+    #[test]
+    fn one_bot_can_register_distinct_sessions_with_distinct_rooms() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, _) = login(&store, "session-owner");
+        let (other_key, _) = login(&store, "other-owner");
+        let bot = store
+            .social_action(&owner_key, "POST", "agents", &json!({"name":"Cowbot"}))
+            .unwrap();
+        let other_bot = store
+            .social_action(&other_key, "POST", "agents", &json!({"name":"Otherbot"}))
+            .unwrap();
+        let bot_key = bot["api_key"].as_str().unwrap();
+        let other_bot_key = other_bot["api_key"].as_str().unwrap();
+        let first_id = format!("session:{}", uuid::Uuid::new_v4());
+        let second_id = format!("session:{}", uuid::Uuid::new_v4());
+
+        let first = store
+            .social_register_session(
+                bot_key,
+                &first_id,
+                "claude-one",
+                "claude",
+                "cowchat",
+                "main",
+            )
+            .unwrap();
+        let second = store
+            .social_register_session(
+                bot_key,
+                &second_id,
+                "codex-two",
+                "codex",
+                "cowchat",
+                "feature",
+            )
+            .unwrap();
+        assert_eq!(first.room_name, "cowchat");
+        assert_eq!(second.room_name, "feature");
+        assert_ne!(first.room_id, second.room_id);
+        assert_eq!(
+            store.social_room_access(&first.room_id, &session_key(bot_key, &first_id)),
+            Some(true)
+        );
+        assert_eq!(
+            store.social_room_access(&first.room_id, &session_key(bot_key, &second_id)),
+            Some(false)
+        );
+        assert_eq!(
+            store.social_room_access(&second.room_id, &session_key(bot_key, &first_id)),
+            Some(false)
+        );
+        assert!(!store.social_identity_allowed(&first_id, bot_key));
+        assert!(store.social_identity_allowed(&first_id, &session_key(bot_key, &first_id)));
+        assert!(!store.social_identity_allowed(&first_id, other_bot_key));
+        assert!(store
+            .social_register_session(
+                other_bot_key,
+                &first_id,
+                "intruder",
+                "claude",
+                "other",
+                "main"
+            )
+            .is_err());
+        assert_eq!(
+            store
+                .social_register_session(
+                    bot_key,
+                    &first_id,
+                    "claude-one",
+                    "claude",
+                    "cowchat",
+                    "main"
+                )
+                .unwrap()
+                .room_id,
+            first.room_id
+        );
+        let shared = store
+            .social_action(
+                &owner_key,
+                "POST",
+                "rooms",
+                &json!({"name":"shared work","agent_ids":[first_id]}),
+            )
+            .unwrap();
+        let shared_room = shared["room_id"].as_str().unwrap();
+        assert_eq!(
+            store.social_room_access(shared_room, &session_key(bot_key, &first_id)),
+            Some(true)
+        );
+        assert_eq!(
+            store.social_room_access(shared_room, &session_key(bot_key, &second_id)),
+            Some(false)
+        );
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE social_sessions SET last_seen=unixepoch()-301 WHERE id=?1",
+                [&second_id],
+            )
+            .unwrap();
+        assert_eq!(
+            store.social_expire_sessions().unwrap(),
+            vec![second_id.clone()]
+        );
+        assert_eq!(
+            store.social_room_access(&second.room_id, &session_key(bot_key, &second_id)),
+            Some(false)
+        );
+        assert!(store.get_room(&second.room_id).unwrap().is_some());
+        assert_eq!(
+            store
+                .social_register_session(
+                    bot_key,
+                    &second_id,
+                    "codex-two",
+                    "codex",
+                    "cowchat",
+                    "feature"
+                )
+                .unwrap()
+                .room_id,
+            second.room_id
+        );
     }
 }

@@ -633,15 +633,15 @@ async fn api_room_history(
     Path(room_id): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let key = headers
+    let supplied_key = headers
         .get(API_KEY_HEADER)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    if key.starts_with(crate::store::social::PREFIX)
-        && authenticated_key(&state, &headers).is_none()
-    {
+    let authenticated = authenticated_key(&state, &headers);
+    if supplied_key.starts_with(crate::store::social::PREFIX) && authenticated.is_none() {
         return json_error(StatusCode::UNAUTHORIZED, "Invalid credential");
     }
+    let key = authenticated.as_deref().unwrap_or(supplied_key);
     if state.store.social_room_access(&room_id, key) == Some(false) {
         return json_error(StatusCode::NOT_FOUND, "Room not found");
     }
@@ -925,7 +925,15 @@ pub(crate) fn authenticated_key(state: &AppState, headers: &HeaderMap) -> Option
         return if state.no_auth || state.broker.is_hosted() || state.api_key.is_empty() {
             None
         } else {
-            state.store.social_principal(key).map(|_| key.to_string())
+            let scoped = headers
+                .get("x-cowchat-session-id")
+                .and_then(|value| value.to_str().ok())
+                .map(|session| crate::store::social::session_key(key, session));
+            let candidate = scoped.as_deref().unwrap_or(key);
+            state
+                .store
+                .social_principal(candidate)
+                .map(|_| candidate.to_string())
         };
     }
     (key == state.api_key || state.store.validate_api_key(key).unwrap_or(false))
@@ -1139,6 +1147,65 @@ mod tests {
                 SessionAuth::new([0xab; 32], "wss://chat.example/ws".into()).unwrap(),
             )),
         }
+    }
+
+    #[tokio::test]
+    async fn session_header_scopes_http_access_to_registered_session() {
+        use base64::Engine;
+        use sha2::Digest;
+
+        let state = test_state();
+        let verifier = "v".repeat(64);
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(verifier.as_bytes()));
+        let (request, oauth_state) = state
+            .store
+            .social_oauth_start("github", &challenge, None, 49233, "test-source")
+            .unwrap();
+        state
+            .store
+            .social_oauth_claim("github", &oauth_state)
+            .unwrap();
+        let (_, code) = state
+            .store
+            .social_oauth_complete("github", &oauth_state, "owner", "Owner")
+            .unwrap();
+        let account = state
+            .store
+            .social_oauth_exchange(&request, &verifier, &code)
+            .unwrap();
+        let bot = state
+            .store
+            .social_action(
+                account["device_key"].as_str().unwrap(),
+                "POST",
+                "agents",
+                &serde_json::json!({"name":"Bot"}),
+            )
+            .unwrap();
+        let key = bot["api_key"].as_str().unwrap();
+        let session = format!("session:{}", uuid::Uuid::new_v4());
+        let room = state
+            .store
+            .social_register_session(key, &session, "Agent", "codex", "repo", "main")
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(API_KEY_HEADER, key.parse().unwrap());
+        assert_eq!(
+            state.store.social_room_access(&room.room_id, key),
+            Some(false)
+        );
+        headers.insert("x-cowchat-session-id", session.parse().unwrap());
+        let scoped = authenticated_key(&state, &headers).unwrap();
+        assert_eq!(
+            state.store.social_room_access(&room.room_id, &scoped),
+            Some(true)
+        );
+        headers.insert(
+            "x-cowchat-session-id",
+            format!("session:{}", uuid::Uuid::new_v4()).parse().unwrap(),
+        );
+        assert!(authenticated_key(&state, &headers).is_none());
     }
 
     async fn start_test_web_server(state: AppState) -> (tokio::task::JoinHandle<()>, SocketAddr) {
