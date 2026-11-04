@@ -59,6 +59,8 @@ def hook_main(event, payload):
     os.chmod(records, 0o700)
     mapping = private_mapping(records, identifier)
     saved = json.loads(mapping.read_text()) if mapping.exists() else None
+    if saved and not Path(saved["session_file"]).is_file():
+        saved = None
     agent_id = saved["id"] if saved else f"session:{uuid.uuid4()}"
     common = ["cowchat", "--url", url, "--agent-id", agent_id]
 
@@ -75,11 +77,18 @@ def hook_main(event, payload):
         name = saved["name"] if saved else f"Claude · {folder}"
         if saved:
             folder, branch = saved["folder"], saved["branch"]
-        start = ["cowchat", "--url", url, "--name", name, "--agent-id", agent_id] + [
-            "session", "start", "--id", agent_id, "--harness", "claude",
-            "--folder", folder, "--branch", branch,
-        ]
-        result = json.loads(run(start, saved["session_file"] if saved else None).stdout)
+        def start_command(current_id):
+            return ["cowchat", "--url", url, "--name", name, "--agent-id", current_id,
+                    "session", "start", "--id", current_id, "--harness", "claude",
+                    "--folder", folder, "--branch", branch]
+
+        try:
+            result = json.loads(run(start_command(agent_id), saved["session_file"] if saved else None).stdout)
+        except subprocess.CalledProcessError as error:
+            if not saved or "session heartbeat failed: 404" not in error.stderr:
+                raise
+            agent_id = f"session:{uuid.uuid4()}"
+            result = json.loads(run(start_command(agent_id)).stdout)
         session_file = result["session_file"]
         record = {"id": agent_id, "name": name, "folder": folder, "branch": branch, "session_file": session_file}
         temporary = records / f".{uuid.uuid4()}.tmp"
