@@ -653,7 +653,7 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 conn.query_row("SELECT EXISTS(SELECT 1 FROM social_members WHERE room_id=?1 AND account_id=?2)", params![room, account], |row| row.get::<_, bool>(0))
             } else {
                 conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_sessions s ON s.id=a.agent_id JOIN social_members m ON m.room_id=a.room_id AND m.account_id=s.owner_id WHERE a.room_id=?1 AND a.agent_id=?2 AND s.ended_at IS NULL UNION SELECT 1 FROM social_admissions a JOIN social_agents b ON b.id=a.agent_id JOIN social_members m ON m.room_id=a.room_id AND m.account_id=b.owner_id WHERE a.room_id=?1 AND a.agent_id=?2 AND b.revoked=0)",
+                    "SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_sessions s ON s.id=a.agent_id JOIN social_members m ON m.room_id=a.room_id AND m.account_id=s.owner_id WHERE a.room_id=?1 AND a.agent_id=?2 AND s.ended_at IS NULL) OR EXISTS(SELECT 1 FROM social_admissions a JOIN social_agents b ON b.id=a.agent_id JOIN social_members m ON m.room_id=a.room_id AND m.account_id=b.owner_id WHERE a.room_id=?1 AND a.agent_id=?2 AND b.revoked=0)",
                     params![room, mention], |row| row.get::<_, bool>(0),
                 )
             };
@@ -1457,7 +1457,7 @@ mod tests {
             Some(false)
         );
         let session = format!("session:{}", uuid::Uuid::new_v4());
-        store
+        let session_room = store
             .social_register_session(
                 bot["api_key"].as_str().unwrap(),
                 &session,
@@ -1468,7 +1468,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            store.social_mentions_valid(room_id, &[session]),
+            store.social_mentions_valid(room_id, std::slice::from_ref(&session)),
+            Some(false)
+        );
+        store
+            .social_action(
+                &owner_key,
+                "POST",
+                &format!("rooms/{room_id}/agents"),
+                &json!({"agent_ids":[session]}),
+            )
+            .unwrap();
+        assert_eq!(
+            store.social_mentions_valid(room_id, std::slice::from_ref(&session)),
+            Some(true)
+        );
+        store
+            .social_end_session(session_room.session_token.as_deref().unwrap(), &session)
+            .unwrap();
+        assert_eq!(
+            store.social_mentions_valid(room_id, std::slice::from_ref(&session)),
             Some(false)
         );
         assert_eq!(
