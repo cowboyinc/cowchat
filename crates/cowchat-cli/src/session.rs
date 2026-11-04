@@ -223,7 +223,10 @@ pub(crate) async fn run(
     Ok(())
 }
 
-async fn heartbeat(url: &str, record: &SessionRecord) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn heartbeat(
+    url: &str,
+    record: &SessionRecord,
+) -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = format!("/social/v1/sessions/{}/heartbeat", record.id);
     let response = reqwest::Client::new()
         .post(http_url(url, &endpoint)?)

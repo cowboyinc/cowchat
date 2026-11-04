@@ -438,7 +438,16 @@ pub async fn handle_frame(
             handle_set_typing(req_id, frame.payload, agent_id, agent_name, broker).await
         }
         FrameType::SetPresence => {
-            handle_set_presence(req_id, frame.payload, agent_id, agent_name, broker, store).await
+            handle_set_presence(
+                req_id,
+                frame.payload,
+                agent_id,
+                agent_name,
+                broker,
+                store,
+                false,
+            )
+            .await
         }
 
         // Thinking pulse
@@ -1615,6 +1624,9 @@ async fn handle_list_agents(
                     if live.contains(&agent_id) {
                         continue;
                     }
+                    if !store.room_presence_allowed(room_id, &agent_id) {
+                        continue;
+                    }
                     if let Some((status, detail, progress)) = pres {
                         list.push(AgentInfo {
                             agent_id,
@@ -2454,6 +2466,7 @@ pub(crate) async fn handle_set_presence(
     agent_name: &str,
     broker: &Arc<Broker>,
     store: &Arc<Store>,
+    allow_offline: bool,
 ) -> Frame {
     let p: SetPresencePayload = match serde_json::from_value(payload) {
         Ok(p) => p,
@@ -2467,27 +2480,48 @@ pub(crate) async fn handle_set_presence(
 
     // Validate status value
     match p.status.as_str() {
-        "idle" | "waiting" | "working" | "thinking" => {}
+        "idle" | "waiting" | "working" | "thinking" | "prompt" => {}
         _ => {
             return Frame::error(
                 req_id,
                 ErrorPayload::new(
                     ErrorCode::InvalidPayload,
-                    "status must be one of: idle, waiting, working, thinking",
+                    "status must be one of: idle, waiting, working, thinking, prompt",
                 ),
             )
         }
+    }
+    if p.status_detail
+        .as_ref()
+        .is_some_and(|detail| detail.len() > 256)
+    {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InvalidPayload, "status_detail exceeds 256 bytes"),
+        );
     }
 
     // Update agent presence fields
     {
         let mut agent = match broker.agents.get_mut(agent_id) {
             Some(a) => a,
-            None => {
+            None if !allow_offline => {
                 return Frame::error(
                     req_id,
                     ErrorPayload::new(ErrorCode::NotRegistered, "Agent not found"),
                 )
+            }
+            None => {
+                return match store.upsert_presence(
+                    agent_id,
+                    agent_name,
+                    &p.status,
+                    p.status_detail.as_deref(),
+                    p.progress,
+                ) {
+                    Ok(()) => Frame::ok(req_id, serde_json::json!({"status":p.status})),
+                    Err(error) => append_error(req_id, error),
+                };
             }
         };
         agent.info.status = Some(p.status.clone());
