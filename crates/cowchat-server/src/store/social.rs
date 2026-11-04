@@ -22,6 +22,14 @@ pub struct SessionRoom {
     pub session_token: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionState {
+    pub agent_id: String,
+    pub room_id: String,
+    pub owner_id: String,
+    pub state: String,
+}
+
 pub fn hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
@@ -372,7 +380,7 @@ CREATE TABLE IF NOT EXISTS social_friends(a TEXT NOT NULL,b TEXT NOT NULL,PRIMAR
 CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS social_members(room_id TEXT NOT NULL,account_id TEXT NOT NULL,PRIMARY KEY(room_id,account_id));
 CREATE TABLE IF NOT EXISTS social_admissions(room_id TEXT NOT NULL,agent_id TEXT NOT NULL,PRIMARY KEY(room_id,agent_id));
-CREATE TABLE IF NOT EXISTS social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,room_name TEXT NOT NULL,token_digest TEXT UNIQUE,minted_by TEXT,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER);
+CREATE TABLE IF NOT EXISTS social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,room_name TEXT NOT NULL,token_digest TEXT UNIQUE,minted_by TEXT,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER,state TEXT NOT NULL DEFAULT 'idle');
 CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,from_id TEXT NOT NULL,to_id TEXT NOT NULL,proposed TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_rooms s JOIN rooms r ON r.room_id=s.room_id;")?;
         let conn = self.conn.lock().unwrap();
@@ -387,6 +395,12 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             )?;
         }
         super::ensure_column_exists(&conn, "social_sessions", "minted_by", "TEXT")?;
+        super::ensure_column_exists(
+            &conn,
+            "social_sessions",
+            "state",
+            "TEXT NOT NULL DEFAULT 'idle'",
+        )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS social_sessions_minted_by ON social_sessions(minted_by)",
             [],
@@ -586,6 +600,61 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
         )?;
         anyhow::ensure!(updated == 1, "session not found");
         Ok(())
+    }
+
+    pub fn social_set_session_state(&self, key: &str, state: &str) -> anyhow::Result<SessionState> {
+        anyhow::ensure!(
+            matches!(state, "working" | "prompt" | "idle"),
+            "invalid session state"
+        );
+        let conn = self.conn.lock().unwrap();
+        let p = principal(&conn, key)?.ok_or_else(|| anyhow::anyhow!("invalid credential"))?;
+        let id = p
+            .session_id
+            .ok_or_else(|| anyhow::anyhow!("session credential required"))?;
+        let updated = conn.execute(
+            "UPDATE social_sessions SET state=?2 WHERE id=?1 AND owner_id=?3 AND ended_at IS NULL",
+            params![id, state, p.account_id],
+        )?;
+        anyhow::ensure!(updated == 1, "session not found");
+        let room_id = conn.query_row(
+            "SELECT room_id FROM social_sessions WHERE id=?1",
+            [&id],
+            |row| row.get(0),
+        )?;
+        Ok(SessionState {
+            agent_id: id,
+            room_id,
+            owner_id: p.account_id,
+            state: state.into(),
+        })
+    }
+
+    pub fn social_live_session_states(&self, owner_id: &str) -> anyhow::Result<Vec<SessionState>> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT id,room_id,owner_id,state FROM social_sessions WHERE owner_id=?1 AND ended_at IS NULL",
+        )?;
+        let states = statement
+            .query_map([owner_id], |row| {
+                Ok(SessionState {
+                    agent_id: row.get(0)?,
+                    room_id: row.get(1)?,
+                    owner_id: row.get(2)?,
+                    state: row.get(3)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(states)
+    }
+
+    pub fn social_session_state_by_id(&self, session_id: &str) -> anyhow::Result<SessionState> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT id,room_id,owner_id,CASE WHEN ended_at IS NULL THEN state ELSE 'ended' END FROM social_sessions WHERE id=?1",
+            [session_id],
+            |row| Ok(SessionState { agent_id: row.get(0)?, room_id: row.get(1)?, owner_id: row.get(2)?, state: row.get(3)? }),
+        )?)
     }
 
     pub fn social_end_session(&self, key: &str, session_id: &str) -> anyhow::Result<String> {
@@ -1116,6 +1185,8 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                 )?;
                 tx.execute("DELETE FROM social_admissions WHERE agent_id=?1", [id])?;
                 tx.execute("DELETE FROM presence WHERE agent_id=?1 OR agent_id IN (SELECT id FROM social_sessions WHERE bot_id=?1)", [id])?;
+                tx.execute("DELETE FROM social_admissions WHERE agent_id IN (SELECT id FROM social_sessions WHERE bot_id=?1 AND ended_at IS NULL)", [id])?;
+                tx.execute("UPDATE social_sessions SET ended_at=unixepoch(),token_digest=NULL WHERE bot_id=?1 AND ended_at IS NULL", [id])?;
                 json!({"ok":true})
             }
             ("POST", ["rooms"]) => {

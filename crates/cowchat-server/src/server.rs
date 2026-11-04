@@ -642,6 +642,13 @@ impl CowchatServer {
                                 if let Some(connection) = session_broker.agents.get(&id) {
                                     connection.disconnect.notify_one();
                                 }
+                                if let Ok(event) = session_store.social_session_state_by_id(&id) {
+                                    crate::social::broadcast_session_state(
+                                        &session_broker,
+                                        &session_store,
+                                        &event,
+                                    );
+                                }
                             }
                         }
                         Err(error) => log::warn!("social session sweep failed: {error}"),
@@ -1396,6 +1403,9 @@ where
                 .is_some()
             })
             .map_err(|error| io::Error::other(format!("session room join failed: {error:?}")))?;
+        if let Ok(event) = store.social_session_state_by_id(&agent_id) {
+            crate::social::broadcast_session_state(&broker, &store, &event);
+        }
     }
     let was_reconnected = reconnected_rooms.is_some();
     let mut restored_rooms = HashSet::new();
@@ -1518,6 +1528,16 @@ where
     }
     let mut initial_frames = Vec::with_capacity(missed_messages.len() + 1);
     initial_frames.push(Frame::ok(register_reply_to.as_deref(), ok_payload));
+    if let Some(principal) = store.social_principal(&agent_api_key) {
+        if principal.agent_id.is_none() {
+            if let Ok(sessions) = store.social_live_session_states(&principal.account_id) {
+                initial_frames.extend(sessions.into_iter().map(|session| Frame::event(
+                    FrameType::SessionState,
+                    serde_json::json!({"agent_id":session.agent_id,"room_id":session.room_id,"state":session.state}),
+                )));
+            }
+        }
+    }
     let replayed_ids: HashSet<String> = missed_messages
         .iter()
         .filter_map(|frame| frame.id.clone())

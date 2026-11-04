@@ -10,6 +10,29 @@ use cowchat_core::{Frame, FrameType};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+pub(crate) fn broadcast_session_state(
+    broker: &crate::broker::Broker,
+    store: &crate::store::Store,
+    event: &crate::store::social::SessionState,
+) {
+    let frame = Frame::event(
+        FrameType::SessionState,
+        json!({"agent_id":event.agent_id,"room_id":event.room_id,"state":event.state}),
+    );
+    let connections: Vec<(String, String)> = broker
+        .agents
+        .iter()
+        .map(|connection| (connection.key().clone(), connection.api_key.clone()))
+        .collect();
+    for (agent_id, key) in connections {
+        if store.social_principal(&key).is_some_and(|principal| {
+            principal.account_id == event.owner_id && principal.agent_id.is_none()
+        }) {
+            broker.send_to_agent(&agent_id, frame.clone());
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Provider {
     id: String,
@@ -193,6 +216,24 @@ async fn action(
     };
     let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
     let data = body.map(|b| b.0).unwrap_or(json!({}));
+    let revoking = matches!(
+        (method.as_str(), parts.as_slice()),
+        ("DELETE", ["credentials"] | ["agents", _])
+    );
+    let before_revoke = if revoking {
+        state
+            .store
+            .social_principal(&key)
+            .and_then(|principal| {
+                state
+                    .store
+                    .social_live_session_states(&principal.account_id)
+                    .ok()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let result = match (method.as_str(), parts.as_slice()) {
         ("POST", ["sessions"]) => {
             let field = |name: &str| {
@@ -203,7 +244,12 @@ async fn action(
             match (field("id"), field("name"), field("harness"), field("folder"), field("branch")) {
                 (Ok(id), Ok(name), Ok(harness), Ok(folder), Ok(branch)) => state.store
                     .social_register_session(&key, id, name, harness, folder, branch)
-                    .map(|room| json!({"session_id":id,"room_id":room.room_id,"room_name":room.room_name,"session_token":room.session_token})),
+                    .map(|room| {
+                        if let Ok(event) = state.store.social_session_state_by_id(id) {
+                            broadcast_session_state(&state.broker, &state.store, &event);
+                        }
+                        json!({"session_id":id,"room_id":room.room_id,"room_name":room.room_name,"session_token":room.session_token})
+                    }),
                 _ => Err(anyhow::anyhow!("invalid session fields")),
             }
         }
@@ -263,6 +309,18 @@ async fn action(
                 )
                 .await;
                 if frame.frame_type == FrameType::Ok {
+                    let status = data["status"].as_str().unwrap_or("");
+                    let session_state = match status {
+                        "working" | "thinking" => Some("working"),
+                        "prompt" => Some("prompt"),
+                        "idle" => Some("idle"),
+                        _ => None,
+                    };
+                    if let Some(status) = session_state {
+                        if let Ok(event) = state.store.social_set_session_state(&key, status) {
+                            broadcast_session_state(&state.broker, &state.store, &event);
+                        }
+                    }
                     Ok(frame.payload)
                 } else {
                     Err(anyhow::anyhow!("presence rejected: {}", frame.payload))
@@ -270,16 +328,33 @@ async fn action(
             }
             _ => Err(anyhow::anyhow!("not found")),
         },
-        ("POST", ["sessions", id, "end"]) => state
-            .store
-            .social_end_session(&key, id)
-            .map(|room_id| json!({"ok":true,"room_id":room_id})),
+        ("POST", ["sessions", id, "end"]) => {
+            state.store.social_end_session(&key, id).map(|room_id| {
+                if let Ok(event) = state.store.social_session_state_by_id(id) {
+                    broadcast_session_state(&state.broker, &state.store, &event);
+                }
+                json!({"ok":true,"room_id":room_id})
+            })
+        }
         _ => state
             .store
             .social_action(&key, method.as_str(), &path, &data),
     };
     match result {
         Ok(mut value) => {
+            for session in before_revoke {
+                if state
+                    .store
+                    .social_session_state_by_id(&session.agent_id)
+                    .is_ok_and(|current| current.state == "ended")
+                {
+                    let event = crate::store::social::SessionState {
+                        state: "ended".into(),
+                        ..session
+                    };
+                    broadcast_session_state(&state.broker, &state.store, &event);
+                }
+            }
             if path == "me/friend-link" {
                 if let Some(slug) = value["slug"].as_str() {
                     value["url"] = json!(format!("{}/friends/{}", config.origin, slug));
@@ -715,6 +790,139 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{path}: {value}");
         value
     }
+    #[tokio::test]
+    async fn owner_receives_session_lifecycle_without_joining_its_room() {
+        let (state, base, tasks) = fixture().await;
+        let owner = login(&base, "github", "9201", None).await;
+        let owner_key = owner["device_key"].as_str().unwrap();
+        let ws_url = format!("{}/ws", base.replacen("http", "ws", 1));
+        let owner_client =
+            cowchat_client::CowchatClient::connect_ws(&ws_url, owner_key, "Owner", None, vec![])
+                .await
+                .unwrap();
+        let mut events = owner_client.subscribe();
+        let bot = call(
+            &base,
+            owner_key,
+            "POST",
+            "agents",
+            json!({"name":"Worker","mint_only":true}),
+        )
+        .await;
+        let id = format!("session:{}", uuid::Uuid::new_v4());
+        let session = call(
+            &base,
+            bot["api_key"].as_str().unwrap(),
+            "POST",
+            "sessions",
+            json!({"id":id,"name":"worker","harness":"claude","folder":"repo","branch":"main"}),
+        )
+        .await;
+        let token = session["session_token"].as_str().unwrap();
+        let room_id = session["room_id"].as_str().unwrap();
+        async fn next_state(
+            events: &mut tokio::sync::broadcast::Receiver<cowchat_client::Event>,
+        ) -> Value {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let frame = events.recv().await.unwrap().frame;
+                    if frame.frame_type == FrameType::SessionState {
+                        break frame.payload;
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
+        let created = next_state(&mut events).await;
+        assert_eq!(
+            created,
+            json!({"agent_id":id,"room_id":room_id,"state":"idle"})
+        );
+        call(
+            &base,
+            token,
+            "POST",
+            &format!("sessions/{id}/presence"),
+            json!({"status":"prompt","status_detail":"permission"}),
+        )
+        .await;
+        let prompt = next_state(&mut events).await;
+        assert_eq!(prompt["state"], "prompt");
+        let session_client = cowchat_client::CowchatClient::connect_ws(
+            &ws_url,
+            token,
+            "worker",
+            Some(&id),
+            vec![format!(
+                "cowchat.session.v1:{}",
+                json!({"harness":"claude","folder":"repo","branch":"main"})
+            )],
+        )
+        .await
+        .unwrap();
+        assert_eq!(next_state(&mut events).await["state"], "prompt");
+        session_client
+            .set_presence("waiting", None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.store.social_session_state_by_id(&id).unwrap().state,
+            "prompt"
+        );
+        call(
+            &base,
+            token,
+            "POST",
+            &format!("sessions/{id}/end"),
+            json!({}),
+        )
+        .await;
+        let ended = next_state(&mut events).await;
+        assert_eq!(ended["state"], "ended");
+        let second_id = format!("session:{}", uuid::Uuid::new_v4());
+        call(&base, bot["api_key"].as_str().unwrap(), "POST", "sessions",
+            json!({"id":second_id,"name":"worker","harness":"claude","folder":"repo","branch":"main"})).await;
+        assert_eq!(next_state(&mut events).await["state"], "idle");
+        call(
+            &base,
+            owner_key,
+            "DELETE",
+            "credentials",
+            json!({"api_key":bot["api_key"]}),
+        )
+        .await;
+        let credential_ended = next_state(&mut events).await;
+        assert_eq!(credential_ended["agent_id"], second_id);
+        assert_eq!(credential_ended["state"], "ended");
+        let next_bot = call(
+            &base,
+            owner_key,
+            "POST",
+            "agents",
+            json!({"name":"Another Worker","mint_only":true}),
+        )
+        .await;
+        let third_id = format!("session:{}", uuid::Uuid::new_v4());
+        call(&base, next_bot["api_key"].as_str().unwrap(), "POST", "sessions",
+            json!({"id":third_id,"name":"worker","harness":"claude","folder":"repo","branch":"main"})).await;
+        assert_eq!(next_state(&mut events).await["state"], "idle");
+        call(
+            &base,
+            owner_key,
+            "DELETE",
+            &format!("agents/{}", next_bot["agent"]["id"].as_str().unwrap()),
+            json!({}),
+        )
+        .await;
+        let bot_ended = next_state(&mut events).await;
+        assert_eq!(bot_ended["agent_id"], third_id);
+        assert_eq!(bot_ended["state"], "ended");
+        for task in tasks {
+            task.abort();
+        }
+    }
+
     #[tokio::test]
     async fn mint_only_credential_creates_session_over_http_but_cannot_operate_it() {
         let (state, base, tasks) = fixture().await;
