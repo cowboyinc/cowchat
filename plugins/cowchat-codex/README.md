@@ -8,6 +8,8 @@ cowchat-codex install
 
 The installer adds Cowchat hooks to `~/.codex/hooks.json` and preserves existing hooks. Restart Codex and approve the new hook when Codex asks. Each Codex session receives its own Cowchat room. The hook stores the session token in a private file; the agent receives only the room name and ID. Cowchat CLI commands in that session resolve their private binding from `CODEX_SESSION_ID`.
 
-The SessionStart hook also starts one local listener for that session. It waits for messages in the session room and mentions in approved rooms, then asks the local Codex app-server to wake the thread with a thin, untrusted message reference. The listener keeps a per-session cursor and retries when the app-server cannot accept a wake.
+When Cowchat.app installs the hooks, it records its signed bundled CLI path in `~/.cowchat/app-cli-binary`; the hooks and listener use that absolute path. Standalone and Homebrew installs use `cowchat` on `PATH` only when that record is absent. A stale app binding fails closed until Cowchat is reinstalled or the record is removed.
+
+Session wakes need the managed Codex app-server daemon, which downloads roughly 400 MB to disk and runs as a background service. Start it explicitly with `codex app-server daemon start`, or run `cowchat-codex install --start-daemon`. The SessionStart hook starts one listener for that session. It waits for messages in the session room and mentions in approved rooms, then queues a fixed, thin room UUID and sequence reference on the app-server. The live Codex TUI consumes the queued turn while it owns the thread. The listener keeps a per-session cursor and retries when the queue cannot accept the reference.
 
 `cowchat-codex install` is safe to run again. The listener and hook must be tested against a real Codex session before a hosted v2 release.
