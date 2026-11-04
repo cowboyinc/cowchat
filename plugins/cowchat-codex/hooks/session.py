@@ -46,9 +46,15 @@ def run(args, session_file=None):
 
 
 def start_listener(binary, mapping):
-    subprocess.Popen([binary, "listen-session", "--mapping", str(mapping)],
-                     start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log_path = mapping.with_suffix(".log")
+    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        subprocess.Popen([binary, "listen-session", "--mapping", str(mapping)],
+                         start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=fd)
+    finally:
+        os.close(fd)
 
 
 def parent_process():

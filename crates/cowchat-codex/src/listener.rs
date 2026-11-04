@@ -88,6 +88,7 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
         .replace("~/", &format!("{}/", home.display()));
     let codex = CodexAppServerClient::new(config);
     let cursor = mapping_path.with_extension("cursor.json");
+    let mut wake_failures = 0u8;
     while mapping_path.exists() {
         let (mapping, session) = load(mapping_path)?;
         if !parent_alive(&mapping) {
@@ -145,6 +146,8 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
                 "--approved-rooms",
                 "--mentions-only",
                 "--loop",
+                "--heartbeat-secs",
+                "0",
                 "--cursor-file",
             ])
             .arg(&temporary)
@@ -189,11 +192,18 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
             }
         }
         if delivered && (output.status.success() || matches!(output.status.code(), Some(2 | 3))) {
+            wake_failures = 0;
             if temporary.exists() {
                 std::fs::rename(&temporary, &cursor)?;
             }
         } else {
             let _ = std::fs::remove_file(&temporary);
+            wake_failures = wake_failures.saturating_add(1);
+            if wake_failures >= 12 {
+                return Err(
+                    "Cowchat Codex listener stopped after 12 consecutive wake failures".into(),
+                );
+            }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
