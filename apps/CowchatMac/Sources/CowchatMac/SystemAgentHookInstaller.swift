@@ -92,13 +92,18 @@ final class SystemAgentHookInstaller: AgentHookInstaller {
     }
 
     private func configureAppCLI() throws {
-        let cli = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/cowchat")
+        let app = Bundle.main.bundleURL
+        let cli = app.appendingPathComponent("Contents/Helpers/cowchat")
         guard FileManager.default.isExecutableFile(atPath: cli.path), trustedBundledHelper(cli) else {
             #if DEBUG
             return
             #else
             throw CowchatConnectionError.transport("The Cowchat app CLI could not be verified. Reinstall Cowchat.")
             #endif
+        }
+        if app.pathComponents.contains("AppTranslocation") ||
+            (try? app.resourceValues(forKeys: [.volumeIsReadOnlyKey]).volumeIsReadOnly) == true {
+            throw CowchatConnectionError.transport("Move Cowchat to Applications before connecting an agent.")
         }
         let directory = home.appendingPathComponent(".cowchat", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
