@@ -33,6 +33,10 @@ class HookTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     hook.cowchat_binary()
                 config.unlink()
+                config.symlink_to(cli)
+                with self.assertRaises(OSError):
+                    hook.cowchat_binary()
+                config.unlink()
                 self.assertEqual(hook.cowchat_binary(), "cowchat")
 
     def test_start_and_resume_keep_private_identity_out_of_context(self):

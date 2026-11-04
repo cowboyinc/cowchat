@@ -47,7 +47,7 @@ def run(args, session_file=None):
 
 def cowchat_binary():
     config = Path.home() / ".cowchat/app-cli-binary"
-    if config.exists():
+    if config.exists() or config.is_symlink():
         candidate = Path(config.read_text().strip())
         if not (candidate.is_absolute() and candidate.name == "cowchat" and candidate.is_file() and os.access(candidate, os.X_OK)):
             raise ValueError("Cowchat app CLI is unavailable; reinstall Cowchat or remove the stale app binding")

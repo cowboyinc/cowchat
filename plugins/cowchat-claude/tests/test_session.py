@@ -33,6 +33,10 @@ class SessionHookTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     hook.cowchat_binary()
                 config.unlink()
+                config.symlink_to(cli)
+                with self.assertRaises(OSError):
+                    hook.cowchat_binary()
+                config.unlink()
                 self.assertEqual(hook.cowchat_binary(), "cowchat")
 
     def test_start_resume_presence_and_end_keep_the_same_bound_file(self):
