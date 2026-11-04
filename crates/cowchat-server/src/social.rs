@@ -259,6 +259,7 @@ async fn action(
                     &name,
                     &state.broker,
                     &state.store,
+                    true,
                 )
                 .await;
                 if frame.frame_type == FrameType::Ok {

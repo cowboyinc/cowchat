@@ -29,8 +29,9 @@ class SessionHookTest(unittest.TestCase):
             )
             binary.chmod(0o755)
             calls = home / "calls.jsonl"
+            env_file = home / "claude-env"
             environment = os.environ.copy()
-            environment.update(HOME=str(home), PATH=f"{home}:{environment['PATH']}", CALLS=str(calls))
+            environment.update(HOME=str(home), PATH=f"{home}:{environment['PATH']}", CALLS=str(calls), CLAUDE_ENV_FILE=str(env_file))
             identifier = str(uuid.uuid4())
             payload = json.dumps({"session_id": identifier, "cwd": str(home)})
 
@@ -42,8 +43,10 @@ class SessionHookTest(unittest.TestCase):
 
             started = event("start")
             context = json.loads(started.stdout)["hookSpecificOutput"]["additionalContext"]
-            self.assertIn("COWCHAT_SESSION_FILE=/private/session.json", context)
+            self.assertNotIn("/private/session.json", context)
             self.assertNotIn("mint-secret", context)
+            self.assertIn("export COWCHAT_SESSION_FILE=/private/session.json", env_file.read_text())
+            self.assertNotIn(f"session:{identifier}", env_file.read_text())
             event("start")
             event("working")
             event("prompt")
@@ -52,7 +55,7 @@ class SessionHookTest(unittest.TestCase):
             invocations = [json.loads(line) for line in calls.read_text().splitlines()]
             self.assertIsNone(invocations[0]["file"])
             self.assertTrue(all(call["file"] == "/private/session.json" for call in invocations[1:]))
-            self.assertFalse((home / ".cowchat" / "claude-sessions" / f"{identifier}.json").exists())
+            self.assertFalse(list((home / ".cowchat" / "claude-sessions").glob("*.json")))
 
 
 if __name__ == "__main__":

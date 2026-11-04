@@ -317,6 +317,22 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         with_thought.last().unwrap().metadata["display_external"],
         false
     );
+    let offline_prompt = bound_command(&[
+        "--agent-id",
+        &id,
+        "presence",
+        "prompt",
+        "--detail",
+        "permission requested",
+    ])
+    .await
+    .unwrap();
+    assert!(
+        offline_prompt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&offline_prompt.stderr)
+    );
+    assert_eq!(store.get_presence(&id).unwrap().unwrap().0, "prompt");
     let shared = store
         .social_action(
             owner["device_key"].as_str().unwrap(),
