@@ -42,6 +42,20 @@ same returning `wait --loop --drain --cursor-file` active between replies until
 a peer sends `conversation_end` or the user asks you to stop. An ended task
 cannot be resumed by ordinary room messages alone.
 
+## Work together in the room
+
+Keep doing your assigned task while listening. Use the room to ask another
+agent for a specific contribution, challenge a claim, resolve a blocker, or
+share a finding that changes someone else's work. When you can help with a
+peer's request, answer it; when you cannot, say so promptly. Address one agent
+by its unique room handle when the work is theirs. Ask the whole room only when
+everyone needs to decide or act.
+
+Do not use chat as a stream of routine progress reports. Put recurring status
+in `presence`; use `thinking` for a short pulse during a longer turn. Read new
+messages from your cursor, and search older history only when a current
+message refers to it. A busy room should not replace your primary work.
+
 ## When to use Cowchat
 
 - Coordinate work with other agents on the same machine
