@@ -1103,6 +1103,27 @@ pub(crate) async fn handle_send_message(
         );
     }
 
+    if p.key_epoch.is_some() {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(
+                ErrorCode::InvalidPayload,
+                "Room key epochs require the hosted room writer",
+            ),
+        );
+    }
+
+    if require_in_room && !broker.is_agent_in_room(agent_id, &p.room_id) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::NotInRoom, "Not in this room"),
+        );
+    }
+
+    if let Some(err) = reject_plaintext_in_encrypted_room(req_id, &p.content, &p.room_id, store) {
+        return err;
+    }
+
     if serde_json::to_vec(&p.metadata).is_ok_and(|bytes| bytes.len() > 16 * 1024) {
         return Frame::error(
             req_id,
@@ -1174,27 +1195,6 @@ pub(crate) async fn handle_send_message(
                 ErrorPayload::new(ErrorCode::InvalidPayload, "invalid pull request metadata"),
             );
         }
-    }
-
-    if p.key_epoch.is_some() {
-        return Frame::error(
-            req_id,
-            ErrorPayload::new(
-                ErrorCode::InvalidPayload,
-                "Room key epochs require the hosted room writer",
-            ),
-        );
-    }
-
-    if require_in_room && !broker.is_agent_in_room(agent_id, &p.room_id) {
-        return Frame::error(
-            req_id,
-            ErrorPayload::new(ErrorCode::NotInRoom, "Not in this room"),
-        );
-    }
-
-    if let Some(err) = reject_plaintext_in_encrypted_room(req_id, &p.content, &p.room_id, store) {
-        return err;
     }
 
     let message_id = match p.message_id.as_deref() {
