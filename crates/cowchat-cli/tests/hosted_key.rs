@@ -333,6 +333,19 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         String::from_utf8_lossy(&offline_prompt.stderr)
     );
     assert_eq!(store.get_presence(&id).unwrap().unwrap().0, "prompt");
+    let oversized_detail = "x".repeat(257);
+    let oversized = bound_command(&[
+        "--agent-id",
+        &id,
+        "presence",
+        "working",
+        "--detail",
+        &oversized_detail,
+    ])
+    .await
+    .unwrap();
+    assert!(!oversized.status.success());
+    assert_eq!(store.get_presence(&id).unwrap().unwrap().0, "prompt");
     let shared = store
         .social_action(
             owner["device_key"].as_str().unwrap(),
@@ -532,6 +545,8 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         "{}",
         String::from_utf8_lossy(&ended.stderr)
     );
+    assert!(store.get_presence(&id).unwrap().is_none());
+    assert!(!store.room_presence_allowed(room, &id));
     assert!(!cowchat
         .join("sessions")
         .join(format!("{}.json", id.trim_start_matches("session:")))

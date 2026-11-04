@@ -1624,6 +1624,9 @@ async fn handle_list_agents(
                     if live.contains(&agent_id) {
                         continue;
                     }
+                    if !store.room_presence_allowed(room_id, &agent_id) {
+                        continue;
+                    }
                     if let Some((status, detail, progress)) = pres {
                         list.push(AgentInfo {
                             agent_id,
@@ -2487,6 +2490,15 @@ pub(crate) async fn handle_set_presence(
                 ),
             )
         }
+    }
+    if p.status_detail
+        .as_ref()
+        .is_some_and(|detail| detail.len() > 256)
+    {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InvalidPayload, "status_detail exceeds 256 bytes"),
+        );
     }
 
     // Update agent presence fields

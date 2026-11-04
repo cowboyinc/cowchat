@@ -611,6 +611,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             "DELETE FROM social_admissions WHERE agent_id=?1",
             [session_id],
         )?;
+        tx.execute("DELETE FROM presence WHERE agent_id=?1", [session_id])?;
         tx.commit()?;
         Ok(room_id)
     }
@@ -631,12 +632,41 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
         )?;
         for id in &ids {
             tx.execute("DELETE FROM social_admissions WHERE agent_id=?1", [id])?;
+            tx.execute("DELETE FROM presence WHERE agent_id=?1", [id])?;
         }
         tx.commit()?;
         Ok(ids)
     }
     pub fn social_room_access(&self, room: &str, key: &str) -> Option<bool> {
         room_access(&self.conn.lock().unwrap(), room, key).unwrap_or(Some(false))
+    }
+    pub fn room_presence_allowed(&self, room: &str, agent_id: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        let managed = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM social_rooms WHERE room_id=?1)",
+            [room],
+            |row| row.get::<_, bool>(0),
+        );
+        match managed {
+            Ok(true) => {}
+            Ok(false) => return true,
+            Err(_) => return false,
+        }
+        conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM social_members m WHERE m.room_id=?1 AND m.account_id=?2
+                UNION SELECT 1 FROM social_admissions a JOIN social_agents b ON b.id=a.agent_id AND b.revoked=0
+                    JOIN social_members m ON m.room_id=a.room_id AND m.account_id=b.owner_id
+                    WHERE a.room_id=?1 AND a.agent_id=?2
+                UNION SELECT 1 FROM social_admissions a JOIN social_sessions s ON s.id=a.agent_id AND s.ended_at IS NULL
+                    JOIN social_agents b ON b.id=s.bot_id AND b.revoked=0
+                    JOIN social_members m ON m.room_id=a.room_id AND m.account_id=s.owner_id
+                    WHERE a.room_id=?1 AND a.agent_id=?2
+            )",
+            params![room, agent_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
     }
     pub fn social_session_rooms(&self, key: &str, session_id: &str) -> anyhow::Result<Value> {
         let conn = self.conn.lock().unwrap();
@@ -1070,6 +1100,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                     [&digest],
                 )?;
                 tx.execute("DELETE FROM social_admissions WHERE agent_id IN (SELECT id FROM social_sessions WHERE minted_by=?1 AND ended_at IS NULL)", [&digest])?;
+                tx.execute("DELETE FROM presence WHERE agent_id IN (SELECT id FROM social_sessions WHERE minted_by=?1 AND ended_at IS NULL)", [&digest])?;
                 tx.execute("UPDATE social_sessions SET ended_at=unixepoch(),token_digest=NULL WHERE minted_by=?1 AND ended_at IS NULL", [&digest])?;
                 json!({"ok":true})
             }
@@ -1084,6 +1115,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                     [id],
                 )?;
                 tx.execute("DELETE FROM social_admissions WHERE agent_id=?1", [id])?;
+                tx.execute("DELETE FROM presence WHERE agent_id=?1 OR agent_id IN (SELECT id FROM social_sessions WHERE bot_id=?1)", [id])?;
                 json!({"ok":true})
             }
             ("POST", ["rooms"]) => {
@@ -1642,6 +1674,16 @@ mod tests {
             Some(true)
         );
         store
+            .upsert_presence(
+                bot_id,
+                "Friend Bot",
+                "working",
+                Some("private status"),
+                None,
+            )
+            .unwrap();
+        assert!(store.room_presence_allowed(room_id, bot_id));
+        store
             .social_action(
                 &owner_key,
                 "DELETE",
@@ -1654,6 +1696,7 @@ mod tests {
             store.social_room_access(room_id, bot["api_key"].as_str().unwrap()),
             Some(false)
         );
+        assert!(!store.room_presence_allowed(room_id, bot_id));
         assert!(store
             .social_action(
                 &friend_key,
