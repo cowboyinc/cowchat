@@ -354,6 +354,7 @@ pub async fn handle_frame(
                 rate_limiter,
                 no_auth,
                 webhook_mgr,
+                true,
             )
             .await
         }
@@ -1057,7 +1058,7 @@ fn append_error(req_id: Option<&str>, error: crate::store::StoreError) -> Frame 
     Frame::error(req_id, ErrorPayload::new(code, error.to_string()))
 }
 
-async fn handle_send_message(
+pub(crate) async fn handle_send_message(
     req_id: Option<&str>,
     payload: serde_json::Value,
     agent_id: &str,
@@ -1068,6 +1069,7 @@ async fn handle_send_message(
     rate_limiter: &Arc<RateLimiter>,
     no_auth: bool,
     webhook_mgr: &Arc<crate::webhooks::WebhookManager>,
+    require_in_room: bool,
 ) -> Frame {
     let p: SendMessagePayload = match serde_json::from_value(payload) {
         Ok(p) => p,
@@ -1102,7 +1104,7 @@ async fn handle_send_message(
         );
     }
 
-    if !broker.is_agent_in_room(agent_id, &p.room_id) {
+    if require_in_room && !broker.is_agent_in_room(agent_id, &p.room_id) {
         return Frame::error(
             req_id,
             ErrorPayload::new(ErrorCode::NotInRoom, "Not in this room"),
@@ -2426,7 +2428,7 @@ async fn handle_set_typing(
     Frame::ok(req_id, serde_json::json!({"room_id": p.room_id}))
 }
 
-async fn handle_set_presence(
+pub(crate) async fn handle_set_presence(
     req_id: Option<&str>,
     payload: serde_json::Value,
     agent_id: &str,

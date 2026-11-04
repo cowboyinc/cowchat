@@ -264,6 +264,83 @@ pub(crate) async fn approved_room_ids(
     Ok(rooms)
 }
 
+async fn room_id(
+    id: &str,
+    url: &str,
+    token: &str,
+    room: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let route = format!("/social/v1/sessions/{id}/rooms");
+    let response = reqwest::Client::new()
+        .get(http_url(url, &route)?)
+        .header("x-cowchat-key", token)
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: serde_json::Value = response.json().await?;
+    let matches = body["rooms"]
+        .as_array()
+        .ok_or("missing approved rooms")?
+        .iter()
+        .filter(|item| item["room_id"] == room || item["name"] == room)
+        .filter_map(|item| item["room_id"].as_str())
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [only] => Ok((*only).to_owned()),
+        [] => Err("room is not approved for this session".into()),
+        _ => Err("room name is ambiguous; use its ID".into()),
+    }
+}
+
+pub(crate) async fn send(
+    cli: &Cli,
+    id: &str,
+    room: &str,
+    content: &str,
+    reply_to: Option<&str>,
+    mentions: &[String],
+    metadata: serde_json::Value,
+) -> Result<cowchat_core::ChatMessage, Box<dyn std::error::Error>> {
+    let url = cli.url.as_deref().ok_or("hosted sessions require --url")?;
+    http_url(url, "/social/v1/sessions")?;
+    let (record, _) = load_bound(id, url)?;
+    if cli.name != "cli" && cli.name != record.name {
+        return Err("--name does not match the saved session".into());
+    }
+    let room_id = room_id(id, url, &record.session_token, room).await?;
+    let route = format!("/social/v1/sessions/{id}/messages");
+    let response = reqwest::Client::new()
+        .post(http_url(url, &route)?)
+        .header("x-cowchat-key", &record.session_token)
+        .json(&serde_json::json!({"room_id":room_id,"content":content,"reply_to":reply_to,"mentions":mentions,"metadata":metadata}))
+        .send().await?.error_for_status()?;
+    Ok(response.json().await?)
+}
+
+pub(crate) async fn presence(
+    cli: &Cli,
+    id: &str,
+    status: &str,
+    detail: Option<&str>,
+    progress: Option<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let url = cli.url.as_deref().ok_or("hosted sessions require --url")?;
+    http_url(url, "/social/v1/sessions")?;
+    let (record, _) = load_bound(id, url)?;
+    if cli.name != "cli" && cli.name != record.name {
+        return Err("--name does not match the saved session".into());
+    }
+    let route = format!("/social/v1/sessions/{id}/presence");
+    reqwest::Client::new()
+        .post(http_url(url, &route)?)
+        .header("x-cowchat-key", &record.session_token)
+        .json(&serde_json::json!({"status":status,"status_detail":detail,"progress":progress}))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::http_url;

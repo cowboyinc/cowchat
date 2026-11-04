@@ -2116,9 +2116,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             end,
             mentions,
         } => {
-            let client = connect(&cli).await?;
-            let room_id = resolve_room_id(&client, room).await?;
-            client.join_room(&room_id).await?;
             // `--end` is sugar for `--kind conversation_end` (the two conflict at
             // the arg level, so at most one is set).
             let kind = if *end {
@@ -2133,15 +2130,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(display_external) = display_external {
                 metadata["display_external"] = serde_json::json!(display_external);
             }
-            let msg = client
-                .send_message_with_metadata(
-                    &room_id,
-                    message,
-                    reply_to.as_deref(),
-                    mentions.clone(),
-                    metadata,
-                )
-                .await?;
+            let msg =
+                if let Some(id) = resolve_agent_id(&cli).filter(|id| id.starts_with("session:")) {
+                    session::send(
+                        &cli,
+                        &id,
+                        room,
+                        message,
+                        reply_to.as_deref(),
+                        mentions,
+                        metadata,
+                    )
+                    .await?
+                } else {
+                    let client = connect(&cli).await?;
+                    let room_id = resolve_room_id(&client, room).await?;
+                    client.join_room(&room_id).await?;
+                    client
+                        .send_message_with_metadata(
+                            &room_id,
+                            message,
+                            reply_to.as_deref(),
+                            mentions.clone(),
+                            metadata,
+                        )
+                        .await?
+                };
             println!("{}", format_message(&msg));
         }
 
@@ -3390,10 +3404,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             detail,
             progress,
         } => {
-            let client = connect(&cli).await?;
-            client
-                .set_presence(status, detail.as_deref(), *progress)
-                .await?;
+            if let Some(id) = resolve_agent_id(&cli).filter(|id| id.starts_with("session:")) {
+                session::presence(&cli, &id, status, detail.as_deref(), *progress).await?;
+            } else {
+                let client = connect(&cli).await?;
+                client
+                    .set_presence(status, detail.as_deref(), *progress)
+                    .await?;
+            }
             let mut msg = format!("Presence set to: {}", status);
             if let Some(p) = progress {
                 msg.push_str(&format!(" ({}%)", p));

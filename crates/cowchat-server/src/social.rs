@@ -212,6 +212,56 @@ async fn action(
             .social_touch_session(&key, id)
             .map(|()| json!({"ok":true})),
         ("GET", ["sessions", id, "rooms"]) => state.store.social_session_rooms(&key, id),
+        ("POST", ["sessions", id, "messages"]) => {
+            let room = data["room_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid room_id"));
+            match (state.store.social_session_name(&key, id), room) {
+                (Ok(name), Ok(room))
+                    if state.store.social_room_access(room, &key) == Some(true) =>
+                {
+                    let frame = crate::handler::handle_send_message(
+                        None,
+                        data.clone(),
+                        id,
+                        &name,
+                        &state.broker,
+                        &state.store,
+                        &key,
+                        &state.rate_limiter,
+                        false,
+                        &state.webhook_mgr,
+                        false,
+                    )
+                    .await;
+                    if frame.frame_type == FrameType::Ok {
+                        Ok(frame.payload)
+                    } else {
+                        Err(anyhow::anyhow!("message rejected: {}", frame.payload))
+                    }
+                }
+                _ => Err(anyhow::anyhow!("not found")),
+            }
+        }
+        ("POST", ["sessions", id, "presence"]) => match state.store.social_session_name(&key, id) {
+            Ok(name) => {
+                let frame = crate::handler::handle_set_presence(
+                    None,
+                    data.clone(),
+                    id,
+                    &name,
+                    &state.broker,
+                    &state.store,
+                )
+                .await;
+                if frame.frame_type == FrameType::Ok {
+                    Ok(frame.payload)
+                } else {
+                    Err(anyhow::anyhow!("presence rejected: {}", frame.payload))
+                }
+            }
+            Err(_) => Err(anyhow::anyhow!("not found")),
+        },
         ("POST", ["sessions", id, "end"]) => state
             .store
             .social_end_session(&key, id)
