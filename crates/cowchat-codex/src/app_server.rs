@@ -375,6 +375,38 @@ fn websocket_error(error: tokio_tungstenite::tungstenite::Error) -> AppServerErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires a disposable Codex thread and local app-server"]
+    async fn real_idle_thread_accepts_untrusted_reference() {
+        let thread = std::env::var("COWCHAT_CODEX_PROBE_THREAD").unwrap();
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        let mut config = CodexConfig::default();
+        config.app_server_endpoint = config
+            .app_server_endpoint
+            .replace("~/", &format!("{}/", home.display()));
+        let client = CodexAppServerClient::new(config);
+        assert!(client.thread_exists(&thread).await.unwrap());
+        let outcome = client
+            .wake(
+                &thread,
+                &WakeReference {
+                    target: "codex-session".into(),
+                    room: "probe-room".into(),
+                    after_seq: 0,
+                    observed_seq: 1,
+                    source: "cowchat".into(),
+                    event_id: "probe-event".into(),
+                    event_type: "cowchat.message".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.mode, "started");
+    }
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
