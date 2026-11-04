@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SessionHookTest(unittest.TestCase):
+    def test_installed_app_cli_is_used_before_path(self):
+        spec = importlib.util.spec_from_file_location("cowchat_claude_hook", ROOT / "hooks/session.py")
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            config = home / ".cowchat/app-cli-binary"
+            config.parent.mkdir()
+            cli = home / "Cowchat.app/Contents/Helpers/cowchat"
+            cli.parent.mkdir(parents=True)
+            cli.write_text("#!/bin/sh\n")
+            cli.chmod(0o700)
+            config.write_text(str(cli))
+            from unittest.mock import patch
+            with patch.object(hook.Path, "home", return_value=home):
+                self.assertEqual(hook.cowchat_binary(), str(cli))
+                cli.unlink()
+                self.assertEqual(hook.cowchat_binary(), "cowchat")
+
     def test_start_resume_presence_and_end_keep_the_same_bound_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)

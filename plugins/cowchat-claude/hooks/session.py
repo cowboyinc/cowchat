@@ -25,6 +25,15 @@ def run(args, session_file=None):
     return subprocess.run(args, env=env, text=True, capture_output=True, timeout=15, check=True)
 
 
+def cowchat_binary():
+    config = Path.home() / ".cowchat/app-cli-binary"
+    if config.is_file():
+        candidate = Path(config.read_text().strip())
+        if candidate.is_absolute() and candidate.name == "cowchat" and candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return "cowchat"
+
+
 def session_id(value):
     return str(uuid.UUID(value))
 
@@ -51,6 +60,7 @@ def hook_main(event, payload):
     identifier = session_id(payload["session_id"])
     home = Path.home() / ".cowchat"
     hosted = json.loads((home / "hosted-bot.json").read_text())
+    cli_binary = cowchat_binary()
     url = hosted["url"]
     if not url.startswith("wss://") and not re.match(r"^ws://(127\.0\.0\.1|localhost|\[::1\])(?::|/)", url):
         raise ValueError("Cowchat session server must use WSS or loopback WS")
@@ -62,7 +72,7 @@ def hook_main(event, payload):
     if saved and not Path(saved["session_file"]).is_file():
         saved = None
     agent_id = saved["id"] if saved else f"session:{uuid.uuid4()}"
-    common = ["cowchat", "--url", url, "--agent-id", agent_id]
+    common = [cli_binary, "--url", url, "--agent-id", agent_id]
 
     if event == "start":
         env_file = os.environ.get("CLAUDE_ENV_FILE")
@@ -78,7 +88,7 @@ def hook_main(event, payload):
         if saved:
             folder, branch = saved["folder"], saved["branch"]
         def start_command(current_id):
-            return ["cowchat", "--url", url, "--name", name, "--agent-id", current_id,
+            return [cli_binary, "--url", url, "--name", name, "--agent-id", current_id,
                     "session", "start", "--id", current_id, "--harness", "claude",
                     "--folder", folder, "--branch", branch]
 
@@ -108,7 +118,7 @@ def hook_main(event, payload):
                 stream.write(f"export {key}={shlex.quote(value)}\n")
         cursor = records / f"{identifier}.cursor"
         command = " ".join(shlex.quote(part) for part in [
-            "cowchat", "wait", result["room_id"], "--approved-rooms", "--mentions-only",
+            cli_binary, "wait", result["room_id"], "--approved-rooms", "--mentions-only",
             "--loop", "--drain", "--heartbeat-secs", "60",
             "--cursor-file", str(cursor),
         ])

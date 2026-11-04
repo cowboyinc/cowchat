@@ -87,6 +87,7 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
         .app_server_endpoint
         .replace("~/", &format!("{}/", home.display()));
     let codex = CodexAppServerClient::new(config);
+    let cli_binary = std::env::var("COWCHAT_CLI_BINARY").unwrap_or_else(|_| "cowchat".into());
     let cursor = mapping_path.with_extension("cursor.json");
     let mut wake_failures = 0u8;
     while mapping_path.exists() {
@@ -103,7 +104,7 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
             }
             Ok(true) => {}
         }
-        let mut heartbeat_command = Command::new("cowchat");
+        let mut heartbeat_command = Command::new(&cli_binary);
         heartbeat_command.kill_on_drop(true);
         let heartbeat = tokio::time::timeout(
             Duration::from_secs(15),
@@ -130,7 +131,7 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
         if cursor.exists() {
             std::fs::copy(&cursor, &temporary)?;
         }
-        let mut wait = Command::new("cowchat");
+        let mut wait = Command::new(&cli_binary);
         wait.kill_on_drop(true);
         let output = wait
             .args([

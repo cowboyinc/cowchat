@@ -17,6 +17,21 @@ spec.loader.exec_module(hook)
 
 
 class HookTests(unittest.TestCase):
+    def test_installed_app_cli_is_used_before_path(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            config = home / ".cowchat/app-cli-binary"
+            config.parent.mkdir()
+            cli = home / "Cowchat.app/Contents/Helpers/cowchat"
+            cli.parent.mkdir(parents=True)
+            cli.write_text("#!/bin/sh\n")
+            cli.chmod(0o700)
+            config.write_text(str(cli))
+            with patch.object(hook.Path, "home", return_value=home):
+                self.assertEqual(hook.cowchat_binary(), str(cli))
+                cli.unlink()
+                self.assertEqual(hook.cowchat_binary(), "cowchat")
+
     def test_start_and_resume_keep_private_identity_out_of_context(self):
         with tempfile.TemporaryDirectory() as root:
             home = Path(root)

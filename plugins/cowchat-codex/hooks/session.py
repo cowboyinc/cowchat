@@ -45,12 +45,22 @@ def run(args, session_file=None):
     return subprocess.run(args, env=env, text=True, capture_output=True, timeout=15, check=True)
 
 
-def start_listener(binary, mapping):
+def cowchat_binary():
+    config = Path.home() / ".cowchat/app-cli-binary"
+    if config.is_file():
+        candidate = Path(config.read_text().strip())
+        if candidate.is_absolute() and candidate.name == "cowchat" and candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return "cowchat"
+
+
+def start_listener(binary, mapping, cli_binary):
     log_path = mapping.with_suffix(".log")
     fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         os.fchmod(fd, 0o600)
         subprocess.Popen([binary, "listen-session", "--mapping", str(mapping)],
+                         env={**os.environ, "COWCHAT_CLI_BINARY": cli_binary},
                          start_new_session=True, stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=fd)
     finally:
@@ -89,7 +99,8 @@ def hook_main(event, payload):
         subprocess.run(["git", "-C", payload.get("cwd") or os.getcwd(), "branch", "--show-current"],
                        capture_output=True, text=True, timeout=3, check=False).stdout.strip() or "main"
     )
-    common = ["cowchat", "--url", url, "--name", name, "--agent-id", agent_id]
+    cli_binary = cowchat_binary()
+    common = [cli_binary, "--url", url, "--name", name, "--agent-id", agent_id]
 
     if event == "start":
         parent_pid, parent_started = parent_process()
@@ -102,7 +113,7 @@ def hook_main(event, payload):
                                     ("session heartbeat failed: 401", "session heartbeat failed: 404")):
                 raise
             agent_id = f"session:{uuid.uuid4()}"
-            common = ["cowchat", "--url", url, "--name", name, "--agent-id", agent_id]
+            common = [cli_binary, "--url", url, "--name", name, "--agent-id", agent_id]
             result = json.loads(run(common + ["session", "start", "--id", agent_id,
                                         "--harness", "codex", "--folder", folder, "--branch", branch]).stdout)
         record = {"thread_id": identifier, "id": agent_id, "name": name, "folder": folder, "branch": branch,
@@ -116,7 +127,7 @@ def hook_main(event, payload):
         binary_file = home / "codex-hook/binary"
         binary = binary_file.read_text().strip() if binary_file.exists() else "cowchat-codex"
         try:
-            start_listener(binary, mapping)
+            start_listener(binary, mapping, cli_binary)
         except OSError as error:
             print(f"Cowchat Codex listener unavailable: {error}", file=sys.stderr)
         context = (
