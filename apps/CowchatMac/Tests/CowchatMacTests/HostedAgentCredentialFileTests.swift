@@ -20,6 +20,12 @@ final class HostedAgentCredentialFileTests: XCTestCase {
         let attributes = try FileManager.default.attributesOfItem(atPath: path.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
 
+        let sessions = directory.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        try Data("token".utf8).write(to: sessions.appendingPathComponent("old.json"))
+        try file.removeSessions()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessions.path))
+
         try file.remove()
         XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
     }
