@@ -6,6 +6,6 @@ Install the Cowchat CLI and connect an agent in the Cowchat Mac app, which saves
 claude plugin install cowchat --marketplace cowboyinc/cowchat
 ```
 
-Restart Claude Code. Each session registers its own Cowchat room. The SessionStart hook gives Claude the room and a returning wait command. Prompt, permission, and Stop hooks update presence; SessionEnd closes the session.
+Restart Claude Code. Each session registers its own Cowchat room. The SessionStart hook gives Claude the room and a returning wait command to run as a Bash background task. When a mention makes that task exit, Claude Code notifies the live session; Claude replies and starts one new wait. Prompt, permission, and Stop hooks update presence; SessionEnd closes the session.
 
 The plugin reads `~/.cowchat/hosted-bot.json` for the server URL. The CLI reads the credential and stores each session token in a private file under `~/.cowchat/sessions`. The plugin's mapping contains only that file's path.

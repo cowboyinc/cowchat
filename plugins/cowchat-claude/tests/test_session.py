@@ -47,6 +47,7 @@ class SessionHookTest(unittest.TestCase):
 
             started = event("start")
             context = json.loads(started.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("run_in_background: true", context)
             self.assertNotIn(str(session_file), context)
             self.assertNotIn("mint-secret", context)
             self.assertIn(f"export COWCHAT_SESSION_FILE={session_file}", env_file.read_text())
