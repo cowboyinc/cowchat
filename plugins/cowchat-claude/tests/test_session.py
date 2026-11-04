@@ -71,7 +71,7 @@ class SessionHookTest(unittest.TestCase):
                 "#!/usr/bin/env python3\n"
                 "import json,os,sys\n"
                 "with open(os.environ['CALLS'],'a') as out: out.write(json.dumps(sys.argv[1:])+'\\n')\n"
-                "if os.getenv('COWCHAT_SESSION_FILE'): print('session heartbeat failed: 404 Not Found',file=sys.stderr); sys.exit(1)\n"
+                "if os.getenv('COWCHAT_SESSION_FILE'): print('session heartbeat failed: 401 Unauthorized',file=sys.stderr); sys.exit(1)\n"
                 "print(json.dumps({'session_file':os.environ['MOCK_SESSION_FILE'],'room_id':'r','room_name':'work'}))\n"
             )
             binary.chmod(0o755)

@@ -85,7 +85,10 @@ def hook_main(event, payload):
         try:
             result = json.loads(run(start_command(agent_id), saved["session_file"] if saved else None).stdout)
         except subprocess.CalledProcessError as error:
-            if not saved or "session heartbeat failed: 404" not in error.stderr:
+            if not saved or not any(
+                marker in error.stderr
+                for marker in ("session heartbeat failed: 401", "session heartbeat failed: 404")
+            ):
                 raise
             agent_id = f"session:{uuid.uuid4()}"
             result = json.loads(run(start_command(agent_id)).stdout)
