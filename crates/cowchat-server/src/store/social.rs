@@ -462,12 +462,6 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             });
         }
         anyhow::ensure!(p.session_id.is_none(), "invalid credential");
-        let total: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM social_sessions WHERE owner_id=?1",
-            [&p.account_id],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(total < 500, "session room limit reached");
         let active_sessions: i64 = tx.query_row(
             "SELECT COUNT(*) FROM social_sessions WHERE bot_id=?1 AND ended_at IS NULL",
             [&bot],
@@ -505,7 +499,7 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             )?
             .query_map([&p.account_id], |row| row.get::<_, String>(0))?
             .collect::<Result<std::collections::HashSet<_>, _>>()?;
-        let room_name = (1..=501)
+        let room_name = (1..=41)
             .map(|number| {
                 if number == 1 {
                     stem.clone()
@@ -2694,5 +2688,33 @@ mod tests {
             .social_register_session(key, &excess, "Agent", "codex", "repo", "excess")
             .is_err());
         assert_eq!(store.list_rooms(None).unwrap().len(), initial_rooms + 60);
+    }
+
+    #[test]
+    fn old_finished_sessions_do_not_exhaust_a_lifetime_quota() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, _) = login(&store, "long-running-owner");
+        let bot = store
+            .social_action(&owner_key, "POST", "agents", &json!({"name":"Cowbot"}))
+            .unwrap();
+        let key = bot["api_key"].as_str().unwrap();
+        let principal = store.social_principal(key).unwrap();
+        let bot_id = principal.agent_id.unwrap();
+        let conn = store.conn.lock().unwrap();
+        for index in 0..500 {
+            conn.execute(
+                "INSERT INTO social_sessions(id,bot_id,owner_id,name,harness,folder,branch,room_id,room_name,started_at,last_seen,ended_at) VALUES(?1,?2,?3,'old','codex','repo','main',?4,'repo',unixepoch()-86400,unixepoch()-86400,unixepoch()-86400)",
+                params![format!("session:old-{index}"), bot_id, principal.account_id, format!("old-room-{index}")],
+            ).unwrap();
+        }
+        drop(conn);
+        let id = format!("session:{}", uuid::Uuid::new_v4());
+        assert_eq!(
+            store
+                .social_register_session(key, &id, "new", "codex", "repo", "main")
+                .unwrap()
+                .room_name,
+            "repo"
+        );
     }
 }
