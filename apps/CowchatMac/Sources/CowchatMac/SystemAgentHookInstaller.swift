@@ -14,6 +14,7 @@ final class SystemAgentHookInstaller: AgentHookInstaller {
                                            URL(fileURLWithPath: "/usr/bin")]) {
         self.home = home
         self.systemSearchDirectories = systemSearchDirectories
+        try? configureAppCLI()
     }
 
     func state(of harness: LiveSession.Harness) async -> AgentHookState {
@@ -50,6 +51,7 @@ final class SystemAgentHookInstaller: AgentHookInstaller {
     }
 
     func connect(_ harness: LiveSession.Harness) async throws -> AgentHookState {
+        try configureAppCLI()
         guard let binary = executable(for: harness) else {
             throw CowchatConnectionError.transport("Install \(harness.appName) before connecting it.")
         }
@@ -87,6 +89,23 @@ final class SystemAgentHookInstaller: AgentHookInstaller {
             + systemSearchDirectories
         return paths.map { $0.appendingPathComponent(name) }
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    private func configureAppCLI() throws {
+        let cli = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/cowchat")
+        guard FileManager.default.isExecutableFile(atPath: cli.path), trustedBundledHelper(cli) else {
+            #if DEBUG
+            return
+            #else
+            throw CowchatConnectionError.transport("The Cowchat app CLI could not be verified. Reinstall Cowchat.")
+            #endif
+        }
+        let directory = home.appendingPathComponent(".cowchat", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let record = directory.appendingPathComponent("app-cli-binary")
+        try cli.path.write(to: record, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: record.path)
     }
 
     private func trustedBundledHelper(_ url: URL) -> Bool {

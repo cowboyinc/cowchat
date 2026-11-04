@@ -161,7 +161,7 @@ private struct AgentHookRow: View {
             Button("Install hooks and start service") { connect() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Cowchat will install Codex hooks and start a local service that uses about 400 MB of memory. Codex will ask you to trust the hooks when it next starts.")
+            Text("Cowchat will install Codex hooks, download about 400 MB to disk, and start a background service. Codex will ask you to trust the hooks when it next starts.")
         }
     }
 
@@ -183,7 +183,7 @@ private struct AgentHookRow: View {
                 .macAccessibleAction(label: "Connect \(harness.appName)") {
                     if harness == .codex { confirmCodexService = true } else { connect() }
                 }
-                .help(harness == .codex ? "Installs Cowchat hooks and starts a local Codex service using about 400 MB of memory." : "Installs the Cowchat Claude Code plugin.")
+                .help(harness == .codex ? "Installs Cowchat hooks and starts a Codex background service with about a 400 MB download." : "Installs the Cowchat Claude Code plugin.")
         case .connecting:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small).frame(width: 16, height: 16)

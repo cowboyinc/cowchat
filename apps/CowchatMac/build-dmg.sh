@@ -12,6 +12,8 @@ SERVER_NAME="cowchat-server"
 SERVER_RELATIVE_PATH="Contents/Helpers/$SERVER_NAME"
 BRIDGE_NAME="cowchat-codex"
 BRIDGE_RELATIVE_PATH="Contents/Helpers/$BRIDGE_NAME"
+CLI_NAME="cowchat"
+CLI_RELATIVE_PATH="Contents/Helpers/$CLI_NAME"
 WINDOW_WIDTH=660
 WINDOW_HEIGHT=450
 APP_POSITION_X=180
@@ -176,6 +178,36 @@ verify_bridge_helper() {
 	fi
 }
 
+verify_cli_helper() {
+	app_root=$1
+	verification_phase=$2
+	cli_path="$app_root/$CLI_RELATIVE_PATH"
+	if [ ! -f "$cli_path" ] || [ ! -x "$cli_path" ] || \
+		! lipo "$cli_path" -verify_arch arm64 || ! lipo "$cli_path" -verify_arch x86_64 || \
+		! codesign --verify --strict "$cli_path"; then
+		printf 'Cowchat CLI helper failed verification (%s): %s\n' "$verification_phase" "$cli_path" >&2
+		exit 1
+	fi
+	cli_signature_info=$(codesign -dv --verbose=4 "$cli_path" 2>&1 || true)
+	cli_team_id=$(printf '%s\n' "$cli_signature_info" | /usr/bin/sed -n 's/^TeamIdentifier=//p' | /usr/bin/head -n 1)
+	cli_developer_authority=$(printf '%s\n' "$cli_signature_info" | \
+		/usr/bin/grep -F 'Authority=Developer ID Application:' | /usr/bin/head -n 1 || true)
+	if [ "$APP_IS_DEVELOPER_ID" -eq 1 ] && \
+		{ [ "$cli_team_id" != "$APP_TEAM_ID" ] || [ "$cli_developer_authority" != "$APP_DEVELOPER_AUTHORITY" ]; }; then
+		printf 'Cowchat CLI helper signer does not match the app (%s).\n' "$verification_phase" >&2
+		exit 1
+	fi
+	if [ -n "$EXPECTED_TEAM_ID" ] && [ "$cli_team_id" != "$EXPECTED_TEAM_ID" ]; then
+		printf 'Cowchat CLI helper is not signed by expected team %s (%s).\n' "$EXPECTED_TEAM_ID" "$verification_phase" >&2
+		exit 1
+	fi
+	if ! cli_version_output=$("$cli_path" --version 2>/dev/null) || \
+		[ "$cli_version_output" != "$CLI_NAME $VERSION" ]; then
+		printf 'Unexpected Cowchat CLI helper version (%s): %s\n' "$verification_phase" "${cli_version_output:-<missing>}" >&2
+		exit 1
+	fi
+}
+
 verify_dmg_signer_matches_app() {
 	dmg_signature_info=$1
 	dmg_team_id=$(printf '%s\n' "$dmg_signature_info" | \
@@ -248,6 +280,7 @@ if [ -n "$NOTARY_PROFILE" ] && [ "$APP_IS_DEVELOPER_ID" -ne 1 ]; then
 fi
 verify_server_helper "$SOURCE_APP" "source app"
 verify_bridge_helper "$SOURCE_APP" "source app"
+verify_cli_helper "$SOURCE_APP" "source app"
 
 if [ -e "/Volumes/$VOLUME_NAME" ]; then
 	printf 'A volume named %s is already mounted; detach it before building.\n' "$VOLUME_NAME" >&2
@@ -451,6 +484,7 @@ verify_payload() {
 	fi
 	verify_server_helper "$volume_root/Cowchat.app" "$verification_phase image"
 	verify_bridge_helper "$volume_root/Cowchat.app" "$verification_phase image"
+	verify_cli_helper "$volume_root/Cowchat.app" "$verification_phase image"
 }
 
 configure_and_verify_finder() {

@@ -91,6 +91,8 @@ grep -Fq "Contents/Helpers/\$SERVER_NAME" "$ROOT/build-app.sh"
 grep -Fq "Contents/Helpers/\$SERVER_NAME" "$ROOT/build-dmg.sh"
 grep -Fq "Contents/Helpers/\$BRIDGE_NAME" "$ROOT/build-app.sh"
 grep -Fq "Contents/Helpers/\$BRIDGE_NAME" "$ROOT/build-dmg.sh"
+grep -Fq "Contents/Helpers/\$CLI_NAME" "$ROOT/build-app.sh"
+grep -Fq "Contents/Helpers/\$CLI_NAME" "$ROOT/build-dmg.sh"
 grep -Fq "\"\$CARGO_BIN\" build --locked --release --package \"\$SERVER_NAME\"" "$ROOT/build-app.sh"
 grep -Fq 'MACOSX_DEPLOYMENT_TARGET=13.0' "$ROOT/build-app.sh"
 grep -Fq 'aarch64-apple-darwin x86_64-apple-darwin' "$ROOT/build-app.sh"
@@ -212,6 +214,9 @@ for test_target in aarch64-apple-darwin x86_64-apple-darwin; do
 	test_bridge="$APP_CARGO_TARGET/$test_target/release/cowchat-codex"
 	printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-codex $TEST_VERSION'" > "$test_bridge"
 	chmod +x "$test_bridge"
+	test_cli="$APP_CARGO_TARGET/$test_target/release/cowchat"
+	printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat $TEST_VERSION'" > "$test_cli"
+	chmod +x "$test_cli"
 done
 
 APP_ARTIFACTS="$APP_TEST/artifacts"
@@ -391,6 +396,9 @@ chmod +x "$DMG_APP/Contents/Helpers/cowchat-server"
 printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-codex $TEST_VERSION'" \
 	> "$DMG_APP/Contents/Helpers/cowchat-codex"
 chmod +x "$DMG_APP/Contents/Helpers/cowchat-codex"
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat $TEST_VERSION'" \
+	> "$DMG_APP/Contents/Helpers/cowchat"
+chmod +x "$DMG_APP/Contents/Helpers/cowchat"
 
 cat > "$DMG_SHIMS/codesign" <<'SHIM'
 #!/bin/sh
@@ -505,6 +513,11 @@ cp -R "$DMG_APP" "$BAD_BRIDGE_APP"
 printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat-codex 9.9.9'" \
 	> "$BAD_BRIDGE_APP/Contents/Helpers/cowchat-codex"
 chmod +x "$BAD_BRIDGE_APP/Contents/Helpers/cowchat-codex"
+BAD_CLI_APP="$DMG_TEST/BadCLI.app"
+cp -R "$DMG_APP" "$BAD_CLI_APP"
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'cowchat 9.9.9'" \
+	> "$BAD_CLI_APP/Contents/Helpers/cowchat"
+chmod +x "$BAD_CLI_APP/Contents/Helpers/cowchat"
 
 run_rejected_source_helper_test() {
 	test_name=$1
@@ -550,6 +563,8 @@ run_rejected_source_helper_test non-executable "$NONEXEC_HELPER_APP" \
 	'Cowchat server helper is missing or not executable (source app)' 0 0
 run_rejected_source_helper_test wrong-bridge-version "$BAD_BRIDGE_APP" \
 	'Unexpected Cowchat Codex helper version (source app): cowchat-codex 9.9.9' 0 0
+run_rejected_source_helper_test wrong-cli-version "$BAD_CLI_APP" \
+	'Unexpected Cowchat CLI helper version (source app): cowchat 9.9.9' 0 0
 run_rejected_source_helper_test wrong-architecture "$DMG_APP" \
 	'Cowchat server helper is not universal (source app).' 1 0
 run_rejected_source_helper_test invalid-signature "$DMG_APP" \
