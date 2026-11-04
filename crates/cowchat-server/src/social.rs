@@ -1764,6 +1764,34 @@ mod tests {
             .frame_type,
             FrameType::Error
         );
+        for index in 0..149 {
+            assert_eq!(
+                frame(
+                    &mut first,
+                    FrameType::SendMessage,
+                    json!({"room_id":first_room,"content":format!("first-{index}")})
+                )
+                .await
+                .frame_type,
+                FrameType::Ok
+            );
+        }
+        for index in 0..150 {
+            let reply = frame(
+                &mut second,
+                FrameType::SendMessage,
+                json!({"room_id":second_room,"content":format!("second-{index}")}),
+            )
+            .await;
+            assert_eq!(
+                reply.frame_type,
+                if index < 50 {
+                    FrameType::Ok
+                } else {
+                    FrameType::Error
+                }
+            );
+        }
         let rooms = call(&base, owner_key, "GET", "rooms", json!({})).await;
         let rooms = rooms["rooms"].as_array().unwrap();
         assert!(rooms.iter().any(|room| room["room_id"] == first_room

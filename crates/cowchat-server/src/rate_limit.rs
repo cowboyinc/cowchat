@@ -156,12 +156,10 @@ impl RateLimiter {
 
     /// Record a blob or inline-chart upload for `api_key` and return whether it's allowed.
     pub fn try_register_upload(&self, api_key: &str) -> bool {
-        let api_key = crate::store::social::credential_key(api_key);
         try_register_window(&self.uploads, api_key, UPLOAD_MAX_PER_WINDOW, UPLOAD_WINDOW)
     }
 
     fn get_or_create(&self, api_key: &str) -> dashmap::mapref::one::Ref<'_, String, KeyUsage> {
-        let api_key = crate::store::social::credential_key(api_key);
         if !self.usage.contains_key(api_key) {
             self.usage.insert(api_key.to_string(), KeyUsage::new());
         }
@@ -197,7 +195,6 @@ impl RateLimiter {
     }
 
     pub fn remove_agent(&self, api_key: &str) {
-        let api_key = crate::store::social::credential_key(api_key);
         if let Some(usage) = self.usage.get(api_key) {
             let current = usage.agent_count.load(Ordering::Relaxed);
             if current > 0 {

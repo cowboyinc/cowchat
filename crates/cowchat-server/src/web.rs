@@ -1001,7 +1001,10 @@ async fn upload_blob(
             "blob exceeds the 25 MiB attachment limit",
         );
     }
-    if !state.rate_limiter.try_register_upload(&key) {
+    if !state
+        .rate_limiter
+        .try_register_upload(&state.store.social_rate_limit_key(&key))
+    {
         return json_error(
             StatusCode::TOO_MANY_REQUESTS,
             "upload rate limit exceeded for this API key; try again later",

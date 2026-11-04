@@ -13,10 +13,6 @@ pub struct Principal {
     pub session_id: Option<String>,
 }
 
-pub fn credential_key(key: &str) -> &str {
-    key
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRoom {
     pub room_id: String,
@@ -384,6 +380,14 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
     pub fn social_principal(&self, key: &str) -> Option<Principal> {
         principal(&self.conn.lock().unwrap(), key).ok().flatten()
     }
+    pub fn social_rate_limit_key(&self, key: &str) -> String {
+        self.social_principal(key)
+            .and_then(|p| {
+                p.agent_id
+                    .map(|bot| format!("social-bot:{}:{bot}", p.account_id))
+            })
+            .unwrap_or_else(|| key.to_owned())
+    }
     /// Register one stable agent session under a bot credential. A resumed
     /// session keeps its room; a different bot cannot claim its identity.
     pub fn social_register_session(
@@ -566,30 +570,29 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
     }
 
     pub fn social_end_session(&self, key: &str, session_id: &str) -> anyhow::Result<String> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         let p = principal(&conn, key)?.ok_or_else(|| anyhow::anyhow!("invalid credential"))?;
         anyhow::ensure!(
-            p.session_id.as_deref() == Some(session_id),
+            p.session_id.as_deref() == Some(session_id) || p.agent_id.is_none(),
             "invalid credential"
         );
-        let bot = p
-            .agent_id
-            .ok_or_else(|| anyhow::anyhow!("bot credential required"))?;
-        let room_id: String = conn
+        let tx = conn.transaction()?;
+        let room_id: String = tx
             .query_row(
-                "SELECT room_id FROM social_sessions WHERE id=?1 AND bot_id=?2 AND owner_id=?3",
-                params![session_id, bot, p.account_id],
+                "SELECT room_id FROM social_sessions WHERE id=?1 AND owner_id=?2 AND ended_at IS NULL AND (?3 IS NULL OR bot_id=?3)",
+                params![session_id, p.account_id, p.agent_id],
                 |row| row.get(0),
             )
             .map_err(|_| anyhow::anyhow!("session not found"))?;
-        conn.execute(
+        tx.execute(
             "UPDATE social_sessions SET ended_at=unixepoch(),token_digest=NULL WHERE id=?1",
             [session_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM social_admissions WHERE agent_id=?1",
             [session_id],
         )?;
+        tx.commit()?;
         Ok(room_id)
     }
 
@@ -2510,6 +2513,14 @@ mod tests {
         let first_token = first.session_token.as_deref().unwrap();
         let second_token = second.session_token.as_deref().unwrap();
         assert_eq!(
+            store.social_rate_limit_key(bot_key),
+            store.social_rate_limit_key(first_token)
+        );
+        assert_eq!(
+            store.social_rate_limit_key(first_token),
+            store.social_rate_limit_key(second_token)
+        );
+        assert_eq!(
             store.social_room_access(&first.room_id, first_token),
             Some(true)
         );
@@ -2642,6 +2653,15 @@ mod tests {
             store.social_room_access(shared_room, first_token),
             Some(false)
         );
+        assert_eq!(
+            store.social_end_session(&owner_key, &duplicate_id).unwrap(),
+            duplicate.room_id
+        );
+        assert!(store
+            .social_principal(duplicate.session_token.as_deref().unwrap())
+            .is_none());
+        assert!(store.social_end_session(&owner_key, &other_id).is_err());
+        assert!(store.social_end_session(&other_key, &other_id).is_ok());
     }
 
     #[test]

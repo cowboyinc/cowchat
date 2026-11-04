@@ -793,6 +793,7 @@ where
         agent_capabilities,
         session_id,
         agent_api_key,
+        rate_limit_key,
         reconnected_rooms,
         takeover_rooms,
         register_reply_to,
@@ -954,6 +955,7 @@ where
             return Ok(());
         };
 
+        let rate_limit_key = store.social_rate_limit_key(&authenticated_key);
         // Check rate limit for agent count (skip in no_auth mode)
         if !no_auth && !authenticated_key.is_empty() {
             let tier = store
@@ -968,7 +970,7 @@ where
             {
                 limits.max_agents = limits.max_agents.max(40);
             }
-            if !rate_limiter.check_agent_limit(&authenticated_key, &limits) {
+            if !rate_limiter.check_agent_limit(&rate_limit_key, &limits) {
                 let err = Frame::error(
                     frame.id.as_deref(),
                     ErrorPayload::new(
@@ -1234,7 +1236,7 @@ where
 
         // Track agent in rate limiter
         if !authenticated_key.is_empty() {
-            rate_limiter.add_agent(&authenticated_key);
+            rate_limiter.add_agent(&rate_limit_key);
         }
 
         let registered_name = store
@@ -1271,6 +1273,7 @@ where
             payload.capabilities,
             session_id,
             authenticated_key,
+            rate_limit_key,
             reconnected_rooms,
             takeover_rooms,
             frame.id,
@@ -1546,7 +1549,7 @@ where
         }
         drop(failed_registration_guard);
         if !agent_api_key.is_empty() {
-            rate_limiter.remove_agent(&agent_api_key);
+            rate_limiter.remove_agent(&rate_limit_key);
         }
         let _ = store.record_session_end(&session_id);
         return Ok(());
@@ -1607,6 +1610,7 @@ where
     });
 
     let mut last_activity = std::time::Instant::now();
+    let mut last_social_touch = std::time::Instant::now();
 
     loop {
         let read_result = tokio::select! {
@@ -1641,11 +1645,15 @@ where
                     }
                 };
                 if social_session_room.is_some()
-                    && store
+                    && last_social_touch.elapsed() >= Duration::from_secs(30)
+                {
+                    if store
                         .social_touch_session(&agent_api_key, &agent_id)
                         .is_err()
-                {
-                    break;
+                    {
+                        break;
+                    }
+                    last_social_touch = std::time::Instant::now();
                 }
 
                 // Pong responses don't need processing
@@ -1721,7 +1729,7 @@ where
 
     // Remove from rate limiter
     if !agent_api_key.is_empty() {
-        rate_limiter.remove_agent(&agent_api_key);
+        rate_limiter.remove_agent(&rate_limit_key);
     }
 
     let cleanup_lifecycle_guard = broker.lock_agent_lifecycle();
