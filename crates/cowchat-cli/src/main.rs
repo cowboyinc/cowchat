@@ -1309,16 +1309,19 @@ async fn upload_attachments(
     for path in paths {
         let canonical = std::fs::canonicalize(path)?;
         let data_dir = std::fs::canonicalize(default_data_dir()).ok();
-        let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+        let home = directories::BaseDirs::new()
+            .and_then(|dirs| std::fs::canonicalize(dirs.home_dir()).ok());
         let protected = data_dir
             .as_ref()
             .is_some_and(|dir| canonical.starts_with(dir))
             || home.as_ref().is_some_and(|home| {
-                [".ssh", ".claude", ".aws", "keys"]
+                [".ssh", ".claude", ".aws", ".gnupg", ".config/gh", "keys"]
                     .iter()
                     .any(|dir| canonical.starts_with(home.join(dir)))
             })
-            || canonical.file_name().is_some_and(|name| name == ".env")
+            || canonical
+                .file_name()
+                .is_some_and(|name| name == ".netrc" || name.to_string_lossy().starts_with(".env"))
             || std::env::var_os("COWCHAT_SESSION_FILE")
                 .and_then(|file| std::fs::canonicalize(file).ok())
                 .is_some_and(|file| canonical == file)
