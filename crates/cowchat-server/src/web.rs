@@ -925,15 +925,7 @@ pub(crate) fn authenticated_key(state: &AppState, headers: &HeaderMap) -> Option
         return if state.no_auth || state.broker.is_hosted() || state.api_key.is_empty() {
             None
         } else {
-            let scoped = headers
-                .get("x-cowchat-session-id")
-                .and_then(|value| value.to_str().ok())
-                .map(|session| crate::store::social::session_key(key, session));
-            let candidate = scoped.as_deref().unwrap_or(key);
-            state
-                .store
-                .social_principal(candidate)
-                .map(|_| candidate.to_string())
+            state.store.social_principal(key).map(|_| key.to_string())
         };
     }
     (key == state.api_key || state.store.validate_api_key(key).unwrap_or(false))
@@ -1150,7 +1142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_header_scopes_http_access_to_registered_session() {
+    async fn session_token_scopes_http_access_to_registered_session() {
         use base64::Engine;
         use sha2::Digest;
 
@@ -1189,6 +1181,7 @@ mod tests {
             .store
             .social_register_session(key, &session, "Agent", "codex", "repo", "main")
             .unwrap();
+        let token = room.session_token.as_deref().unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(API_KEY_HEADER, key.parse().unwrap());
         assert_eq!(
@@ -1199,13 +1192,10 @@ mod tests {
         let scoped = authenticated_key(&state, &headers).unwrap();
         assert_eq!(
             state.store.social_room_access(&room.room_id, &scoped),
-            Some(true)
+            Some(false)
         );
-        headers.insert(
-            "x-cowchat-session-id",
-            format!("session:{}", uuid::Uuid::new_v4()).parse().unwrap(),
-        );
-        assert!(authenticated_key(&state, &headers).is_none());
+        headers.insert(API_KEY_HEADER, token.parse().unwrap());
+        assert_eq!(authenticated_key(&state, &headers).as_deref(), Some(token));
 
         let (server, addr) = start_test_web_server(state).await;
         let http = reqwest::Client::new();
@@ -1223,12 +1213,7 @@ mod tests {
                 .status(),
             StatusCode::NOT_FOUND
         );
-        let created = upload()
-            .header(API_KEY_HEADER, key)
-            .header("x-cowchat-session-id", &session)
-            .send()
-            .await
-            .unwrap();
+        let created = upload().header(API_KEY_HEADER, token).send().await.unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
         let blob: serde_json::Value = created.json().await.unwrap();
         let blob_id = blob["blob_id"].as_str().unwrap();
@@ -1243,8 +1228,7 @@ mod tests {
         );
         assert_eq!(
             http.get(blob_url(&addr, blob_id))
-                .header(API_KEY_HEADER, key)
-                .header("x-cowchat-session-id", &session)
+                .header(API_KEY_HEADER, token)
                 .send()
                 .await
                 .unwrap()

@@ -1042,13 +1042,15 @@ where
                 &parsed.branch,
             ) {
                 Ok(room) => {
-                    authenticated_key = social::session_key(&authenticated_key, &agent_id);
+                    if let Some(token) = &room.session_token {
+                        authenticated_key = token.clone();
+                    }
                     Some(room)
                 }
-                Err(error) => {
+                Err(_) => {
                     let err = Frame::error(
                         frame.id.as_deref(),
-                        ErrorPayload::new(ErrorCode::Unauthorized, error.to_string()),
+                        ErrorPayload::new(ErrorCode::Unauthorized, "Invalid session credential"),
                     );
                     write_half.write_all(err.to_line()?.as_bytes()).await?;
                     continue;
@@ -1496,6 +1498,9 @@ where
             "room_id": room.room_id,
             "name": room.room_name,
         });
+        if let Some(token) = room.session_token.as_ref() {
+            ok_payload["session_token"] = serde_json::json!(token);
+        }
     }
     if was_reconnected {
         let mut room_list: Vec<String> = restored_rooms.into_iter().collect();
@@ -1631,6 +1636,13 @@ where
                         continue;
                     }
                 };
+                if social_session_room.is_some()
+                    && store
+                        .social_touch_session(&agent_api_key, &agent_id)
+                        .is_err()
+                {
+                    break;
+                }
 
                 // Pong responses don't need processing
                 if frame.frame_type == FrameType::Pong {

@@ -1699,6 +1699,23 @@ mod tests {
             .as_str()
             .unwrap();
         assert_eq!(first_ok.payload["session_room"]["name"], "cowchat");
+        let first_token = first_ok.payload["session_token"].as_str().unwrap();
+        assert!(state.broker.is_agent_in_room(&first_id, first_room));
+
+        let (mut impostor, _) =
+            tokio_tungstenite::connect_async(format!("{}/ws", base.replacen("http", "ws", 1)))
+                .await
+                .unwrap();
+        assert_eq!(
+            frame(
+                &mut impostor,
+                FrameType::Register,
+                register(&first_id, "impostor", "main")
+            )
+            .await
+            .frame_type,
+            FrameType::Error
+        );
         assert!(state.broker.is_agent_in_room(&first_id, first_room));
 
         let (mut second, _) =
@@ -1778,7 +1795,7 @@ mod tests {
         assert_eq!(state.broker.agents.len(), 30);
         call(
             &base,
-            bot_key,
+            first_token,
             "POST",
             &format!("sessions/{first_id}/heartbeat"),
             json!({}),
@@ -1786,17 +1803,21 @@ mod tests {
         .await;
         call(
             &base,
-            bot_key,
+            first_token,
             "POST",
             &format!("sessions/{first_id}/end"),
             json!({}),
         )
         .await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.broker.agents.contains_key(&first_id) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("ended session must disconnect");
         assert_eq!(
-            state.store.social_room_access(
-                first_room,
-                &crate::store::social::session_key(bot_key, &first_id)
-            ),
+            state.store.social_room_access(first_room, first_token),
             Some(false)
         );
         let rooms = call(&base, owner_key, "GET", "rooms", json!({})).await;
