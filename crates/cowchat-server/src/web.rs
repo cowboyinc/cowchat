@@ -1206,6 +1206,52 @@ mod tests {
             format!("session:{}", uuid::Uuid::new_v4()).parse().unwrap(),
         );
         assert!(authenticated_key(&state, &headers).is_none());
+
+        let (server, addr) = start_test_web_server(state).await;
+        let http = reqwest::Client::new();
+        let upload = || {
+            http.post(upload_url(&addr, &room.room_id))
+                .query(&[("name", "note.txt")])
+                .body("hello")
+        };
+        assert_eq!(
+            upload()
+                .header(API_KEY_HEADER, key)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let created = upload()
+            .header(API_KEY_HEADER, key)
+            .header("x-cowchat-session-id", &session)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let blob: serde_json::Value = created.json().await.unwrap();
+        let blob_id = blob["blob_id"].as_str().unwrap();
+        assert_eq!(
+            http.get(blob_url(&addr, blob_id))
+                .header(API_KEY_HEADER, key)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            http.get(blob_url(&addr, blob_id))
+                .header(API_KEY_HEADER, key)
+                .header("x-cowchat-session-id", &session)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        server.abort();
     }
 
     async fn start_test_web_server(state: AppState) -> (tokio::task::JoinHandle<()>, SocketAddr) {
