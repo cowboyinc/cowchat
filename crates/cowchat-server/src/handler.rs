@@ -1149,6 +1149,12 @@ pub(crate) async fn handle_send_message(
         metadata["mentions"] = serde_json::json!(p.mentions);
     }
     if let Some(principal) = store.social_principal(agent_api_key) {
+        if principal.session_id.is_some() && metadata.get("display_external").is_none() {
+            if !metadata.is_object() {
+                metadata = serde_json::json!({});
+            }
+            metadata["display_external"] = serde_json::json!(false);
+        }
         let kind = if principal.agent_id.is_some() {
             "agent"
         } else {
