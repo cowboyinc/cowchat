@@ -216,6 +216,24 @@ async fn action(
     };
     let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
     let data = body.map(|b| b.0).unwrap_or(json!({}));
+    let revoking = matches!(
+        (method.as_str(), parts.as_slice()),
+        ("DELETE", ["credentials"] | ["agents", _])
+    );
+    let before_revoke = if revoking {
+        state
+            .store
+            .social_principal(&key)
+            .and_then(|principal| {
+                state
+                    .store
+                    .social_live_session_states(&principal.account_id)
+                    .ok()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let result = match (method.as_str(), parts.as_slice()) {
         ("POST", ["sessions"]) => {
             let field = |name: &str| {
@@ -324,6 +342,19 @@ async fn action(
     };
     match result {
         Ok(mut value) => {
+            for session in before_revoke {
+                if state
+                    .store
+                    .social_session_state_by_id(&session.agent_id)
+                    .is_ok_and(|current| current.state == "ended")
+                {
+                    let event = crate::store::social::SessionState {
+                        state: "ended".into(),
+                        ..session
+                    };
+                    broadcast_session_state(&state.broker, &state.store, &event);
+                }
+            }
             if path == "me/friend-link" {
                 if let Some(slug) = value["slug"].as_str() {
                     value["url"] = json!(format!("{}/friends/{}", config.origin, slug));
@@ -849,6 +880,44 @@ mod tests {
         .await;
         let ended = next_state(&mut events).await;
         assert_eq!(ended["state"], "ended");
+        let second_id = format!("session:{}", uuid::Uuid::new_v4());
+        call(&base, bot["api_key"].as_str().unwrap(), "POST", "sessions",
+            json!({"id":second_id,"name":"worker","harness":"claude","folder":"repo","branch":"main"})).await;
+        assert_eq!(next_state(&mut events).await["state"], "idle");
+        call(
+            &base,
+            owner_key,
+            "DELETE",
+            "credentials",
+            json!({"api_key":bot["api_key"]}),
+        )
+        .await;
+        let credential_ended = next_state(&mut events).await;
+        assert_eq!(credential_ended["agent_id"], second_id);
+        assert_eq!(credential_ended["state"], "ended");
+        let next_bot = call(
+            &base,
+            owner_key,
+            "POST",
+            "agents",
+            json!({"name":"Another Worker","mint_only":true}),
+        )
+        .await;
+        let third_id = format!("session:{}", uuid::Uuid::new_v4());
+        call(&base, next_bot["api_key"].as_str().unwrap(), "POST", "sessions",
+            json!({"id":third_id,"name":"worker","harness":"claude","folder":"repo","branch":"main"})).await;
+        assert_eq!(next_state(&mut events).await["state"], "idle");
+        call(
+            &base,
+            owner_key,
+            "DELETE",
+            &format!("agents/{}", next_bot["agent"]["id"].as_str().unwrap()),
+            json!({}),
+        )
+        .await;
+        let bot_ended = next_state(&mut events).await;
+        assert_eq!(bot_ended["agent_id"], third_id);
+        assert_eq!(bot_ended["state"], "ended");
         for task in tasks {
             task.abort();
         }
