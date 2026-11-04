@@ -81,7 +81,7 @@ final class WorkspaceStore: ObservableObject {
     /// or a friend's row on the Friends page (navigation note, section 7).
     @Published var starting: StartSheet?
     /// Starts New session's agents. The prototype puts its own in.
-    var sessionLauncher: any SessionLauncher = UnavailableSessionLauncher()
+    var sessionLauncher: any SessionLauncher = SystemSessionLauncher()
     /// Follows the live sessions after New session's Start, until the first new one registers and its room opens.
     private var awaitingSession: AnyCancellable?
     /// A room's people, as its menu's People… shows them.

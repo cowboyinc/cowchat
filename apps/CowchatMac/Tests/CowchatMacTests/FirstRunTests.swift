@@ -153,9 +153,9 @@ final class FirstRunTests: XCTestCase {
         XCTAssertEqual(agents.state(of: .claudeCode), .connected)
     }
 
-    /// Until task 13 lands, the app's own installer connects nothing and Connect says so.
+    /// The injectable unavailable installer still reports its failure to the UI.
     func testTheUnavailableInstallerSaysItCannotConnectYet() async {
-        let agents = AgentConnections()
+        let agents = AgentConnections(installer: UnavailableAgentHookInstaller())
         await agents.connect(.claudeCode)
         XCTAssertEqual(agents.state(of: .claudeCode), .notConnected)
         XCTAssertEqual(agents.errorMessage, "This version of Cowchat can't connect Claude Code yet.")

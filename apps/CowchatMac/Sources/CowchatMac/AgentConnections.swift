@@ -52,7 +52,7 @@ final class AgentConnections: ObservableObject {
     var installer: any AgentHookInstaller
 
     init(installer: (any AgentHookInstaller)? = nil) {
-        self.installer = installer ?? UnavailableAgentHookInstaller()
+        self.installer = installer ?? SystemAgentHookInstaller()
     }
 
     func state(of harness: LiveSession.Harness) -> AgentHookState { states[harness] ?? .notConnected }
@@ -172,6 +172,7 @@ private struct AgentHookRow: View {
                 .buttonStyle(CowchatPillButtonStyle(prominent: true))
                 .fixedSize()
                 .macAccessibleAction(label: "Connect \(harness.appName)", action: connect)
+                .help(harness == .codex ? "Installs Cowchat hooks and starts a local Codex service using about 400 MB of memory." : "Installs the Cowchat Claude Code plugin.")
         case .connecting:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small).frame(width: 16, height: 16)
