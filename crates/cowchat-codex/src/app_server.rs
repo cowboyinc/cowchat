@@ -52,7 +52,8 @@ impl CodexAppServerClient {
     pub async fn thread_exists(&self, thread_id: &str) -> Result<bool, AppServerError> {
         let endpoint = &self.config.app_server_endpoint;
         if let Some(path) = endpoint.strip_prefix("unix://") {
-            let stream = UnixStream::connect(path)
+            let socket_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+            let stream = UnixStream::connect(socket_path)
                 .await
                 .map_err(AppServerError::UnixConnect)?;
             let request = self.websocket_request("ws://localhost/")?;
@@ -113,7 +114,8 @@ impl CodexAppServerClient {
                     "unix endpoint requires an absolute socket path".into(),
                 ));
             }
-            let stream = UnixStream::connect(path)
+            let socket_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+            let stream = UnixStream::connect(socket_path)
                 .await
                 .map_err(AppServerError::UnixConnect)?;
             let request = self.websocket_request("ws://localhost/")?;
