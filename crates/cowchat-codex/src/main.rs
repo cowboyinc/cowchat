@@ -28,7 +28,11 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Install Codex session hooks without replacing existing hooks.
-    Install,
+    Install {
+        /// Start the managed Codex app-server daemon after installing hooks.
+        #[arg(long)]
+        start_daemon: bool,
+    },
     /// Wait for one Codex session's Cowchat messages and wake its thread.
     ListenSession {
         #[arg(long)]
@@ -53,8 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    if matches!(cli.command, Command::Install) {
-        install_hooks()?;
+    if let Command::Install { start_daemon } = &cli.command {
+        install_hooks(*start_daemon)?;
         return Ok(());
     }
     if let Command::ListenSession { mapping } = &cli.command {
@@ -85,18 +89,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn install_hooks() -> Result<(), Box<dyn std::error::Error>> {
+fn install_hooks(start_daemon: bool) -> Result<(), Box<dyn std::error::Error>> {
     let home = directories::BaseDirs::new()
         .ok_or("cannot locate home directory")?
         .home_dir()
         .to_path_buf();
     install_hooks_at(&home)?;
-    match std::process::Command::new("codex")
-        .args(["app-server", "daemon", "start"])
-        .output()
-    {
-        Ok(output) if output.status.success() => {}
-        _ => eprintln!("Start the Codex app-server daemon before using Cowchat session wakes"),
+    if start_daemon {
+        match std::process::Command::new("codex")
+            .args(["app-server", "daemon", "start"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            _ => eprintln!("Start the Codex app-server daemon before using Cowchat session wakes"),
+        }
+    } else {
+        eprintln!("For session wakes, start the managed Codex app-server daemon with `codex app-server daemon start`.");
     }
     Ok(())
 }
