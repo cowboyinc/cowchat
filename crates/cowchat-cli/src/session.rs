@@ -267,7 +267,7 @@ pub(crate) async fn approved_room_ids(
     Ok(rooms)
 }
 
-async fn room_id(
+pub(crate) async fn room_id(
     id: &str,
     url: &str,
     token: &str,

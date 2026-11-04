@@ -1124,6 +1124,79 @@ pub(crate) async fn handle_send_message(
         return err;
     }
 
+    if serde_json::to_vec(&p.metadata).is_ok_and(|bytes| bytes.len() > 16 * 1024) {
+        return Frame::error(
+            req_id,
+            ErrorPayload::new(ErrorCode::InvalidPayload, "message metadata exceeds 16 KiB"),
+        );
+    }
+    let mut verified_attachments = Vec::new();
+    if let Some(attachments) = p.metadata.get("attachments") {
+        let Some(items) = attachments.as_array().filter(|items| items.len() <= 10) else {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, "invalid attachments"),
+            );
+        };
+        for item in items {
+            let Some(blob_id) = item.get("blob_id").and_then(|v| v.as_str()) else {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InvalidPayload, "invalid attachment ID"),
+                );
+            };
+            let Ok(Some(blob)) = store.get_blob(blob_id) else {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(ErrorCode::InvalidPayload, "attachment does not exist"),
+                );
+            };
+            if blob.room_id != p.room_id {
+                return Frame::error(
+                    req_id,
+                    ErrorPayload::new(
+                        ErrorCode::InvalidPayload,
+                        "attachment belongs to another room",
+                    ),
+                );
+            }
+            verified_attachments.push(blob);
+        }
+    }
+    if let Some(pr) = p.metadata.get("pull_request") {
+        let valid = pr.as_object().is_some_and(|_| {
+            let text = |key: &str| {
+                pr[key]
+                    .as_str()
+                    .is_some_and(|s| !s.trim().is_empty() && s.len() <= 1024)
+            };
+            text("repository")
+                && text("title")
+                && pr["number"].as_i64().is_some_and(|n| n > 0)
+                && pr["address"].as_str().is_some_and(|s| {
+                    url::Url::parse(s).is_ok_and(|u| {
+                        u.scheme() == "https"
+                            && u.host_str().is_some()
+                            && u.username().is_empty()
+                            && u.password().is_none()
+                    })
+                })
+                && ["additions", "deletions"].iter().all(|key| {
+                    pr.get(*key)
+                        .is_none_or(|v| v.is_null() || v.as_i64().is_some_and(|n| n >= 0))
+                })
+                && pr.get("checks").is_none_or(|v| {
+                    v.is_null() || matches!(v.as_str(), Some("passing" | "failing" | "running"))
+                })
+        });
+        if !valid {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InvalidPayload, "invalid pull request metadata"),
+            );
+        }
+    }
+
     let message_id = match p.message_id.as_deref() {
         Some(id) if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) => {
             return Frame::error(
@@ -1141,6 +1214,28 @@ pub(crate) async fn handle_send_message(
     if let Some(fields) = metadata.as_object_mut() {
         fields.remove("mentions");
         fields.remove("sender_kind");
+        if let Some(pr) = fields
+            .get_mut("pull_request")
+            .and_then(|v| v.as_object_mut())
+        {
+            pr.retain(|key, _| {
+                matches!(
+                    key.as_str(),
+                    "repository"
+                        | "number"
+                        | "title"
+                        | "address"
+                        | "checks"
+                        | "additions"
+                        | "deletions"
+                )
+            });
+        }
+        if let Some(items) = fields.get_mut("attachments").and_then(|v| v.as_array_mut()) {
+            for (item, blob) in items.iter_mut().zip(&verified_attachments) {
+                *item = serde_json::json!({"blob_id": blob.blob_id, "name": blob.name, "size": blob.size, "sha256": blob.sha256});
+            }
+        }
     }
     if let Some(valid) = store.social_mentions_valid(&p.room_id, &p.mentions) {
         if !valid {

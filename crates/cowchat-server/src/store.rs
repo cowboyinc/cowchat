@@ -1679,12 +1679,37 @@ impl Store {
     ) -> Result<BlobMeta, StoreError> {
         let blob_id = uuid::Uuid::new_v4().to_string();
         let sha256 = crate::auth::sha256_hex(bytes);
+        let conn = self.conn.lock().unwrap();
+        let used: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM blobs WHERE room_id = ?1",
+            params![room_id],
+            |row| row.get(0),
+        )?;
+        if used.saturating_add(bytes.len() as i64) > 1024 * 1024 * 1024 {
+            return Err(StoreError::BlobQuotaExceeded);
+        }
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT owner_id FROM social_rooms WHERE room_id = ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(owner) = owner {
+            let account_used: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(b.size), 0) FROM blobs b JOIN social_rooms r ON r.room_id = b.room_id WHERE r.owner_id = ?1",
+                params![owner],
+                |row| row.get(0),
+            )?;
+            if account_used.saturating_add(bytes.len() as i64) > 1024 * 1024 * 1024 {
+                return Err(StoreError::BlobQuotaExceeded);
+            }
+        }
         std::fs::create_dir_all(&self.blob_dir)?;
         let path = self.blob_file_path(&blob_id);
         std::fs::write(&path, bytes)?;
 
         let inserted = {
-            let conn = self.conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO blobs (blob_id, room_id, name, sha256, size) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![blob_id, room_id, name, sha256, bytes.len() as i64],
@@ -1757,13 +1782,21 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT blob_id FROM blobs b
                  WHERE b.room_id NOT IN (SELECT room_id FROM rooms)
-                    OR MAX(
+                    OR (b.room_id IN (SELECT room_id FROM social_rooms)
+                        AND b.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+                        AND NOT EXISTS (
+                            SELECT 1 FROM messages m WHERE m.room_id = b.room_id
+                            AND (json_extract(m.metadata, '$.blob_id') = b.blob_id
+                                OR EXISTS (SELECT 1 FROM json_each(m.metadata, '$.attachments') a
+                                    WHERE json_extract(a.value, '$.blob_id') = b.blob_id))
+                        ))
+                    OR (b.room_id NOT IN (SELECT room_id FROM social_rooms) AND MAX(
                          COALESCE(
                              (SELECT MAX(m.created_at) FROM messages m WHERE m.room_id = b.room_id),
                              b.created_at
                          ),
                          b.created_at
-                       ) < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+                       ) < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1))",
             )?;
             let ids = stmt
                 .query_map(params![modifier], |row| row.get::<_, String>(0))?
@@ -2580,6 +2613,8 @@ pub enum RenameRoomError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("blob storage quota exceeded (1 GiB per room and account)")]
+    BlobQuotaExceeded,
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
 
@@ -3709,6 +3744,57 @@ mod tests {
     }
 
     #[test]
+    fn blob_quota_is_enforced_per_room_before_writing() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room("full", "full", None, None, Some("a"))
+            .unwrap();
+        store
+            .create_room("other", "other", None, None, Some("a"))
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO blobs (blob_id, room_id, name, sha256, size) VALUES ('existing', 'full', 'old', 'hash', ?1)",
+                params![1024_i64 * 1024 * 1024],
+            ).unwrap();
+        }
+        assert!(matches!(
+            store.add_blob("full", "new", b"x"),
+            Err(StoreError::BlobQuotaExceeded)
+        ));
+        assert!(store.add_blob("other", "new", b"x").is_ok());
+    }
+
+    #[test]
+    fn social_blob_quota_covers_all_rooms_owned_by_account() {
+        let store = Store::open_in_memory().unwrap();
+        for room in ["first", "second"] {
+            store
+                .create_room(room, room, None, None, Some("a"))
+                .unwrap();
+        }
+        {
+            let conn = store.conn.lock().unwrap();
+            for room in ["first", "second"] {
+                conn.execute(
+                    "INSERT INTO social_rooms(room_id,owner_id) VALUES (?1,'owner')",
+                    params![room],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO blobs (blob_id,room_id,name,sha256,size) VALUES ('existing','first','old','hash',?1)",
+                params![1024_i64 * 1024 * 1024],
+            ).unwrap();
+        }
+        assert!(matches!(
+            store.add_blob("second", "new", b"x"),
+            Err(StoreError::BlobQuotaExceeded)
+        ));
+    }
+
+    #[test]
     fn blob_sweep_expires_idle_rooms_and_orphan_rows_but_keeps_active_ones() {
         let store = Store::open_in_memory().unwrap();
         for room in ["active", "idle", "quiet"] {
@@ -3770,6 +3856,75 @@ mod tests {
             assert!(store.get_blob(&gone.blob_id).unwrap().is_none());
             assert!(!store.blob_file_path(&gone.blob_id).exists());
         }
+        let _ = std::fs::remove_dir_all(store.blob_dir());
+    }
+
+    #[test]
+    fn social_room_attachment_outlives_idle_window_until_its_message_is_removed() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_room("social", "social", None, None, Some("a"))
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO social_rooms(room_id,owner_id) VALUES('social','owner')",
+                [],
+            )
+            .unwrap();
+        let attached = store
+            .add_blob("social", "screen.png", b"screenshot")
+            .unwrap();
+        let abandoned = store
+            .add_blob("social", "abandoned.png", b"unused")
+            .unwrap();
+        store
+            .insert_message(
+                "finished",
+                "social",
+                "a",
+                "A",
+                "done",
+                None,
+                &serde_json::json!({"attachments":[{"blob_id":attached.blob_id}]}),
+            )
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE messages SET created_at='2000-01-01T00:00:00.000Z' WHERE room_id='social'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE blobs SET created_at='2000-01-01T00:00:00.000Z' WHERE room_id='social'",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            store
+                .sweep_blobs(3600, std::time::Duration::from_secs(3600))
+                .unwrap(),
+            1
+        );
+        assert!(store.get_blob(&attached.blob_id).unwrap().is_some());
+        assert!(store.get_blob(&abandoned.blob_id).unwrap().is_none());
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM messages WHERE message_id='finished'", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .sweep_blobs(3600, std::time::Duration::from_secs(3600))
+                .unwrap(),
+            1
+        );
+        assert!(store.get_blob(&attached.blob_id).unwrap().is_none());
         let _ = std::fs::remove_dir_all(store.blob_dir());
     }
 
