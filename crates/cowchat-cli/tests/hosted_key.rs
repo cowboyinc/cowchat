@@ -320,6 +320,12 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         "{}",
         String::from_utf8_lossy(&sent_while_waiting.stderr)
     );
+    let sent_history = store.get_history(room, 10, None).unwrap();
+    let sent_message = sent_history
+        .iter()
+        .find(|message| message.content == "still working")
+        .unwrap();
+    assert!(sent_message.agent_name.starts_with("worker · @"));
     let presence_while_waiting = bound_command(&[
         "--agent-id",
         &id,

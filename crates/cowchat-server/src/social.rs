@@ -216,8 +216,12 @@ async fn action(
             let room = data["room_id"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("invalid room_id"));
-            match (state.store.social_session_name(&key, id), room) {
-                (Ok(name), Ok(room))
+            match (
+                state.store.social_session_name(&key, id),
+                state.store.social_display_name(&key, id),
+                room,
+            ) {
+                (Ok(_), Some(name), Ok(room))
                     if state.store.social_room_access(room, &key) == Some(true) =>
                 {
                     let frame = crate::handler::handle_send_message(
@@ -243,8 +247,11 @@ async fn action(
                 _ => Err(anyhow::anyhow!("not found")),
             }
         }
-        ("POST", ["sessions", id, "presence"]) => match state.store.social_session_name(&key, id) {
-            Ok(name) => {
+        ("POST", ["sessions", id, "presence"]) => match (
+            state.store.social_session_name(&key, id),
+            state.store.social_display_name(&key, id),
+        ) {
+            (Ok(_), Some(name)) => {
                 let frame = crate::handler::handle_set_presence(
                     None,
                     data.clone(),
@@ -260,7 +267,7 @@ async fn action(
                     Err(anyhow::anyhow!("presence rejected: {}", frame.payload))
                 }
             }
-            Err(_) => Err(anyhow::anyhow!("not found")),
+            _ => Err(anyhow::anyhow!("not found")),
         },
         ("POST", ["sessions", id, "end"]) => state
             .store
@@ -295,7 +302,12 @@ async fn action(
                     }
                 }
             }
-            if method != Method::GET {
+            if method != Method::GET
+                && !matches!(
+                    parts.as_slice(),
+                    ["sessions", _, "heartbeat" | "messages" | "presence"]
+                )
+            {
                 for entry in state.broker.agents.iter() {
                     if entry.api_key.starts_with(crate::store::social::PREFIX) {
                         let invalid = state.store.social_principal(&entry.api_key).is_none()
