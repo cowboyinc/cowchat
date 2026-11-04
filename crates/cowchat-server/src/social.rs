@@ -1816,6 +1816,20 @@ mod tests {
         })
         .await
         .expect("ended session must disconnect");
+        for credential in [bot_key, first_token] {
+            let (mut resumed, _) =
+                tokio_tungstenite::connect_async(format!("{}/ws", base.replacen("http", "ws", 1)))
+                    .await
+                    .unwrap();
+            let mut attempt = register(&first_id, "claude-one", "main");
+            attempt["key"] = json!(credential);
+            assert_eq!(
+                frame(&mut resumed, FrameType::Register, attempt)
+                    .await
+                    .frame_type,
+                FrameType::Error
+            );
+        }
         assert_eq!(
             state.store.social_room_access(first_room, first_token),
             Some(false)

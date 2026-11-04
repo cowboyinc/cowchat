@@ -1197,6 +1197,7 @@ mod tests {
         headers.insert(API_KEY_HEADER, token.parse().unwrap());
         assert_eq!(authenticated_key(&state, &headers).as_deref(), Some(token));
 
+        let observed = state.clone();
         let (server, addr) = start_test_web_server(state).await;
         let http = reqwest::Client::new();
         let upload = || {
@@ -1234,6 +1235,16 @@ mod tests {
                 .unwrap()
                 .status(),
             StatusCode::OK
+        );
+        observed.store.social_end_session(token, &session).unwrap();
+        assert_eq!(
+            http.get(blob_url(&addr, blob_id))
+                .header(API_KEY_HEADER, token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
         );
         server.abort();
     }
