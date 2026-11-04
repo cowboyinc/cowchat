@@ -1,4 +1,4 @@
-use cowchat_codex::app_server::{CodexAppServerClient, WakeBackend, WakeReference};
+use cowchat_codex::app_server::{CodexAppServerClient, WakeReference};
 use cowchat_codex::config::CodexConfig;
 use cowchat_core::ChatMessage;
 use fs2::FileExt;
@@ -184,7 +184,10 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
                 event_id: message.message_id.clone(),
                 event_type: "cowchat.message".into(),
             };
-            if let Err(error) = codex.wake(&mapping.thread_id, &reference).await {
+            if let Err(error) = codex
+                .queue_session_reference(&mapping.thread_id, &reference)
+                .await
+            {
                 eprintln!("Cowchat Codex wake failed: {error}");
                 delivered = false;
                 break;

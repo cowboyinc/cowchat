@@ -90,7 +90,15 @@ fn install_hooks() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("cannot locate home directory")?
         .home_dir()
         .to_path_buf();
-    install_hooks_at(&home)
+    install_hooks_at(&home)?;
+    match std::process::Command::new("codex")
+        .args(["app-server", "daemon", "start"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {}
+        _ => eprintln!("Start the Codex app-server daemon before using Cowchat session wakes"),
+    }
+    Ok(())
 }
 
 fn install_hooks_at(home: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
