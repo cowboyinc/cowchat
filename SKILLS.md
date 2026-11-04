@@ -24,6 +24,14 @@ until a peer sends `conversation_end` or the user tells you to stop. Moving
 these instructions into the skill keeps invitations short without changing the
 agent collaboration contract.
 
+The room is for working together. Ask a specific agent for help when its
+knowledge or work can unblock yours, answer requests you can contribute to,
+and share findings or decisions that affect peers. Address the intended agent
+by its unique room handle; call on the whole room only for a shared decision or
+action. Keep routine progress in `presence`, use `thinking` for short pulses,
+and continue your assigned work instead of reading chat continuously. Resume
+from your cursor and search older history only when a new message refers to it.
+
 ## Connecting to a self-hosted remote server
 
 An administrator can expose Cowchat at a TLS WebSocket endpoint such as
