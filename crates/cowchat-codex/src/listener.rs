@@ -13,6 +13,19 @@ struct Mapping {
     id: String,
     name: String,
     session_file: PathBuf,
+    parent_pid: u32,
+    parent_started: String,
+}
+
+fn parent_alive(mapping: &Mapping) -> bool {
+    std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &mapping.parent_pid.to_string()])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            String::from_utf8_lossy(&output.stdout).trim() == mapping.parent_started
+        })
 }
 
 #[derive(Deserialize)]
@@ -77,6 +90,42 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
     let cursor = mapping_path.with_extension("cursor.json");
     while mapping_path.exists() {
         let (mapping, session) = load(mapping_path)?;
+        if !parent_alive(&mapping) {
+            return Err("Codex parent process exited".into());
+        }
+        match codex.thread_exists(&mapping.thread_id).await {
+            Ok(false) => return Err("Codex thread no longer exists".into()),
+            Err(error) => {
+                eprintln!("Cowchat Codex thread probe failed: {error}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            Ok(true) => {}
+        }
+        let mut heartbeat_command = Command::new("cowchat");
+        heartbeat_command.kill_on_drop(true);
+        let heartbeat = tokio::time::timeout(
+            Duration::from_secs(15),
+            heartbeat_command
+                .args([
+                    "--url",
+                    &session.url,
+                    "--name",
+                    &mapping.name,
+                    "--agent-id",
+                    &mapping.id,
+                    "session",
+                    "heartbeat",
+                    "--id",
+                    &mapping.id,
+                ])
+                .env("COWCHAT_SESSION_FILE", &mapping.session_file)
+                .output(),
+        )
+        .await??;
+        if !heartbeat.status.success() {
+            return Err("Cowchat session heartbeat failed or session ended".into());
+        }
         let temporary = mapping_path.with_extension(format!("{}.cursor.tmp", uuid::Uuid::new_v4()));
         if cursor.exists() {
             std::fs::copy(&cursor, &temporary)?;
@@ -96,12 +145,10 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
                 "--approved-rooms",
                 "--mentions-only",
                 "--loop",
-                "--heartbeat-secs",
-                "60",
                 "--cursor-file",
             ])
             .arg(&temporary)
-            .args(["--idle-timeout", "300"])
+            .args(["--idle-timeout", "60"])
             .env("COWCHAT_SESSION_FILE", &mapping.session_file)
             .output();
         let output = match tokio::time::timeout(Duration::from_secs(360), output).await {
@@ -113,6 +160,13 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
             }
         };
         let messages = String::from_utf8_lossy(&output.stdout);
+        if !output.status.success() && !matches!(output.status.code(), Some(2 | 3)) {
+            let error = String::from_utf8_lossy(&output.stderr);
+            if error.contains("401 Unauthorized") || error.contains("404 Not Found") {
+                let _ = std::fs::remove_file(&temporary);
+                return Err("Cowchat session ended or was revoked".into());
+            }
+        }
         let mut delivered = true;
         for line in messages.lines() {
             let message: ChatMessage = match serde_json::from_str(line) {
@@ -144,4 +198,34 @@ pub async fn listen(mapping_path: &Path) -> Result<(), Box<dyn std::error::Error
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopped_parent_cannot_keep_session_alive() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let started = std::process::Command::new("ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let mapping = Mapping {
+            thread_id: String::new(),
+            id: String::new(),
+            name: String::new(),
+            session_file: PathBuf::new(),
+            parent_pid: pid,
+            parent_started: String::from_utf8_lossy(&started.stdout).trim().to_string(),
+        };
+        assert!(parent_alive(&mapping));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!parent_alive(&mapping));
+    }
 }

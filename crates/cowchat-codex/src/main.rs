@@ -111,7 +111,15 @@ fn install_hooks_at(home: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         script_dir.join("binary"),
         std::env::current_exe()?.to_string_lossy().as_bytes(),
     )?;
-    let hooks_path = home.join(".codex/hooks.json");
+    let configured_path = home.join(".codex/hooks.json");
+    let hooks_path = if std::fs::symlink_metadata(&configured_path).is_ok() {
+        std::fs::canonicalize(&configured_path)?
+    } else {
+        configured_path
+    };
+    let existing_permissions = std::fs::metadata(&hooks_path)
+        .ok()
+        .map(|meta| meta.permissions());
     let mut config: serde_json::Value = if hooks_path.exists() {
         serde_json::from_slice(&std::fs::read(&hooks_path)?)?
     } else {
@@ -146,6 +154,9 @@ fn install_hooks_at(home: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     std::fs::create_dir_all(hooks_path.parent().ok_or("invalid hooks path")?)?;
     let temporary = hooks_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     std::fs::write(&temporary, serde_json::to_vec_pretty(&config)?)?;
+    if let Some(permissions) = existing_permissions {
+        std::fs::set_permissions(&temporary, permissions)?;
+    }
     std::fs::rename(temporary, hooks_path)?;
     println!("Cowchat Codex hooks installed");
     Ok(())
@@ -179,6 +190,39 @@ mod install_tests {
             "existing-hook"
         );
         assert_eq!(config["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_preserves_private_mode_and_symlink_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let home =
+            std::env::temp_dir().join(format!("cowchat-codex-link-{}", uuid::Uuid::new_v4()));
+        let codex = home.join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let target = home.join("private-hooks.json");
+        std::fs::write(&target, r#"{"hooks":{}}"#).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = codex.join("hooks.json");
+        symlink(&target, &link).unwrap();
+        install_hooks_at(&home).unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&target).unwrap()).unwrap()
+                ["hooks"]["Stop"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         std::fs::remove_dir_all(home).unwrap();
     }
 }

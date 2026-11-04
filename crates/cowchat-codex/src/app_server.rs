@@ -49,6 +49,58 @@ impl CodexAppServerClient {
         Self { config }
     }
 
+    pub async fn thread_exists(&self, thread_id: &str) -> Result<bool, AppServerError> {
+        let endpoint = &self.config.app_server_endpoint;
+        if let Some(path) = endpoint.strip_prefix("unix://") {
+            let stream = UnixStream::connect(path)
+                .await
+                .map_err(AppServerError::UnixConnect)?;
+            let request = self.websocket_request("ws://localhost/")?;
+            let (websocket, _) = client_async(request, stream)
+                .await
+                .map_err(websocket_error)?;
+            self.read_thread(websocket, thread_id).await
+        } else if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
+            let request = self.websocket_request(endpoint)?;
+            let (websocket, _) = connect_async(request).await.map_err(websocket_error)?;
+            self.read_thread(websocket, thread_id).await
+        } else {
+            Err(AppServerError::InvalidEndpoint(endpoint.clone()))
+        }
+    }
+
+    async fn read_thread<S>(
+        &self,
+        mut websocket: WebSocketStream<S>,
+        thread_id: &str,
+    ) -> Result<bool, AppServerError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let timeout = Duration::from_secs(self.config.request_timeout_seconds);
+        send_request(&mut websocket, 1, "initialize", json!({
+            "clientInfo": {"name":"cowchat_codex_probe","title":"Cowchat Codex Session Probe","version":env!("CARGO_PKG_VERSION")},
+            "capabilities": {"experimentalApi": true, "optOutNotificationMethods": ["item/agentMessage/delta"]}
+        }), timeout).await?;
+        send_notification(&mut websocket, "initialized", json!({})).await?;
+        match send_request(
+            &mut websocket,
+            2,
+            "thread/read",
+            json!({"threadId":thread_id,"includeTurns":false}),
+            timeout,
+        )
+        .await
+        {
+            Ok(read) => Ok(read
+                .pointer("/thread/status/type")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "systemError")),
+            Err(AppServerError::Rpc(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn connect_and_wake(
         &self,
         thread_id: &str,

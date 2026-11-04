@@ -51,6 +51,15 @@ def start_listener(binary, mapping):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def parent_process():
+    pid = os.getppid()
+    started = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=3, check=True).stdout.strip()
+    if not started:
+        raise ValueError("Codex parent process has exited")
+    return pid, started
+
+
 def hook_main(event, payload):
     identifier = str(uuid.UUID(payload["session_id"]))
     home = Path.home() / ".cowchat"
@@ -77,6 +86,7 @@ def hook_main(event, payload):
     common = ["cowchat", "--url", url, "--name", name, "--agent-id", agent_id]
 
     if event == "start":
+        parent_pid, parent_started = parent_process()
         start = common + ["session", "start", "--id", agent_id,
                           "--harness", "codex", "--folder", folder, "--branch", branch]
         try:
@@ -90,7 +100,8 @@ def hook_main(event, payload):
             result = json.loads(run(common + ["session", "start", "--id", agent_id,
                                         "--harness", "codex", "--folder", folder, "--branch", branch]).stdout)
         record = {"thread_id": identifier, "id": agent_id, "name": name, "folder": folder, "branch": branch,
-                  "session_file": result["session_file"]}
+                  "session_file": result["session_file"], "parent_pid": parent_pid,
+                  "parent_started": parent_started}
         temporary = directory / f".{uuid.uuid4()}.tmp"
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as stream:
