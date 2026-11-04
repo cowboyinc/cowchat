@@ -2519,7 +2519,10 @@ pub(crate) async fn handle_set_presence(
                     p.status_detail.as_deref(),
                     p.progress,
                 ) {
-                    Ok(()) => Frame::ok(req_id, serde_json::json!({"status":p.status})),
+                    Ok(()) => {
+                        publish_session_presence(store, broker, agent_id, &p);
+                        Frame::ok(req_id, serde_json::json!({"status":p.status}))
+                    }
                     Err(error) => append_error(req_id, error),
                 };
             }
@@ -2543,6 +2546,7 @@ pub(crate) async fn handle_set_presence(
             p.status_detail.as_deref(),
             p.progress,
         );
+        publish_session_presence(store, broker, agent_id, &p);
     }
 
     let rooms = broker.rooms_for_agent(agent_id);
@@ -2563,6 +2567,28 @@ pub(crate) async fn handle_set_presence(
     }
 
     Frame::ok(req_id, serde_json::json!({"status": p.status}))
+}
+
+fn publish_session_presence(
+    store: &Arc<Store>,
+    broker: &Arc<Broker>,
+    agent_id: &str,
+    presence: &SetPresencePayload,
+) {
+    let Some(connection) = broker.agents.get(agent_id) else {
+        return;
+    };
+    let key = connection.api_key.clone();
+    drop(connection);
+    let state = match presence.status.as_str() {
+        "working" | "thinking" => "working",
+        "prompt" => "prompt",
+        "idle" => "idle",
+        _ => return,
+    };
+    if let Ok(event) = store.social_set_session_state(&key, state) {
+        crate::social::broadcast_session_state(broker, store, &event);
+    }
 }
 
 // --- Task handlers ---
