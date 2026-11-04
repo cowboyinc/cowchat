@@ -348,8 +348,9 @@ enum Commands {
 
     /// Wait for a new message in a room (blocks until one arrives)
     Wait {
-        /// Room ID or name
-        room: String,
+        /// One or more room IDs or exact names.
+        #[arg(required = true, num_args = 1..)]
+        room: Vec<String>,
         /// Timeout in seconds (0 = wait forever). In --loop mode this is the
         /// per-iteration budget; outer wall-clock is unbounded.
         #[arg(long, default_value = "60")]
@@ -1254,12 +1255,16 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn write_cursor_atomic(path: &std::path::Path, seq: i64) -> std::io::Result<()> {
+    write_cursor_bytes_atomic(path, seq.to_string().as_bytes())
+}
+
+fn write_cursor_bytes_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("cursor");
     let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
-    std::fs::write(&temporary, seq.to_string())?;
+    std::fs::write(&temporary, bytes)?;
     std::fs::rename(temporary, path)
 }
 
@@ -1284,6 +1289,225 @@ fn is_retryable_wait_error(error: &ClientError) -> bool {
             | ClientError::Channel
             | ClientError::Ws(_)
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_wait_multiple(
+    cli: &Cli,
+    rooms: &[String],
+    timeout: u64,
+    loop_: bool,
+    follow: bool,
+    idle_timeout: u64,
+    heartbeat_secs: u64,
+    only_from: Option<&str>,
+    mentions_only: bool,
+    not_from: Option<&str>,
+    only_kind: Option<&str>,
+    not_kind: Option<&str>,
+    text_mode: bool,
+    drain: bool,
+    since_seq: Option<&str>,
+    output: Option<&PathBuf>,
+    cursor_file: Option<&PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if follow {
+        return Err("multi-room wait uses --loop, not --follow".into());
+    }
+    let cursor_file = cursor_file.ok_or("multi-room wait requires --cursor-file")?;
+    let mut cursors: std::collections::HashMap<String, i64> = if cursor_file.exists() {
+        serde_json::from_slice(&std::fs::read(cursor_file)?)
+            .map_err(|_| "multi-room cursor file must be a JSON object of room IDs to sequences")?
+    } else {
+        std::collections::HashMap::new()
+    };
+    let own_id = resolve_agent_id(cli);
+    let own_session_room = own_id
+        .as_deref()
+        .filter(|id| id.starts_with("session:"))
+        .and_then(|id| {
+            cli.url
+                .as_deref()
+                .and_then(|url| session::load_bound(id, url).ok())
+        })
+        .map(|(record, _)| record.room_id);
+    let only_kinds_spec = only_kind.map(str::to_owned);
+    let not_kinds_spec = not_kind.map(str::to_owned);
+    let only_kinds = parse_kinds(only_kinds_spec.as_ref());
+    let not_kinds = parse_kinds(not_kinds_spec.as_ref());
+    let started = std::time::Instant::now();
+    let effective_timeout = if timeout == 0 { 86_400 } else { timeout };
+    let mut backoff = 1u64;
+    'reconnect: loop {
+        let client = match connect(cli).await {
+            Ok(client) => std::sync::Arc::new(client),
+            Err(error) if loop_ => {
+                eprintln!("wait --loop: connection failed: {error}; retrying in {backoff}s");
+                tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                backoff = (backoff * 2).min(30);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let mut room_ids = Vec::new();
+        for room in rooms {
+            let id = resolve_room_id(&client, room).await?;
+            client.join_room(&id).await?;
+            if !cursors.contains_key(&id) {
+                let seed = match since_seq {
+                    Some(s) if s.eq_ignore_ascii_case("tip") || s.eq_ignore_ascii_case("auto") => {
+                        client.room_tip(&id).await?
+                    }
+                    Some(s) => s.parse::<i64>()?,
+                    None => 0,
+                };
+                cursors.insert(id.clone(), seed);
+            }
+            if !room_ids.contains(&id) {
+                room_ids.push(id);
+            }
+        }
+        let _ = client.set_presence("waiting", None, None).await;
+        backoff = 1;
+        loop {
+            let elapsed = started.elapsed().as_secs();
+            if idle_timeout > 0 && elapsed >= idle_timeout {
+                eprintln!(
+                    "No message for {idle_timeout}s — multi-room cursor saved in {}",
+                    cursor_file.display()
+                );
+                std::process::exit(2);
+            }
+            let wait_seconds = if idle_timeout > 0 {
+                effective_timeout.min(idle_timeout.saturating_sub(elapsed).max(1))
+            } else {
+                effective_timeout
+            };
+            let wait_seconds = if loop_ && heartbeat_secs > 0 {
+                wait_seconds.min(heartbeat_secs)
+            } else {
+                wait_seconds
+            };
+            let mut tasks = tokio::task::JoinSet::new();
+            for id in &room_ids {
+                let client = client.clone();
+                let room_id = id.clone();
+                let cursor = cursors.get(id).copied();
+                tasks.spawn(async move {
+                    let result = client
+                        .wait_for_message(&room_id, wait_seconds, cursor)
+                        .await;
+                    (room_id, result)
+                });
+            }
+            let result = tasks.join_next().await;
+            tasks.abort_all();
+            let Some(Ok((room_id, result))) = result else {
+                return Err("multi-room wait task failed".into());
+            };
+            let message = match result {
+                Ok(Some(message)) => message,
+                Ok(None) if loop_ => {
+                    if heartbeat_secs > 0 {
+                        eprintln!(
+                            "wait: alive {}s rooms={} mode=loop",
+                            started.elapsed().as_secs(),
+                            room_ids.len()
+                        );
+                    }
+                    continue;
+                }
+                Ok(None) => {
+                    eprintln!("Timed out after {timeout}s waiting for a message");
+                    std::process::exit(1);
+                }
+                Err(error) if loop_ && is_retryable_wait_error(&error) => {
+                    eprintln!("wait --loop: connection lost: {error}; retrying in {backoff}s");
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                    continue 'reconnect;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let old_cursors = cursors.clone();
+            cursors.insert(room_id, message.seq);
+            let matches = |msg: &ChatMessage| {
+                !client.is_self_message(msg)
+                    && only_from.is_none_or(|want| msg.agent_name == want || msg.agent_id == want)
+                    && not_from.is_none_or(|skip| msg.agent_name != skip && msg.agent_id != skip)
+                    && (!mentions_only
+                        || own_session_room.as_deref() == Some(msg.room_id.as_str())
+                        || mentions_self(msg, own_id.as_deref()))
+                    && !kind_skipped(
+                        msg.metadata.get("kind").and_then(|v| v.as_str()),
+                        &only_kinds,
+                        &not_kinds,
+                    )
+            };
+            let mut batch = Vec::new();
+            if drain {
+                for id in &room_ids {
+                    let mut after = old_cursors.get(id).copied().unwrap_or(0);
+                    let tip = client.room_tip(id).await?;
+                    while after < tip {
+                        let page = client
+                            .get_history_filtered(id, 500, None, None, Some(after))
+                            .await?;
+                        if page.is_empty() {
+                            break;
+                        }
+                        for msg in page {
+                            if msg.seq <= after {
+                                continue;
+                            }
+                            after = msg.seq;
+                            if msg.seq <= tip && matches(&msg) {
+                                let kind = msg.metadata.get("type").and_then(|v| v.as_str());
+                                if kind != Some("thinking") && kind != Some("system") {
+                                    batch.push(msg);
+                                }
+                            }
+                        }
+                    }
+                    cursors.insert(id.clone(), after.max(*cursors.get(id).unwrap_or(&0)));
+                }
+            } else if matches(&message) {
+                batch.push(message);
+            }
+            write_cursor_bytes_atomic(cursor_file, &serde_json::to_vec(&cursors)?)?;
+            if batch.is_empty() {
+                continue;
+            }
+            batch.sort_by(|a, b| {
+                a.timestamp
+                    .cmp(&b.timestamp)
+                    .then(a.room_id.cmp(&b.room_id))
+                    .then(a.seq.cmp(&b.seq))
+            });
+            let rendered = batch
+                .iter()
+                .map(|m| {
+                    if text_mode {
+                        format_message(m)
+                    } else {
+                        serde_json::to_string(m).unwrap_or_default()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(path) = output {
+                std::fs::write(path, format!("{rendered}\n"))?;
+            } else {
+                println!("{rendered}");
+            }
+            if batch.iter().any(|m| {
+                m.metadata.get("kind").and_then(|v| v.as_str()) == Some(KIND_CONVERSATION_END)
+            }) {
+                eprintln!("Peer ended the conversation.");
+                std::process::exit(3);
+            }
+            return Ok(());
+        }
+    }
 }
 
 fn spawn_wait_presence_watcher(
@@ -2214,6 +2438,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             drain,
             cursor_file,
         } => {
+            if room.len() > 1 {
+                return run_wait_multiple(
+                    &cli,
+                    room,
+                    *timeout,
+                    *loop_,
+                    *follow,
+                    *idle_timeout,
+                    *heartbeat_secs,
+                    only_from.as_deref(),
+                    *mentions_only,
+                    not_from.as_deref(),
+                    only_kind.as_deref(),
+                    not_kind.as_deref(),
+                    *text,
+                    *drain,
+                    since_seq.as_deref(),
+                    output.as_ref(),
+                    cursor_file.as_ref(),
+                )
+                .await;
+            }
+            let room = &room[0];
             if *follow {
                 run_wait_follow(
                     &cli,
