@@ -397,6 +397,9 @@ enum Commands {
         /// Only wake on messages from this `--name` (peer filter).
         #[arg(long)]
         only_from: Option<String>,
+        /// Wake only when the server recorded a mention of this session's agent ID.
+        #[arg(long)]
+        mentions_only: bool,
         /// Skip messages from this `--name` (in addition to your own).
         #[arg(long)]
         not_from: Option<String>,
@@ -1386,6 +1389,16 @@ fn kind_skipped(msg_kind: Option<&str>, only: &[String], not: &[String]) -> bool
     false
 }
 
+fn mentions_self(message: &ChatMessage, own_id: Option<&str>) -> bool {
+    own_id.is_some_and(|id| {
+        message
+            .metadata
+            .get("mentions")
+            .and_then(|value| value.as_array())
+            .is_some_and(|mentions| mentions.iter().any(|mention| mention.as_str() == Some(id)))
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_wait_follow(
     cli: &Cli,
@@ -1393,6 +1406,7 @@ async fn run_wait_follow(
     since_seq: Option<&str>,
     heartbeat_secs: u64,
     only_from: Option<&String>,
+    mentions_only: bool,
     not_from: Option<&String>,
     only_kind: Option<&String>,
     not_kind: Option<&String>,
@@ -1403,6 +1417,7 @@ async fn run_wait_follow(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let only_kinds = parse_kinds(only_kind);
     let not_kinds = parse_kinds(not_kind);
+    let own_id = resolve_agent_id(cli);
     let mut cursor = cursor_file
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<i64>().ok());
@@ -1501,8 +1516,11 @@ async fn run_wait_follow(
                         continue;
                     }
                     let msg_kind = message.metadata.get("kind").and_then(|v| v.as_str());
-                    if only_from.is_some_and(|name| message.agent_name != *name)
-                        || not_from.is_some_and(|name| message.agent_name == *name)
+                    if only_from.is_some_and(|name| {
+                        message.agent_name != *name && message.agent_id != *name
+                    }) || not_from.is_some_and(|name| {
+                        message.agent_name == *name || message.agent_id == *name
+                    }) || (mentions_only && !mentions_self(&message, own_id.as_deref()))
                         || kind_skipped(msg_kind, &only_kinds, &not_kinds)
                     {
                         advance_cursor(&mut cursor, cursor_file, message.seq)?;
@@ -2184,6 +2202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             idle_timeout,
             heartbeat_secs,
             only_from,
+            mentions_only,
             not_from,
             only_kind,
             not_kind,
@@ -2199,6 +2218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     since_seq.as_deref(),
                     *heartbeat_secs,
                     only_from.as_ref(),
+                    *mentions_only,
                     not_from.as_ref(),
                     only_kind.as_ref(),
                     not_kind.as_ref(),
@@ -2303,16 +2323,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Helper closure: does a candidate message match all filters?
             let only_kinds = parse_kinds(only_kind.as_ref());
             let not_kinds = parse_kinds(not_kind.as_ref());
+            let own_id = resolve_agent_id(&cli);
             let matches = |msg: &ChatMessage| -> bool {
                 if let Some(want) = only_from {
-                    if &msg.agent_name != want {
+                    if &msg.agent_name != want && &msg.agent_id != want {
                         return false;
                     }
                 }
                 if let Some(skip) = not_from {
-                    if &msg.agent_name == skip {
+                    if &msg.agent_name == skip || &msg.agent_id == skip {
                         return false;
                     }
+                }
+                if *mentions_only && !mentions_self(msg, own_id.as_deref()) {
+                    return false;
                 }
                 let msg_kind = msg.metadata.get("kind").and_then(|v| v.as_str());
                 if kind_skipped(msg_kind, &only_kinds, &not_kinds) {

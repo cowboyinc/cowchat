@@ -609,11 +609,21 @@ mod tests {
         .unwrap();
         let room_id = session["room_id"].as_str().unwrap();
         client
-            .send_message(room_id, "hello from session", None, vec![])
+            .send_message(room_id, "hello from session", None, vec![id.clone()])
             .await
             .unwrap();
+        assert!(client
+            .send_message(
+                room_id,
+                "invalid mention",
+                None,
+                vec!["session:outsider".into()]
+            )
+            .await
+            .is_err());
         let history = client.get_history(room_id, 10, None).await.unwrap();
         assert_eq!(history.last().unwrap().content, "hello from session");
+        assert_eq!(history.last().unwrap().metadata["mentions"], json!([id]));
         for task in tasks {
             task.abort();
         }

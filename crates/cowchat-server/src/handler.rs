@@ -1126,6 +1126,27 @@ async fn handle_send_message(
         Some(id) => id.to_owned(),
         None => uuid::Uuid::new_v4().to_string(),
     };
+    let mut metadata = p.metadata.clone();
+    if let Some(fields) = metadata.as_object_mut() {
+        fields.remove("mentions");
+    }
+    if let Some(valid) = store.social_mentions_valid(&p.room_id, &p.mentions) {
+        if !valid {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::InvalidPayload,
+                    "Mention target is not in this room",
+                ),
+            );
+        }
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        if let Some(fields) = metadata.as_object_mut() {
+            fields.insert("mentions".into(), serde_json::json!(p.mentions));
+        }
+    }
     let append = crate::store::MessageAppend {
         message_id: &message_id,
         room_id: &p.room_id,
@@ -1133,7 +1154,7 @@ async fn handle_send_message(
         agent_name,
         content: &p.content,
         reply_to: p.reply_to.as_deref(),
-        metadata: &p.metadata,
+        metadata: &metadata,
         mentions: &p.mentions,
     };
     // Authorization above is required even for retries. Read-only preflight lets

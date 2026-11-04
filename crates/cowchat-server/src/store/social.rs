@@ -628,6 +628,36 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
     pub fn social_room_access(&self, room: &str, key: &str) -> Option<bool> {
         room_access(&self.conn.lock().unwrap(), room, key).unwrap_or(Some(false))
     }
+    pub fn social_mentions_valid(&self, room: &str, mentions: &[String]) -> Option<bool> {
+        let conn = self.conn.lock().unwrap();
+        let managed: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM social_rooms WHERE room_id=?1)",
+                [room],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !managed {
+            return None;
+        }
+        if mentions.len() > 32 {
+            return Some(false);
+        }
+        for mention in mentions {
+            let allowed = if let Some(account) = mention.strip_prefix("account:") {
+                conn.query_row("SELECT EXISTS(SELECT 1 FROM social_members WHERE room_id=?1 AND account_id=?2)", params![room, account], |row| row.get::<_, bool>(0))
+            } else {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_sessions s ON s.id=a.agent_id JOIN social_members m ON m.room_id=a.room_id AND m.account_id=s.owner_id WHERE a.room_id=?1 AND a.agent_id=?2 AND s.ended_at IS NULL UNION SELECT 1 FROM social_admissions a JOIN social_agents b ON b.id=a.agent_id JOIN social_members m ON m.room_id=a.room_id AND m.account_id=b.owner_id WHERE a.room_id=?1 AND a.agent_id=?2 AND b.revoked=0)",
+                    params![room, mention], |row| row.get::<_, bool>(0),
+                )
+            };
+            if !matches!(allowed, Ok(true)) {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
     pub fn social_room_owner(&self, room: &str, key: &str) -> Option<bool> {
         room_owner(&self.conn.lock().unwrap(), room, key).unwrap_or(Some(false))
     }
@@ -1385,6 +1415,58 @@ mod tests {
             response["device_key"].as_str().unwrap().to_owned(),
             response["account"].clone(),
         )
+    }
+    #[test]
+    fn social_mentions_require_current_room_membership() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, owner) = login(&store, "mention-owner");
+        let bot = store
+            .social_action(&owner_key, "POST", "agents", &json!({"name":"Bot"}))
+            .unwrap();
+        let bot_id = bot["agent"]["id"].as_str().unwrap().to_string();
+        let room = store
+            .social_action(
+                &owner_key,
+                "POST",
+                "rooms",
+                &json!({"name":"mention-room","agent_ids":[bot_id]}),
+            )
+            .unwrap();
+        let room_id = room["room_id"].as_str().unwrap();
+        assert_eq!(
+            store.social_mentions_valid(room_id, std::slice::from_ref(&bot_id)),
+            Some(true)
+        );
+        assert_eq!(
+            store.social_mentions_valid(
+                room_id,
+                &[format!("account:{}", owner["id"].as_str().unwrap())]
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            store.social_mentions_valid(room_id, &["account:outsider".into()]),
+            Some(false)
+        );
+        let session = format!("session:{}", uuid::Uuid::new_v4());
+        store
+            .social_register_session(
+                bot["api_key"].as_str().unwrap(),
+                &session,
+                "worker",
+                "codex",
+                "repo",
+                "main",
+            )
+            .unwrap();
+        assert_eq!(
+            store.social_mentions_valid(room_id, &[session]),
+            Some(false)
+        );
+        assert_eq!(
+            store.social_mentions_valid("ordinary-room", &["anything".into()]),
+            None
+        );
     }
     #[test]
     fn friend_alias_is_permanent_idempotent_and_requires_explicit_consent() {
