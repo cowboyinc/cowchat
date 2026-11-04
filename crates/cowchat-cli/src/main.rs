@@ -106,6 +106,38 @@ fn render_export(
     out
 }
 
+#[cfg(test)]
+mod hosted_key_tests {
+    use super::hosted_key;
+
+    #[test]
+    fn hosted_key_is_bound_to_url_and_private_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("hosted-bot.json");
+        std::fs::write(
+            &path,
+            r#"{"url":"wss://chat.example/ws","api_key":"csoc_secret"}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(
+            hosted_key(&path, "wss://chat.example/ws").as_deref(),
+            Some("csoc_secret")
+        );
+        assert!(hosted_key(&path, "wss://other.example/ws").is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(hosted_key(&path, "wss://chat.example/ws").is_none());
+        }
+    }
+}
+
 fn human_size(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * 1024;
@@ -916,9 +948,33 @@ fn default_key_path() -> PathBuf {
     default_data_dir().join("auth.key")
 }
 
-fn load_key(key_arg: &Option<String>) -> String {
+#[derive(serde::Deserialize)]
+struct HostedBotCredential {
+    url: String,
+    api_key: String,
+}
+
+fn hosted_key(path: &std::path::Path, url: &str) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return None;
+        }
+    }
+    let saved: HostedBotCredential = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    (saved.url == url && saved.api_key.starts_with("csoc_")).then_some(saved.api_key)
+}
+
+fn load_key(key_arg: &Option<String>, url: Option<&str>) -> String {
     if let Some(key) = key_arg {
         return key.clone();
+    }
+    if let Some(url) = url {
+        if let Some(key) = hosted_key(&default_data_dir().join("hosted-bot.json"), url) {
+            return key;
+        }
     }
     let key_path = default_key_path();
     std::fs::read_to_string(key_path)
@@ -1046,7 +1102,7 @@ async fn note_purged_history(
 }
 
 async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>> {
-    let key = load_key(&cli.key);
+    let key = load_key(&cli.key, cli.url.as_deref());
 
     let agent_id = resolve_agent_id(cli);
     let agent_id = agent_id.as_deref();
@@ -2495,7 +2551,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| format!("{} has no usable file name", path.display()))?;
-            let key = load_key(&cli.key);
+            let key = load_key(&cli.key, cli.url.as_deref());
 
             let client = connect(&cli).await?;
             let room_id = resolve_room_id(&client, room).await?;
@@ -2546,7 +2602,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Fetch { blob_id, out } => {
             let base = attachment_http_base(cli.url.as_deref())?;
-            let key = load_key(&cli.key);
+            let key = load_key(&cli.key, cli.url.as_deref());
             let response = reqwest::Client::new()
                 .get(format!("{base}/api/blobs/{blob_id}"))
                 .header("x-cowchat-key", &key)

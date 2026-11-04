@@ -54,6 +54,7 @@ final class SocialStore: ObservableObject {
     @Published var issuedAgent: SocialCreatedAgent?
     private(set) var savedSession: SocialSession?
     private let credentials: any CowchatCredentialStore
+    private let hostedCredentialFile: HostedAgentCredentialFile
     private let session: URLSession
     private var generation = UUID()
     private var loginTask: Task<Void, Never>?
@@ -66,10 +67,11 @@ final class SocialStore: ObservableObject {
     var onSnapshot: ((SocialNotificationSnapshot) -> Void)?
     private static let credentialAccount = "cowchat-social-session-v1"
 
-    init(endpoint: URL, credentials: any CowchatCredentialStore = KeychainCowchatCredentialStore(), session: URLSession = SocialAPI.secureSession) {
+    init(endpoint: URL, credentials: any CowchatCredentialStore = KeychainCowchatCredentialStore(), session: URLSession = SocialAPI.secureSession, hostedCredentialFile: HostedAgentCredentialFile = HostedAgentCredentialFile()) {
         self.endpoint = endpoint
         self.credentials = credentials
         self.session = session
+        self.hostedCredentialFile = hostedCredentialFile
         do {
             if let encoded = try credentials.credential(for: Self.credentialAccount),
                let data = Data(base64Encoded: encoded) {
@@ -265,6 +267,8 @@ final class SocialStore: ObservableObject {
         busy = false
         do { try credentials.setCredential(nil, for: Self.credentialAccount) }
         catch { errorMessage = error.localizedDescription; return }
+        do { try hostedCredentialFile.remove() }
+        catch { errorMessage = "Signed out, but could not remove the CLI credential: \(error.localizedDescription)" }
         savedSession = nil
         account = nil
         identities = []
@@ -417,6 +421,7 @@ final class SocialStore: ObservableObject {
         await perform { api in
             let created: SocialCreatedAgent = try await api.social(["agents", id, "credentials"], method: "POST")
             guard ticket == self.generation else { return }
+            try self.hostedCredentialFile.save(apiKey: created.apiKey, endpoint: self.endpoint)
             self.issuedAgent = created
         }
     }
@@ -426,6 +431,7 @@ final class SocialStore: ObservableObject {
         await perform { api in
             let created: SocialCreatedAgent = try await api.social(["agents"], method: "POST", body: ["name": name])
             guard ticket == self.generation else { return }
+            try self.hostedCredentialFile.save(apiKey: created.apiKey, endpoint: self.endpoint)
             self.issuedAgent = created
         }
     }
