@@ -282,7 +282,7 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         .unwrap();
     let shared_id = shared["room_id"].as_str().unwrap();
     let cursor = dir.path().join("approved-rooms-cursor");
-    let waiter = tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"))
+    let mut waiter = tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"))
         .args([
             "--url",
             &url,
@@ -312,6 +312,39 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         .spawn()
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let sent_while_waiting = bound_command(&["--agent-id", &id, "send", room, "still working"])
+        .await
+        .unwrap();
+    assert!(
+        sent_while_waiting.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sent_while_waiting.stderr)
+    );
+    let sent_history = store.get_history(room, 10, None).unwrap();
+    let sent_message = sent_history
+        .iter()
+        .find(|message| message.content == "still working")
+        .unwrap();
+    assert!(sent_message.agent_name.starts_with("worker · @"));
+    let presence_while_waiting = bound_command(&[
+        "--agent-id",
+        &id,
+        "presence",
+        "working",
+        "--detail",
+        "reviewing",
+    ])
+    .await
+    .unwrap();
+    assert!(
+        presence_while_waiting.status.success(),
+        "{}",
+        String::from_utf8_lossy(&presence_while_waiting.stderr)
+    );
+    assert!(
+        waiter.try_wait().unwrap().is_none(),
+        "send and presence must not end the waiter"
+    );
     let approval = reqwest::Client::new()
         .post(format!("http://{addr}/social/v1/rooms/{shared_id}/agents"))
         .header("x-cowchat-key", owner["device_key"].as_str().unwrap())
@@ -366,7 +399,11 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         .await
         .unwrap();
     assert!(!insecure.status.success());
-    assert!(String::from_utf8_lossy(&insecure.stderr).contains("expected ws or wss URL"));
+    assert!(
+        String::from_utf8_lossy(&insecure.stderr).contains("expected ws or wss URL"),
+        "{}",
+        String::from_utf8_lossy(&insecure.stderr)
+    );
     let sibling_id = format!("session:{}", uuid::Uuid::new_v4());
     let sibling = command(&[
         "--name",

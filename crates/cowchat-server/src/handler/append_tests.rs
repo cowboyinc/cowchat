@@ -38,6 +38,7 @@ async fn append_handler_retry_has_original_response_without_broadcast_mentions_t
         &limiter,
         false,
         &webhooks,
+        true,
     )
     .await;
     assert_eq!(first.frame_type, FrameType::Ok);
@@ -61,6 +62,7 @@ async fn append_handler_retry_has_original_response_without_broadcast_mentions_t
         &limiter,
         false,
         &webhooks,
+        true,
     )
     .await;
     assert_eq!(retry.payload, first.payload);
@@ -85,6 +87,7 @@ async fn append_handler_retry_has_original_response_without_broadcast_mentions_t
         &limiter,
         false,
         &webhooks,
+        true,
     )
     .await;
     assert_eq!(full_retry.payload, first.payload);
@@ -101,6 +104,7 @@ async fn append_handler_retry_has_original_response_without_broadcast_mentions_t
         &limiter,
         false,
         &webhooks,
+        true,
     )
     .await;
     assert_eq!(response.payload["code"], "message_conflict");
@@ -115,6 +119,7 @@ async fn append_handler_retry_has_original_response_without_broadcast_mentions_t
         &limiter,
         false,
         &webhooks,
+        true,
     )
     .await;
     assert_eq!(other_sender.payload["code"], "message_conflict");
@@ -129,6 +134,7 @@ async fn append_handler_retry_has_original_response_without_broadcast_mentions_t
         &limiter,
         false,
         &webhooks,
+        true,
     )
     .await;
     assert_eq!(unjoined.payload["code"], "not_in_room");
@@ -148,10 +154,11 @@ async fn append_handler_retry_has_original_response_without_broadcast_mentions_t
         &limiter,
         true,
         &webhooks,
+        true,
     )
     .await;
     let b = handle_send_message(
-        None, legacy, "sender", "Sender", &broker, &store, "", &limiter, true, &webhooks,
+        None, legacy, "sender", "Sender", &broker, &store, "", &limiter, true, &webhooks, true,
     )
     .await;
     assert_ne!(a.payload["message_id"], b.payload["message_id"]);

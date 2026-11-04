@@ -660,6 +660,20 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             .collect::<Result<Vec<_>, _>>()?;
         Ok(json!({"rooms":rooms}))
     }
+    pub fn social_session_name(&self, key: &str, session_id: &str) -> anyhow::Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let principal = principal(&conn, key)?.ok_or_else(|| anyhow::anyhow!("not found"))?;
+        anyhow::ensure!(
+            principal.session_id.as_deref() == Some(session_id),
+            "not found"
+        );
+        conn.query_row(
+            "SELECT name FROM social_sessions WHERE id=?1 AND ended_at IS NULL",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
     pub fn social_live_sessions_in_room(&self, room: &str) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let mut statement = conn.prepare(
