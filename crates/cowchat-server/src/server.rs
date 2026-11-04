@@ -1244,7 +1244,11 @@ where
             "Agent registered: {} ({}) capabilities={:?}{}",
             registered_name,
             agent_id,
-            payload.capabilities,
+            if social_session_room.is_some() {
+                &[][..]
+            } else {
+                &payload.capabilities
+            },
             if reconnected_rooms.is_some() {
                 " [RECONNECTED]"
             } else {

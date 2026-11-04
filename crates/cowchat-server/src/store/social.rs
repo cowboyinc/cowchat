@@ -469,6 +469,12 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             |row| row.get(0),
         )?;
         anyhow::ensure!(total < 500, "session room limit reached");
+        let active_sessions: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM social_sessions WHERE bot_id=?1 AND ended_at IS NULL",
+            [&bot],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(active_sessions < 40, "active session limit reached");
         let recent: i64 = tx.query_row(
             "SELECT COUNT(*) FROM social_sessions WHERE bot_id=?1 AND started_at>=unixepoch()-3600",
             [&bot],
@@ -2626,7 +2632,7 @@ mod tests {
         let initial_rooms = store.list_rooms(None).unwrap().len();
         for index in 0..60 {
             let id = format!("session:{}", uuid::Uuid::new_v4());
-            store
+            let room = store
                 .social_register_session(
                     key,
                     &id,
@@ -2635,6 +2641,9 @@ mod tests {
                     "repo",
                     &format!("branch-{index}"),
                 )
+                .unwrap();
+            store
+                .social_end_session(room.session_token.as_deref().unwrap(), &id)
                 .unwrap();
         }
         let excess = format!("session:{}", uuid::Uuid::new_v4());
