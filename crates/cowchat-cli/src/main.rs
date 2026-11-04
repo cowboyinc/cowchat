@@ -1123,6 +1123,7 @@ async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>>
     }
     let saved_session = match (agent_id.as_deref(), cli.url.as_deref()) {
         (Some(id), Some(url)) if id.starts_with("session:") => {
+            session::http_url(url, "/social/v1/sessions")?;
             Some(session::load_bound(id, url)?.0)
         }
         _ => None,

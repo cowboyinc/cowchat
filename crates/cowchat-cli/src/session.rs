@@ -35,12 +35,10 @@ pub(crate) struct SessionRecord {
     pub session_token: String,
 }
 
-fn path(id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn validate_id(id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let suffix = id.strip_prefix("session:").ok_or("invalid session ID")?;
     uuid::Uuid::parse_str(suffix)?;
-    Ok(default_data_dir()
-        .join("sessions")
-        .join(format!("{suffix}.json")))
+    Ok(())
 }
 
 pub(crate) fn load_bound(
@@ -67,7 +65,10 @@ pub(crate) fn load_bound(
 }
 
 fn save(record: &SessionRecord) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let target = path(&record.id)?;
+    validate_id(&record.id)?;
+    let target = default_data_dir()
+        .join("sessions")
+        .join(format!("{}.json", uuid::Uuid::new_v4()));
     let parent = target.parent().ok_or("invalid session file path")?;
     fs::create_dir_all(parent)?;
     #[cfg(unix)]
@@ -91,7 +92,7 @@ fn save(record: &SessionRecord) -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(target)
 }
 
-fn http_url(url: &str, route: &str) -> Result<reqwest::Url, Box<dyn std::error::Error>> {
+pub(crate) fn http_url(url: &str, route: &str) -> Result<reqwest::Url, Box<dyn std::error::Error>> {
     let mut parsed = reqwest::Url::parse(url)?;
     if parsed.path() != "/ws"
         || parsed.query().is_some()
@@ -139,7 +140,7 @@ pub(crate) async fn run(
             let id = id
                 .clone()
                 .unwrap_or_else(|| format!("session:{}", uuid::Uuid::new_v4()));
-            let session_path = path(&id)?;
+            validate_id(&id)?;
             if std::env::var_os("COWCHAT_SESSION_FILE").is_some() {
                 let (saved, bound_path) = load_bound(&id, url)?;
                 if saved.name != cli.name
@@ -155,11 +156,6 @@ pub(crate) async fn run(
                     serde_json::json!({"session_id":saved.id,"room_id":saved.room_id,"room_name":saved.room_name,"session_file":bound_path})
                 );
                 return Ok(());
-            }
-            if session_path.exists() {
-                return Err(
-                    "existing session requires its hook-provided COWCHAT_SESSION_FILE".into(),
-                );
             }
             let key = load_key(&cli.key, Some(url));
             if key.is_empty() {
