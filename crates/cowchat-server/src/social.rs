@@ -1767,6 +1767,7 @@ mod tests {
         let rooms = call(&base, owner_key, "GET", "rooms", json!({})).await;
         let rooms = rooms["rooms"].as_array().unwrap();
         assert!(rooms.iter().any(|room| room["room_id"] == first_room
+            && room["name"] == "cowchat"
             && room["kind"] == "session"
             && room["session"]["agent_id"] == first_id));
         assert!(rooms.iter().any(|room| room["room_id"] == second_room

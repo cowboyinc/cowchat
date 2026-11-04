@@ -373,7 +373,7 @@ CREATE TABLE IF NOT EXISTS social_friends(a TEXT NOT NULL,b TEXT NOT NULL,PRIMAR
 CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS social_members(room_id TEXT NOT NULL,account_id TEXT NOT NULL,PRIMARY KEY(room_id,account_id));
 CREATE TABLE IF NOT EXISTS social_admissions(room_id TEXT NOT NULL,agent_id TEXT NOT NULL,PRIMARY KEY(room_id,agent_id));
-CREATE TABLE IF NOT EXISTS social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,token_digest TEXT UNIQUE,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER);
+CREATE TABLE IF NOT EXISTS social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,room_name TEXT NOT NULL,token_digest TEXT UNIQUE,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER);
 CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,from_id TEXT NOT NULL,to_id TEXT NOT NULL,proposed TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);")
     }
     pub fn social_friend_link_account(&self, slug: &str) -> anyhow::Result<Value> {
@@ -435,12 +435,12 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
         let tx = conn.transaction()?;
         let existing: Option<(String, String, String)> = tx
             .query_row(
-                "SELECT bot_id,room_id,name FROM social_sessions WHERE id=?1",
+                "SELECT bot_id,room_id,room_name FROM social_sessions WHERE id=?1",
                 [session_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        if let Some((owner_bot, room_id, _old_name)) = existing {
+        if let Some((owner_bot, room_id, room_name)) = existing {
             anyhow::ensure!(
                 owner_bot == bot && p.session_id.as_deref() == Some(session_id),
                 "invalid credential"
@@ -448,11 +448,6 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             tx.execute(
                 "UPDATE social_sessions SET name=?2,harness=?3,folder=?4,branch=?5,last_seen=unixepoch() WHERE id=?1 AND ended_at IS NULL",
                 params![session_id, name, harness, folder, branch],
-            )?;
-            let room_name: String = tx.query_row(
-                "SELECT name FROM rooms WHERE room_id=?1",
-                [&room_id],
-                |row| row.get(0),
             )?;
             tx.commit()?;
             return Ok(SessionRoom {
@@ -500,28 +495,27 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             branch
         };
         let stem = super::normalize_room_name(stem).map_err(anyhow::Error::msg)?;
-        let mut room_name = stem.clone();
-        for attempt in 0..5 {
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM rooms WHERE name=?1)",
-                [&room_name],
-                |row| row.get(0),
-            )?;
-            if !exists {
-                break;
-            }
-            anyhow::ensure!(attempt < 4, "room name unavailable");
-            let suffix = uuid::Uuid::new_v4().simple().to_string();
-            room_name = format!(
-                "{}-{}",
-                stem.chars().take(90).collect::<String>(),
-                &suffix[..8]
-            );
-        }
+        let taken = tx
+            .prepare(
+                "SELECT room_name FROM social_sessions WHERE owner_id=?1 AND ended_at IS NULL",
+            )?
+            .query_map([&p.account_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+        let room_name = (1..=501)
+            .map(|number| {
+                if number == 1 {
+                    stem.clone()
+                } else {
+                    format!("{}-{number}", stem.chars().take(95).collect::<String>())
+                }
+            })
+            .find(|name| !taken.contains(name))
+            .ok_or_else(|| anyhow::anyhow!("session room limit reached"))?;
         let room_id = uuid::Uuid::new_v4().to_string();
+        let internal_name = format!("session-{room_id}");
         tx.execute(
             "INSERT INTO rooms(room_id,name,visibility,owner_key,encrypted,created_by) VALUES(?1,?2,'private',?3,0,?4)",
-            params![room_id, room_name, format!("{OWNER_PREFIX}{}", p.account_id), p.account_id],
+            params![room_id, internal_name, format!("{OWNER_PREFIX}{}", p.account_id), p.account_id],
         )?;
         tx.execute(
             "INSERT INTO social_rooms(room_id,owner_id) VALUES(?1,?2)",
@@ -541,8 +535,8 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
             uuid::Uuid::new_v4().simple()
         );
         tx.execute(
-            "INSERT INTO social_sessions(id,bot_id,owner_id,name,harness,folder,branch,room_id,token_digest,started_at,last_seen) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,unixepoch(),unixepoch())",
-            params![session_id, bot, p.account_id, name, harness, folder, branch, room_id, hash(&token)],
+            "INSERT INTO social_sessions(id,bot_id,owner_id,name,harness,folder,branch,room_id,room_name,token_digest,started_at,last_seen) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,unixepoch(),unixepoch())",
+            params![session_id, bot, p.account_id, name, harness, folder, branch, room_id, room_name, hash(&token)],
         )?;
         tx.commit()?;
         Ok(SessionRoom {
@@ -1001,7 +995,7 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 json!({"room_id":room,"invitation":invitation})
             }
             ("GET", ["rooms"]) => {
-                let mut s=tx.prepare("SELECT r.room_id,r.name,s.owner_id,x.id,x.name,x.harness,x.folder,x.branch,x.started_at,x.last_seen,x.ended_at FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id JOIN social_members m ON m.room_id=r.room_id LEFT JOIN social_sessions x ON x.room_id=r.room_id WHERE m.account_id=?1 ORDER BY r.name")?;
+                let mut s=tx.prepare("SELECT r.room_id,r.name,s.owner_id,x.id,x.name,x.harness,x.folder,x.branch,x.started_at,x.last_seen,x.ended_at,x.room_name FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id JOIN social_members m ON m.room_id=r.room_id LEFT JOIN social_sessions x ON x.room_id=r.room_id WHERE m.account_id=?1 ORDER BY COALESCE(x.room_name,r.name)")?;
                 let rooms = s
                     .query_map([a], |r| {
                         let session_id: Option<String> = r.get(3)?;
@@ -1019,9 +1013,14 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                         } else {
                             None
                         };
+                        let display_name: Option<String> = r.get(11)?;
+                        let room_name = match display_name {
+                            Some(name) => name,
+                            None => r.get(1)?,
+                        };
                         Ok(json!({
                             "room_id": r.get::<_,String>(0)?,
-                            "name": r.get::<_,String>(1)?,
+                            "name": room_name,
                             "owner_id": r.get::<_,String>(2)?,
                             "kind": session.as_ref().map(|_| "session"),
                             "session": session,
@@ -2481,8 +2480,32 @@ mod tests {
                 "feature",
             )
             .unwrap();
+        let duplicate_id = format!("session:{}", uuid::Uuid::new_v4());
+        let duplicate = store
+            .social_register_session(
+                bot_key,
+                &duplicate_id,
+                "claude-three",
+                "claude",
+                "cowchat",
+                "main",
+            )
+            .unwrap();
+        let other_id = format!("session:{}", uuid::Uuid::new_v4());
+        let other = store
+            .social_register_session(
+                other_bot_key,
+                &other_id,
+                "other",
+                "claude",
+                "cowchat",
+                "main",
+            )
+            .unwrap();
         assert_eq!(first.room_name, "cowchat");
         assert_eq!(second.room_name, "feature");
+        assert_eq!(duplicate.room_name, "cowchat-2");
+        assert_eq!(other.room_name, "cowchat");
         assert_ne!(first.room_id, second.room_id);
         let first_token = first.session_token.as_deref().unwrap();
         let second_token = second.session_token.as_deref().unwrap();
