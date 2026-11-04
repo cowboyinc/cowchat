@@ -46,6 +46,7 @@ class SessionHookTest(unittest.TestCase):
             self.assertNotIn("mint-secret", context)
             event("start")
             event("working")
+            event("prompt")
             event("idle")
             event("end")
             invocations = [json.loads(line) for line in calls.read_text().splitlines()]
