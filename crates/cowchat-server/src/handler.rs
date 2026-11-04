@@ -1129,6 +1129,7 @@ async fn handle_send_message(
     let mut metadata = p.metadata.clone();
     if let Some(fields) = metadata.as_object_mut() {
         fields.remove("mentions");
+        fields.remove("sender_kind");
     }
     if let Some(valid) = store.social_mentions_valid(&p.room_id, &p.mentions) {
         if !valid {
@@ -1143,9 +1144,18 @@ async fn handle_send_message(
         if !metadata.is_object() {
             metadata = serde_json::json!({});
         }
-        if let Some(fields) = metadata.as_object_mut() {
-            fields.insert("mentions".into(), serde_json::json!(p.mentions));
+        metadata["mentions"] = serde_json::json!(p.mentions);
+    }
+    if let Some(principal) = store.social_principal(agent_api_key) {
+        let kind = if principal.agent_id.is_some() {
+            "agent"
+        } else {
+            "person"
+        };
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
         }
+        metadata["sender_kind"] = serde_json::Value::String(kind.into());
     }
     let append = crate::store::MessageAppend {
         message_id: &message_id,
@@ -2355,7 +2365,7 @@ async fn handle_decision(
             "leader_id": agent_id,
             "leader_name": agent_name,
             "content": p.content,
-            "metadata": p.metadata,
+            "metadata": decision_metadata,
             "timestamp": chrono::Utc::now(),
         }),
     );
