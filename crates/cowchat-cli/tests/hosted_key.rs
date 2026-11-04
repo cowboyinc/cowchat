@@ -224,6 +224,7 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
     let started: serde_json::Value = serde_json::from_slice(&started.stdout).unwrap();
     let room = started["room_id"].as_str().unwrap();
     let session_file = started["session_file"].as_str().unwrap();
+    assert!(!session_file.ends_with(&format!("{}.json", id.trim_start_matches("session:"))));
     let bound_command = |args: &[&str]| {
         tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"))
             .args(["--url", &url])
@@ -271,6 +272,23 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         "{}",
         String::from_utf8_lossy(&sent.stderr)
     );
+    let insecure = tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args([
+            "--url",
+            "ws://chat.example/ws",
+            "--agent-id",
+            &id,
+            "send",
+            room,
+            "leak",
+        ])
+        .env("HOME", &home)
+        .env("COWCHAT_SESSION_FILE", session_file)
+        .output()
+        .await
+        .unwrap();
+    assert!(!insecure.status.success());
+    assert!(String::from_utf8_lossy(&insecure.stderr).contains("expected ws or wss URL"));
     let sibling_id = format!("session:{}", uuid::Uuid::new_v4());
     let sibling = command(&[
         "--name",
