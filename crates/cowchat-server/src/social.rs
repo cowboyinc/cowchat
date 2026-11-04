@@ -191,7 +191,21 @@ async fn action(
         return fail(anyhow::anyhow!("unauthorized"));
     };
     let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    let data = body.map(|b| b.0).unwrap_or(json!({}));
     let result = match (method.as_str(), parts.as_slice()) {
+        ("POST", ["sessions"]) => {
+            let field = |name: &str| {
+                data.get(name)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("invalid {name}"))
+            };
+            match (field("id"), field("name"), field("harness"), field("folder"), field("branch")) {
+                (Ok(id), Ok(name), Ok(harness), Ok(folder), Ok(branch)) => state.store
+                    .social_register_session(&key, id, name, harness, folder, branch)
+                    .map(|room| json!({"session_id":id,"room_id":room.room_id,"room_name":room.room_name,"session_token":room.session_token})),
+                _ => Err(anyhow::anyhow!("invalid session fields")),
+            }
+        }
         ("POST", ["sessions", id, "heartbeat"]) => state
             .store
             .social_touch_session(&key, id)
@@ -200,12 +214,9 @@ async fn action(
             .store
             .social_end_session(&key, id)
             .map(|room_id| json!({"ok":true,"room_id":room_id})),
-        _ => state.store.social_action(
-            &key,
-            method.as_str(),
-            &path,
-            &body.map(|b| b.0).unwrap_or(json!({})),
-        ),
+        _ => state
+            .store
+            .social_action(&key, method.as_str(), &path, &data),
     };
     match result {
         Ok(mut value) => {
@@ -541,6 +552,71 @@ mod tests {
         let value: Value = response.json().await.unwrap();
         assert_eq!(status, StatusCode::OK, "{path}: {value}");
         value
+    }
+    #[tokio::test]
+    async fn mint_only_credential_creates_session_over_http_but_cannot_operate_it() {
+        let (state, base, tasks) = fixture().await;
+        let owner = login(&base, "github", "9101", None).await;
+        let owner_key = owner["device_key"].as_str().unwrap();
+        let bot = call(
+            &base,
+            owner_key,
+            "POST",
+            "agents",
+            json!({"name":"Cowbot","mint_only":true}),
+        )
+        .await;
+        let mint_key = bot["api_key"].as_str().unwrap();
+        let id = format!("session:{}", uuid::Uuid::new_v4());
+        let session = call(
+            &base,
+            mint_key,
+            "POST",
+            "sessions",
+            json!({"id":id,"name":"worker","harness":"codex","folder":"repo","branch":"main"}),
+        )
+        .await;
+        let token = session["session_token"].as_str().unwrap();
+        assert_eq!(session["session_id"], id);
+        assert_eq!(
+            state
+                .store
+                .social_room_access(session["room_id"].as_str().unwrap(), mint_key),
+            Some(false)
+        );
+        let heartbeat = format!("sessions/{id}/heartbeat");
+        let denied = reqwest::Client::new()
+            .post(format!("{base}/social/v1/{heartbeat}"))
+            .header("x-cowchat-key", mint_key)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+        call(&base, token, "POST", &heartbeat, json!({})).await;
+        let ws_url = format!("{}/ws", base.replacen("http", "ws", 1));
+        let client = cowchat_client::CowchatClient::connect_ws(
+            &ws_url,
+            token,
+            "worker",
+            Some(&id),
+            vec![format!(
+                "cowchat.session.v1:{}",
+                json!({"harness":"codex","folder":"repo","branch":"main"})
+            )],
+        )
+        .await
+        .unwrap();
+        let room_id = session["room_id"].as_str().unwrap();
+        client
+            .send_message(room_id, "hello from session", None, vec![])
+            .await
+            .unwrap();
+        let history = client.get_history(room_id, 10, None).await.unwrap();
+        assert_eq!(history.last().unwrap().content, "hello from session");
+        for task in tasks {
+            task.abort();
+        }
     }
     async fn login(base: &str, provider: &str, code: &str, link: Option<&str>) -> Value {
         let verifier = "v".repeat(64);

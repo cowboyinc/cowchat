@@ -2,6 +2,7 @@ mod actor_host;
 mod artifact;
 mod bridge;
 mod chart;
+mod session;
 mod telegram;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -252,6 +253,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Start, inspect, or end a hosted bot session.
+    Session {
+        #[command(subcommand)]
+        action: session::SessionAction,
+    },
     /// Durable room leases and commit-specific readiness.
     Lease(leases::Args),
     /// Publish and update a live room artifact using Gallop and OpenUI.
@@ -952,9 +958,10 @@ fn default_key_path() -> PathBuf {
 struct HostedBotCredential {
     url: String,
     api_key: String,
+    kind: Option<String>,
 }
 
-fn hosted_key(path: &std::path::Path, url: &str) -> Option<String> {
+fn hosted_credential(path: &std::path::Path, url: &str) -> Option<HostedBotCredential> {
     let metadata = std::fs::metadata(path).ok()?;
     #[cfg(unix)]
     {
@@ -964,7 +971,11 @@ fn hosted_key(path: &std::path::Path, url: &str) -> Option<String> {
         }
     }
     let saved: HostedBotCredential = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    (saved.url == url && !saved.api_key.is_empty()).then_some(saved.api_key)
+    (saved.url == url && !saved.api_key.is_empty()).then_some(saved)
+}
+
+fn hosted_key(path: &std::path::Path, url: &str) -> Option<String> {
+    hosted_credential(path, url).map(|saved| saved.api_key)
 }
 
 fn load_key(key_arg: &Option<String>, url: Option<&str>) -> String {
@@ -1102,12 +1113,54 @@ async fn note_purged_history(
 }
 
 async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>> {
-    let key = load_key(&cli.key, cli.url.as_deref());
-
     let agent_id = resolve_agent_id(cli);
+    if agent_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("session:"))
+        && cli.url.is_none()
+    {
+        return Err("hosted sessions require --url".into());
+    }
+    let saved_session = match (agent_id.as_deref(), cli.url.as_deref()) {
+        (Some(id), Some(url)) if id.starts_with("session:") => {
+            session::http_url(url, "/social/v1/sessions")?;
+            Some(session::load_bound(id, url)?.0)
+        }
+        _ => None,
+    };
+    if saved_session.is_none()
+        && cli.key.is_none()
+        && cli.url.as_deref().is_some_and(|url| {
+            hosted_credential(&default_data_dir().join("hosted-bot.json"), url)
+                .is_some_and(|saved| saved.kind.as_deref() == Some("mint_only"))
+        })
+    {
+        return Err("hosted bot credential only starts sessions; run `cowchat session start` first, then pass its --agent-id".into());
+    }
+    if saved_session
+        .as_ref()
+        .is_some_and(|saved| cli.name != "cli" && cli.name != saved.name)
+    {
+        return Err("--name does not match the saved session".into());
+    }
+    let key = cli
+        .key
+        .clone()
+        .or_else(|| saved_session.as_ref().map(|s| s.session_token.clone()))
+        .unwrap_or_else(|| load_key(&None, cli.url.as_deref()));
+    let name = saved_session
+        .as_ref()
+        .filter(|_| cli.name == "cli")
+        .map_or(cli.name.as_str(), |s| s.name.as_str());
+    let capabilities = saved_session.as_ref().map_or_else(Vec::new, |s| {
+        vec![format!(
+            "cowchat.session.v1:{}",
+            serde_json::json!({"harness":s.harness,"folder":s.folder,"branch":s.branch})
+        )]
+    });
     let agent_id = agent_id.as_deref();
     let mut client = if let Some(url) = &cli.url {
-        CowchatClient::connect_ws(url, &key, &cli.name, agent_id, vec![]).await?
+        CowchatClient::connect_ws(url, &key, name, agent_id, capabilities).await?
     } else if let Some(addr) = &cli.tcp {
         CowchatClient::connect_tcp(addr, &key, &cli.name, agent_id, vec![]).await?
     } else {
@@ -1764,6 +1817,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     require_stable_named_agent(&cli)?;
 
     match &cli.command {
+        Commands::Session { action } => session::run(&cli, action).await?,
         Commands::Lease(args) => leases::run(&cli, args).await?,
         Commands::Artifact(args) => artifact::run(&cli, args).await?,
         Commands::ActorHost(args) => actor_host::run(&cli, args).await?,
