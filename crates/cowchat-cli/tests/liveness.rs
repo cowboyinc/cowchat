@@ -722,6 +722,98 @@ async fn wait_drain_returns_full_batch() {
     );
 }
 
+#[tokio::test]
+async fn multi_room_wait_keeps_independent_cursors_after_restart() {
+    let (_handle, addr, key, tmp) = start_test_server().await;
+    let cursor = tmp.path().join("multi-room-cursor");
+    let speaker = CowchatClient::connect_tcp(&addr, &key, "speaker", None, vec![])
+        .await
+        .unwrap();
+    let a = speaker.create_room("multi-a", None, None).await.unwrap();
+    let b = speaker.create_room("multi-b", None, None).await.unwrap();
+    speaker.join_room(&a.room_id).await.unwrap();
+    speaker.join_room(&b.room_id).await.unwrap();
+    for content in ["a-one", "a-two", "a-three"] {
+        speaker
+            .send_message(&a.room_id, content, None, vec![])
+            .await
+            .unwrap();
+    }
+    speaker
+        .send_message(&b.room_id, "b-one", None, vec![])
+        .await
+        .unwrap();
+    let wait = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command.args([
+            "--tcp",
+            &addr,
+            "--key",
+            &key,
+            "--name",
+            "multi-waiter",
+            "--agent-id",
+            "stable-multi-waiter",
+            "wait",
+            &a.room_id,
+            &b.room_id,
+            "--loop",
+            "--drain",
+            "--cursor-file",
+            cursor.to_str().unwrap(),
+            "--since-seq",
+            "0",
+            "--idle-timeout",
+            "5",
+            "--heartbeat-secs",
+            "0",
+        ]);
+        command
+    };
+    let first = wait().output().await.unwrap();
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_text = String::from_utf8_lossy(&first.stdout);
+    assert!(
+        first_text.contains("a-one")
+            && first_text.contains("a-three")
+            && first_text.contains("b-one"),
+        "{first_text}"
+    );
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cursor).unwrap()).unwrap();
+    assert_eq!(saved[&a.room_id], 3);
+    assert_eq!(saved[&b.room_id], 1);
+    speaker
+        .send_message(&b.room_id, "b-two", None, vec![])
+        .await
+        .unwrap();
+    let second = wait().output().await.unwrap();
+    assert_eq!(second.status.code(), Some(0));
+    let second_text = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        second_text.contains("b-two")
+            && !second_text.contains("a-three")
+            && !second_text.contains("b-one"),
+        "{second_text}"
+    );
+    speaker
+        .send_message(&a.room_id, "a-four", None, vec![])
+        .await
+        .unwrap();
+    let third = wait().output().await.unwrap();
+    assert_eq!(third.status.code(), Some(0));
+    let third_text = String::from_utf8_lossy(&third.stdout);
+    assert!(
+        third_text.contains("a-four") && !third_text.contains("b-two"),
+        "{third_text}"
+    );
+}
+
 /// `--follow` emits more than one message in a single process, persists its
 /// cursor after each row, and terminates cleanly on conversation_end.
 #[tokio::test]
