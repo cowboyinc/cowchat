@@ -1185,6 +1185,8 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                 )?;
                 tx.execute("DELETE FROM social_admissions WHERE agent_id=?1", [id])?;
                 tx.execute("DELETE FROM presence WHERE agent_id=?1 OR agent_id IN (SELECT id FROM social_sessions WHERE bot_id=?1)", [id])?;
+                tx.execute("DELETE FROM social_admissions WHERE agent_id IN (SELECT id FROM social_sessions WHERE bot_id=?1 AND ended_at IS NULL)", [id])?;
+                tx.execute("UPDATE social_sessions SET ended_at=unixepoch(),token_digest=NULL WHERE bot_id=?1 AND ended_at IS NULL", [id])?;
                 json!({"ok":true})
             }
             ("POST", ["rooms"]) => {
