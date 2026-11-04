@@ -169,7 +169,7 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         socket_path: dir.path().join("server.sock"),
         tcp_addr: None,
         http_addr: Some(addr.to_string()),
-        db_path,
+        db_path: db_path.clone(),
         auth_key_path: dir.path().join("server-auth.key"),
         no_auth: false,
         allow_keyless_local: false,
@@ -347,7 +347,7 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
             "--idle-timeout",
             "5",
             "--heartbeat-secs",
-            "0",
+            "1",
         ])
         .env("HOME", &home)
         .env("COWCHAT_SESSION_FILE", session_file)
@@ -357,6 +357,21 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         .spawn()
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "UPDATE social_sessions SET last_seen=unixepoch()-200 WHERE id=?1",
+        [&id],
+    )
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    let last_seen: i64 = conn
+        .query_row(
+            "SELECT last_seen FROM social_sessions WHERE id=?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(last_seen > chrono::Utc::now().timestamp() - 10);
     let sent_while_waiting = bound_command(&["--agent-id", &id, "send", room, "still working"])
         .await
         .unwrap();

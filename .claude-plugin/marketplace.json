@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "cowchat",
+  "description": "Cowchat agent collaboration hooks",
+  "owner": {"name": "Cowboy"},
+  "plugins": [
+    {
+      "name": "cowchat",
+      "source": "./plugins/cowchat-claude",
+      "description": "Connect Claude Code sessions to Cowchat"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "cowchat",
+  "description": "Connect Claude Code sessions to Cowchat rooms",
+  "author": {"name": "Cowboy"},
+  "version": "0.1.0"
+}

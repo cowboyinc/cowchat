@@ -1361,6 +1361,7 @@ async fn run_wait_multiple(
     let only_kinds = parse_kinds(only_kinds_spec.as_ref());
     let not_kinds = parse_kinds(not_kinds_spec.as_ref());
     let started = std::time::Instant::now();
+    let mut last_session_heartbeat = std::time::Instant::now();
     let effective_timeout = if timeout == 0 { 86_400 } else { timeout };
     let mut backoff = 1u64;
     'reconnect: loop {
@@ -1402,6 +1403,13 @@ async fn run_wait_multiple(
         let _ = client.set_presence("waiting", None, None).await;
         backoff = 1;
         loop {
+            if heartbeat_secs > 0 && last_session_heartbeat.elapsed().as_secs() >= heartbeat_secs {
+                if let Some((id, url)) = &approved_session {
+                    let (record, _) = session::load_bound(id, url)?;
+                    session::heartbeat(url, &record).await?;
+                }
+                last_session_heartbeat = std::time::Instant::now();
+            }
             let elapsed = started.elapsed().as_secs();
             if idle_timeout > 0 && elapsed >= idle_timeout {
                 eprintln!(
