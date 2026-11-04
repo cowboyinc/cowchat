@@ -37,6 +37,8 @@ final class ChatStore: ObservableObject {
     @Published private(set) var archivedRoomIDs: Set<String> = []
     @Published private(set) var setupRoomIDs: Set<String> = []
     @Published private(set) var readState = RoomReadState()
+    /// Rooms whose switch shows every message, agents' unmarked ones included. Kept on this Mac.
+    @Published private(set) var showsAllMessagesRoomIDs: Set<String> = []
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
     @Published private(set) var lastThinkingAt: [String: [String: Date]] = [:]
@@ -47,9 +49,18 @@ final class ChatStore: ObservableObject {
     @Published private(set) var thinkingPulses: [String: [String: AgentThinkingPulse]] = [:]
     @Published private(set) var recentAgentActivityAt: [String: [String: Date]] = [:]
     @Published var roomReadyNotice: Room?
-    @Published var secondAgentHintRoom: Room?
     @Published var roomBeingRenamed: Room?
-    @Published var connectionStatus: ConnectionStatus = .disconnected
+    @Published var connectionStatus: ConnectionStatus = .disconnected {
+        didSet { followConnectionDown() }
+    }
+    /// Whether the connection has been down for `connectionDownDelay`, which the sidebar's cells show. It waits so that
+    /// launch and a quick reconnect change no icon (navigation note, section 3.11).
+    @Published private(set) var isConnectionDown = false
+    var connectionDownDelay: Duration = .seconds(3)
+    private var connectionDownTask: Task<Void, Never>?
+    /// Rooms this connection's key may join and is not in, which the sidebar's search lists under To join. A server
+    /// without the list call gives none.
+    @Published private(set) var joinableRooms: [Room] = []
     @Published private(set) var connectionProfile: ConnectionProfile
     /// Cached single-use invite token per room, embedded in connect prompts
     /// for shared servers. Copying a prompt consumes the token and mints a
@@ -57,8 +68,11 @@ final class ChatStore: ObservableObject {
     @Published private(set) var promptInviteTokens: [String: String] = [:]
     @Published var errorMessage: String?
     @Published var isLoadingMessages = false
-    @Published var isCreateRoomPresented = false
-    @Published var createRoomParentID: String?
+    /// Called with each `session_state` frame, which says one of the person's sessions registered, changed state or
+    /// ended (navigation note, section 4.1).
+    var onSessionState: ((SessionStateEvent) -> Void)?
+    /// What the archive rule for ended sessions did with each session room on this Mac (navigation note, section 4.4).
+    @Published private(set) var sessionRoomArchiveOutcomes: [String: SessionRoomArchive.Outcome] = [:]
 
     private let connection: any CowchatConnectionProtocol
     private let connectionPreferences: ConnectionProfilePreferences?
@@ -106,11 +120,13 @@ final class ChatStore: ObservableObject {
     private var pendingDestructionRoomIDs: Set<String> = []
     private var confirmedDestructionRoomIDs: Set<String> = []
     private var destroyedRoomIDs: Set<String> = []
-    private var secondAgentHintShownRoomIDs: Set<String> = []
     private var draftsByRoomID: [String: String] = [:]
     private var failedDraftRestorationsByRoomID: [String: FailedDraftRestoration] = [:]
     private var sendGeneration = 0
     private var previewActivityByRoomID: [String: String] = [:]
+    /// Each room's newest message its feed shows, as of the room's activity when that was read, so a hidden agent
+    /// message moves the room's activity on without lighting its unread dot.
+    private var shownActivityByRoomID: [String: ShownActivity] = [:]
     private var promptInviteMintsInFlight: Set<String> = []
     private(set) var agentID = ""
     let agentName = "Cowchat Mac"
@@ -125,13 +141,13 @@ final class ChatStore: ObservableObject {
         memberCountIncludesCurrentAgentRoomIDs.contains(roomID)
     }
 
-    /// True while the selected room should render the connect state: non-lobby,
+    /// True while the selected room should render the connect state:
     /// connected, nothing said yet, nobody else here. Keeps the 2s poll honest
-    /// about who is actually in the room (spec §3 "member-truth refresh").
+    /// about who is actually in the room (spec §3 "member-truth refresh"). The
+    /// lobby is an ordinary room and opens as a chat, so it is polled too.
     var selectedRoomAwaitingFirstAgent: Bool {
         guard connectionStatus.isConnected,
-              let room = selectedRoom,
-              room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame,
+              selectedRoom != nil,
               messages.isEmpty, !isLoadingMessages else { return false }
         return !roomMembers.contains { $0.id != agentID }
     }
@@ -236,8 +252,10 @@ final class ChatStore: ObservableObject {
         )
         localPreferences = Self.roomPreferences(defaults: defaults, profile: connectionProfile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
+        sessionRoomArchiveOutcomes = localPreferences.sessionRoomArchiveOutcomes
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
+        showsAllMessagesRoomIDs = localPreferences.showsAllMessagesRoomIDs
         // One-time cleanup: the setup-screen takeover was removed in the
         // onboarding redesign (spec 2026-08-07); stale persisted IDs would
         // otherwise sit orphaned forever.
@@ -857,12 +875,8 @@ final class ChatStore: ObservableObject {
         thinkingPulses = [:]
         recentAgentActivityAt = [:]
         roomReadyNotice = nil
-        secondAgentHintRoom = nil
-        secondAgentHintShownRoomIDs = []
         roomBeingRenamed = nil
         isLoadingMessages = false
-        isCreateRoomPresented = false
-        createRoomParentID = nil
         joinedRoomID = nil
         memberCountIncludesCurrentAgentRoomIDs = []
         agentID = ""
@@ -873,13 +887,16 @@ final class ChatStore: ObservableObject {
         draftsByRoomID = [:]
         failedDraftRestorationsByRoomID = [:]
         previewActivityByRoomID = [:]
+        shownActivityByRoomID = [:]
         activeMessageSearchContext = nil
         completedMessageSearchContext = nil
 
         localPreferences = Self.roomPreferences(defaults: defaults, profile: profile)
         archivedRoomIDs = localPreferences.archivedRoomIDs
+        sessionRoomArchiveOutcomes = localPreferences.sessionRoomArchiveOutcomes
         setupRoomIDs = localPreferences.pendingSetupRoomIDs
         readState = localPreferences.roomReadState ?? RoomReadState()
+        showsAllMessagesRoomIDs = localPreferences.showsAllMessagesRoomIDs
         connectionStatus = .disconnected
         surfacedSpawnFailureDescription = nil
     }
@@ -959,6 +976,8 @@ final class ChatStore: ObservableObject {
             memberCountIncludesCurrentAgentRoomIDs.insert(joinedRoomID)
         }
         reconcileLocalRoomPreferences()
+        // The rooms the key may join follow the person's own, since a room they join leaves that list.
+        Task { [weak self] in await self?.refreshJoinableRooms() }
         if !readState.hasSeeded {
             readState.seed(rooms: rooms)
             localPreferences.saveRoomReadState(readState)
@@ -988,6 +1007,17 @@ final class ChatStore: ObservableObject {
         if selectedRoomID == joinedRoomID {
             await refreshMembers()
         }
+    }
+
+    /// The agents in a room, as the server lists them, whether or not it is open.
+    func agents(in roomID: String) async throws -> [AgentPresence] {
+        try await connection.listAgents(roomID: roomID)
+    }
+
+    /// A room's newest messages, oldest first, whether or not it is open. The Inbox reads the community rooms'
+    /// mentions with it.
+    func recentMessages(in roomID: String, limit: Int) async throws -> [ChatMessage] {
+        try await connection.history(roomID: roomID, limit: limit, before: nil)
     }
 
     func select(room: Room) async {
@@ -1073,7 +1103,7 @@ final class ChatStore: ObservableObject {
                 recordHistoricalAgentActivity(in: rawHistory, now: Date())
                 let history = Self.visibleMessages(in: rawHistory)
                 messages = Self.merging(history: history, live: messages)
-                if let latest = messages.last { updateRoomPreview(from: latest) }
+                if let latest = messages.last(where: showsInFeed) { updateRoomPreview(from: latest) }
                 isLoadingMessages = false
                 await memberRefresh.value
             } catch {
@@ -1132,19 +1162,19 @@ final class ChatStore: ObservableObject {
     /// create sheet renders them inline. Routing them at the store's alert
     /// used to be silently dropped when the sheet was presented (or when the
     /// target store wasn't the active one).
-    func createRoom(name: String, description: String, isPublic: Bool) async -> CreateRoomOutcome {
+    func createRoom(name: String, description: String, isPublic: Bool, parentID: String? = nil) async -> CreateRoomOutcome {
         let expectedProfileGeneration = profileGeneration
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedName.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
             return .failed(
-                "\u{201C}lobby\u{201D} is reserved for the Lobby dashboard. Choose another name."
+                "\u{201C}lobby\u{201D} is reserved. Choose another name." // copy: the Lobby page is gone (2 November)
             )
         }
         do {
             let room = try await connection.createRoom(
                 name: trimmedName,
                 description: description.trimmingCharacters(in: .whitespacesAndNewlines),
-                parentID: createRoomParentID,
+                parentID: parentID,
                 isPublic: isPublic
             )
             guard expectedProfileGeneration == profileGeneration else {
@@ -1157,8 +1187,6 @@ final class ChatStore: ObservableObject {
             rooms.sort(by: roomSort)
             setupRoomIDs.insert(room.id)
             localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
-            isCreateRoomPresented = false
-            createRoomParentID = nil
             await select(room: room)
             guard expectedProfileGeneration == profileGeneration else {
                 return .failed("The connection changed while creating the room.")
@@ -1177,17 +1205,51 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    func presentCreateRoom(parentID: String? = nil) {
-        createRoomParentID = parentID
-        isCreateRoomPresented = true
-    }
-
     func isArchived(_ room: Room) -> Bool {
         archivedRoomIDs.contains(room.id)
     }
 
     func isUnread(_ room: Room) -> Bool {
-        readState.isUnread(room, selectedRoomID: selectedRoomID)
+        readState.isUnread(roomAsShown(room), selectedRoomID: selectedRoomID)
+    }
+
+    /// The room as its sidebar row and unread dot read it: once its newest shown message is known for its current
+    /// activity, the room is as recent as that message, so messages its feed hides do not count.
+    func roomAsShown(_ room: Room) -> Room {
+        guard let shown = shownActivityByRoomID[room.id],
+              shown.activity == (room.lastActivity ?? room.createdAt) else { return room }
+        return room.updating(lastActivity: shown.latest ?? room.createdAt)
+    }
+
+    // MARK: Messages for people
+
+    private struct ShownActivity {
+        /// The room's activity when this was read.
+        let activity: String
+        /// The timestamp of its newest message the feed shows, or nil when it shows none.
+        let latest: String?
+    }
+
+    func showsAllMessages(in roomID: String) -> Bool {
+        showsAllMessagesRoomIDs.contains(roomID)
+    }
+
+    /// The room menu's switch: every message in the room, or only what people wrote and what agents marked for people.
+    func setShowsAllMessages(_ on: Bool, in roomID: String) {
+        guard on != showsAllMessages(in: roomID) else { return }
+        if on { showsAllMessagesRoomIDs.insert(roomID) } else { showsAllMessagesRoomIDs.remove(roomID) }
+        localPreferences.saveShowsAllMessagesRoomIDs(showsAllMessagesRoomIDs)
+        // The room's preview and unread dot follow what its feed shows, so both are read again.
+        shownActivityByRoomID.removeValue(forKey: roomID)
+        previewActivityByRoomID.removeValue(forKey: roomID)
+        if roomID == selectedRoomID, let latest = messages.last(where: showsInFeed) { updateRoomPreview(from: latest) }
+        scheduleRoomPreviewRefresh()
+    }
+
+    /// Whether the message's room draws it outside a fold: always with the room's switch on, and otherwise as
+    /// `MessageVisibility` says.
+    func showsInFeed(_ message: ChatMessage) -> Bool {
+        showsAllMessages(in: message.roomID) || MessageVisibility.showsByDefault(message)
     }
 
     func isWorking(_ room: Room, at now: Date = Date()) -> Bool {
@@ -1209,6 +1271,52 @@ final class ChatStore: ObservableObject {
     func unarchive(_ room: Room) {
         guard archivedRoomIDs.remove(room.id) != nil else { return }
         localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
+    }
+
+    // MARK: The sidebar
+
+    /// Lists the rooms this connection's key may join. Any failure, such as a server without the call, lists none.
+    func refreshJoinableRooms() async {
+        let generation = profileGeneration
+        let listed = (try? await connection.listJoinableRooms()) ?? []
+        guard generation == profileGeneration else { return }
+        let joined = Set(rooms.map(\.id))
+        let fresh = listed.filter { !joined.contains($0.id) }
+        if fresh != joinableRooms { joinableRooms = fresh }
+    }
+
+    /// Opens a room the key may join and is not in. Opening it joins it, as for any room, and the rooms list then holds
+    /// it as one of the person's.
+    func openJoinable(_ room: Room) async {
+        joinableRooms.removeAll { $0.id == room.id }
+        if !rooms.contains(where: { $0.id == room.id }) { rooms = (rooms + [room]).sorted(by: roomSort) }
+        await select(room: room)
+        try? await refreshRooms(selectFallbackForMissingSelection: false)
+    }
+
+    /// Marks the connection down once it has stayed down for `connectionDownDelay`, and up again at once.
+    private func followConnectionDown() {
+        if connectionStatus.isConnected {
+            connectionDownTask?.cancel()
+            connectionDownTask = nil
+            if isConnectionDown { isConnectionDown = false }
+            return
+        }
+        guard !isConnectionDown, connectionDownTask == nil else { return }
+        let delay = connectionDownDelay
+        connectionDownTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, !Task.isCancelled else { return }
+            self.connectionDownTask = nil
+            if !self.connectionStatus.isConnected { self.isConnectionDown = true }
+        }
+    }
+
+    /// Records what the archive rule did with an ended session's room, or forgets it when its session resumes.
+    func recordSessionRoomArchive(_ outcome: SessionRoomArchive.Outcome?, roomID: String) {
+        guard sessionRoomArchiveOutcomes[roomID] != outcome else { return }
+        sessionRoomArchiveOutcomes[roomID] = outcome
+        localPreferences.saveSessionRoomArchiveOutcomes(sessionRoomArchiveOutcomes)
     }
 
     func canDestroy(_ room: Room) -> Bool {
@@ -1245,7 +1353,7 @@ final class ChatStore: ObservableObject {
             return false
         }
         guard name.localizedCaseInsensitiveCompare("lobby") != .orderedSame else {
-            errorMessage = "\u{201C}lobby\u{201D} is reserved for the Lobby dashboard. Choose another name."
+            errorMessage = "\u{201C}lobby\u{201D} is reserved. Choose another name." // copy: the Lobby page is gone (2 November)
             return false
         }
 
@@ -1376,7 +1484,8 @@ final class ChatStore: ObservableObject {
         unlockedRoomIDs.remove(room.id)
     }
 
-    func sendDraft() {
+    /// Sends the open room's draft. `mentions` holds the agent IDs it names.
+    func sendDraft(mentions: [String] = []) {
         guard let room = selectedRoom, !room.encrypted || unlockedRoomIDs.contains(room.id) else { return }
         let content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
@@ -1399,7 +1508,7 @@ final class ChatStore: ObservableObject {
         failedDraftRestorationsByRoomID.removeValue(forKey: room.id)
         Task {
             do {
-                let message = try await connection.send(roomID: room.roomID, content: wireContent)
+                let message = try await connection.send(roomID: room.roomID, content: wireContent, mentions: mentions)
                 guard expectedProfileGeneration == profileGeneration else { return }
                 if selectedRoomID == room.roomID { append(message) }
             } catch {
@@ -1499,6 +1608,13 @@ final class ChatStore: ObservableObject {
             recordPresenceActivity(from: payload)
             if joinedRoomID == selectedRoomID, !updatePresence(from: payload) {
                 scheduleMemberRefresh()
+            }
+        case "session_state":
+            guard let event = SessionStateEvent(payload: payload) else { break }
+            onSessionState?(event)
+            // A new session's room may not be listed yet: list the rooms now, so its cell appears at once.
+            if !rooms.contains(where: { $0.id == event.roomID }) {
+                Task { [weak self] in try? await self?.refreshRooms() }
             }
         case "thinking":
             // Live thinking pulses arrive as this dedicated event, not
@@ -1876,8 +1992,14 @@ final class ChatStore: ObservableObject {
                           (current.lastActivity ?? current.createdAt) == capturedActivity else {
                         continue
                     }
-                    if let latest { updateRoomPreview(from: latest) }
+                    if let latest {
+                        updateRoomPreview(from: latest)
+                    } else {
+                        roomMessagePreviews.removeValue(forKey: room.id)
+                    }
                     previewActivityByRoomID[room.id] = capturedActivity
+                    shownActivityByRoomID[room.id] = ShownActivity(activity: capturedActivity,
+                                                                   latest: latest?.timestamp)
                 } catch {
                     continue
                 }
@@ -1890,7 +2012,7 @@ final class ChatStore: ObservableObject {
         var seenCutoffs: Set<String> = []
         while !Task.isCancelled {
             let page = try await connection.history(roomID: roomID, limit: 20, before: before)
-            if let latest = Self.visibleMessages(in: page).last { return latest }
+            if let latest = Self.visibleMessages(in: page).last(where: showsInFeed) { return latest }
             guard page.count == 20,
                   let cutoff = page.first?.timestamp,
                   !cutoff.isEmpty,
@@ -1954,20 +2076,28 @@ final class ChatStore: ObservableObject {
               let index = rooms.firstIndex(where: { $0.roomID == message.roomID }) else { return }
         let currentActivity = rooms[index].activityDate
         if let currentActivity, activity <= currentActivity { return }
+        noteShownActivity(of: message, in: rooms[index])
         rooms[index] = rooms[index].updating(lastActivity: message.timestamp)
         rooms.sort(by: roomSort)
         recordRoomMutation(roomID: message.roomID)
         if message.roomID == selectedRoomID { markSelectedRoomRead() }
     }
 
+    /// Keeps a room's newest shown message in step with a message that moves its activity on. A message the feed
+    /// hides keeps the newest shown one, when that was known for the room's activity before it.
+    private func noteShownActivity(of message: ChatMessage, in room: Room) {
+        if message.isThinking || showsInFeed(message) {
+            shownActivityByRoomID[room.id] = ShownActivity(activity: message.timestamp, latest: message.timestamp)
+        } else if let known = shownActivityByRoomID[room.id], known.activity == (room.lastActivity ?? room.createdAt) {
+            shownActivityByRoomID[room.id] = ShownActivity(activity: message.timestamp, latest: known.latest)
+        }
+    }
+
     private func updateRoomPreview(from message: ChatMessage) {
-        guard !message.isThinking else { return }
-        let preview = (message.content.hasPrefix("cow1:") ? "Encrypted message" : message.content)
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+        guard !message.isThinking, showsInFeed(message) else { return }
+        let preview = MessagePreview.line(for: message.content)
         guard !preview.isEmpty else { return }
-        roomMessagePreviews[message.roomID] = String(preview.prefix(140))
+        roomMessagePreviews[message.roomID] = preview
         previewActivityByRoomID[message.roomID] = message.timestamp
     }
 
@@ -2106,11 +2236,6 @@ final class ChatStore: ObservableObject {
            !validRoomIDs.contains(roomBeingRenamed.id) {
             self.roomBeingRenamed = nil
         }
-        if let createRoomParentID,
-           !validRoomIDs.contains(createRoomParentID) {
-            self.createRoomParentID = nil
-            isCreateRoomPresented = false
-        }
     }
 
     private func removeRoom(roomID: String) {
@@ -2129,12 +2254,7 @@ final class ChatStore: ObservableObject {
         recentAgentActivityAt.removeValue(forKey: roomID)
         memberCountIncludesCurrentAgentRoomIDs.remove(roomID)
         if roomReadyNotice?.id == roomID { roomReadyNotice = nil }
-        if secondAgentHintRoom?.id == roomID { secondAgentHintRoom = nil }
         if roomBeingRenamed?.id == roomID { roomBeingRenamed = nil }
-        if createRoomParentID == roomID {
-            createRoomParentID = nil
-            isCreateRoomPresented = false
-        }
         localPreferences.saveArchivedRoomIDs(archivedRoomIDs)
         recordRoomMutation(roomID: roomID)
 
@@ -2200,8 +2320,6 @@ final class ChatStore: ObservableObject {
         localPreferences.savePendingSetupRoomIDs(setupRoomIDs)
         if selectedRoomID != roomID {
             roomReadyNotice = room
-        } else if secondAgentHintShownRoomIDs.insert(roomID).inserted {
-            secondAgentHintRoom = room
         }
     }
 
@@ -2238,10 +2356,10 @@ final class ChatStore: ObservableObject {
         return try JSONDecoder().decode(type, from: data)
     }
 
-    /// Lobby-first ordering for the dashboard grid and fallback selection.
+    /// Lobby-first ordering for the first and fallback selection.
     /// Deliberately NOT shared with RoomSidebarPresentation.sortedByRecency:
-    /// the sidebar excludes Lobby (it lives in its own nav row) and sorts by
-    /// parsed recency alone.
+    /// the sidebar sorts by parsed recency alone, with the local lobby as an
+    /// ordinary room.
     private func roomSort(_ lhs: Room, _ rhs: Room) -> Bool {
         guard lhs.id != rhs.id else { return false }
         let lhsIsLobby = lhs.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame

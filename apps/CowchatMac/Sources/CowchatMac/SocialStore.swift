@@ -26,6 +26,8 @@ final class SocialStore: ObservableObject {
     @Published private(set) var endpoint: URL
     @Published private(set) var account: SocialAccount?
     @Published private(set) var providers: [String] = []
+    /// The provider the last sign-in went through, whose door shows the wait for the browser.
+    @Published private(set) var signInProvider: String?
     @Published private(set) var serverNeedsUpdate = false
     @Published private(set) var setupSupported = false
     @Published private(set) var handleAvailabilitySupported = false
@@ -40,14 +42,21 @@ final class SocialStore: ObservableObject {
         return nil
     }
     private var friendLinkLoad = UUID()
-    @Published private(set) var setup: SocialSetup?
+    @Published private(set) var setup: SocialSetup? {
+        didSet { onSetupChanged?(setup) }
+    }
     @Published private(set) var setupLoaded = false
+    /// Called when the account's setup is loaded or forgotten.
+    var onSetupChanged: ((SocialSetup?) -> Void)?
     @Published private(set) var identities: [SocialMe.Identity] = []
     @Published private(set) var oauthFlow: OAuthFlow?
     @Published private(set) var friends: [SocialFriend] = []
     @Published private(set) var requests: [SocialFriendRequest] = []
     @Published private(set) var agents: [SocialAgent] = []
     @Published private(set) var invitations: [SocialRoomInvitation] = []
+    /// The invitations the person sent that are still open, which keep an ended session's room out of Archived
+    /// (navigation note, section 4.4).
+    @Published private(set) var sentInvitations: [SocialRoomInvitation] = []
     @Published private(set) var rooms: [SocialRoom] = []
     @Published var errorMessage: String?
     @Published var busy = false
@@ -160,13 +169,23 @@ final class SocialStore: ObservableObject {
             guard ticket == generation, !Task.isCancelled else { return }
             let roomList: SocialRooms = try await boundAPI.social(["rooms"])
             guard ticket == generation, !Task.isCancelled else { return }
+            var loadedSetup: SocialSetupReply?
+            if setupSupported, !setupLoaded {
+                loadedSetup = try await boundAPI.social(["setup"])
+                guard ticket == generation, !Task.isCancelled else { return }
+            }
             if account == accountAtStart { try saveAccount(me.account) }
             identities = me.identities
             friends = friendList.friends
             requests = requestList.requests.filter { $0.status == "pending" }
             agents = agentList.agents
             invitations = invitationList.invitations.filter { $0.status == "pending" && $0.to.id == me.account.id }
+            sentInvitations = invitationList.invitations.filter { $0.status == "pending" && $0.from.id == me.account.id }
             rooms = roomList.rooms
+            if let loadedSetup {
+                setup = loadedSetup.setup
+                setupLoaded = true
+            }
             errorMessage = nil
             if let savedSession {
                 onSnapshot?(SocialNotificationSnapshot(session: savedSession, requests: requestList.requests, invitations: invitationList.invitations))
@@ -186,6 +205,7 @@ final class SocialStore: ObservableObject {
     @discardableResult
     func signIn(provider: String, open: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }) -> Task<Void, Never>? {
         guard providers.contains(provider), phase == .signedOut else { return nil }
+        signInProvider = provider
         return startOAuth(provider: provider, flow: .signIn, open: open)
     }
 
@@ -250,11 +270,24 @@ final class SocialStore: ObservableObject {
         return task
     }
 
-    func cancelSignIn() {
+    func cancelSignIn() { cancel(keepingSetup: false) }
+
+    func closeFriends() { cancel(keepingSetup: phase == .signedIn) }
+
+    /// Settings › Account's Cancel, or the page closing while a link is under way: cancels the link, and keeps a
+    /// signed-in account's setup.
+    func cancelLink() { cancel(keepingSetup: phase == .signedIn) }
+
+    /// First run closing on the session's room or the Inbox: the same as cancelling a link, so the setup it made stays.
+    func closeOnboarding() { cancel(keepingSetup: phase == .signedIn) }
+
+    private func cancel(keepingSetup: Bool) {
         generation = UUID()
         busy = false
-        setup = nil
-        setupLoaded = false
+        if !keepingSetup {
+            setup = nil
+            setupLoaded = false
+        }
         friendLinkState = .idle
         friendLinkLoad = UUID()
         oauthCallback?.cancel()
@@ -285,7 +318,7 @@ final class SocialStore: ObservableObject {
         savedSession = nil
         account = nil
         identities = []
-        friends = []; requests = []; agents = []; invitations = []; rooms = []; issuedAgent = nil
+        friends = []; requests = []; agents = []; invitations = []; sentInvitations = []; rooms = []; issuedAgent = nil
         phase = .signedOut
         let ticket = generation
         onSessionChanged?(nil)
@@ -305,6 +338,22 @@ final class SocialStore: ObservableObject {
             await refresh()
             onRoomsChanged?()
         } catch { if ticket == generation { errorMessage = error.localizedDescription } }
+    }
+
+    /// Lists the account's rooms again on their own, as a `session_state` that names a room not yet listed asks, so a
+    /// new session's cell appears at once (navigation note, section 4.1).
+    func refreshRooms() async {
+        guard phase == .signedIn, savedSession != nil else { return }
+        let ticket = generation
+        guard let list: SocialRooms = try? await boundAPI().social(["rooms"]), ticket == generation else { return }
+        rooms = list.rooms
+    }
+
+    /// The signed-in account's social API, for the Inbox's and Team's reads, which poll with the friends. It throws
+    /// when no account is signed in.
+    func readingAPI() throws -> SocialAPI {
+        guard phase == .signedIn, savedSession != nil else { throw CowchatConnectionError.notConnected }
+        return try boundAPI()
     }
 
     private func saveAccount(_ account: SocialAccount) throws {
@@ -429,6 +478,45 @@ final class SocialStore: ObservableObject {
         return succeeded && ticket == generation
     }
 
+    /// Accept or Decline on a friend request sent to the person.
+    func answerFriendRequest(_ id: String, accept: Bool) async {
+        await perform { api in
+            let _: SocialAcknowledgement = try await api.social(["friend-requests", id, accept ? "accept" : "decline"],
+                                                                method: "POST")
+        }
+    }
+
+    /// Remove friend. Rooms already approved stay; the person leaves them separately.
+    func removeFriend(_ id: String) async {
+        await perform { api in
+            let _: SocialAcknowledgement = try await api.social(["friends", id], method: "DELETE")
+        }
+    }
+
+    /// Revoke on a bot: its credentials stop working and it leaves the account.
+    func revokeAgent(_ id: String) async {
+        await perform { api in
+            let _: SocialAcknowledgement = try await api.social(["agents", id], method: "DELETE")
+        }
+    }
+
+    /// Save on Settings' Account page: the person's display name and handle.
+    @discardableResult
+    func saveProfile(displayName: String, handle: String) async -> Bool {
+        let ticket = generation
+        var saved = false
+        await perform { api in
+            let me: SocialMe = try await api.social(["me"], method: "PATCH", body: [
+                "display_name": displayName.trimmingCharacters(in: .whitespacesAndNewlines),
+                "handle": SocialAPI.normalizedHandle(handle),
+            ])
+            guard ticket == self.generation else { return }
+            try self.saveAccount(me.account)
+            saved = true
+        }
+        return saved && ticket == generation
+    }
+
     func connectAgent(_ id: String) async {
         let ticket = generation
         await perform { api in
@@ -453,13 +541,25 @@ final class SocialStore: ObservableObject {
         }
     }
 
+    /// Makes an account room from New room's draft and invites the people picked. They are friends, or people of the
+    /// company room it is made inside, whom the server lets the person invite (a question for Chad beside his task 4).
     func createRoom(_ draft: SocialRoomDraft) async -> String? {
         let ticket = generation
         var roomID: String?
+        let others = Array(draft.friendIDs.dropFirst())
+        let first = friends.first { $0.id == draft.friendID }
+        let body = !others.isEmpty ? first.map(draft.requestBody(inviting:)) ?? draft.requestBody : draft.requestBody
         await perform { api in
             struct Reply: Decodable { let roomId: String }
-            let reply: Reply = try await api.social(["rooms"], method: "POST", body: draft.requestBody)
+            let reply: Reply = try await api.social(["rooms"], method: "POST", body: body)
             roomID = ticket == self.generation ? reply.roomId : nil
+            // Room creation invites one person; the rest go through the room's invitations (Chad's plan, task 4).
+            for id in others where ticket == self.generation {
+                let invitation = self.friends.first { $0.id == id }.map(draft.invitationBody(for:))
+                    ?? ["friend_id": id, "proposed_agent_ids": [String]()]
+                let _: SocialAcknowledgement = try await api.social(["rooms", reply.roomId, "invitations"],
+                                                                     method: "POST", body: invitation)
+            }
         }
         return roomID
     }

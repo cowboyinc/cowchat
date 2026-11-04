@@ -32,10 +32,9 @@ struct ContentView: View {
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
     @State private var isSidebarVisible = true
     @State private var isSettingsPresented = false
-    @State private var isFriendsPresented = false
-    @State private var friendsSection = SocialSection.friends
-    @State private var pendingFriendsSection: SocialSection?
     @State private var isWhatsNewPresented = false
+    /// The height under the toolbar, which a starting sheet keeps within.
+    @State private var contentHeight: CGFloat?
     @Environment(\.controlActiveState) private var controlActiveState
 
     init(onShowOnboarding: @escaping () -> Void = {}) {
@@ -45,24 +44,24 @@ struct ContentView: View {
     var body: some View {
         HStack(spacing: 0) {
             if isSidebarVisible {
-                SidebarView(
-                    isSidebarVisible: $isSidebarVisible,
-                    isSettingsPresented: $isSettingsPresented
-                )
+                SidebarView(isSidebarVisible: $isSidebarVisible)
                 .frame(width: 280)
                 .transition(.move(edge: .leading).combined(with: .opacity))
             }
 
             Group {
-                if let room = store.selectedRoom {
-                    if room.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame {
-                        LobbyDashboardView(room: room, isSidebarVisible: $isSidebarVisible)
-                            .id("lobby-\(room.id)")
-                    } else {
-                        ChatRoomView(room: room, isSidebarVisible: $isSidebarVisible)
-                            .id(room.id)
-                    }
-                } else {
+                switch MainArea.content(page: workspace.page, selectedRoom: store.selectedRoom) {
+                case .page(.inbox):
+                    InboxPage(inbox: workspace.inbox, sessions: workspace.liveSessions, social: workspace.social)
+                case .page(.team):
+                    TeamPage(team: workspace.team, account: workspace.accountGlobal ?? workspace.local)
+                case .page(.friends):
+                    FriendsPage(social: workspace.social, sessions: FriendsList.sessions(workspace.sidebarRooms),
+                                addToSession: { await workspace.addFriend($0.id, to: $1) }, signIn: onShowOnboarding)
+                case .chat(let room):
+                    ChatRoomView(room: room, isSidebarVisible: $isSidebarVisible)
+                        .id(room.id)
+                case .empty:
                     EmptyChatView()
                 }
             }
@@ -80,45 +79,77 @@ struct ContentView: View {
             .padding(.leading, isSidebarVisible ? 0 : 8)
         }
         .background(SemanticColor.surface400)
+        .background {
+            GeometryReader { content in
+                Color.clear
+                    .onAppear { contentHeight = content.size.height }
+                    .onChange(of: content.size.height) { contentHeight = $0 }
+            }
+        }
+        .environmentObject(workspace.liveSessions)
         // The unified toolbar otherwise paints its own system strip; tint it
         // with the same surface400 shell so the nav reads as one tan surface.
         .toolbarBackground(SemanticColor.surface400, for: .windowToolbar)
-        .navigationTitle(store.selectedRoom?.name ?? "Cowchat")
+        .navigationTitle(windowTitle)
         .toolbar {
+            // The three buttons are one set: a 20 glyph in Icon/Secondary in a 36 circle that is clear at rest and takes
+            // a sidebar row's hover under the pointer (navigation round 2, section 2).
             ToolbarItem(placement: .primaryAction) {
-                Button { friendsSection = .friends; isFriendsPresented = true } label: {
-                    Label("Friends & account", systemImage: "person.2")
-                }.help("Friends, agents and account")
-            }
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
-                } label: {
-                    GallopIconView(icon: .sidebar, fallbackSystemName: "sidebar.left", size: 17)
-                        .foregroundStyle(SemanticColor.iconTertiary)
-                        .frame(width: 36, height: 36)
-                        .background(Circle().fill(SemanticColor.surface700))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .focusable(false)
-                .help(isSidebarVisible ? "Hide sidebar" : "Show sidebar")
-                .macAccessibleAction(label: "Toggle sidebar") {
-                    withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
+                ToolbarCircleHover { isHovering in
+                    Button { workspace.show(.friends) } label: {
+                        // Gallop has no outline person glyph (@cowboyinc/gallop-foundations 0.7.0 has only the filled
+                        // Posse), so this is SF Symbol person.2. At 14 semibold its stroke is about 1.4, close to Add's
+                        // and Sidebar.Expanded's beside it.
+                        ToolbarCircleLabel(isHovering: isHovering) {
+                            Image(systemName: "person.2")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    // copy:
+                    .help("Friends")
+                    .macAccessibleAction(label: "Open Friends") { workspace.show(.friends) }
                 }
             }
             ToolbarItem(placement: .navigation) {
-                Button {
-                    store.presentCreateRoom()
-                } label: {
-                    GallopIconView(icon: .edit, fallbackSystemName: "square.and.pencil", size: 17)
-                        .foregroundStyle(SemanticColor.iconSecondary)
-                        .frame(width: 36, height: 36)
-                        .contentShape(Circle())
+                ToolbarCircleHover { isHovering in
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
+                    } label: {
+                        // Gallop's Sidebar.Expanded while the sidebar shows and Sidebar.Collapsed while it is hidden,
+                        // as the prototype site's rail swaps them.
+                        ToolbarCircleLabel(isHovering: isHovering) {
+                            GallopIconView(icon: isSidebarVisible ? .sidebarExpanded : .sidebarCollapsed,
+                                           fallbackSystemName: "sidebar.left", size: 20)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .help(isSidebarVisible ? "Hide sidebar" : "Show sidebar")
+                    .macAccessibleAction(label: "Toggle sidebar") {
+                        withAnimation(.easeInOut(duration: 0.2)) { isSidebarVisible.toggle() }
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("New room (⌘N)")
-                .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
+            }
+            ToolbarItem(placement: .navigation) {
+                // The New menu holds every way to start something (navigation note, section 7.1). It stays in reach
+                // while the sidebar is hidden.
+                ToolbarCircleHover { isHovering in
+                    Menu {
+                        NewMenuItems(workspace: workspace)
+                    } label: {
+                        ToolbarCircleLabel(isHovering: isHovering) {
+                            GallopIconView(icon: .add, fallbackSystemName: "plus", size: 20)
+                        }
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    // copy:
+                    .help("New")
+                    .accessibilityLabel("New")
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .cowchatToggleSidebar)) { _ in
@@ -128,37 +159,51 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 600)
         .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
         .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
-        .sheet(isPresented: $isFriendsPresented, onDismiss: presentPendingFriendsSection) {
-            FriendsView(social: workspace.social, initialSection: friendsSection).id(friendsSection)
-        }
-        .onReceive(workspace.notifications.$destination.receive(on: RunLoop.main)) { section in
-            guard let section, workspace.notifications.consumeDestination(section) else { return }
-            pendingFriendsSection = section
-            let dismissingSheet = isSettingsPresented || store.isCreateRoomPresented || isWhatsNewPresented || store.roomBeingRenamed != nil || isFriendsPresented
+        // A social notification's click: a friend request opens the Friends page, and a room invitation the Inbox.
+        .onReceive(workspace.notifications.$destination.receive(on: RunLoop.main)) { destination in
+            guard let destination, workspace.notifications.consumeDestination(destination) else { return }
             isSettingsPresented = false
-            store.isCreateRoomPresented = false
             isWhatsNewPresented = false
             store.roomBeingRenamed = nil
-            isFriendsPresented = false
-            if !dismissingSheet { presentPendingFriendsSection() }
+            workspace.starting = nil
+            workspace.roomPeople = nil
+            workspace.show(destination.page)
         }
-        .sheet(
-            isPresented: $store.isCreateRoomPresented,
-            onDismiss: { store.createRoomParentID = nil; presentPendingFriendsSection() }
-        ) {
-            RoomCreationSheet(initialSource: workspace.activeServer)
-                .environmentObject(store)
+        .onReceive(NotificationCenter.default.publisher(for: .cowchatShowFriends)) { _ in
+            workspace.show(.friends)
+        }
+        .sheet(item: $workspace.starting) { sheet in
+            Group {
+                switch sheet {
+                case let .newRoom(request): NewRoomSheet(workspace: workspace, request: request)
+                case .newSession: NewSessionSheet(workspace: workspace)
+                case .joinWithCode: JoinWithCodeSheet(workspace: workspace)
+                case let .addPerson(session): AddPersonSheet(workspace: workspace, session: session)
+                }
+            }
+            // 12 clear above and below the sheet.
+            .environment(\.sheetHeightLimit, contentHeight.map { $0 - 24 })
+        }
+        .sheet(isPresented: Binding(get: { workspace.roomPeople != nil },
+                                    set: { if !$0 { workspace.roomPeople = nil } })) {
+            RoomParticipantsSheet(social: workspace.social, participants: $workspace.roomPeople)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .cowchatShowSettings)) { _ in
+            // The app menu's command reaches the key window. A post while the app is in the background, which only
+            // the prototype's director makes, reaches the window too.
+            guard controlActiveState == .key || controlActiveState == .active || !NSApp.isActive else { return }
+            isSettingsPresented = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .cowchatShowWhatsNew)) { _ in
             guard controlActiveState == .key || controlActiveState == .active else { return }
             isWhatsNewPresented = true
         }
-        .sheet(isPresented: $isWhatsNewPresented, onDismiss: presentPendingFriendsSection) { WhatsNewView() }
-        .sheet(item: $store.roomBeingRenamed, onDismiss: presentPendingFriendsSection) { room in
+        .sheet(isPresented: $isWhatsNewPresented) { WhatsNewView() }
+        .sheet(item: $store.roomBeingRenamed) { room in
             RenameRoomView(room: room)
                 .environmentObject(store)
         }
-        .sheet(isPresented: $isSettingsPresented, onDismiss: presentPendingFriendsSection) {
+        .sheet(isPresented: $isSettingsPresented) {
             SettingsView(
                 isPresented: $isSettingsPresented,
                 onShowOnboarding: onShowOnboarding
@@ -179,35 +224,58 @@ struct ContentView: View {
                     .environmentObject(store)
                     .padding(18)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if let room = store.secondAgentHintRoom {
-                SecondAgentHintNotice(room: room)
-                    .id(room.id)
-                    .environmentObject(store)
-                    .padding(18)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.2), value: store.roomReadyNotice?.id)
-        .animation(.easeInOut(duration: 0.2), value: store.secondAgentHintRoom?.id)
     }
 
-    private func presentPendingFriendsSection() {
-        guard let section = pendingFriendsSection, workspace.social.phase == .signedIn else {
-            pendingFriendsSection = nil
-            return
+    // copy:
+    /// The window's title: the page's, or the open room's.
+    private var windowTitle: String {
+        switch workspace.page {
+        case .inbox: return "Inbox"
+        case .team: return "Team"
+        case .friends: return "Friends"
+        case nil: return store.selectedRoom?.name ?? "Cowchat"
         }
-        pendingFriendsSection = nil
-        friendsSection = section
-        isFriendsPresented = true
+    }
+}
+
+/// A toolbar button's label (navigation round 2, section 2): its 20 glyph in Icon/Secondary, centred in a 36 circle
+/// that is clear at rest and takes a sidebar row's hover under the pointer, whose capsule is a circle at 36. It has no
+/// pressed state, since a SwiftUI menu can't show one and the three buttons must look alike.
+private struct ToolbarCircleLabel<Glyph: View>: View {
+    let isHovering: Bool
+    @ViewBuilder let glyph: () -> Glyph
+
+    var body: some View {
+        glyph()
+            .foregroundStyle(SemanticColor.iconSecondary)
+            .frame(width: 20, height: 20)
+            .frame(width: 36, height: 36)
+            .background(SidebarRowBackground(state: .init(isSelected: false, isHovering: isHovering)))
+            .contentShape(Circle())
+    }
+}
+
+/// A toolbar button's hover, taken on the button or the menu itself, as the sidebar's filter button and
+/// `SheetMenuField` take theirs, so the three toolbar buttons take it the same way.
+private struct ToolbarCircleHover<Control: View>: View {
+    @ViewBuilder let control: (_ isHovering: Bool) -> Control
+    @State private var isHovering = false
+
+    var body: some View {
+        control(isHovering)
+            .onHover { isHovering = $0 }
     }
 }
 
 private struct SidebarView: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @Binding var isSidebarVisible: Bool
-    @Binding var isSettingsPresented: Bool
-    @State private var isArchiveExpanded = false
-    @State private var isRoomBrowserPresented = false
+    /// What a legacy scroller takes from the list's right edge, which the pinned rows give up too so they end where the
+    /// cells end.
+    @State private var listsScrollerWidth: CGFloat = 0
     @FocusState private var isSearchFocused: Bool
     /// Once per process: the launch-focus clear must not repeat on sidebar re-mounts.
     private static var didClearLaunchFocus = false
@@ -219,55 +287,33 @@ private struct SidebarView: View {
     // run loop during AppKit menu/hover tracking (2026-08-13 archive hang,
     // same loop signature as the 2026-08-06 freeze).
     var body: some View {
-        VStack(spacing: 0) {
-            LobbyNavRow(local: workspace.local)
-
-            searchField
-                .padding(.horizontal, 12)
-                .padding(.bottom, 14)
-
-            Button { isRoomBrowserPresented = true } label: {
-                Label("Find a room", systemImage: "magnifyingglass")
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 0) {
+            // Pinned, and never scrolled: the search field with its filter, 8 under the toolbar so its top is level
+            // with the main card's, then 12 under it the Inbox, Team and the line under them, 8 in from both sides, so
+            // they share one left edge with the cells (navigation round 2, section 3.1). Signed out only the search
+            // field is left.
+            VStack(alignment: .leading, spacing: 0) {
+                SearchCapsule(placeholder: workspace.sidebarFilter.searchPlaceholder, text: $workspace.searchText,
+                              isFocused: $isSearchFocused, clearLabel: "Clear search") {
+                    SidebarFilterButton()
+                }
+                AccountNavRows(inbox: workspace.inbox)
             }
-            .buttonStyle(.plain)
-            .gallopText(.bodySStrong, color: SemanticColor.textSecondary)
-            .padding(.horizontal, 18)
-            .padding(.bottom, 12)
-            .sheet(isPresented: $isRoomBrowserPresented) {
-                RoomBrowserView(workspace: workspace)
-            }
+            .padding(.horizontal, 8)
+            .padding(.trailing, listsScrollerWidth)
 
-            SidebarRoomLists(
+            SidebarList(
                 local: workspace.local,
                 globalOrLocal: workspace.global ?? workspace.local,
                 accountOrLocal: workspace.accountGlobal ?? workspace.local,
+                sessions: workspace.liveSessions,
+                inbox: workspace.inbox,
                 hasAccountGlobal: workspace.accountGlobal != nil,
                 hasGlobal: workspace.global != nil
             )
-
-            // Archive stays pinned above the footer instead of trailing the
-            // room list (which floats it mid-sidebar when the list is short).
-            ArchiveSection(
-                local: workspace.local,
-                globalOrLocal: workspace.global ?? workspace.local,
-                accountOrLocal: workspace.accountGlobal ?? workspace.local,
-                hasAccountGlobal: workspace.accountGlobal != nil,
-                hasGlobal: workspace.global != nil,
-                isExpanded: $isArchiveExpanded
-            )
-            .padding(.horizontal, 8)
-
-            SidebarFooter(
-                local: workspace.local,
-                globalOrLocal: workspace.global ?? workspace.local,
-                accountOrLocal: workspace.accountGlobal ?? workspace.local,
-                hasAccountGlobal: workspace.accountGlobal != nil,
-                hasGlobal: workspace.global != nil,
-                isSettingsPresented: $isSettingsPresented
-            )
+            .onPreferenceChange(SidebarScrollerWidthKey.self) { listsScrollerWidth = $0 }
         }
-        .padding(.top, 14)
+        .padding(.top, 8)
         .onAppear {
             // The pinned search field is the window's first focusable view, so
             // AppKit hands it first-responder at launch and stray keystrokes
@@ -283,77 +329,86 @@ private struct SidebarView: View {
             }
         }
     }
-
-    private var searchField: some View {
-        HStack(spacing: 8) {
-            GallopIconView(icon: .search, fallbackSystemName: "magnifyingglass", size: 13)
-                .foregroundStyle(SemanticColor.iconTertiary)
-            TextField("Search rooms or messages", text: $workspace.searchText)
-                .textFieldStyle(.plain)
-                .gallopText(.bodyM, color: SemanticColor.textPrimary)
-                .focused($isSearchFocused)
-                .onExitCommand {
-                    // Escape clears the filter and returns focus to the list.
-                    workspace.searchText = ""
-                    isSearchFocused = false
-                }
-                .accessibilityLabel("Search rooms or messages")
-            if !workspace.searchText.isEmpty {
-                Button { workspace.searchText = "" } label: {
-                    GallopIconView(icon: .dismiss, fallbackSystemName: "xmark.circle.fill", size: 13)
-                        .foregroundStyle(SemanticColor.iconSubtle)
-                }
-                .buttonStyle(.plain)
-                .macAccessibleAction(label: "Clear room search") { workspace.searchText = "" }
-            }
-        }
-        .padding(.horizontal, 11)
-        .frame(height: 36)
-        .background(SemanticColor.textfieldDefault, in: Capsule())
-        .overlay {
-            Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
-        }
-    }
-
 }
 
-/// Dash-style nav destination: Lobby is Home, above the conversations
-/// table, not a row inside it (Patrick, 2026-08-06).
-private struct LobbyNavRow: View {
+/// The sidebar's filter as Gallop's IconButton at size XS inside the search field: a 28 circle with the 16
+/// Settings.Slider glyph that opens the filter's menu (navigation round 2, section 3.4). At All it is the ghost button;
+/// at any other value it takes the Primary button's fill, the on recipe of the Gallop Chip it replaces. Signed out the
+/// menu offers All and Archived only. A SwiftUI menu doesn't tell its label when it is pressed, so the button draws
+/// hover and not press, and pressing it leaves the search's text unfocused.
+private struct SidebarFilterButton: View {
     @EnvironmentObject private var workspace: WorkspaceStore
-    @ObservedObject var local: ChatStore
     @State private var isHovering = false
 
-    private var lobby: Room? {
-        local.rooms.first { $0.name.localizedCaseInsensitiveCompare("lobby") == .orderedSame }
+    var body: some View {
+        let filter = workspace.sidebarFilter
+        Menu {
+            ForEach(SidebarFilter.offered(signedIn: workspace.accountGlobal != nil)) { value in
+                Toggle(value.title, isOn: Binding(get: { value == workspace.sidebarFilter },
+                                                  set: { if $0 { workspace.sidebarFilter = value } }))
+            }
+        } label: {
+            GallopIconView(icon: .settingsSlider, fallbackSystemName: "slider.horizontal.3", size: 16)
+                .foregroundStyle(glyph(isOn: filter != .all))
+                .frame(width: 28, height: 28)
+                .background(fill(isOn: filter != .all), in: Circle())
+                .contentShape(Circle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { isHovering = $0 }
+        // copy:
+        .help("Filter")
+        // copy:
+        .accessibilityLabel("Filter, \(filter.title)")
     }
+
+    private func fill(isOn: Bool) -> Color {
+        if isOn { return isHovering ? SemanticColor.buttonPrimaryHover : SemanticColor.buttonPrimaryDefault }
+        return isHovering ? SemanticColor.buttonGhostHover : Color.clear
+    }
+
+    private func glyph(isOn: Bool) -> Color {
+        if isOn { return SemanticColor.buttonPrimaryIconDefault }
+        return isHovering ? SemanticColor.buttonGhostIconHover : SemanticColor.buttonGhostIconDefault
+    }
+}
+
+/// A destination above the list: its glyph at 18, 10 before the title in Body S Strong, 10 at the sides, 36 tall, on
+/// the sidebar's row fill. The Inbox and Team draw it. A count sits at the row's end in Caption, Text/Tertiary, and
+/// nothing at zero.
+private struct SidebarNavRow: View {
+    let title: String
+    var icon = GallopIcon.sunrise
+    var fallbackSystemName = "sunrise"
+    var count = 0
+    /// The row's accessible name, "Open <title>" unless it says otherwise.
+    var accessibilityLabel: String?
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovering = false
 
     var body: some View {
-        if let lobby {
-            row(lobby)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 10)
-        }
-    }
-
-    private func row(_ lobby: Room) -> some View {
-        let isSelected = workspace.isSelected(lobby, on: .local)
-        return Button {
-            Task { await workspace.select(room: lobby, on: .local) }
-        } label: {
+        Button(action: action) {
             HStack(spacing: 10) {
-                GallopIconView(icon: .sunrise, fallbackSystemName: "sunrise", size: 18)
+                GallopIconView(icon: icon, fallbackSystemName: fallbackSystemName, size: 18)
                     .foregroundStyle(
                         isSelected
                             ? SemanticColor.surfaceGlassOnIconDefault
                             : SemanticColor.iconSecondary
                     )
-                Text("Lobby")
+                Text(title)
                     .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
                 Spacer()
+                if count > 0 {
+                    Text("\(count)")
+                        .gallopText(.caption, color: SemanticColor.textTertiary)
+                }
             }
             .padding(.horizontal, 10)
-            .frame(height: 38)
+            .frame(height: 36)
             .background(
                 SidebarRowBackground(
                     state: .init(isSelected: isSelected, isHovering: isHovering)
@@ -364,407 +419,361 @@ private struct LobbyNavRow: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .macAccessibleAction(
-            label: "Open Lobby",
-            value: isSelected ? "selected" : nil
-        ) {
-            Task { await workspace.select(room: lobby, on: .local) }
-        }
-    }
-}
-
-/// One selectable room row, shared by the room lists and the archive.
-private struct SidebarRoomRowButton: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @ObservedObject var store: ChatStore
-    let room: Room
-    let server: WorkspaceStore.Server
-    let now: Date
-    var isArchived = false
-
-    var body: some View {
-        Button {
-            Task { await workspace.select(room: room, on: server) }
-        } label: {
-            RoomRow(
-                room: room,
-                messagePreview: store.roomMessagePreviews[room.id],
-                isSlackConnected: store.slackConnectedRoomIDs.contains(room.id),
-                isSelected: workspace.isSelected(room, on: server),
-                isUnread: store.isUnread(room),
-                isWorking: store.isWorking(room, at: now),
-                now: now
-            )
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            if isArchived {
-                Button("Unarchive") { store.unarchive(room) }
-            } else {
-                Button("Rename") { store.presentRename(room) }
-                    .disabled(!store.canRename(room))
-                if room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame {
-                    Button("Archive") {
-                        Task { await store.archive(room) }
-                    }
-                }
-            }
-        }
-        .macAccessibleAction(label: "Open \(room.name)", value: accessibilityValue) {
-            Task { await workspace.select(room: room, on: server) }
-        }
+            label: accessibilityLabel ?? "Open \(title)",
+            value: accessibilityValue,
+            action: action
+        )
     }
 
-    /// Value announced by the AccessibleActionOverlay for a room row (see
-    /// macAccessibleAction) — RoomRow's own accessibility subtree is hidden,
-    /// so unread/selected state must be composed here to be announced at all.
+    // copy:
     private var accessibilityValue: String? {
-        let parts = [
-            store.isWorking(room, at: now) ? "Agents working" : nil,
-            store.isUnread(room) ? "Unread" : nil,
-            store.slackConnectedRoomIDs.contains(room.id) ? "Connected to Slack" : nil,
-            workspace.isSelected(room, on: server) ? "selected" : nil,
-        ].compactMap { $0 }
+        let parts = [count > 0 ? "\(count) unread" : nil, isSelected ? "selected" : nil].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 }
 
-private struct SidebarRoomLists: View {
+/// The Inbox and Team, 12 under the search field and 2 apart, and the line under them with 8 above it, once the person
+/// is signed in. The Inbox's
+/// count is every unread item, open invitations included, and it shows nothing at zero. The line is 1 point of
+/// Border/Default at the rows' padding. The note's Surface/Glass/Border/Shadow is the dark sidebar's own colour, so the
+/// line could not be seen in dark mode.
+private struct AccountNavRows: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @ObservedObject var inbox: InboxStore
+
+    var body: some View {
+        if workspace.accountGlobal != nil {
+            VStack(spacing: 0) {
+                // copy:
+                SidebarNavRow(title: "Inbox", icon: .incoming, fallbackSystemName: "tray.and.arrow.down",
+                              count: inbox.unreadCount, isSelected: workspace.page == .inbox) {
+                    workspace.show(.inbox)
+                }
+                // copy:
+                SidebarNavRow(title: "Team", icon: .posse, fallbackSystemName: "person.2",
+                              isSelected: workspace.page == .team) {
+                    workspace.show(.team)
+                }
+                .padding(.top, 2)
+                Rectangle()
+                    .fill(SemanticColor.borderDefault)
+                    .frame(height: 1)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
+                    .accessibilityHidden(true)
+            }
+            .padding(.top, 12)
+        }
+    }
+}
+
+/// The harness a session runs in, as a 16-point rounded square: Claude Code's
+/// asterisk on its clay, or Codex's code glyph on near-black. Gallop has no
+/// tokens for other products' marks, so their colours are written here. In
+/// dark mode Codex's mark turns light so it keeps 3:1 on every dark surface.
+struct HarnessMark: View {
+    let harness: LiveSession.Harness
+    var size: CGFloat = 16
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+            .fill(background)
+            .overlay {
+                Image(systemName: harness == .claudeCode ? "asterisk" : "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: size * 0.56, weight: .bold))
+                    .foregroundStyle(glyph)
+            }
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+
+    private var background: Color {
+        switch harness {
+        case .claudeCode: return HexColor.adaptive(light: "#D97757", dark: "#D97757")
+        case .codex: return HexColor.adaptive(light: "#1D1916", dark: "#AEA399")
+        }
+    }
+
+    private var glyph: Color {
+        switch harness {
+        case .claudeCode: return .white
+        case .codex: return HexColor.adaptive(light: "#FFFFFF", dark: "#1D1916")
+        }
+    }
+}
+
+/// A working session's mark: Dash Chat's live-task glyph, which a room row
+/// draws while its agents work, turning once a second as Gallop's spinner
+/// does. At 20 its arc has the 10-point spinner's radius and stroke, in
+/// Icon/Tertiary so it stays quiet beside the names.
+struct SessionWorkingMark: View {
+    @State private var turning = false
+
+    var body: some View {
+        GallopIconView(icon: .thinking, fallbackSystemName: "circle.dotted", size: 20)
+            .foregroundStyle(SemanticColor.iconTertiary)
+            .frame(width: 10, height: 10)
+            .rotationEffect(.degrees(turning ? 360 : 0))
+            .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: turning)
+            .onAppear { turning = true }
+            .accessibilityHidden(true)
+    }
+}
+
+/// The row after the first five sessions when more are live: how many more in Body S, Text/Secondary at the names'
+/// indent with no icon, 32 tall, with the row hover of the surface it sits on. Pressing it shows every row, and it then
+/// says how many it hides again. Home's sessions in the sidebar and each person on the Team page draw it.
+struct SessionsMoreRow: View {
+    enum Surface { case sidebar, page }
+
+    let title: String
+    let indent: CGFloat
+    var surface = Surface.sidebar
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Group {
+            switch surface {
+            case .sidebar:
+                Button(action: action) {
+                    label.background(SidebarRowBackground(state: .init(isSelected: false, isHovering: isHovering)))
+                }
+                .buttonStyle(.plain)
+                .onHover { isHovering = $0 }
+            case .page:
+                Button(action: action) { label }
+                    .buttonStyle(PageRowButtonStyle())
+            }
+        }
+        .macAccessibleAction(label: title, action: action)
+    }
+
+    private var label: some View {
+        Text(title)
+            .gallopText(.bodyS, color: SemanticColor.textSecondary)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, indent)
+            .padding(.trailing, 6)
+            .frame(height: 32)
+            .contentShape(Rectangle())
+    }
+}
+
+/// What a legacy scroller takes from the room lists' width: the lists' width less their content's, or none.
+private struct SidebarScrollerWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// The room lists' content width, measured inside their scroll view.
+private struct SidebarListsContentWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// The scrolling list under the sidebar's line: the rows the list model gives for the filter and the search
+/// (`RoomSidebarPresentation`), with the cells of all three connections in one order. The order holds while the pointer
+/// is over the list and re-sorts when it leaves, so a busy room never moves a cell under a press. The list never
+/// scrolls by itself. Its scroll view takes its identity from the filter and from whether the search is empty, so it
+/// starts from its top when either changes and at no other time (navigation note, section 3.6).
+private struct SidebarList: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @ObservedObject var local: ChatStore
     @ObservedObject var globalOrLocal: ChatStore
     @ObservedObject var accountOrLocal: ChatStore
+    @ObservedObject var sessions: LiveSessions
+    @ObservedObject var inbox: InboxStore
     let hasAccountGlobal: Bool
     let hasGlobal: Bool
+    /// Each room's time as the pointer came over the list, which orders the list until the pointer leaves. A room
+    /// that appears meanwhile goes to the end.
+    @State private var frozenActivity: [String: Date]?
+    /// The list's width and its content's, whose difference is what a legacy scroller takes.
+    @State private var listsWidth: CGFloat = 0
+    @State private var contentWidth: CGFloat = 0
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: anyAgentsThinking ? 10 : 60)) { timeline in
+            let rows = rows
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if visibleRoomsEmpty && isSearchActive {
-                        emptyRoomsState
-                    } else {
-                        section(for: .local, store: local, at: timeline.date)
-                        if hasGlobal || hasAccountGlobal {
-                            sectionHeader("Global rooms")
-                        }
-                        if hasGlobal {
-                            section(for: .global, store: globalOrLocal, at: timeline.date)
-                        }
-                        if hasAccountGlobal {
-                            section(for: .accountGlobal, store: accountOrLocal, at: timeline.date)
-                        }
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    if rows.isEmpty, let line = emptyLine {
+                        Text(line)
+                            .gallopText(.bodyS, color: SemanticColor.textTertiary)
+                            .padding(.leading, 10)
+                            .padding(.top, 4)
+                    }
+                    ForEach(rows) { row in
+                        self.row(row, now: timeline.date)
                     }
                 }
                 .padding(.horizontal, 8)
+                // The cells start 8 under the line, or 12 under the search field when there is no line.
+                .padding(.top, hasAccountGlobal ? 8 : 12)
                 .padding(.bottom, 12)
+                .background {
+                    GeometryReader { content in
+                        Color.clear.preference(key: SidebarListsContentWidthKey.self, value: content.size.width)
+                    }
+                }
             }
+            .id(scrollIdentity)
+            .background {
+                GeometryReader { viewport in
+                    Color.clear
+                        .onAppear { listsWidth = viewport.size.width }
+                        .onChange(of: viewport.size.width) { listsWidth = $0 }
+                }
+            }
+            .onPreferenceChange(SidebarListsContentWidthKey.self) { contentWidth = $0 }
+            .preference(key: SidebarScrollerWidthKey.self,
+                        value: contentWidth > 0 ? max(0, listsWidth - contentWidth) : 0)
             .scrollIndicators(.hidden)
+            .onHover { frozenActivity = $0 ? liveActivity : nil }
         }
     }
 
-    private func baseRooms(in store: ChatStore, server: WorkspaceStore.Server) -> [Room] {
-        // Lobby belongs in local navigation, not in the global room list.
-        // Local searches can still find its name and messages.
-        let searching = !workspace.searchText
-            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let source = searching && server == .local
-            ? store.unarchivedRooms
-            : store.unarchivedRooms.filter {
-                $0.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame
-            }
-        return RoomSidebarPresentation.filteredRooms(
-            from: source,
-            query: workspace.searchText,
-            matchingMessageRoomIDs: store.messageSearchRoomIDs
-        )
+    /// The filter, and whether a search is typed. A new value of either is a new list, shown from its top.
+    private var scrollIdentity: String {
+        "\(workspace.sidebarFilter.rawValue)/\(workspace.searchText.isEmpty)"
+    }
+
+    private var isSearching: Bool {
+        !workspace.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var rows: [SidebarRow] {
+        let rooms = workspace.sidebarRooms
+        let frozen = frozenActivity
+        let activity: (SidebarRoom) -> Date = { room in
+            guard let frozen else { return room.activity }
+            return frozen[room.id] ?? .distantPast
+        }
+        if isSearching {
+            return RoomSidebarPresentation.searchRows(query: workspace.searchText, filter: workspace.sidebarFilter,
+                                                      rooms: rooms, joinable: workspace.sidebarJoinable,
+                                                      activity: activity)
+        }
+        return RoomSidebarPresentation.rows(for: workspace.sidebarFilter, rooms: rooms, activity: activity)
+    }
+
+    private var emptyLine: String? {
+        RoomSidebarPresentation.emptyLine(filter: workspace.sidebarFilter, isSearching: isSearching,
+                                          isSearchingMessages: isSearchingMessages)
+    }
+
+    private var stores: [(WorkspaceStore.Server, ChatStore)] {
+        [(.local, local)] + (hasGlobal ? [(.global, globalOrLocal)] : [])
+            + (hasAccountGlobal ? [(.accountGlobal, accountOrLocal)] : [])
+    }
+
+    private func store(for server: WorkspaceStore.Server) -> ChatStore {
+        switch server {
+        case .local: return local
+        case .global: return globalOrLocal
+        case .accountGlobal: return accountOrLocal
+        }
+    }
+
+    private var liveActivity: [String: Date] {
+        Dictionary(workspace.sidebarRooms.map { ($0.id, $0.activity) }, uniquingKeysWith: { max($0, $1) })
     }
 
     private var anyAgentsThinking: Bool {
-        !local.lastThinkingAt.isEmpty
-            || (hasGlobal && !globalOrLocal.lastThinkingAt.isEmpty)
-            || (hasAccountGlobal && !accountOrLocal.lastThinkingAt.isEmpty)
-    }
-
-    private var visibleRoomsEmpty: Bool {
-        baseRooms(in: local, server: .local).isEmpty
-            && (!hasGlobal || baseRooms(in: globalOrLocal, server: .global).isEmpty)
-            && (!hasAccountGlobal || baseRooms(in: accountOrLocal, server: .accountGlobal).isEmpty)
-    }
-
-    /// Item D (quiet empty state): the sidebar only shows an explicit empty
-    /// message while a search is actually in flight or has text typed. A
-    /// genuinely empty room list (no search) renders nothing above Archive.
-    private var isSearchActive: Bool {
-        isSearchingMessages || !workspace.searchText.isEmpty
+        stores.contains { !$0.1.lastThinkingAt.isEmpty }
     }
 
     private var isSearchingMessages: Bool {
-        local.isSearchingMessages || (hasGlobal && globalOrLocal.isSearchingMessages)
-            || (hasAccountGlobal && accountOrLocal.isSearchingMessages)
+        stores.contains { $0.1.isSearchingMessages }
+    }
+
+    /// What the cells of a connection show of it: down once it has been down for a while.
+    private func connection(of server: WorkspaceStore.Server) -> SidebarConnection {
+        let store = store(for: server)
+        return SidebarConnection(status: store.connectionStatus, isDown: store.isConnectionDown)
     }
 
     @ViewBuilder
-    private func section(
-        for server: WorkspaceStore.Server,
-        store: ChatStore,
-        at now: Date
-    ) -> some View {
-        let rooms = baseRooms(in: store, server: server)
-        if server == .local && (hasGlobal || hasAccountGlobal) {
-            sectionHeader("Local rooms")
-        }
-        if !rooms.isEmpty {
-            VStack(spacing: 0) {
-                ForEach(RoomSidebarPresentation.sortedByRecency(rooms)) { room in
-                    SidebarRoomRowButton(store: store, room: room, server: server, now: now)
-                }
-            }
-            .padding(.bottom, 10)
-        }
-    }
-
-    private func sectionHeader(_ title: String) -> some View {
-        HStack(spacing: 6) {
+    private func row(_ row: SidebarRow, now: Date) -> some View {
+        switch row {
+        case let .cell(room):
+            cell(room, now: now)
+        case let .label(title):
             Text(title)
                 .gallopText(.caption, color: SemanticColor.textTertiary)
-            Spacer()
+                .padding(.leading, 10)
+                // With the rows' 2 between, 8 under the group before and 4 over the group after.
+                .padding(.top, 6)
+                .padding(.bottom, 2)
+        case let .joinable(item):
+            let connection = connection(of: item.server)
+            SidebarCell(name: item.name,
+                        placeIcon: SidebarPlaceIcon.icon(place: .online, isLocalServer: false, connection: connection),
+                        connection: connection, time: item.at?.cowchatShortTime(relativeTo: now) ?? "",
+                        isSelected: false) {
+                switch item.source {
+                case let .invitation(itemID): workspace.openInvitation(itemID: itemID)
+                case let .room(room): Task { await workspace.openJoinable(room) }
+                }
+            }
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 10)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
     }
 
-    /// Only ever shown while `isSearchActive`, so the branch below always has
-    /// search text (or an in-flight search) to react to — never the bare
-    /// "no rooms at all" case, which item D renders as nothing instead.
-    private var emptyRoomsState: some View {
-        VStack(spacing: 8) {
-            if isSearchingMessages {
-                ProgressView()
-                    .controlSize(.small)
+    private func cell(_ room: SidebarRoom, now: Date) -> some View {
+        let store = store(for: room.server)
+        let connection = connection(of: room.server)
+        let placeIcon = SidebarPlaceIcon.icon(place: room.place, isLocalServer: room.server == .local,
+                                              connection: connection)
+        let mark: SidebarMark? = room.session.flatMap { session in
+            switch session.state {
+            case .working: return .working
+            case .prompt: return .waiting(session.harness.appName)
+            case .idle: return nil
+            }
+        }
+        return SidebarCell(
+            name: room.room.name, placeIcon: placeIcon, connection: connection, mark: mark,
+            time: room.activity.cowchatShortTime(relativeTo: now), isUnread: room.isUnread,
+            isSelected: workspace.isSelected(room.room, on: room.server),
+            open: { Task { await workspace.select(room: room.room, on: room.server) } },
+            addPerson: room.session.map { session in { workspace.presentAddPerson(to: session) } }
+        ) {
+            if room.isArchived {
+                Button("Unarchive") { store.unarchive(room.room) }
             } else {
-                GallopIconView(icon: .search, fallbackSystemName: "magnifyingglass", size: 20)
-                    .foregroundStyle(SemanticColor.iconTertiary)
-            }
-            Text(isSearchingMessages ? "Searching messages…" : "No rooms or messages found")
-                .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
-            if !workspace.searchText.isEmpty {
-                Text("Try another room, message, or agent name.")
-                    .gallopText(.caption, color: SemanticColor.textTertiary)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 18)
-        .padding(.top, 44)
-    }
-}
-
-private struct ArchiveSection: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @ObservedObject var local: ChatStore
-    @ObservedObject var globalOrLocal: ChatStore
-    @ObservedObject var accountOrLocal: ChatStore
-    let hasAccountGlobal: Bool
-    let hasGlobal: Bool
-    @Binding var isExpanded: Bool
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 60)) { timeline in
-            content(at: timeline.date)
-        }
-    }
-
-    private var isVisible: Bool {
-        isExpanded || !workspace.searchText.isEmpty
-    }
-
-    private func archivedRooms(in store: ChatStore) -> [Room] {
-        RoomSidebarPresentation.filteredRooms(
-            from: store.archivedRooms,
-            query: workspace.searchText,
-            matchingMessageRoomIDs: store.messageSearchRoomIDs
-        )
-    }
-
-    private struct Entry: Identifiable {
-        let server: WorkspaceStore.Server
-        let store: ChatStore
-        let room: Room
-        var id: String { server.rawValue + "." + room.id }
-    }
-
-    private var entries: [Entry] {
-        var all = archivedRooms(in: local).map { Entry(server: .local, store: local, room: $0) }
-        if hasGlobal {
-            all += archivedRooms(in: globalOrLocal).map { Entry(server: .global, store: globalOrLocal, room: $0) }
-        }
-        if hasAccountGlobal {
-            all += archivedRooms(in: accountOrLocal).map { Entry(server: .accountGlobal, store: accountOrLocal, room: $0) }
-        }
-        return all
-    }
-
-    private func content(at now: Date) -> some View {
-        let entries = entries
-        return VStack(alignment: .leading, spacing: 4) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "archivebox")
-                        .font(.system(size: 13, weight: .medium))
-                        .offset(y: 1)  // optical center against the label ink
-                    Text("Archive")
-                        .gallopText(.bodySStrong)
-                    Spacer()
-                    if !entries.isEmpty {
-                        Text("\(entries.count)")
-                            .gallopText(.caption)
+                if let session = room.session {
+                    // copy:
+                    Button("Add person…") { workspace.presentAddPerson(to: session) }
+                }
+                Button("Rename") { store.presentRename(room.room) }
+                    .disabled(!store.canRename(room.room))
+                if room.room.name.localizedCaseInsensitiveCompare("lobby") != .orderedSame {
+                    Button("Archive") {
+                        Task { await store.archive(room.room) }
                     }
-                    Image(systemName: isVisible ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-                .foregroundStyle(SemanticColor.textTertiary)
-                // Leading 16 matches RoomRow's avatar inset so the archive
-                // glyph joins the same left column as the rows above it.
-                .padding(.leading, 16)
-                .padding(.trailing, 10)
-                .frame(height: 36)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .macAccessibleAction(
-                label: "Archive, \(entries.count) rooms",
-                value: isVisible ? "expanded" : "collapsed"
-            ) {
-                withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
-            }
-
-            if isVisible {
-                if entries.isEmpty {
-                    Text("No rooms archived")
-                        .gallopText(.caption, color: SemanticColor.textTertiary)
-                        .padding(.leading, 16)
-                        .padding(.trailing, 10)
-                        .padding(.bottom, 8)
-                } else {
-                    // Bounded: the archive sits OUTSIDE the room-list scroll
-                    // view, so an unbounded expansion would crush the room
-                    // list and push the footer offscreen at min window height.
-                    // Rows are a fixed 54pt; cap the reveal at ~4.5 rows.
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(entries) { entry in
-                                SidebarRoomRowButton(
-                                    store: entry.store,
-                                    room: entry.room,
-                                    server: entry.server,
-                                    now: now,
-                                    isArchived: true
-                                )
-                            }
-                        }
-                    }
-                    .scrollIndicators(.hidden)
-                    .frame(height: min(CGFloat(entries.count) * 54, 244))
                 }
             }
-        }
-    }
-}
-
-private struct SidebarFooter: View {
-    @ObservedObject var local: ChatStore
-    @ObservedObject var globalOrLocal: ChatStore
-    @ObservedObject var accountOrLocal: ChatStore
-    let hasAccountGlobal: Bool
-    let hasGlobal: Bool
-    @Binding var isSettingsPresented: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Button {
-                isSettingsPresented = true
-            } label: {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(connectionColor)
-                        .frame(width: 7, height: 7)
-                    Text(connectionLabel)
-                        .gallopText(.caption, color: SemanticColor.textSecondary)
-                }
-                .contentShape(Rectangle())
+            if placeIcon.isDown {
+                // copy:
+                Button("Reconnect") { reconnect() }
             }
-            .buttonStyle(.plain)
-            .help(connectionDetails)
-            .macAccessibleAction(label: "Connection settings") { isSettingsPresented = true }
-            Spacer()
-            if anyServerDisconnected {
-                CircleIconButton(
-                    icon: .retry,
-                    fallbackSystemName: "arrow.clockwise",
-                    help: "Reconnect",
-                    action: reconnectDisconnectedServers
-                )
-            }
-            CircleIconButton(
-                icon: .settings,
-                fallbackSystemName: "gearshape",
-                help: "Settings",
-                action: { isSettingsPresented = true }
-            )
         }
-        .padding(.horizontal, 12)
-        .frame(height: 58)
     }
 
-    private var connectionLabel: String {
-        if !anyServerDisconnected { return "Connected" }
-        if statuses.contains(where: { if case .connecting = $0 { return true }; return false }) {
-            return "Connecting…"
-        }
-        return "Connection issue"
-    }
-
-    private var connectionColor: Color {
-        if !anyServerDisconnected { return SemanticColor.success }
-        if statuses.contains(where: { if case .connecting = $0 { return true }; return false }) {
-            return SemanticColor.warning
-        }
-        return SemanticColor.textError
-    }
-
-    private var connectionDetails: String {
-        var details = ["Local: \(local.connectionStatus.label)"]
-        if hasGlobal { details.append("Global rooms (key): \(globalOrLocal.connectionStatus.label)") }
-        if hasAccountGlobal { details.append("Global rooms (account): \(accountOrLocal.connectionStatus.label)") }
-        return details.joined(separator: " · ")
-    }
-
-    private var statuses: [ConnectionStatus] {
-        [local.connectionStatus]
-            + (hasGlobal ? [globalOrLocal.connectionStatus] : [])
-            + (hasAccountGlobal ? [accountOrLocal.connectionStatus] : [])
-    }
-
-    private var anyServerDisconnected: Bool {
-        !local.connectionStatus.isConnected
-            || (hasGlobal && !globalOrLocal.connectionStatus.isConnected)
-            || (hasAccountGlobal && !accountOrLocal.connectionStatus.isConnected)
-    }
-
-    private func reconnectDisconnectedServers() {
-        var stores = [local]
-        if hasGlobal { stores.append(globalOrLocal) }
-        if hasAccountGlobal { stores.append(accountOrLocal) }
-        for store in stores where !store.connectionStatus.isConnected {
+    /// Reconnects every connection that is down, as the sidebar footer's Reconnect button did.
+    private func reconnect() {
+        for (_, store) in stores where !store.connectionStatus.isConnected {
             store.reconnect()
         }
     }
-
 }
 
 enum SidebarRowState {
@@ -774,11 +783,11 @@ enum SidebarRowState {
     }
 }
 
-/// Cowboy SidebarRowPill recipe at cowchat's row geometry (radius 12 — the
-/// 100pt pill reads as a blob on two-line 54pt rows; divergence logged in spec).
+/// Cowboy's SidebarRowPill recipe, a capsule, which on the sidebar's 36 rows is Cowboy's pill. Every row in the sidebar
+/// takes it: the Inbox, Team and every cell. The toolbar's buttons take its hover, as a circle at 36.
 struct SidebarRowBackground: View {
     let state: SidebarRowState
-    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 12, style: .continuous) }
+    private var shape: Capsule { Capsule(style: .continuous) }
 
     var body: some View {
         switch state {
@@ -792,215 +801,6 @@ struct SidebarRowBackground: View {
             shape.fill(SemanticColor.surface500)
                 .overlay(shape.strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5))
                 .shadow(color: Color.black.opacity(0.04), radius: 1.5, x: 0, y: 1)
-        }
-    }
-}
-
-private struct RoomRow: View {
-    let room: Room
-    let messagePreview: String?
-    let isSlackConnected: Bool
-    let isSelected: Bool
-    let isUnread: Bool
-    let isWorking: Bool
-    let now: Date
-    @State private var isHovering = false
-
-    var body: some View {
-        HStack(spacing: 10) {
-            RoomAvatar(name: room.name, size: 40, accented: isSelected)
-                .overlay(alignment: .bottomTrailing) {
-                    if isSlackConnected { SlackRoomBadge().offset(x: 3, y: 3) }
-                }
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Text(room.name)
-                        .gallopText(isUnread ? .bodySStrong : .bodyS, color: SemanticColor.textPrimary)
-                        .lineLimit(1)
-                    if room.encrypted {
-                        GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
-                            .foregroundStyle(SemanticColor.textPrimary)
-                    }
-                    Spacer(minLength: 6)
-                    if isWorking {
-                        GallopIconView(icon: .thinking, fallbackSystemName: "arrow.triangle.2.circlepath", size: 12)
-                            .foregroundStyle(SemanticColor.buttonPrimaryDefault)
-                    }
-                    Text(
-                        (room.lastActivity ?? room.createdAt)
-                            .cowchatRelativeTime(relativeTo: now)
-                    )
-                        .gallopText(.dataLabel, color: SemanticColor.textTertiary)
-                }
-
-                Text(roomSummary)
-                    .gallopText(.caption, color: SemanticColor.textTertiary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.trailing, 8)
-        .padding(.leading, 16)
-        .frame(height: 54)
-        // Floats in the leading padding rather than occupying a flow column,
-        // so read rows carry no reserved gutter and content never shifts
-        // when the dot appears.
-        .overlay(alignment: .leading) {
-            if isUnread {
-                Circle()
-                    .fill(Palette.nugget500)
-                    .frame(width: 7, height: 7)
-                    .padding(.leading, 4)
-            }
-        }
-        .background(SidebarRowBackground(state: .init(isSelected: isSelected, isHovering: isHovering)))
-        .onHover { isHovering = $0 }
-    }
-
-    private var roomSummary: String {
-        if let messagePreview, !messagePreview.isEmpty { return messagePreview }
-        if let description = room.description, !description.isEmpty { return description }
-        return "Open conversation"
-    }
-}
-
-private struct LobbyDashboardView: View {
-    @EnvironmentObject private var store: ChatStore
-    let room: Room
-    @Binding var isSidebarVisible: Bool
-
-    private var dashboardRooms: [Room] {
-        store.unarchivedRooms.filter { $0.id != room.id }
-    }
-
-    private var availableAgentCount: Int {
-        LobbyPresentation.availableAgentCount(
-            from: store.roomMembers,
-            excluding: store.agentID
-        )
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Lobby")
-                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                    Text("\(availableAgentCount) available agents")
-                        .gallopText(.caption, color: SemanticColor.textTertiary)
-                }
-
-                Spacer()
-            }
-            .padding(.top, 10)
-            .padding(.leading, 18)
-            .padding(.trailing, 14)
-            .frame(height: 58)
-
-            ScrollView {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 210, maximum: 280), spacing: 14)],
-                    alignment: .leading,
-                    spacing: 14
-                ) {
-                    ForEach(dashboardRooms) { dashboardRoom in
-                        DashboardRoomCard(room: dashboardRoom)
-                    }
-
-                    Button {
-                        store.presentCreateRoom()
-                    } label: {
-                        VStack(alignment: .leading, spacing: 18) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(SemanticColor.buttonSecondaryIconDefault)
-                                .frame(width: 34, height: 34)
-                                .background(SemanticColor.buttonSecondaryDefault, in: Circle())
-                            Spacer(minLength: 12)
-                            Text("New Room")
-                                .gallopText(.h4, color: SemanticColor.textPrimary)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
-                        .gallopCard()
-                    }
-                    .buttonStyle(.plain)
-                    .macAccessibleAction(label: "Create room") {
-                        store.presentCreateRoom()
-                    }
-                }
-                .padding(20)
-            }
-            .scrollIndicators(.hidden)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-        .background(SemanticColor.surface500)
-    }
-}
-
-private struct DashboardRoomCard: View {
-    @EnvironmentObject private var store: ChatStore
-    let room: Room
-
-    private var parentRoom: Room? {
-        guard let parentID = room.parentID else { return nil }
-        return store.rooms.first { $0.id == parentID }
-    }
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Button {
-                Task { await store.select(room: room) }
-            } label: {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        RoomAvatar(name: room.name, size: 38, accented: false)
-                        if room.encrypted {
-                            GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
-                                .foregroundStyle(SemanticColor.iconTertiary)
-                        }
-                        Spacer()
-                    }
-
-                    Spacer(minLength: 8)
-                    if let parentRoom {
-                        Text("in \(parentRoom.name)")
-                            .gallopText(.dataLabel, color: SemanticColor.textTertiary)
-                            .lineLimit(1)
-                    }
-                    Text(room.name)
-                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                        .lineLimit(1)
-                    Text(
-                        store.roomMessagePreviews[room.id]
-                            ?? room.description
-                            ?? "Open conversation"
-                    )
-                        .gallopText(.caption, color: SemanticColor.textTertiary)
-                        .lineLimit(2)
-                }
-                .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
-                .gallopCard()
-            }
-            .buttonStyle(.plain)
-            .macAccessibleAction(label: "Open \(room.name)") {
-                Task { await store.select(room: room) }
-            }
-
-            Menu {
-                Button("Rename") { store.presentRename(room) }
-                    .disabled(!store.canRename(room))
-                Button("Archive") {
-                    Task { await store.archive(room) }
-                }
-            } label: {
-                GallopIconView(icon: .ellipsis, fallbackSystemName: "ellipsis", size: 14)
-                    .foregroundStyle(SemanticColor.iconTertiary)
-                    .frame(width: 28, height: 28)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .accessibilityLabel("Actions for \(room.name)")
-            .padding(12)
         }
     }
 }
@@ -1064,49 +864,10 @@ private struct RoomReadyNotice: View {
     }
 }
 
-private struct SecondAgentHintNotice: View {
-    @EnvironmentObject private var store: ChatStore
-    let room: Room
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Text("Now connect your agent to this room. Copy the connect prompt from the ⋯ menu.")
-                .gallopText(.bodySStrong, color: SemanticColor.textPrimary)
-            Button {
-                store.secondAgentHintRoom = nil
-            } label: {
-                GallopIconView(icon: .dismiss, fallbackSystemName: "xmark", size: 11)
-                    .foregroundStyle(SemanticColor.iconTertiary)
-            }
-            .buttonStyle(.plain)
-            .macAccessibleAction(label: "Dismiss hint") {
-                store.secondAgentHintRoom = nil
-            }
-        }
-        .padding(14)
-        .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(SemanticColor.surfaceGlass500)
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(SemanticColor.surfaceGlassBorderHighlight, lineWidth: 1)
-                }
-        }
-        .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
-        .shadow(color: .black.opacity(0.04), radius: 0, y: 0.5)
-        .task {
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
-            if !Task.isCancelled { store.secondAgentHintRoom = nil }
-        }
-    }
-}
-
 private struct ChatRoomView: View {
     @EnvironmentObject private var store: ChatStore
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @EnvironmentObject private var sessions: LiveSessions
     let room: Room
     @Binding var isSidebarVisible: Bool
     @State private var isRoomKeyPresented = false
@@ -1122,34 +883,50 @@ private struct ChatRoomView: View {
     @State private var isArtifactPresented = false
     @State private var isMessageListNearBottom = true
     @State private var newMessageCount = 0
-    @State private var hasCopiedQuietRoomPrompt = false
+    @State private var hasCopiedEmptyRoomPrompt = false
     /// The list is revealed only after the initial bottom-anchor scroll, so a
     /// room switch never paints top-anchored content and animates it away.
     @State private var hasPositionedInitialScroll = false
+    /// The runs of hidden agent messages opened in place, by their first message.
+    @State private var openRuns: Set<String> = []
 
-    private var parentRoom: Room? {
-        guard let parentID = room.parentID else { return nil }
-        return store.rooms.first { $0.id == parentID }
+    private var title: String { room.name }
+
+    private var isAccountRoom: Bool { workspace.activeServer == .accountGlobal }
+
+    /// Whether the room offers People…, from the ⋯ menu and the header's caption.
+    private var offersPeople: Bool {
+        RoomPeople.isOffered(isLocal: store.isLocalConnection, apiKey: store.connectionProfile.apiKey)
     }
 
-    private func paneState(at now: Date) -> RoomPaneState {
+    /// Whether the viewer owns this account room, which is where a typed @name of one of their live sessions becomes a
+    /// mention, since the app knows only the viewer's sessions.
+    private var ownsRoom: Bool {
+        let social = workspace.social
+        let owner = social.rooms.first { $0.roomId == room.id }?.ownerId
+        return isAccountRoom && owner != nil && owner == social.account?.id
+    }
+
+    /// In every account room the person's own sessions are named by their name alone, without the handle the server
+    /// adds. Other senders keep the server's name.
+    private func senderName(of message: ChatMessage) -> String? {
+        guard isAccountRoom, let session = sessions.sessions.first(where: { $0.id == message.agentID }) else { return nil }
+        return sessions.name(of: session)
+    }
+
+    /// The @names this room's messages and composer draw in the accent: the live sessions of the room's owner when
+    /// that is the viewer, and the people the app knows.
+    private var mentionMarks: MentionMarks {
+        let social = workspace.social
+        return MentionMarks(sessionNames: ownsRoom ? sessions.sessions.map(sessions.name(of:)) : [],
+                            people: social.friends.map(\.account), viewer: social.account)
+    }
+
+    private var paneState: RoomPaneState {
         RoomPaneState.state(
             connectionStatus: store.connectionStatus,
             isLoadingMessages: store.isLoadingMessages,
-            hasMessages: !store.messages.isEmpty,
-            hasOtherMembers: hasCollaborators(at: now)
-        )
-    }
-
-    private func hasCollaborators(at now: Date) -> Bool {
-        ChatPresencePresentation.hasCollaboratorSignal(
-            members: store.roomMembers,
-            currentAgentID: store.agentID,
-            fallbackMemberCount: room.memberCount,
-            fallbackMemberCountIncludesCurrentAgent:
-                store.fallbackMemberCountIncludesCurrentAgent(in: room.id),
-            recentActivityByAgent: store.recentAgentActivityAt[room.id],
-            now: now
+            hasMessages: !store.messages.isEmpty
         )
     }
 
@@ -1159,37 +936,16 @@ private struct ChatRoomView: View {
 
             ZStack(alignment: .bottomTrailing) {
                 messageList
+                    .environment(\.mentionMarks, mentionMarks)
                 if store.isLoadingMessages && !hasPositionedInitialScroll {
                     ProgressView()
                         .controlSize(.small)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                TimelineView(.periodic(from: .now, by: 10)) { timeline in
-                    let state = paneState(at: timeline.date)
-                    ZStack {
-                        if case .connectPrompt(let variant) = state {
-                            RoomConnectStateView(
-                                roomName: room.name,
-                                prompt: store.connectPrompt(for: room),
-                                variant: variant,
-                                makeCopyPrompt: { await store.copyableConnectPrompt(for: room) }
-                            )
-                            .onAppear { store.ensurePromptInvite(for: room) }
-                        } else if state == .quiet {
-                            quietRoom
-                                .allowsHitTesting(true)
-                        }
-                        if RoomPaneState.showsInviteNudge(
-                            state: state,
-                            hasOtherMembers: hasCollaborators(at: timeline.date)
-                        ) {
-                            InviteCollaboratorNudge {
-                                await store.copyableConnectPrompt(for: room)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                            .padding(.top, 12)
-                        }
-                    }
+                switch paneState {
+                case .empty: emptyRoom
+                case .unreachable(let reason): unreachableRoom(reason)
+                case .loading, .chat: EmptyView()
                 }
                 composer
             }
@@ -1199,8 +955,7 @@ private struct ChatRoomView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Room key for \(room.name)").font(.headline)
                 Text("Enter the shared room key. It stays in this Mac’s Keychain.").font(.callout)
-                SecureField("Room key", text: $roomKeyDraft)
-                    .textFieldStyle(.roundedBorder)
+                CapsuleField(placeholder: "Room key", text: $roomKeyDraft, isSecure: true)
                 if let error = roomKeyError { Text(error).foregroundStyle(.red).font(.caption) }
                 HStack {
                     if store.unlockedRoomIDs.contains(room.id) {
@@ -1253,16 +1008,30 @@ private struct ChatRoomView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 Spacer()
                 Menu {
+                    // copy:
+                    Toggle("Show all messages", isOn: Binding(
+                        get: { store.showsAllMessages(in: room.id) },
+                        set: { store.setShowsAllMessages($0, in: room.id) }
+                    ))
+                    Divider()
                     Button("Leases…") { isLeasesPresented = true }
                     Button("Copy connect prompt") { copyConnectPrompt() }
                     if !store.isLocalConnection {
                         Button("Artifact…") { isArtifactPresented = true }
+                        if offersPeople {
+                            // copy:
+                            Button("People…") { Task { await workspace.showPeople(of: room.id) } }
+                        }
                         if !store.connectionProfile.apiKey.hasPrefix("csoc_") {
                             Button("Invites…") { isInvitesPresented = true }
                             Button("Slack…") { isSlackPresented = true }
                         }
                     }
                     Divider()
+                    if isAccountRoom, let session = sessions.session(inRoom: room.id) {
+                        // copy:
+                        Button("Add person…") { workspace.presentAddPerson(to: session) }
+                    }
                     // Rename and destroy are creator-only, so for other
                     // agents' rooms they are hidden rather than left as
                     // permanently disabled clutter.
@@ -1270,9 +1039,6 @@ private struct ChatRoomView: View {
                         Button("Rename room") { store.presentRename(room) }
                     }
                     Button("Archive room") { Task { await store.archive(room) } }
-                    if !store.connectionProfile.apiKey.hasPrefix("csoc_") {
-                        Button("Create nested room…") { store.presentCreateRoom(parentID: room.id) }
-                    }
                     if !store.connectionStatus.isConnected {
                         Button("Reconnect") { store.start() }
                     }
@@ -1297,20 +1063,7 @@ private struct ChatRoomView: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    if let parentRoom {
-                        Button(parentRoom.name) {
-                            Task { await store.select(room: parentRoom) }
-                        }
-                        .buttonStyle(.plain)
-                        .gallopText(.bodySStrong, color: SemanticColor.textTertiary)
-                        .lineLimit(1)
-                        .macAccessibleAction(label: "Open parent room \(parentRoom.name)") {
-                            Task { await store.select(room: parentRoom) }
-                        }
-                        GallopIconView(icon: .chevronRightExtraSmall, fallbackSystemName: "chevron.right", size: 10)
-                            .foregroundStyle(SemanticColor.iconSubtle)
-                    }
-                    Text(room.name)
+                    Text(title)
                         .gallopText(.h4, color: SemanticColor.textPrimary)
                     if room.encrypted {
                         GallopIconView(icon: .lock, fallbackSystemName: "lock.fill", size: 12)
@@ -1319,13 +1072,29 @@ private struct ChatRoomView: View {
                 }
                 TimelineView(.periodic(from: .now, by: 10)) { timeline in
                     let summary = presenceSummary(at: timeline.date)
-                    Text(summary)
-                        .gallopText(
-                            .caption,
-                            color: summary.contains("active")
-                                ? SemanticColor.warning : SemanticColor.textTertiary
-                        )
-                        .lineLimit(1)
+                    let isActive = summary.contains("active")
+                    HStack(spacing: 0) {
+                        // The line opens People… where the room offers it and the connection is up (navigation
+                        // note, section 8). Someone active keeps the warning colour under the pointer.
+                        if offersPeople, store.connectionStatus.isConnected {
+                            TextLink(title: summary, style: .caption,
+                                     color: isActive ? SemanticColor.warning : SemanticColor.textTertiary,
+                                     hoverColor: isActive ? nil : SemanticColor.textSecondary) {
+                                Task { await workspace.showPeople(of: room.id) }
+                            }
+                            // copy:
+                            .help("People")
+                            // copy:
+                            .macAccessibleAction(label: "People in \(room.name), \(summary)") {
+                                Task { await workspace.showPeople(of: room.id) }
+                            }
+                        } else {
+                            Text(summary)
+                                .gallopText(.caption,
+                                            color: isActive ? SemanticColor.warning : SemanticColor.textTertiary)
+                        }
+                    }
+                    .lineLimit(1)
                 }
             }
 
@@ -1346,6 +1115,20 @@ private struct ChatRoomView: View {
             pasteboard.clearContents()
             pasteboard.setString(prompt, forType: .string)
         }
+    }
+
+    private func openAttachment(_ attachment: FileAttachment) {
+        Task {
+            do {
+                try await store.openAttachment(attachment)
+            } catch {
+                store.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func toggleRun(_ run: HiddenMessageRun) {
+        withAnimation(.easeInOut(duration: 0.16)) { openRuns.formSymmetricDifference([run.id]) }
     }
 
     private func saveAttachment(_ attachment: FileAttachment) {
@@ -1372,6 +1155,9 @@ private struct ChatRoomView: View {
         )
     }
 
+    /// The feed's padding under its last message while the composer is open, which keeps the message above the field.
+    private static let openComposerClearance: CGFloat = 86
+
     private var messageList: some View {
         TimelineView(.periodic(from: .now, by: 60)) { timeline in
             ScrollViewReader { proxy in
@@ -1396,22 +1182,48 @@ private struct ChatRoomView: View {
                             now: timeline.date
                         )
 
-                        ForEach(store.messages) { message in
-                            VStack(alignment: .leading, spacing: 10) {
-                                MessageFeedRow(
-                                    message: store.displayMessage(message),
-                                    isMine: message.agentID == store.agentID,
-                                    now: timeline.date,
-                                    onSaveAttachment: room.encrypted ? nil : { saveAttachment($0) }
-                                )
-                                ForEach(
-                                    pulseAnchors.byMessageID[message.id] ?? [],
-                                    id: \.agentID
-                                ) { pulse in
-                                    ThinkingPulsePill(pulse: pulse)
+                        let feed = MessageFeed.items(
+                            store.messages,
+                            showsAll: store.showsAllMessages(in: room.id),
+                            openRuns: openRuns
+                        )
+
+                        ForEach(feed) { item in
+                            switch item {
+                            case .message(let message, let quiet):
+                                VStack(alignment: .leading, spacing: 10) {
+                                    MessageFeedRow(
+                                        message: store.displayMessage(message),
+                                        isMine: message.agentID == store.agentID,
+                                        now: timeline.date,
+                                        quiet: quiet,
+                                        senderName: senderName(of: message),
+                                        onSaveAttachment: room.encrypted ? nil : { saveAttachment($0) },
+                                        onOpenAttachment: room.encrypted ? nil : { openAttachment($0) }
+                                    )
+                                    ForEach(
+                                        pulseAnchors.byMessageID[message.id] ?? [],
+                                        id: \.agentID
+                                    ) { pulse in
+                                        ThinkingPulsePill(pulse: pulse)
+                                    }
                                 }
+                                .id(message.id)
+                            case .run(let run):
+                                // A closed run keeps the pulses of the agents inside it under its row.
+                                VStack(alignment: .leading, spacing: 10) {
+                                    HiddenRunRow(run: run) { toggleRun(run) }
+                                    if !run.isOpen {
+                                        ForEach(
+                                            run.messages.flatMap { pulseAnchors.byMessageID[$0.id] ?? [] },
+                                            id: \.agentID
+                                        ) { pulse in
+                                            ThinkingPulsePill(pulse: pulse)
+                                        }
+                                    }
+                                }
+                                .id(item.id)
                             }
-                            .id(message.id)
                         }
 
                         // Pulsing agents who haven't spoken yet pill at the
@@ -1440,7 +1252,7 @@ private struct ChatRoomView: View {
                         }
                         .padding(.horizontal, 20)
                         .padding(.top, 18)
-                        .padding(.bottom, isComposerExpanded ? 86 : 72)
+                        .padding(.bottom, isComposerExpanded ? Self.openComposerClearance : 72)
                     }
                     .coordinateSpace(name: "cowchatFeed")
                     .onPreferenceChange(FeedBottomOffsetKey.self) { markerY in
@@ -1488,8 +1300,27 @@ private struct ChatRoomView: View {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo("message-list-bottom", anchor: .bottom)
                         }
-                    } else {
+                    } else if let latest = store.messages.last, store.showsInFeed(latest) {
+                        // A hidden arrival only joins a fold, so there is nothing new to read.
                         newMessageCount += 1
+                    }
+                }
+                // The open composer covers the feed's last lines, so a feed at its end moves up to show the newest
+                // message whole above the field, as far as the feed's padding under it. It moves once the composer
+                // has opened and without animating, since an animated scroll here is lost to the field taking focus.
+                .onChange(of: isComposerExpanded) { expanded in
+                    guard expanded, isMessageListNearBottom, hasPositionedInitialScroll,
+                          viewport.size.height > 0 else { return }
+                    let clearance = UnitPoint(x: 0.5, y: max(0, 1 - Self.openComposerClearance / viewport.size.height))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        proxy.scrollTo("message-list-bottom", anchor: clearance)
+                    }
+                }
+                // The switch adds or takes away messages all through the feed, so a feed at its end stays there.
+                .onChange(of: store.showsAllMessages(in: room.id)) { _ in
+                    guard isMessageListNearBottom, hasPositionedInitialScroll else { return }
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("message-list-bottom", anchor: .bottom)
                     }
                 }
                 .onChange(of: store.isLoadingMessages) { loading in
@@ -1512,43 +1343,66 @@ private struct ChatRoomView: View {
         }
     }
 
-    private var quietRoom: some View {
-        VStack(spacing: 10) {
+    /// A connected room with no messages: the message glyph and "No messages yet", centred in the feed above the
+    /// composer, and in This Mac and API-key rooms Copy connect prompt 16 under it (navigation note, section 5.1).
+    private var emptyRoom: some View {
+        VStack(spacing: 0) {
             GallopIconView(icon: .message, fallbackSystemName: "bubble.left", size: 24)
                 .foregroundStyle(SemanticColor.iconTertiary)
-            Text("This room is quiet")
+            // copy:
+            Text("No messages yet")
                 .gallopText(.h5, color: SemanticColor.textPrimary)
-            Text("Bring an agent in with the connect prompt, or open the composer and say hello.")
-                .gallopText(.bodyM, color: SemanticColor.textTertiary)
-                .multilineTextAlignment(.center)
-
-            Button {
-                copyConnectPrompt()
-                hasCopiedQuietRoomPrompt = true
-            } label: {
-                // Reserve the wider label's width (no resize on click) and keep
-                // the chrome inside the label so the whole capsule is clickable.
-                ZStack {
-                    Text("Copy connect prompt").hidden()
-                    Text(hasCopiedQuietRoomPrompt ? "Copied" : "Copy connect prompt")
-                }
-                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                .padding(.horizontal, 18)
-                .frame(height: 38)
-                .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 6)
-            .macAccessibleAction(label: "Copy connect prompt") {
-                copyConnectPrompt()
-                hasCopiedQuietRoomPrompt = true
+                .padding(.top, 10)
+            if RoomPaneState.emptyOffersConnectPrompt(isAccountRoom: isAccountRoom) {
+                emptyRoomPromptButton
+                    .padding(.top, 16)
             }
         }
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var emptyRoomPromptButton: some View {
+        Button {
+            copyConnectPrompt()
+            hasCopiedEmptyRoomPrompt = true
+        } label: {
+            // Reserve the wider label's width, so the pill does not resize when its label turns to Copied.
+            ZStack {
+                // copy:
+                Text("Copy connect prompt").hidden()
+                Text(hasCopiedEmptyRoomPrompt ? "Copied" : "Copy connect prompt")
+            }
+        }
+        .buttonStyle(CowchatPillButtonStyle(prominent: true))
+        .macAccessibleAction(label: "Copy connect prompt") {
+            copyConnectPrompt()
+            hasCopiedEmptyRoomPrompt = true
+        }
+    }
+
+    /// Offline or connecting with nothing loaded: the empty state's layout with the retry glyph, the connection's state
+    /// as the title, and Reconnect while offline. `EmptyChatView`'s failed state without its caption or its
+    /// troubleshooting text.
+    private func unreachableRoom(_ reason: RoomPaneState.Unreachable) -> some View {
+        VStack(spacing: 0) {
+            GallopIconView(icon: .retry, fallbackSystemName: "arrow.clockwise", size: 24)
+                .foregroundStyle(SemanticColor.iconTertiary)
+            // copy:
+            Text(reason == .connecting ? "Connecting…" : "Offline")
+                .gallopText(.h5, color: SemanticColor.textPrimary)
+                .padding(.top, 10)
+            if reason == .offline {
+                // copy:
+                Button("Reconnect") { store.reconnect() }
+                    .buttonStyle(CowchatPillButtonStyle(prominent: true))
+                    .padding(.top, 16)
+                    .macAccessibleAction(label: "Reconnect", action: store.reconnect)
+            }
+        }
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
     @ViewBuilder
     private var composer: some View {
@@ -1597,12 +1451,13 @@ private struct ChatRoomView: View {
             HStack(spacing: 8) {
                 ComposerTextField(
                     text: $store.draft,
-                    placeholder: "Message \(room.name)",
+                    placeholder: "Message \(title)",
                     isEnabled: !room.encrypted || store.unlockedRoomIDs.contains(room.id),
-                    onSubmit: store.sendDraft,
+                    onSubmit: sendDraft,
                     onCancel: {
                         withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
-                    }
+                    },
+                    mentionMarks: mentionMarks
                 )
                 .frame(height: ComposerTextField.naturalHeight)
                 .padding(.horizontal, 16)
@@ -1617,7 +1472,7 @@ private struct ChatRoomView: View {
                 }
                 .onHover { isFieldHovering = $0 }
 
-                Button { store.sendDraft() } label: {
+                Button { sendDraft() } label: {
                     GallopIconView(icon: .send, fallbackSystemName: "paperplane.fill", size: 18)
                         .foregroundStyle(SemanticColor.buttonPrimaryIconDefault)
                         .frame(width: 36, height: 36)
@@ -1630,7 +1485,7 @@ private struct ChatRoomView: View {
                 .macAccessibleAction(
                     label: "Send message",
                     isEnabled: canSend,
-                    action: store.sendDraft
+                    action: sendDraft
                 )
             }
         }
@@ -1638,6 +1493,11 @@ private struct ChatRoomView: View {
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
         .background(SemanticColor.surface500)
+    }
+
+    /// Sends the draft, with the live sessions it names after an @ as its mentions in an account room the person owns.
+    private func sendDraft() {
+        store.sendDraft(mentions: ownsRoom ? sessions.mentions(in: store.draft) : [])
     }
 
     private var canSend: Bool {
@@ -1660,7 +1520,13 @@ private struct MessageFeedRow: View {
     let message: ChatMessage
     let isMine: Bool
     let now: Date
+    /// A message the room hides by default, drawn because its run is open or the room's switch is on. Its text takes
+    /// Text/Tertiary.
+    var quiet = false
+    /// The name over the message when the room names its sender itself, as account rooms do the person's own sessions.
+    var senderName: String?
     var onSaveAttachment: ((FileAttachment) -> Void)?
+    var onOpenAttachment: ((FileAttachment) -> Void)?
     @State private var isHovering = false
 
     var body: some View {
@@ -1670,6 +1536,7 @@ private struct MessageFeedRow: View {
                 VStack(alignment: .leading, spacing: 7) {
                     ExpandableMessageText(content: message.content, textColor: SemanticColor.textPrimary)
                     attachmentChip
+                    carriedWork
                     Text(relativeTimestamp)
                         .gallopText(.caption, color: SemanticColor.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -1702,7 +1569,7 @@ private struct MessageFeedRow: View {
                 AgentAvatar(name: message.agentName, size: 24)
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 8) {
-                        Text(message.agentName)
+                        Text(senderName ?? message.agentName)
                             .gallopText(.bodyMStrong, color: SemanticColor.textPrimary)
                         Text(relativeTimestamp)
                             .gallopText(.caption, color: SemanticColor.textTertiary)
@@ -1712,8 +1579,12 @@ private struct MessageFeedRow: View {
                         }
                     }
                     .modifier(OpenInAppAccessibility(label: openInLabel, value: relativeTimestamp, action: openInApp))
-                    ExpandableMessageText(content: message.content)
+                    ExpandableMessageText(
+                        content: message.content,
+                        textColor: quiet ? SemanticColor.textTertiary : SemanticColor.textSecondary
+                    )
                     attachmentChip
+                    carriedWork
                 }
                 .frame(maxWidth: 760, alignment: .leading)
                 Spacer(minLength: 24)
@@ -1725,9 +1596,34 @@ private struct MessageFeedRow: View {
         }
     }
 
+    /// What the message carries under its text: its pull request's row, its pictures as thumbnails, and its other
+    /// files as attachment chips.
+    @ViewBuilder
+    private var carriedWork: some View {
+        if let pullRequest = message.metadata.pullRequest {
+            PullRequestRow(pullRequest: pullRequest)
+        }
+        let pictures = message.attachments.filter(\.isImage)
+        if !pictures.isEmpty, let onOpenAttachment {
+            MessageFlowLayout(spacing: 8, lineSpacing: 8) {
+                ForEach(pictures, id: \.blobID) { picture in
+                    AttachmentThumbnail(attachment: picture, onOpen: onOpenAttachment)
+                }
+            }
+        }
+        ForEach(message.attachments.filter { !$0.isImage }, id: \.blobID) { file in
+            attachmentChip(file)
+        }
+    }
+
     @ViewBuilder
     private var attachmentChip: some View {
-        if let attachment = message.fileAttachment, onSaveAttachment != nil {
+        if let attachment = message.fileAttachment { attachmentChip(attachment) }
+    }
+
+    @ViewBuilder
+    private func attachmentChip(_ attachment: FileAttachment) -> some View {
+        if onSaveAttachment != nil {
             Button {
                 onSaveAttachment?(attachment)
             } label: {
@@ -1786,7 +1682,7 @@ private struct MessageFeedRow: View {
         // Keep the specific agent name in the announcement — several
         // claude-* agents can share a room, and the overlay replaces the
         // visual name/timestamp pair for VoiceOver users.
-        resolvedApp.map { "\(message.agentName), open in \($0.displayName)" }
+        resolvedApp.map { "\(senderName ?? message.agentName), open in \($0.displayName)" }
     }
     private func openInApp() { if let resolvedApp { AgentAppResolver.open(resolvedApp) } }
 }
@@ -1886,6 +1782,7 @@ enum MessageRenderPlan: Equatable {
 struct ExpandableMessageText: View {
     let content: String
     var textColor: Color
+    @Environment(\.mentionMarks) private var mentionMarks
     @State private var isExpanded = false
     @State private var expandedPlan: MessageRenderPlan?
     private let chart: ChartMessage?
@@ -1961,7 +1858,7 @@ struct ExpandableMessageText: View {
     private func renderedContent(_ plan: MessageRenderPlan) -> some View {
         switch plan {
         case .plainText(let source):
-            Text(source)
+            Text(mentionMarks.marking(AttributedString(source)))
                 .textSelection(.enabled)
                 .gallopText(.bodyL, color: textColor)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1970,18 +1867,18 @@ struct ExpandableMessageText: View {
                 ForEach(segments) { segment in
                     switch segment.kind {
                     case .prose:
-                        Text(MessageContentParser.attributedInline(segment.text))
+                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(.bodyL, color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
                     case .heading(let level):
-                        Text(MessageContentParser.attributedInline(segment.text))
+                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(headingStyle(for: level), color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityAddTraits(.isHeader)
                     case .unorderedList, .orderedList:
-                        Text(MessageContentParser.attributedInline(segment.text))
+                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(.bodyL, color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1996,7 +1893,7 @@ struct ExpandableMessageText: View {
                             RoundedRectangle(cornerRadius: 1)
                                 .fill(SemanticColor.borderDefault)
                                 .frame(width: 3)
-                            Text(MessageContentParser.attributedInline(segment.text))
+                            Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
                                 .textSelection(.enabled)
                                 .gallopText(.bodyL, color: textColor)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -2106,7 +2003,7 @@ private struct AgentAvatar: View {
     }
 }
 
-private struct RoomAvatar: View {
+struct RoomAvatar: View {
     let name: String
     let size: CGFloat
     let accented: Bool
@@ -2252,86 +2149,52 @@ private struct CircleIconButton: View {
     }
 }
 
+/// What the window's main area draws: a page chosen from the sidebar, the selected room's chat, or the empty state.
+/// The lobby is an ordinary room and opens as a chat (Patrick removed the Lobby page, 2 November).
+enum MainArea: Equatable {
+    case page(WorkspaceStore.Page)
+    case chat(Room)
+    case empty
+
+    static func content(page: WorkspaceStore.Page?, selectedRoom: Room?) -> MainArea {
+        if let page { return .page(page) }
+        if let selectedRoom { return .chat(selectedRoom) }
+        return .empty
+    }
+}
+
 private struct EmptyChatView: View {
     @EnvironmentObject private var store: ChatStore
+    @EnvironmentObject private var workspace: WorkspaceStore
 
     var body: some View {
         Group {
-            if store.rooms.isEmpty {
-                if case .failed = store.connectionStatus {
-                    connectionFailedState
-                } else {
-                    // Centered welcome IS the empty state, with a direct path to
-                    // the first room (Patrick, 2026-08-06).
-                    VStack(spacing: 20) {
-                        welcome(alignment: .center)
-
-                        Button {
-                            store.presentCreateRoom()
-                        } label: {
-                            Text("New room")
-                                .gallopText(.bodyMStrong, color: SemanticColor.buttonPrimaryTextDefault)
-                                .padding(.horizontal, 20)
-                                .frame(height: 38)
-                                .background(SemanticColor.buttonPrimaryDefault, in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .keyboardShortcut(.defaultAction)
-                        .macAccessibleAction(label: "Create room") { store.presentCreateRoom() }
-                    }
-                    .padding(24)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+            if store.rooms.isEmpty, case .failed = store.connectionStatus {
+                connectionFailedState
             } else {
-                VStack(alignment: .leading, spacing: 18) {
-                    welcome(alignment: .leading)
+                // The quiet room's icon and title with no line under them (Patrick removed the Lobby page and its
+                // welcome, 2 November). With no rooms, New room sits under the title.
+                VStack(spacing: 10) {
+                    GallopIconView(icon: .message, fallbackSystemName: "bubble.left", size: 24)
+                        .foregroundStyle(SemanticColor.iconTertiary)
+                    // copy:
+                    Text(store.rooms.isEmpty ? "No rooms yet" : "No room open")
+                        .gallopText(.h5, color: SemanticColor.textPrimary)
 
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
-                        ForEach(store.rooms.prefix(6)) { room in
-                            Button {
-                                Task { await store.select(room: room) }
-                            } label: {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    RoomAvatar(name: room.name, size: 38, accented: false)
-                                    Text(room.name)
-                                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                                    Text(room.description ?? "Open conversation")
-                                        .gallopText(.caption, color: SemanticColor.textTertiary)
-                                        .lineLimit(2)
-                                }
-                                .frame(maxWidth: .infinity, minHeight: 116, alignment: .topLeading)
-                                .padding(16)
-                                .background(SemanticColor.surface600, in: RoundedRectangle(cornerRadius: 12))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(SemanticColor.borderDefault, lineWidth: 1)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .macAccessibleAction(label: "Open \(room.name)") {
-                                Task { await store.select(room: room) }
-                            }
-                        }
+                    if store.rooms.isEmpty {
+                        // copy:
+                        Button("New room") { workspace.presentNewRoom() }
+                            .buttonStyle(CowchatPillButtonStyle(prominent: true))
+                            .keyboardShortcut(.defaultAction)
+                            .padding(.top, 6)
+                            .macAccessibleAction(label: "Create room") { workspace.presentNewRoom() }
                     }
-                    Spacer()
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.horizontal, 24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(SemanticColor.surface500)
-    }
-
-    /// One source of truth for the welcome copy; alignment differs per branch.
-    @ViewBuilder
-    private func welcome(alignment: HorizontalAlignment) -> some View {
-        VStack(alignment: alignment, spacing: 4) {
-            Text("Howdy, welcome to Cowchat")
-                .gallopText(.h4, color: SemanticColor.textPrimary)
-            Text("Choose a local room or start a new conversation.")
-                .gallopText(.bodyM, color: SemanticColor.textTertiary)
-        }
-        .multilineTextAlignment(alignment == .center ? .center : .leading)
     }
 
     private var connectionFailedState: some View {
@@ -2366,7 +2229,9 @@ private struct EmptyChatView: View {
 }
 
 private enum SettingsPage {
+    case account
     case connection
+    case agents
     case theme
     case roomIcons
     case updates
@@ -2375,7 +2240,10 @@ private enum SettingsPage {
 
     var title: String {
         switch self {
+        // copy:
+        case .account: return "Account"
         case .connection: return "Connection"
+        case .agents: return "Agents" // copy:
         case .theme: return "Theme"
         case .roomIcons: return "Room icons"
         case .updates: return "Updates"
@@ -2384,9 +2252,13 @@ private enum SettingsPage {
         }
     }
 
-    var subtitle: String {
+    /// The line under the title. Account has none.
+    var subtitle: String? {
         switch self {
+        case .account: return nil
         case .connection: return "Choose where Cowchat stores and syncs your rooms."
+        // copy:
+        case .agents: return "Connect Claude Code and Codex to Cowchat."
         case .theme: return "Choose how Cowchat appears on this Mac."
         case .roomIcons: return "Every room gets the same icon on every Mac — it is drawn from the room name."
         case .updates: return "Keep Cowchat up to date."
@@ -2419,13 +2291,11 @@ private struct SettingsView: View {
     let onShowOnboarding: () -> Void
     @AppStorage("CowchatMac.appearance") private var appearance = AppAppearance.system.rawValue
     @AppStorage(RoomIconStyle.storageKey) private var roomIconStyle = RoomIconStyle.fallback.rawValue
-    @State private var selectedPage = SettingsPage.connection
+    /// The page chosen in the list, or nil for the first: Account while an account is signed in, else Connection.
+    @State private var chosenPage: SettingsPage?
     @State private var cloudURL = ""
     @State private var cloudAPIKey = ""
     @State private var isConnectingGlobal = false
-    @State private var inviteToken = ""
-    @State private var isRedeemingInvite = false
-    @State private var inviteRedeemError: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -2435,10 +2305,23 @@ private struct SettingsView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 20)
                     .padding(.bottom, 8)
+                if isSignedIn {
+                    // copy:
+                    settingsNavigationRow(
+                        "Account",
+                        systemName: "person.crop.circle",
+                        page: .account
+                    )
+                }
                 settingsNavigationRow(
                     "Connection",
                     systemName: "network",
                     page: .connection
+                )
+                settingsNavigationRow(
+                    "Agents",
+                    systemName: "terminal",
+                    page: .agents
                 )
                 settingsNavigationRow(
                     "Theme",
@@ -2476,11 +2359,20 @@ private struct SettingsView: View {
                 settingsHeader
 
                 switch selectedPage {
+                case .account:
+                    ScrollView {
+                        AccountSettings(social: workspace.social) {
+                            isPresented = false
+                            Task { await workspace.signOut() }
+                        }
+                    }
                 case .connection:
                     ScrollView {
                         connectionSettings
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                case .agents:
+                    agentSettings
                 case .theme:
                     themeSettings
                 case .roomIcons:
@@ -2536,13 +2428,22 @@ private struct SettingsView: View {
         }
     }
 
+    private var isSignedIn: Bool { workspace.social.phase == .signedIn }
+
+    private var selectedPage: SettingsPage {
+        let page = chosenPage ?? (isSignedIn ? .account : .connection)
+        return page == .account && !isSignedIn ? .connection : page
+    }
+
     private var settingsHeader: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
                 Text(selectedPage.title)
                     .gallopText(.h4, color: SemanticColor.textPrimary)
-                Text(selectedPage.subtitle)
-                    .gallopText(.bodyM, color: SemanticColor.textTertiary)
+                if let subtitle = selectedPage.subtitle {
+                    Text(subtitle)
+                        .gallopText(.bodyM, color: SemanticColor.textTertiary)
+                }
             }
             Spacer()
             Button("Close") { isPresented = false }
@@ -2585,7 +2486,7 @@ private struct SettingsView: View {
                         Spacer()
                         ServerStatusBadge(store: accountGlobal)
                     }
-                    Text("Your Home and rooms shared with friends. Only invited people and approved agents can join.")
+                    Text("Your sessions' rooms and rooms shared with friends. Only invited people and approved agents can join.")
                         .gallopText(.bodyM, color: SemanticColor.textTertiary)
                 }.gallopCard(cornerRadius: 14)
             }
@@ -2624,41 +2525,6 @@ private struct SettingsView: View {
                     store: workspace.global ?? workspace.local,
                     hasGlobal: workspace.global != nil
                 )
-                if workspace.isGlobalEnabled {
-                    HStack(spacing: 10) {
-                        TextField("Have an invite? Paste its cinv_… token", text: $inviteToken)
-                            .textFieldStyle(.plain)
-                            .gallopText(.bodyM, color: SemanticColor.textPrimary)
-                            .padding(.horizontal, 13)
-                            .frame(height: 36)
-                            .background(SemanticColor.textfieldDefault, in: Capsule())
-                            .overlay {
-                                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
-                            }
-                        Button(isRedeemingInvite ? "Redeeming…" : "Redeem") { redeemInvite() }
-                            .buttonStyle(.plain)
-                            .gallopText(.bodySStrong, color: SemanticColor.buttonSecondaryTextDefault)
-                            .padding(.horizontal, 14)
-                            .frame(height: 36)
-                            .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
-                            .overlay {
-                                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 0.5)
-                            }
-                            .disabled(!canRedeemInvite)
-                            .opacity(canRedeemInvite ? 1 : 0.45)
-                            .fixedSize()
-                            .macAccessibleAction(
-                                label: "Redeem invite",
-                                isEnabled: canRedeemInvite,
-                                action: redeemInvite
-                            )
-                    }
-                    if let inviteRedeemError {
-                        Text(inviteRedeemError)
-                            .gallopText(.caption, color: SemanticColor.textError)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
                 HStack(spacing: 10) {
                     Spacer()
                     if workspace.isGlobalEnabled {
@@ -2701,6 +2567,28 @@ private struct SettingsView: View {
         }
     }
 
+
+    /// Claude Code and Codex with where each stands, and Connect on one that isn't connected, for a person who
+    /// skipped them in first run. A signed-in account's bots follow in a list of their own, then the switch that shows
+    /// the person's live sessions on Team.
+    private var agentSettings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                VStack(alignment: .leading, spacing: 12) {
+                    AgentHookList(connections: workspace.agentConnections).gallopCard(cornerRadius: 14)
+                    AgentHookError(connections: workspace.agentConnections)
+                }
+                if isSignedIn {
+                    BotSettings(social: workspace.social)
+                }
+                if workspace.accountGlobal != nil {
+                    TeamSharingSettings(team: workspace.team, social: workspace.social)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .task { await workspace.agentConnections.refresh() }
+    }
 
     private var themeSettings: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -2809,7 +2697,7 @@ private struct SettingsView: View {
         systemName: String,
         page: SettingsPage
     ) -> some View {
-        Button { selectedPage = page } label: {
+        Button { chosenPage = page } label: {
             HStack(spacing: 9) {
                 Image(systemName: systemName)
                     .font(.system(size: 13, weight: .medium))
@@ -2836,6 +2724,7 @@ private struct SettingsView: View {
             .padding(.horizontal, 8)
         }
         .buttonStyle(.plain)
+        .macAccessibleAction(label: title, value: selectedPage == page ? "selected" : nil) { chosenPage = page }
     }
 
     private var canSaveCloudConfiguration: Bool {
@@ -2862,31 +2751,6 @@ private struct SettingsView: View {
                 loadCloudConfiguration()
             }
             isConnectingGlobal = false
-        }
-    }
-
-    private var canRedeemInvite: Bool {
-        !isRedeemingInvite
-            && !inviteToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && workspace.global?.connectionStatus.isConnected == true
-    }
-
-    private func redeemInvite() {
-        guard canRedeemInvite, let global = workspace.global else { return }
-        isRedeemingInvite = true
-        inviteRedeemError = nil
-        Task {
-            do {
-                let room = try await global.redeemInvite(token: inviteToken)
-                inviteToken = ""
-                if let room {
-                    await workspace.select(room: room, on: .global)
-                    isPresented = false
-                }
-            } catch {
-                inviteRedeemError = error.localizedDescription
-            }
-            isRedeemingInvite = false
         }
     }
 
@@ -2937,16 +2801,7 @@ private struct RenameRoomView: View {
                 CircleIconButton(icon: .dismiss, fallbackSystemName: "xmark", help: "Close", action: cancel)
             }
 
-            TextField("Room name", text: $name)
-                .textFieldStyle(.plain)
-                .gallopText(.bodyM, color: SemanticColor.textPrimary)
-                .padding(.horizontal, 14)
-                .frame(height: 42)
-                .background(SemanticColor.textfieldDefault, in: Capsule())
-                .overlay {
-                    Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
-                }
-                .onSubmit(renameRoom)
+            CapsuleField(placeholder: "Room name", text: $name, onSubmit: renameRoom)
 
             if let validationMessage {
                 Text(validationMessage)
@@ -3085,299 +2940,5 @@ private struct GlobalServerNotice: View {
     private var noticeMessage: String? {
         workspace.globalSetupError
             ?? (hasGlobal ? store.connectionStatus.failureMessage : nil)
-    }
-}
-
-private struct RoomCreationSheet: View {
-    private enum Location: String, CaseIterable { case local = "Local", global = "Online" }
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @EnvironmentObject private var store: ChatStore
-    @State private var location: Location
-    @State private var preferPrivate: Bool
-
-    init(initialSource: WorkspaceStore.Server) {
-        _location = State(initialValue: initialSource == .local ? .local : .global)
-        _preferPrivate = State(initialValue: initialSource != .global)
-    }
-
-    private var hasGlobal: Bool { workspace.global != nil || workspace.accountGlobal != nil }
-    private var usePrivateGlobal: Bool {
-        location == .global && workspace.accountGlobal != nil && (workspace.global == nil || preferPrivate)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if store.createRoomParentID == nil {
-                VStack(alignment: .leading, spacing: 12) {
-                    if hasGlobal {
-                        Picker("Room location", selection: $location) {
-                            ForEach(Location.allCases, id: \.self) { location in
-                                Text(location.rawValue).tag(location)
-                            }
-                        }.pickerStyle(.segmented)
-                    } else {
-                        Text("Local · This Mac").gallopText(.bodySStrong)
-                    }
-                    if location == .global, workspace.global != nil, workspace.accountGlobal != nil {
-                        Picker("Room audience", selection: $preferPrivate) {
-                            Text("You and friends").tag(true)
-                            Text("With API key").tag(false)
-                        }.pickerStyle(.segmented)
-                    }
-                }
-                .padding(.horizontal, 28).padding(.top, 20).padding(.bottom, 8)
-            }
-            if usePrivateGlobal, store.createRoomParentID == nil {
-                SocialRoomCreationView(social: workspace.social)
-            } else if location == .global && !hasGlobal {
-                Text("The online connection was disconnected. Choose Local to create a room on this Mac.")
-                    .gallopText(.bodyM).padding(28)
-                Button("Create a local room") { location = .local }.padding(.bottom, 28)
-            } else {
-                CreateRoomView(
-                    local: workspace.local,
-                    globalOrLocal: workspace.global ?? workspace.local,
-                    hasGlobal: workspace.global != nil,
-                    source: location == .local ? .local : .global
-                )
-            }
-        }.background(SemanticColor.surface600)
-    }
-}
-
-private struct CreateRoomView: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @EnvironmentObject private var store: ChatStore
-    @ObservedObject var local: ChatStore
-    @ObservedObject var globalOrLocal: ChatStore
-    let hasGlobal: Bool
-    var source: WorkspaceStore.Server? = nil
-    @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var description = ""
-    @State private var isCreating = false
-    @State private var chosenServer: WorkspaceStore.Server?
-    @State private var creationError: String?
-    /// Ready-made name shown as the field's grey placeholder; an empty field
-    /// creates the room under this name.
-    @State private var suggestedName = RoomNameSuggestion.generate()
-
-    private var effectiveName: String {
-        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return typed.isEmpty ? suggestedName : typed
-    }
-
-    private var parentRoom: Room? {
-        guard let parentID = store.createRoomParentID else { return nil }
-        return store.rooms.first { $0.id == parentID }
-    }
-
-    /// Nested rooms stay on their parent's server; top-level rooms default to
-    /// whichever server owns the current selection.
-    private var targetServer: WorkspaceStore.Server {
-        if parentRoom != nil { return workspace.activeServer }
-        return source ?? chosenServer ?? workspace.activeServer
-    }
-
-    private var targetStore: ChatStore {
-        switch targetServer {
-        case .local: return local
-        case .global: return hasGlobal ? globalOrLocal : local
-        case .accountGlobal: return workspace.accountGlobal ?? local
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(parentRoom == nil ? "New room" : "New nested room")
-                        .gallopText(.h4, color: SemanticColor.textPrimary)
-                    Text(
-                        parentRoom.map {
-                            "Create a separate conversation inside \($0.name). Membership and history stay independent."
-                        }
-                            ?? (targetServer == .local
-                                ? "Create a conversation on this Mac's local Cowchat server."
-                                : "Create a conversation on the community Cowchat server.")
-                    )
-                        .gallopText(.bodyM, color: SemanticColor.textTertiary)
-                }
-                Spacer()
-                CircleIconButton(
-                    icon: .dismiss,
-                    fallbackSystemName: "xmark",
-                    help: "Close",
-                    action: cancel
-                )
-            }
-
-            VStack(spacing: 12) {
-                if hasGlobal, parentRoom == nil, source == nil {
-                    Picker("Server", selection: serverSelection) {
-                        ForEach([WorkspaceStore.Server.local, .global]) { server in
-                            Text(server.label).tag(server)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-                styledField(suggestedName, text: $name)
-                if !name.isEmpty, let nameValidationMessage {
-                    Text(nameValidationMessage)
-                        .gallopText(.caption, color: SemanticColor.textError)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 4)
-                }
-                styledField("Description (optional)", text: $description)
-                if let creationError {
-                    Text(creationError)
-                        .gallopText(.caption, color: SemanticColor.textError)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 4)
-                }
-            }
-            .onChange(of: name) { _ in creationError = nil }
-            .onChange(of: chosenServer) { _ in creationError = nil }
-
-            Spacer()
-
-            HStack(spacing: 10) {
-                Spacer()
-                Button("Cancel", action: cancel)
-                    .keyboardShortcut(.cancelAction)
-                    .buttonStyle(.plain)
-                    .gallopText(.bodyMStrong, color: SemanticColor.textSecondary)
-                    .padding(.horizontal, 16)
-                    .frame(height: 38)
-                    .background(SemanticColor.buttonSecondaryDefault, in: Capsule())
-                    .macAccessibleAction(label: "Cancel", action: cancel)
-
-                Button(createButtonTitle) {
-                    createRoom()
-                }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.plain)
-                .gallopText(
-                    .bodyMStrong,
-                    color: canCreate ? SemanticColor.buttonPrimaryTextDefault : SemanticColor.textDisabled
-                )
-                .padding(.horizontal, 18)
-                .frame(height: 38)
-                .background(
-                    canCreate ? SemanticColor.buttonPrimaryDefault : SemanticColor.buttonSecondaryDefault,
-                    in: Capsule()
-                )
-                .disabled(!canCreate)
-                .macAccessibleAction(
-                    label: "Create room",
-                    isEnabled: canCreate,
-                    action: createRoom
-                )
-            }
-        }
-        .padding(26)
-        .frame(width: 480, height: 350)
-        .background(SemanticColor.surface600)
-    }
-
-    private func styledField(_ placeholder: String, text: Binding<String>) -> some View {
-        TextField(placeholder, text: text)
-            .textFieldStyle(.plain)
-            .gallopText(.bodyM, color: SemanticColor.textPrimary)
-            .padding(.horizontal, 14)
-            .frame(height: 42)
-            .background(SemanticColor.textfieldDefault, in: Capsule())
-            .overlay {
-                Capsule().stroke(SemanticColor.borderDefault, lineWidth: 1)
-            }
-    }
-
-    private var serverSelection: Binding<WorkspaceStore.Server> {
-        Binding(
-            get: { targetServer },
-            set: { chosenServer = $0 }
-        )
-    }
-
-    private var canCreate: Bool {
-        nameValidationMessage == nil
-            && !isCreating
-            && targetStore.connectionStatus.isConnected
-    }
-
-    private var nameValidationMessage: String? {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Empty is fine — the suggested placeholder name is used instead.
-        if trimmedName.isEmpty { return nil }
-        if trimmedName.unicodeScalars.count > 100 {
-            return "Room names can contain at most 100 characters."
-        }
-        if trimmedName.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
-            return "Room names cannot contain control characters."
-        }
-        return nil
-    }
-
-    private var createButtonTitle: String {
-        if isCreating { return "Creating…" }
-        return targetStore.connectionStatus.isConnected ? "Create Room" : "Connecting…"
-    }
-
-    private func createRoom() {
-        guard canCreate else { return }
-        isCreating = true
-        creationError = nil
-        let server = targetServer
-        let target = targetStore
-        let presenting = store
-        let usedSuggestion = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let creatingName = effectiveName
-        Task {
-            let outcome = await target.createRoom(
-                name: creatingName,
-                description: description,
-                isPublic: false
-            )
-            isCreating = false
-            switch outcome {
-            case .created:
-                // The room was created and selected on `server`; make that
-                // server active so the chat pane shows it, and close the
-                // sheet on whichever store presented it.
-                workspace.activate(server: server)
-                closeSheet(presenting: presenting)
-            case .nameTaken:
-                if let existing = target.rooms.first(where: {
-                    $0.name.localizedCaseInsensitiveCompare(creatingName) == .orderedSame
-                }) {
-                    // The room already exists and this key can see it — just
-                    // go there instead of arguing about the name.
-                    await workspace.select(room: existing, on: server)
-                    closeSheet(presenting: presenting)
-                } else if usedSuggestion {
-                    // Suggested name collided with a room this key can't
-                    // see; deal a fresh suggestion rather than arguing.
-                    suggestedName = RoomNameSuggestion.generate()
-                    creationError = "\u{201C}\(creatingName)\u{201D} was already taken — here's a fresh suggestion."
-                } else {
-                    creationError = "A room named \u{201C}\(creatingName)\u{201D} already exists on this server, but it isn't visible to you. Choose another name."
-                }
-            case let .failed(message):
-                creationError = message
-            }
-        }
-    }
-
-    private func closeSheet(presenting: ChatStore) {
-        presenting.isCreateRoomPresented = false
-        presenting.createRoomParentID = nil
-        dismiss()
-    }
-
-    private func cancel() {
-        store.createRoomParentID = nil
-        dismiss()
     }
 }

@@ -33,7 +33,7 @@ private final class StubConnection: CowchatConnectionProtocol {
     func join(roomID: String) async throws {}
     func leave(roomID: String) async throws {}
     func history(roomID: String, limit: Int, before: String?) async throws -> [ChatMessage] { [] }
-    func send(roomID: String, content: String) async throws -> ChatMessage {
+    func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage {
         throw CancellationError()
     }
     func disconnect() {}
@@ -108,8 +108,9 @@ final class WorkspaceStoreTests: XCTestCase {
 
         XCTAssertNil(workspace.accountGlobal)
         XCTAssertTrue(workspace.global === shared)
-        XCTAssertEqual(workspace.activeServer, .global)
-        XCTAssertTrue(workspace.activeStore === shared)
+        // Signed out, the window opens on this Mac's lobby rather than a hosted server's hidden one.
+        XCTAssertEqual(workspace.activeServer, .local)
+        XCTAssertTrue(workspace.activeStore === workspace.local)
         XCTAssertTrue(fixture.preferences.isGlobalEnabled())
     }
 

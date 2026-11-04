@@ -84,7 +84,6 @@ final class SocialTests: XCTestCase {
         XCTAssertNil(store.friendLink)
         fixture.beforeAvailability = nil
         await store.loadFriendLink()
-        try render(CowchatSetupWizard(social: store, initialStep: .friends, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-share-link")
         try render(FriendInvitationConfirmation(social: store, invitation: invitation, onDismiss: {}), name: "mac-wizard-friend-confirmation")
     }
 
@@ -121,13 +120,13 @@ final class SocialTests: XCTestCase {
         XCTAssertNil(store.setup)
         await store.loadSetup()
         XCTAssertEqual(store.setup?.agentId, "starter-agent")
-        XCTAssertEqual(store.setup?.roomId, "starter-home")
+        XCTAssertEqual(store.setup?.agentName, "Chad_DePue_bot")
         XCTAssertEqual(store.account?.displayName, "Chad DePue")
         XCTAssertEqual(store.savedSession?.account, store.account)
         let restored = fixture.store()
         XCTAssertEqual(restored.account?.displayName, "Chad DePue")
         await restored.loadSetup()
-        XCTAssertEqual(restored.setup?.roomId, store.setup?.roomId)
+        XCTAssertEqual(restored.setup?.agentId, store.setup?.agentId)
         XCTAssertEqual(fixture.setupPosts, 1)
         XCTAssertEqual(fixture.credentialPosts, 0)
         await store.connectAgent("starter-agent")
@@ -136,9 +135,9 @@ final class SocialTests: XCTestCase {
         let savedBot = try Data(contentsOf: fixture.credentialDirectory.appendingPathComponent("hosted-bot.json"))
         let botValues = try JSONSerialization.jsonObject(with: savedBot) as! [String: String]
         XCTAssertEqual(botValues["url"], "wss://fixture.example/ws")
-        try render(CowchatSetupWizard(social: restored, initialStep: .name, name: "Chad DePue", onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-name")
-        try render(CowchatSetupWizard(social: restored, initialStep: .friends, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-friends")
-        try render(CowchatSetupWizard(social: restored, initialStep: .ready, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-ready")
+        try render(CowchatSetupWizard(social: restored, initialStep: .name, name: "Chad DePue", onLocal: {}, onOpenStarter: { _ in false }), name: "mac-wizard-name")
+        try render(CowchatSetupWizard(social: restored, initialStep: .agents, onLocal: {}, onOpenStarter: { _ in false }), name: "mac-wizard-agents")
+        try render(CowchatSetupWizard(social: restored, initialStep: .ready, onLocal: {}, onOpenStarter: { _ in false }), name: "mac-wizard-ready")
     }
 
     @MainActor
@@ -194,10 +193,26 @@ final class SocialTests: XCTestCase {
         fixture.supported = false
         let unsupported = fixture.store()
         await unsupported.loadSetup()
-        try render(CowchatSetupWizard(social: unsupported, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-unsupported")
+        try render(CowchatSetupWizard(social: unsupported, onLocal: {}, onOpenStarter: { _ in false }), name: "mac-wizard-unsupported")
         let signedOut = SocialStore(endpoint: fixture.endpoint, credentials: SocialMemoryCredentials(), session: fixture.session)
         await signedOut.refresh()
-        try render(CowchatSetupWizard(social: signedOut, onLocal: {}, onOpenHome: { _, _ in false }, onOpenRooms: {}), name: "mac-wizard-welcome")
+        try render(CowchatSetupWizard(social: signedOut, onLocal: {}, onOpenStarter: { _ in false }), name: "mac-wizard-welcome")
+    }
+
+    @MainActor
+    func testCancellingALinkKeepsTheSetup() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.close() }
+        fixture.established = true
+        let store = fixture.store()
+        await store.loadSetup()
+        XCTAssertEqual(store.setup?.agentId, "starter-agent")
+        store.cancelLink()
+        XCTAssertEqual(store.setup?.agentId, "starter-agent")
+        XCTAssertTrue(store.setupLoaded)
+        store.cancelSignIn()
+        XCTAssertNil(store.setup)
+        XCTAssertFalse(store.setupLoaded)
     }
 
     private final class SetupFixture {
@@ -218,7 +233,7 @@ final class SocialTests: XCTestCase {
         var capabilityReads = 0
         let agent = #"{"id":"starter-agent","owner_id":"me","name":"Chad_DePue_bot","discoverable":false}"#
         var setupJSON: String {
-            established ? "{\"setup\":{\"agent_id\":\"starter-agent\",\"agent_name\":\"Chad_DePue_bot\",\"room_id\":\"starter-home\",\"room_name\":\"Chad_DePue_Home\",\"agent\":\(agent),\"room\":{\"room_id\":\"starter-home\",\"name\":\"Chad_DePue_Home\",\"owner_id\":\"me\"},\"bot_admitted\":true}}" : "{\"setup\":null}"
+            established ? "{\"setup\":{\"agent_id\":\"starter-agent\",\"agent_name\":\"Chad_DePue_bot\",\"agent\":\(agent),\"bot_admitted\":true}}" : "{\"setup\":null}"
         }
         init() throws {
             let config = URLSessionConfiguration.ephemeral
@@ -330,13 +345,6 @@ final class SocialTests: XCTestCase {
         XCTAssertEqual(changes, 2)
         XCTAssertEqual(store.rooms.count, 2)
         XCTAssertTrue(store.errorMessage?.contains("Room creation unavailable") == true)
-        try render(FriendsView(social: store, initialSection: .rooms), name: "mac-rooms-populated-create-action")
-        roomList = []
-        let emptyStore = SocialStore(endpoint: endpoint, credentials: credentials, session: session)
-        await emptyStore.refresh()
-        try render(FriendsView(social: emptyStore, initialSection: .rooms), name: "mac-rooms-empty-create-action")
-        try render(SocialRoomCreationView(social: emptyStore), name: "mac-room-create-solo")
-        try render(SocialRoomCreationView(social: emptyStore, draft: draft), name: "mac-room-create-friend")
     }
 
     @MainActor
@@ -442,7 +450,7 @@ final class SocialTests: XCTestCase {
         SocialFixtureProtocol.contentType = "text/html"
         SocialFixtureProtocol.handler = { _ in (200, "<!doctype html><html>Cowchat</html>") }
         await store.refresh()
-        try render(FriendsView(social: store), name: "mac-friends-server-update")
+        try render(FriendsPage(social: store, sessions: [], addToSession: { _, _ in true }, signIn: {}), name: "mac-friends-server-update")
     }
 
     func testCopiedHandleCanBePastedIntoFriendRequest() {
@@ -528,7 +536,12 @@ final class SocialTests: XCTestCase {
         XCTAssertNil(store.errorMessage)
         XCTAssertEqual(store.friends.first?.account.handle, "renzo")
         XCTAssertEqual(store.requests.first?.from.handle, "rachel")
-        try render(FriendsView(social: store), name: "mac-friends-signed-in")
+        try render(FriendsPage(social: store, sessions: [], addToSession: { _, _ in true }, signIn: {}), name: "mac-friends-signed-in")
+        try render(ScrollView { BotSettings(social: store).padding(24) }, name: "mac-settings-bots")
+        try render(NewBotSheet(social: store, cancel: {}), name: "mac-bot-new")
+        let issued = SocialCreatedAgent(agent: SocialAgent(id: "agent", ownerId: account.id, name: "Release bot",
+                                                           discoverable: true), apiKey: "cagt_fixture_key")
+        try render(BotCredentialSheet(issued: issued, endpoint: endpoint, done: {}), name: "mac-bot-credential")
         var loggedOut = false
         store.onSessionChanged = { value in loggedOut = value == nil }
         await store.signOut()
@@ -536,7 +549,7 @@ final class SocialTests: XCTestCase {
         XCTAssertNil(credentials.value)
         XCTAssertTrue(store.friends.isEmpty)
         XCTAssertEqual(store.phase, .signedOut)
-        try render(FriendsView(social: store), name: "mac-friends-sign-in")
+        try render(FriendsPage(social: store, sessions: [], addToSession: { _, _ in true }, signIn: {}), name: "mac-friends-sign-in")
     }
 
     @MainActor
@@ -688,7 +701,9 @@ final class SocialTests: XCTestCase {
         await store.refresh()
         XCTAssertEqual(store.identities.map(\.provider), ["github"])
         XCTAssertEqual(store.availableLinkProviders, ["google"])
-        try render(SocialProfileEditor(handle: .constant("chad"), displayName: .constant("Chad"), busy: false, error: nil, identities: store.identities, linkProviders: store.availableLinkProviders, onCancel: {}, onSave: {}), name: "mac-friends-link-provider")
+        // The page cancels a link under way as it closes, so its render is gone before Link is pressed.
+        try autoreleasepool { try render(AccountSettings(social: store, signOut: {}), name: "mac-account-link-provider") }
+        try await Task.sleep(for: .milliseconds(200))
         XCTAssertNil(store.linkProvider("github"))
         var activated: SocialSession?
         store.onSessionChanged = { activated = $0 }
@@ -711,7 +726,7 @@ final class SocialTests: XCTestCase {
         XCTAssertEqual(try fixture.savedCredential()?.deviceKey, "csoc_linked")
         XCTAssertEqual(store.identities.map(\.provider), ["github", "google"])
         XCTAssertTrue(store.availableLinkProviders.isEmpty)
-        try render(SocialProfileEditor(handle: .constant("chad"), displayName: .constant("Chad"), busy: false, error: nil, identities: store.identities, linkProviders: store.availableLinkProviders, onCancel: {}, onSave: {}), name: "mac-friends-linked-providers")
+        try render(AccountSettings(social: store, signOut: {}), name: "mac-account-linked-providers")
     }
 
     @MainActor
@@ -867,9 +882,9 @@ final class SocialTests: XCTestCase {
         let recipient = SocialAccount(id: "recipient", handle: "chad", displayName: "Chad")
         let coordinator = SocialAgent(id: "coordinator", ownerId: account.id, name: "Renzo's coordinator", discoverable: true)
         let own = SocialAgent(id: "reviewer", ownerId: recipient.id, name: "Chad's reviewer", discoverable: true)
-        try render(SocialProfileEditor(handle: .constant("chad"), displayName: .constant("Chad"), busy: false, error: nil, onCancel: {}, onSave: {}), name: "mac-friends-edit-profile")
         let invitation = SocialRoomInvitation(id: "invitation", roomId: "room", roomName: "Release planning", from: account, to: recipient, proposedAgents: [own], members: [account], agents: [coordinator], historyPolicy: "full", encrypted: false, slackConnected: false, status: "pending")
-        try render(SocialInvitationReview(invitation: invitation, agents: [own], selectedAgents: .constant([]), busy: false, error: nil, onCancel: {}, onAccept: {}), name: "mac-friends-invitation")
+        let session = LiveSession(id: "reviewer", harness: .claudeCode, folder: "cowchat", branch: "chad/release-notes", state: .working, startedAt: Date())
+        try render(SocialInvitationReview(invitation: invitation, sessions: [session], sessionName: { $0.baseName }, selectedSession: .constant(nil), busy: false, error: nil, onCancel: {}, onDecline: {}, onAccept: {}), name: "mac-friends-invitation")
         try render(VStack(alignment: .leading, spacing: 16) {
             Text("Release planning").gallopText(.h3)
             SocialConsentDetails(members: [account, recipient], agents: [coordinator, own], slack: false)

@@ -1,0 +1,151 @@
+import Foundation
+import Security
+
+/// Connects the installed coding agents to the Cowchat hooks. Process arguments
+/// are passed directly; neither a room credential nor user text enters a shell.
+@MainActor
+final class SystemAgentHookInstaller: AgentHookInstaller {
+    private let home: URL
+    private let systemSearchDirectories: [URL]
+
+    init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+         systemSearchDirectories: [URL] = [URL(fileURLWithPath: "/opt/homebrew/bin"),
+                                           URL(fileURLWithPath: "/usr/local/bin"),
+                                           URL(fileURLWithPath: "/usr/bin")]) {
+        self.home = home
+        self.systemSearchDirectories = systemSearchDirectories
+        try? configureAppCLI()
+    }
+
+    func state(of harness: LiveSession.Harness) async -> AgentHookState {
+        guard executable(for: harness) != nil else { return .notInstalled }
+        switch harness {
+        case .claudeCode:
+            let manifest = home.appendingPathComponent(".claude/plugins/installed_plugins.json")
+            guard let data = try? Data(contentsOf: manifest),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let plugins = root["plugins"] as? [String: Any],
+                  plugins["cowchat@cowchat"] != nil else { return .notConnected }
+            let settings = home.appendingPathComponent(".claude/settings.json")
+            if let data = try? Data(contentsOf: settings),
+               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let enabled = root["enabledPlugins"] as? [String: Bool],
+               enabled["cowchat@cowchat"] == false { return .notConnected }
+            return .connected
+        case .codex:
+            let hooks = home.appendingPathComponent(".codex/hooks.json")
+            guard let data = try? Data(contentsOf: hooks),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let groups = root["hooks"] as? [String: [[String: Any]]],
+                  let start = groups["SessionStart"],
+                  start.contains(where: { group in
+                      (group["hooks"] as? [[String: Any]])?.contains(where: {
+                          ($0["command"] as? String)?.contains(".cowchat/codex-hook/session.py") == true
+                      }) == true
+                  }) else { return .notConnected }
+            let mappings = home.appendingPathComponent(".cowchat/codex-sessions")
+            let files = (try? FileManager.default.contentsOfDirectory(at: mappings, includingPropertiesForKeys: nil)) ?? []
+            return files.contains { $0.pathExtension == "json" && !$0.lastPathComponent.hasSuffix("cursor.json") }
+                ? .connected : .waitingForTrust
+        }
+    }
+
+    func connect(_ harness: LiveSession.Harness) async throws -> AgentHookState {
+        try configureAppCLI()
+        guard let binary = executable(for: harness) else {
+            throw CowchatConnectionError.transport("Install \(harness.appName) before connecting it.")
+        }
+        let arguments: [String]
+        switch harness {
+        case .claudeCode:
+            arguments = ["plugin", "install", "cowchat", "--marketplace", "cowboyinc/cowchat", "--json"]
+        case .codex:
+            guard let bridge = executable(named: "cowchat-codex") else {
+                throw CowchatConnectionError.transport("Install the Cowchat Codex bridge before connecting Codex.")
+            }
+            try await run(bridge, ["install"])
+            try await run(binary, ["app-server", "daemon", "start"])
+            return await state(of: harness)
+        }
+        try await run(binary, arguments)
+        return await state(of: harness)
+    }
+
+    private func executable(for harness: LiveSession.Harness) -> URL? {
+        executable(named: harness == .claudeCode ? "claude" : "codex")
+    }
+
+    private func executable(named name: String) -> URL? {
+        if name == "cowchat-codex" {
+            let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/cowchat-codex")
+            if FileManager.default.isExecutableFile(atPath: bundled.path), trustedBundledHelper(bundled) {
+                return bundled
+            }
+            #if !DEBUG
+            return nil
+            #endif
+        }
+        let paths = [".local/bin", ".cargo/bin", "bin"].map { home.appendingPathComponent($0) }
+            + systemSearchDirectories
+        return paths.map { $0.appendingPathComponent(name) }
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    private func configureAppCLI() throws {
+        let app = Bundle.main.bundleURL
+        let cli = app.appendingPathComponent("Contents/Helpers/cowchat")
+        guard FileManager.default.isExecutableFile(atPath: cli.path), trustedBundledHelper(cli) else {
+            #if DEBUG
+            return
+            #else
+            throw CowchatConnectionError.transport("The Cowchat app CLI could not be verified. Reinstall Cowchat.")
+            #endif
+        }
+        if app.pathComponents.contains("AppTranslocation") ||
+            (try? app.resourceValues(forKeys: [.volumeIsReadOnlyKey]).volumeIsReadOnly) == true {
+            throw CowchatConnectionError.transport("Move Cowchat to Applications before connecting an agent.")
+        }
+        let directory = home.appendingPathComponent(".cowchat", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let record = directory.appendingPathComponent("app-cli-binary")
+        try cli.path.write(to: record, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: record.path)
+    }
+
+    private func trustedBundledHelper(_ url: URL) -> Bool {
+        var helper: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, SecCSFlags(), &helper) == errSecSuccess,
+              let helper,
+              SecStaticCodeCheckValidity(helper, SecCSFlags(), nil) == errSecSuccess else { return false }
+        var ownCode: SecCode?
+        guard SecCodeCopySelf(SecCSFlags(), &ownCode) == errSecSuccess, let ownCode else { return false }
+        var ownStatic: SecStaticCode?
+        guard SecCodeCopyStaticCode(ownCode, SecCSFlags(), &ownStatic) == errSecSuccess,
+              let ownStatic else { return false }
+        var ownInfo: CFDictionary?
+        var helperInfo: CFDictionary?
+        guard SecCodeCopySigningInformation(ownStatic, SecCSFlags(rawValue: kSecCSSigningInformation), &ownInfo) == errSecSuccess,
+              SecCodeCopySigningInformation(helper, SecCSFlags(rawValue: kSecCSSigningInformation), &helperInfo) == errSecSuccess,
+              let ownTeam = (ownInfo as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String,
+              let helperTeam = (helperInfo as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String,
+              !ownTeam.isEmpty else { return false }
+        return helperTeam == ownTeam
+    }
+
+    private func run(_ binary: URL, _ arguments: [String]) async throws {
+        let status = try await Task.detached {
+            let process = Process()
+            process.executableURL = binary
+            process.arguments = arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        }.value
+        guard status == 0 else {
+            throw CowchatConnectionError.transport("Could not connect the agent. Check its installation and try again.")
+        }
+    }
+}

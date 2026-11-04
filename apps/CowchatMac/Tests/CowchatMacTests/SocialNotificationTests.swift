@@ -25,7 +25,7 @@ final class SocialNotificationTests: XCTestCase {
         XCTAssertTrue(ledger.consume(snapshot(requests: [request("old")], invitations: [invitation("old")])).isEmpty)
         let events = ledger.consume(snapshot(requests: [request("old"), request("new"), request("out", outgoing: true), request("done", outgoing: true, status: "accepted")], invitations: [invitation("old"), invitation("new")]))
         XCTAssertEqual(events.map(\.kind), [.friendRequest, .friendAccepted, .roomInvitation])
-        XCTAssertEqual(events.map { $0.kind.destination }, [.friends, .friends, .invitations])
+        XCTAssertEqual(events.map { $0.kind.destination }, [.friends, .friends, .inbox])
         XCTAssertEqual(events.map(\.body), ["@renzo wants to be your friend.", "@renzo accepted your friend request.", "@renzo invited you to Engineering."])
     }
 
@@ -75,15 +75,15 @@ final class SocialNotificationTests: XCTestCase {
         let subscription = service.$destination.receive(on: RunLoop.main).sink { section in
             if let section, service.consumeDestination(section) {
                 consumed += 1
-                XCTAssertEqual(section, .invitations)
+                XCTAssertEqual(section, .inbox)
                 routed.fulfill()
             }
         }
-        XCTAssertTrue(service.route(scope: current.deliveryScope, section: .invitations))
+        XCTAssertTrue(service.route(scope: current.deliveryScope, section: .inbox))
         await fulfillment(of: [routed], timeout: 1)
         XCTAssertEqual(consumed, 1)
         XCTAssertNil(service.destination)
-        XCTAssertFalse(service.consumeDestination(.invitations))
+        XCTAssertFalse(service.consumeDestination(.inbox))
         subscription.cancel()
         XCTAssertTrue(service.route(scope: current.deliveryScope, section: .friends))
         service.setSession(nil)

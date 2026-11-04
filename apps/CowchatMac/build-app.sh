@@ -8,6 +8,8 @@ cd "$ROOT"
 PRODUCT="CowchatMac"
 APP_NAME="Cowchat.app"
 SERVER_NAME="cowchat-server"
+BRIDGE_NAME="cowchat-codex"
+CLI_NAME="cowchat"
 SERVER_MANIFEST="$REPO_ROOT/Cargo.toml"
 SERVER_TARGET_DIR=${CARGO_TARGET_DIR:-"$REPO_ROOT/target"}
 RUST_TOOLCHAIN=${COWCHAT_RUST_TOOLCHAIN:-stable}
@@ -72,6 +74,24 @@ verify_server_signature() {
 	fi
 }
 
+verify_helper_binary() {
+	helper_path=$1
+	helper_name=$2
+	verification_phase=$3
+	if [ ! -f "$helper_path" ] || [ ! -x "$helper_path" ] || \
+		! lipo "$helper_path" -verify_arch arm64 || ! lipo "$helper_path" -verify_arch x86_64; then
+		printf 'Cowchat helper is missing, not executable, or not universal (%s): %s\n' \
+			"$verification_phase" "$helper_path" >&2
+		exit 1
+	fi
+	if ! helper_version_output=$("$helper_path" --version 2>/dev/null) || \
+		[ "$helper_version_output" != "$helper_name $SERVER_VERSION" ]; then
+		printf 'Unexpected Cowchat helper version (%s): %s\n' \
+			"$verification_phase" "${helper_version_output:-<missing>}" >&2
+		exit 1
+	fi
+}
+
 if [ ! -d "$ICON_PACKAGE" ]; then
 	printf 'Missing Icon Composer source: %s\n' "$ICON_PACKAGE" >&2
 	exit 1
@@ -121,11 +141,29 @@ for server_target in aarch64-apple-darwin x86_64-apple-darwin; do
 	MACOSX_DEPLOYMENT_TARGET=13.0 CARGO_TARGET_DIR="$SERVER_TARGET_DIR" \
 		RUSTC="$RUSTC_BIN" "$CARGO_BIN" build --locked --release --package "$SERVER_NAME" \
 		--target "$server_target" --manifest-path "$SERVER_MANIFEST"
+	MACOSX_DEPLOYMENT_TARGET=13.0 CARGO_TARGET_DIR="$SERVER_TARGET_DIR" \
+		RUSTC="$RUSTC_BIN" "$CARGO_BIN" build --locked --release --package "$BRIDGE_NAME" \
+		--target "$server_target" --manifest-path "$SERVER_MANIFEST"
+	MACOSX_DEPLOYMENT_TARGET=13.0 CARGO_TARGET_DIR="$SERVER_TARGET_DIR" \
+		RUSTC="$RUSTC_BIN" "$CARGO_BIN" build --locked --release --package cowchat-cli \
+		--target "$server_target" --manifest-path "$SERVER_MANIFEST"
 done
 ARM_SERVER="$SERVER_TARGET_DIR/aarch64-apple-darwin/release/$SERVER_NAME"
 INTEL_SERVER="$SERVER_TARGET_DIR/x86_64-apple-darwin/release/$SERVER_NAME"
+ARM_BRIDGE="$SERVER_TARGET_DIR/aarch64-apple-darwin/release/$BRIDGE_NAME"
+INTEL_BRIDGE="$SERVER_TARGET_DIR/x86_64-apple-darwin/release/$BRIDGE_NAME"
+ARM_CLI="$SERVER_TARGET_DIR/aarch64-apple-darwin/release/$CLI_NAME"
+INTEL_CLI="$SERVER_TARGET_DIR/x86_64-apple-darwin/release/$CLI_NAME"
 if [ ! -f "$ARM_SERVER" ] || [ ! -f "$INTEL_SERVER" ]; then
 	printf '%s\n' 'Missing one or more release cowchat-server target slices.' >&2
+	exit 1
+fi
+if [ ! -f "$ARM_BRIDGE" ] || [ ! -f "$INTEL_BRIDGE" ]; then
+	printf '%s\n' 'Missing one or more release cowchat-codex target slices.' >&2
+	exit 1
+fi
+if [ ! -f "$ARM_CLI" ] || [ ! -f "$INTEL_CLI" ]; then
+	printf '%s\n' 'Missing one or more release cowchat CLI target slices.' >&2
 	exit 1
 fi
 
@@ -176,6 +214,14 @@ SERVER_HELPER="$APP_DIR/Contents/Helpers/$SERVER_NAME"
 lipo "$ARM_SERVER" "$INTEL_SERVER" -create -output "$SERVER_HELPER"
 chmod 755 "$SERVER_HELPER"
 verify_server_binary "$SERVER_HELPER" "built app before signing"
+BRIDGE_HELPER="$APP_DIR/Contents/Helpers/$BRIDGE_NAME"
+lipo "$ARM_BRIDGE" "$INTEL_BRIDGE" -create -output "$BRIDGE_HELPER"
+chmod 755 "$BRIDGE_HELPER"
+verify_helper_binary "$BRIDGE_HELPER" "$BRIDGE_NAME" "built app before signing"
+CLI_HELPER="$APP_DIR/Contents/Helpers/$CLI_NAME"
+lipo "$ARM_CLI" "$INTEL_CLI" -create -output "$CLI_HELPER"
+chmod 755 "$CLI_HELPER"
+verify_helper_binary "$CLI_HELPER" "$CLI_NAME" "built app before signing"
 
 TMP_BASE=$(CDPATH='' cd -- "${TMPDIR:-/tmp}" && pwd)
 ICON_BUILD=$(mktemp -d "$TMP_BASE/CowchatIcon.XXXXXX")
@@ -259,10 +305,18 @@ sign_sparkle_framework "$APP_DIR/Contents/Frameworks/Sparkle.framework" "$SIGNIN
 if [ "$SIGNING_IDENTITY" = "-" ]; then
 	codesign --force --sign - "$SERVER_HELPER" >/dev/null
 	verify_server_signature "$SERVER_HELPER" "built app"
+	codesign --force --sign - "$BRIDGE_HELPER" >/dev/null
+	verify_server_signature "$BRIDGE_HELPER" "built app"
+	codesign --force --sign - "$CLI_HELPER" >/dev/null
+	verify_server_signature "$CLI_HELPER" "built app"
 	codesign --force --sign - "$APP_DIR" >/dev/null
 else
 	codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$SERVER_HELPER" >/dev/null
 	verify_server_signature "$SERVER_HELPER" "built app"
+	codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$BRIDGE_HELPER" >/dev/null
+	verify_server_signature "$BRIDGE_HELPER" "built app"
+	codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$CLI_HELPER" >/dev/null
+	verify_server_signature "$CLI_HELPER" "built app"
 	codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_DIR" >/dev/null
 fi
 codesign --verify --deep --strict "$APP_DIR"
@@ -282,6 +336,12 @@ fi
 INSTALL_SERVER_HELPER="$INSTALL_CANDIDATE/Contents/Helpers/$SERVER_NAME"
 verify_server_binary "$INSTALL_SERVER_HELPER" "staged installed app"
 verify_server_signature "$INSTALL_SERVER_HELPER" "staged installed app"
+INSTALL_BRIDGE_HELPER="$INSTALL_CANDIDATE/Contents/Helpers/$BRIDGE_NAME"
+verify_helper_binary "$INSTALL_BRIDGE_HELPER" "$BRIDGE_NAME" "staged installed app"
+verify_server_signature "$INSTALL_BRIDGE_HELPER" "staged installed app"
+INSTALL_CLI_HELPER="$INSTALL_CANDIDATE/Contents/Helpers/$CLI_NAME"
+verify_helper_binary "$INSTALL_CLI_HELPER" "$CLI_NAME" "staged installed app"
+verify_server_signature "$INSTALL_CLI_HELPER" "staged installed app"
 
 if [ -e "$INSTALL_APP" ] || [ -L "$INSTALL_APP" ]; then
 	INSTALL_BACKUP="$INSTALL_STAGE/previous-$APP_NAME"

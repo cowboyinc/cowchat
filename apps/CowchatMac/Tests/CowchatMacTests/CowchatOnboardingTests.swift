@@ -48,11 +48,9 @@ final class CowchatOnboardingTests: XCTestCase {
 
     func testStarterNamePreviewsPreserveUnicodeAndBoundSuffixes() {
         XCTAssertEqual(SocialStarterNames.bot("Chad DePue"), "Chad_DePue_bot")
-        XCTAssertEqual(SocialStarterNames.home("  Renée • 李  "), "Renée_李_Home")
+        XCTAssertEqual(SocialStarterNames.bot("  Renée • 李  "), "Renée_李_bot")
         XCTAssertEqual(SocialStarterNames.bot("🐄"), "Cowboy_bot")
-        XCTAssertEqual(SocialStarterNames.home(String(repeating: "é", count: 100)), String(repeating: "é", count: 70) + "_Home")
-        XCTAssertEqual(WizardStep.login.number, 1)
-        XCTAssertEqual(WizardStep.ready.number, 4)
+        XCTAssertEqual(SocialStarterNames.bot(String(repeating: "é", count: 100)), String(repeating: "é", count: 70) + "_bot")
     }
 
     private func freshDefaults() -> (UserDefaults, String) {

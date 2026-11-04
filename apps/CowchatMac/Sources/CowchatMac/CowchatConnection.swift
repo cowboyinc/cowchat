@@ -59,6 +59,9 @@ protocol CowchatConnectionProtocol: AnyObject {
     func register(name: String, agentID: String) async throws -> CowchatRegistration
     func roomLeases(roomID: String) async throws -> [RoomLease]
     func listRooms() async throws -> [Room]
+    /// Rooms this connection's key may join and is not in, which the sidebar's search lists under To join. The server
+    /// has no such call yet (a question for Chad, navigation note section 3.7).
+    func listJoinableRooms() async throws -> [Room]
     func listAgents(roomID: String) async throws -> [AgentPresence]
     func createRoom(
         name: String,
@@ -83,8 +86,16 @@ protocol CowchatConnectionProtocol: AnyObject {
         limit: Int,
         before: String?
     ) async throws -> [ChatMessage]
-    func send(roomID: String, content: String) async throws -> ChatMessage
+    /// Sends a message. `mentions` holds the agent IDs it names, which the server keeps on the message.
+    func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage
     func disconnect()
+}
+
+extension CowchatConnectionProtocol {
+    /// Sends a message that mentions no one.
+    func send(roomID: String, content: String) async throws -> ChatMessage {
+        try await send(roomID: roomID, content: content, mentions: [])
+    }
 }
 
 extension CowchatConnectionProtocol {
@@ -92,6 +103,10 @@ extension CowchatConnectionProtocol {
 
     func roomLeases(roomID: String) async throws -> [RoomLease] {
         throw CowchatConnectionError.transport("Room leases require an updated Cowchat server.")
+    }
+
+    func listJoinableRooms() async throws -> [Room] {
+        throw CowchatConnectionError.transport("Listing rooms to join requires an updated Cowchat server.")
     }
 
     func history(roomID: String, limit: Int) async throws -> [ChatMessage] {
@@ -329,12 +344,12 @@ final class CowchatConnection: CowchatConnectionProtocol {
         return messages
     }
 
-    func send(roomID: String, content: String) async throws -> ChatMessage {
+    func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage {
         let payload = try await request(type: "send_message", payload: [
             "room_id": roomID,
             "content": content,
             "metadata": ["display_external": true],
-            "mentions": [],
+            "mentions": mentions,
         ])
         return try decode(ChatMessage.self, from: payload)
     }

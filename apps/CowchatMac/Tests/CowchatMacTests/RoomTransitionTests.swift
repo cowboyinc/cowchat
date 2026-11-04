@@ -221,7 +221,7 @@ private final class MockRoomConnection: CowchatConnectionProtocol {
         }
         return Array(eligible.suffix(limit))
     }
-    func send(roomID: String, content: String) async throws -> ChatMessage {
+    func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage {
         operations.append("send:\(roomID):\(content)")
         if blocksSend {
             await withCheckedContinuation { sendContinuations[content] = $0 }
@@ -2052,13 +2052,12 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
-    func testDestroyedRoomClearsRenameAndSubroomCreationState() throws {
+    func testDestroyedRoomClearsRenameState() throws {
         let parent = try decodeRoom(id: "parent", name: "Parent")
         let connection = MockRoomConnection()
         let store = makeStore(connection: connection)
         store.rooms = [parent]
         store.roomBeingRenamed = parent
-        store.presentCreateRoom(parentID: parent.id)
 
         connection.onEvent?("room_destroyed", ["room_id": parent.id])
         connection.onEvent?("room_updated", [
@@ -2069,8 +2068,6 @@ final class RoomTransitionTests: XCTestCase {
         ])
 
         XCTAssertNil(store.roomBeingRenamed)
-        XCTAssertNil(store.createRoomParentID)
-        XCTAssertFalse(store.isCreateRoomPresented)
         XCTAssertFalse(store.rooms.contains(where: { $0.id == parent.id }))
     }
 
@@ -2292,32 +2289,6 @@ final class RoomTransitionTests: XCTestCase {
     }
 
     @MainActor
-    func testFirstCollaboratorInSelectedRoomShowsSecondAgentHintOnce() async throws {
-        let connection = MockRoomConnection()
-        let store = makeStore(connection: connection)
-        let room = try decodeRoom(id: "r1", name: "my-room")
-        connection.listedRooms = [try decodeRoom(id: "lobby", name: "lobby"), room]
-        await store.connect()
-        connection.roomToCreate = room
-        _ = await store.createRoom(name: "my-room", description: "", isPublic: true)
-
-        // Collaborator appears while the room is selected → in-place flip.
-        connection.agentsByRoom["r1"] = [AgentPresence(agentID: "other", name: "codex")]
-        await store.pollSetupRoomReadiness()
-
-        XCTAssertEqual(store.secondAgentHintRoom?.id, "r1")
-        XCTAssertNil(store.roomReadyNotice)
-
-        // Once per room: re-entering the setup state can't re-trigger it.
-        store.secondAgentHintRoom = nil
-        connection.agentsByRoom["r1"] = []
-        await store.pollSetupRoomReadiness()
-        connection.agentsByRoom["r1"] = [AgentPresence(agentID: "other", name: "codex")]
-        await store.pollSetupRoomReadiness()
-        XCTAssertNil(store.secondAgentHintRoom)
-    }
-
-    @MainActor
     func testSelectedAgentlessRoomIsPolledForMembersEvenWhenNotInSetupSet() async throws {
         let connection = MockRoomConnection()
         let store = makeStore(connection: connection)
@@ -2333,6 +2304,21 @@ final class RoomTransitionTests: XCTestCase {
         connection.agentsByRoom["r-empty"] = [
             AgentPresence(agentID: "other-agent", name: "codex")
         ]
+        await store.pollSetupRoomReadiness()
+        XCTAssertTrue(store.roomMembers.contains { $0.agentID == "other-agent" })
+    }
+
+    @MainActor
+    func testTheLobbyIsPolledForMembersAsAnyRoomIs() async throws {
+        let connection = MockRoomConnection()
+        let store = makeStore(connection: connection)
+        let lobby = try decodeRoom(id: "lobby", name: "lobby")
+        connection.listedRooms = [lobby]
+        await store.connect()
+        await store.select(room: lobby)
+        XCTAssertTrue(store.selectedRoomAwaitingFirstAgent)
+
+        connection.agentsByRoom["lobby"] = [AgentPresence(agentID: "other-agent", name: "codex")]
         await store.pollSetupRoomReadiness()
         XCTAssertTrue(store.roomMembers.contains { $0.agentID == "other-agent" })
     }

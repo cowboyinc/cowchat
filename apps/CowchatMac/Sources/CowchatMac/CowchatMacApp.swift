@@ -6,6 +6,8 @@ final class CowchatAppDelegate: NSObject, NSApplicationDelegate {
     private var screenObserver: NSObjectProtocol?
     private var terminationTask: Task<Void, Never>?
     private var terminationShutdownCompleted = false
+    /// The Inbox's unread count on the Dock's icon.
+    let inboxDockBadge = InboxDockBadge()
     var onTerminationRequested: (@MainActor () async -> Void)?
     var replyToApplicationShouldTerminate: @MainActor (NSApplication, Bool) -> Void = {
         application, shouldTerminate in
@@ -150,6 +152,7 @@ struct CowchatMacApp: App {
                 }
                 workspace.start()
                 softwareUpdater.start()
+                appDelegate.inboxDockBadge.start(inbox: workspace.inbox)
             }
         }
         .defaultSize(width: 1080, height: 740)
@@ -159,9 +162,13 @@ struct CowchatMacApp: App {
                 Button("Check for Updates…") { softwareUpdater.checkForUpdates() }
                     .disabled(!softwareUpdater.canCheckForUpdates)
             }
+            CommandGroup(replacing: .appSettings) {
+                // copy:
+                Button("Settings…", action: SettingsCommand.perform)
+                    .keyboardShortcut(",", modifiers: .command)
+            }
             CommandGroup(after: .newItem) {
-                Button("New Room") { workspace.activeStore.presentCreateRoom() }
-                    .keyboardShortcut("n", modifiers: .command)
+                NewMenuItems(workspace: workspace)
                     .disabled(completedOnboardingVersion < CowchatOnboarding.currentVersion)
             }
             CommandGroup(after: .help) {
@@ -179,8 +186,18 @@ struct CowchatMacApp: App {
     }
 }
 
+/// The app menu's Settings… (⌘,): the window shows its Settings sheet, since the app has no Settings scene.
+enum SettingsCommand {
+    static func perform() {
+        NotificationCenter.default.post(name: .cowchatShowSettings, object: nil)
+    }
+}
+
 extension Notification.Name {
     static let cowchatShowWhatsNew = Notification.Name("CowchatMac.showWhatsNew")
+
+    /// ⌘, — the window presents its Settings sheet. The app has no Settings scene.
+    static let cowchatShowSettings = Notification.Name("CowchatMac.showSettings")
 
     /// ⌃⌘S — macOS reserves this for sidebar toggling; nothing binds it once
     /// the shell owns its own fixed column (cowboy-app pattern).

@@ -1,40 +1,39 @@
-/// What the main pane renders for a selected, non-lobby room — §3 of the
-/// onboarding spec. Purely derived from live signals; persisted flags never
-/// gate rendering. "Loading" means an in-flight history fetch on an
-/// established connection only.
+/// What the main pane renders for a selected room. Purely derived from live signals; persisted flags never gate
+/// rendering. "Loading" means an in-flight history fetch on an established connection only.
+///
+/// An empty room draws one state whoever is in it (navigation note, section 5.1): sessions join their rooms by
+/// themselves through the plugin and hooks, so nobody pastes a join prompt into an account room.
 enum RoomPaneState: Equatable {
-    enum ConnectVariant: Equatable {
-        case connected
+    enum Unreachable: Equatable {
         case connecting
         case offline
     }
 
-    case connectPrompt(ConnectVariant)
     case loading
     case chat
-    case quiet
+    /// A connected room with no messages yet.
+    case empty
+    /// No connection, and nothing loaded to show.
+    case unreachable(Unreachable)
 
     static func state(
         connectionStatus: ConnectionStatus,
         isLoadingMessages: Bool,
-        hasMessages: Bool,
-        hasOtherMembers: Bool
+        hasMessages: Bool
     ) -> RoomPaneState {
-        // Spec §3 decision-table order, minus the lobby row (handled by
-        // ContentView's outer switch before this function is reached).
+        // A room whose messages are already loaded keeps them, and its header caption says it is offline.
         if !connectionStatus.isConnected && !hasMessages {
-            return .connectPrompt(connectionStatus == .connecting ? .connecting : .offline)
+            return .unreachable(connectionStatus == .connecting ? .connecting : .offline)
         }
         if isLoadingMessages { return .loading }
         if hasMessages { return .chat }
-        if hasOtherMembers { return .quiet }
-        return .connectPrompt(.connected)
+        return .empty
     }
 
-    /// The floating "Invite a collaborator" nudge: live chat, but nobody
-    /// else here. The connect and quiet states carry their own invite CTAs,
-    /// so the nudge only floats over an active feed.
-    static func showsInviteNudge(state: RoomPaneState, hasOtherMembers: Bool) -> Bool {
-        state == .chat && !hasOtherMembers
+    /// Whether the empty state offers Copy connect prompt: in This Mac and API-key rooms, where an agent still gets in
+    /// only through a pasted prompt, since the hooks join the account. Account rooms bring agents in through the
+    /// person's sessions, Add person, People… and the Join sheet.
+    static func emptyOffersConnectPrompt(isAccountRoom: Bool) -> Bool {
+        !isAccountRoom
     }
 }
