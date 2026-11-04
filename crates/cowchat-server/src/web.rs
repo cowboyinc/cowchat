@@ -1200,6 +1200,26 @@ mod tests {
         let observed = state.clone();
         let (server, addr) = start_test_web_server(state).await;
         let http = reqwest::Client::new();
+        let history_url = format!("http://{addr}/api/rooms/{}/history", room.room_id);
+        assert_eq!(
+            http.get(&history_url)
+                .header(API_KEY_HEADER, key)
+                .header("x-cowchat-session-id", &session)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            http.get(&history_url)
+                .header(API_KEY_HEADER, token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
         let upload = || {
             http.post(upload_url(&addr, &room.room_id))
                 .query(&[("name", "note.txt")])
@@ -1237,6 +1257,15 @@ mod tests {
             StatusCode::OK
         );
         observed.store.social_end_session(token, &session).unwrap();
+        assert_eq!(
+            http.get(&history_url)
+                .header(API_KEY_HEADER, token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
         assert_eq!(
             http.get(blob_url(&addr, blob_id))
                 .header(API_KEY_HEADER, token)
