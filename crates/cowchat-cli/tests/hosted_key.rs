@@ -272,6 +272,84 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         "{}",
         String::from_utf8_lossy(&sent.stderr)
     );
+    let shared = store
+        .social_action(
+            owner["device_key"].as_str().unwrap(),
+            "POST",
+            "rooms",
+            &serde_json::json!({"name":"shared-work"}),
+        )
+        .unwrap();
+    let shared_id = shared["room_id"].as_str().unwrap();
+    let cursor = dir.path().join("approved-rooms-cursor");
+    let waiter = tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args([
+            "--url",
+            &url,
+            "--name",
+            "worker",
+            "--agent-id",
+            &id,
+            "wait",
+            room,
+            "--approved-rooms",
+            "--mentions-only",
+            "--loop",
+            "--cursor-file",
+            cursor.to_str().unwrap(),
+            "--since-seq",
+            "0",
+            "--idle-timeout",
+            "5",
+            "--heartbeat-secs",
+            "0",
+        ])
+        .env("HOME", &home)
+        .env("COWCHAT_SESSION_FILE", session_file)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let approval = reqwest::Client::new()
+        .post(format!("http://{addr}/social/v1/rooms/{shared_id}/agents"))
+        .header("x-cowchat-key", owner["device_key"].as_str().unwrap())
+        .json(&serde_json::json!({"agent_ids":[id]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(approval.status().is_success());
+    let human = CowchatClient::connect_ws(
+        &url,
+        owner["device_key"].as_str().unwrap(),
+        "owner",
+        None,
+        vec![],
+    )
+    .await
+    .unwrap();
+    human.join_room(shared_id).await.unwrap();
+    human
+        .send_message(shared_id, "please review this", None, vec![id.clone()])
+        .await
+        .unwrap();
+    let waiter_out =
+        tokio::time::timeout(std::time::Duration::from_secs(6), waiter.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        waiter_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&waiter_out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&waiter_out.stdout).contains("please review this"),
+        "stdout: {} stderr: {}",
+        String::from_utf8_lossy(&waiter_out.stdout),
+        String::from_utf8_lossy(&waiter_out.stderr)
+    );
     let insecure = tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"))
         .args([
             "--url",

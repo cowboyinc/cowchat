@@ -401,6 +401,9 @@ enum Commands {
         /// Wake only when the server recorded a mention of this session's agent ID.
         #[arg(long)]
         mentions_only: bool,
+        /// Add every room currently approved for this hosted session and join new approvals live.
+        #[arg(long)]
+        approved_rooms: bool,
         /// Skip messages from this `--name` (in addition to your own).
         #[arg(long)]
         not_from: Option<String>,
@@ -1302,6 +1305,7 @@ async fn run_wait_multiple(
     heartbeat_secs: u64,
     only_from: Option<&str>,
     mentions_only: bool,
+    approved_rooms: bool,
     not_from: Option<&str>,
     only_kind: Option<&str>,
     not_kind: Option<&str>,
@@ -1322,6 +1326,19 @@ async fn run_wait_multiple(
         std::collections::HashMap::new()
     };
     let own_id = resolve_agent_id(cli);
+    let approved_session = if approved_rooms {
+        let id = own_id
+            .as_deref()
+            .filter(|id| id.starts_with("session:"))
+            .ok_or("--approved-rooms requires a session agent ID")?;
+        let url = cli
+            .url
+            .as_deref()
+            .ok_or("--approved-rooms requires --url")?;
+        Some((id.to_owned(), url.to_owned()))
+    } else {
+        None
+    };
     let own_session_room = own_id
         .as_deref()
         .filter(|id| id.starts_with("session:"))
@@ -1349,8 +1366,15 @@ async fn run_wait_multiple(
             }
             Err(error) => return Err(error),
         };
+        // Subscribe before discovering approvals, so an approval racing the
+        // HTTP snapshot remains queued for the live listener.
+        let mut approval_events = client.subscribe();
         let mut room_ids = Vec::new();
-        for room in rooms {
+        let mut room_refs = rooms.to_vec();
+        if let Some((id, url)) = &approved_session {
+            room_refs.extend(session::approved_room_ids(id, url).await?);
+        }
+        for room in &room_refs {
             let id = resolve_room_id(&client, room).await?;
             client.join_room(&id).await?;
             if !cursors.contains_key(&id) {
@@ -1400,7 +1424,26 @@ async fn run_wait_multiple(
                     (room_id, result)
                 });
             }
-            let result = tasks.join_next().await;
+            let result = tokio::select! {
+                result = tasks.join_next() => result,
+                event = approval_events.recv(), if approved_session.is_some() => {
+                    tasks.abort_all();
+                    match event {
+                        Ok(event) if event.frame.frame_type == cowchat_core::FrameType::RoomApproved => {
+                            if let Some(room_id) = event.frame.payload["room_id"].as_str() {
+                                if !room_ids.iter().any(|id| id == room_id) {
+                                    client.join_room(room_id).await?;
+                                    cursors.entry(room_id.to_owned()).or_insert(0);
+                                    room_ids.push(room_id.to_owned());
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => continue 'reconnect,
+                        _ => {}
+                    }
+                    continue;
+                }
+            };
             tasks.abort_all();
             let Some(Ok((room_id, result))) = result else {
                 return Err("multi-room wait task failed".into());
@@ -2430,6 +2473,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             heartbeat_secs,
             only_from,
             mentions_only,
+            approved_rooms,
             not_from,
             only_kind,
             not_kind,
@@ -2438,7 +2482,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             drain,
             cursor_file,
         } => {
-            if room.len() > 1 {
+            if room.len() > 1 || *approved_rooms {
                 return run_wait_multiple(
                     &cli,
                     room,
@@ -2449,6 +2493,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *heartbeat_secs,
                     only_from.as_deref(),
                     *mentions_only,
+                    *approved_rooms,
                     not_from.as_deref(),
                     only_kind.as_deref(),
                     not_kind.as_deref(),
