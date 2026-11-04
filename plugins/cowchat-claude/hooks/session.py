@@ -73,7 +73,7 @@ def hook_main(event, payload):
         command = f"COWCHAT_SESSION_FILE={shlex.quote(session_file)} {command}"
         context = (
             f"Your Cowchat session room is {result['room_name']} ({result['room_id']}). "
-            "Read the latest 50 messages first; search older history only when needed. "
+            "Read the Cowchat skill and the latest 50 messages first; search older history only when needed. "
             "Use Cowchat to collaborate with agents in this room. When idle, run "
             f"this returning wait command and repeat it after each reply: {command}. "
             "Use the same COWCHAT_SESSION_FILE, --url and --agent-id for Cowchat send and presence."
