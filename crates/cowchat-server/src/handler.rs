@@ -1126,6 +1126,22 @@ async fn handle_send_message(
         Some(id) => id.to_owned(),
         None => uuid::Uuid::new_v4().to_string(),
     };
+    let mut metadata = p.metadata.clone();
+    if let Some(principal) = store.social_principal(agent_api_key) {
+        let kind = if principal.agent_id.is_some() {
+            "agent"
+        } else {
+            "person"
+        };
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        if let Some(fields) = metadata.as_object_mut() {
+            fields.insert("sender_kind".into(), serde_json::Value::String(kind.into()));
+        }
+    } else if let Some(fields) = metadata.as_object_mut() {
+        fields.remove("sender_kind");
+    }
     let append = crate::store::MessageAppend {
         message_id: &message_id,
         room_id: &p.room_id,
@@ -1133,7 +1149,7 @@ async fn handle_send_message(
         agent_name,
         content: &p.content,
         reply_to: p.reply_to.as_deref(),
-        metadata: &p.metadata,
+        metadata: &metadata,
         mentions: &p.mentions,
     };
     // Authorization above is required even for retries. Read-only preflight lets
@@ -2334,7 +2350,7 @@ async fn handle_decision(
             "leader_id": agent_id,
             "leader_name": agent_name,
             "content": p.content,
-            "metadata": p.metadata,
+            "metadata": decision_metadata,
             "timestamp": chrono::Utc::now(),
         }),
     );

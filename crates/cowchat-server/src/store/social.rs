@@ -373,7 +373,8 @@ CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT N
 CREATE TABLE IF NOT EXISTS social_members(room_id TEXT NOT NULL,account_id TEXT NOT NULL,PRIMARY KEY(room_id,account_id));
 CREATE TABLE IF NOT EXISTS social_admissions(room_id TEXT NOT NULL,agent_id TEXT NOT NULL,PRIMARY KEY(room_id,agent_id));
 CREATE TABLE IF NOT EXISTS social_sessions(id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,owner_id TEXT NOT NULL,name TEXT NOT NULL,harness TEXT NOT NULL,folder TEXT NOT NULL,branch TEXT NOT NULL,room_id TEXT NOT NULL UNIQUE,room_name TEXT NOT NULL,token_digest TEXT UNIQUE,minted_by TEXT,started_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,ended_at INTEGER);
-CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,from_id TEXT NOT NULL,to_id TEXT NOT NULL,proposed TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);")?;
+CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,from_id TEXT NOT NULL,to_id TEXT NOT NULL,proposed TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_rooms s JOIN rooms r ON r.room_id=s.room_id;")?;
         let conn = self.conn.lock().unwrap();
         let mut columns = conn.prepare("PRAGMA table_info(social_credentials)")?;
         let has_kind = columns
@@ -538,6 +539,10 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
         tx.execute(
             "INSERT INTO social_rooms(room_id,owner_id) VALUES(?1,?2)",
             params![room_id, p.account_id],
+        )?;
+        tx.execute(
+            "INSERT INTO persistent_rooms(room_id) VALUES(?1)",
+            [&room_id],
         )?;
         tx.execute(
             "INSERT INTO social_members(room_id,account_id) VALUES(?1,?2)",
@@ -823,6 +828,7 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                         "INSERT INTO social_rooms(room_id,owner_id) VALUES(?1,?2)",
                         params![room, a],
                     )?;
+                    tx.execute("INSERT INTO persistent_rooms(room_id) VALUES(?1)", [&room])?;
                     tx.execute(
                         "INSERT INTO social_members(room_id,account_id) VALUES(?1,?2)",
                         params![room, a],
@@ -1027,6 +1033,7 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                     "INSERT INTO social_rooms(room_id,owner_id) VALUES(?1,?2)",
                     params![room, a],
                 )?;
+                tx.execute("INSERT INTO persistent_rooms(room_id) VALUES(?1)", [&room])?;
                 tx.execute(
                     "INSERT INTO social_members(room_id,account_id) VALUES(?1,?2)",
                     params![room, a],
@@ -1117,8 +1124,27 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                 let (name,owner):(String,String)=tx.query_row("SELECT r.name,s.owner_id FROM rooms r JOIN social_rooms s ON s.room_id=r.room_id WHERE r.room_id=?1",[room],|r|Ok((r.get(0)?,r.get(1)?)))?;
                 json!({"room_id":room,"name":name,"owner_id":owner,"history_policy":"full","encrypted":false,"slack_connected":false,"members":members(&tx,room)?,"agents":agents(&tx,None,Some(room))?})
             }
-            ("POST", ["rooms", _, "invitations"]) => {
-                anyhow::bail!("Additional people are not supported in v1")
+            ("POST", ["rooms", room, "invitations"]) => {
+                anyhow::ensure!(room_owner(&tx, room, key)? == Some(true), "not found");
+                let member_count: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM social_members WHERE room_id=?1",
+                    [room],
+                    |row| row.get(0),
+                )?;
+                let pending_count: i64 = tx.query_row("SELECT COUNT(*) FROM social_room_invitations WHERE room_id=?1 AND status='pending'", [room], |row| row.get(0))?;
+                anyhow::ensure!(member_count + pending_count < 50, "room is full");
+                let friend = string(body, "friend_id")?;
+                let already_member: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM social_members WHERE room_id=?1 AND account_id=?2)",
+                    params![room, friend], |row| row.get(0),
+                )?;
+                anyhow::ensure!(!already_member, "already in room");
+                let pending: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM social_room_invitations WHERE room_id=?1 AND to_id=?2 AND status='pending')",
+                    params![room, friend], |row| row.get(0),
+                )?;
+                anyhow::ensure!(!pending, "invitation already pending");
+                invite(&tx, room, a, friend, ids(body, "proposed_agent_ids")?)?
             }
             ("POST", ["rooms", room, "agents"]) => {
                 anyhow::ensure!(room_access(&tx, room, key)? == Some(true), "not found");
@@ -1152,8 +1178,20 @@ CREATE TABLE IF NOT EXISTS social_room_invitations(id TEXT PRIMARY KEY,room_id T
                     "DELETE FROM social_members WHERE room_id=?1 AND account_id=?2",
                     params![room, a],
                 )?;
-                tx.execute("DELETE FROM social_admissions WHERE room_id=?1 AND agent_id IN (SELECT id FROM social_agents WHERE owner_id=?2)",params![room,a])?;
+                tx.execute("DELETE FROM social_admissions WHERE room_id=?1 AND agent_id IN (SELECT id FROM social_agents WHERE owner_id=?2 UNION SELECT id FROM social_sessions WHERE owner_id=?2)",params![room,a])?;
                 tx.execute("UPDATE social_room_invitations SET status='declined' WHERE room_id=?1 AND status='pending' AND (from_id=?2 OR to_id=?2)",params![room,a])?;
+                json!({"ok":true})
+            }
+            ("DELETE", ["rooms", room, "members", account]) => {
+                anyhow::ensure!(room_owner(&tx, room, key)? == Some(true), "not found");
+                anyhow::ensure!(account != a, "owner cannot leave");
+                let removed = tx.execute(
+                    "DELETE FROM social_members WHERE room_id=?1 AND account_id=?2",
+                    params![room, account],
+                )?;
+                anyhow::ensure!(removed > 0, "not found");
+                tx.execute("DELETE FROM social_admissions WHERE room_id=?1 AND agent_id IN (SELECT id FROM social_agents WHERE owner_id=?2 UNION SELECT id FROM social_sessions WHERE owner_id=?2)",params![room,account])?;
+                tx.execute("UPDATE social_room_invitations SET status='declined' WHERE room_id=?1 AND status='pending' AND (from_id=?2 OR to_id=?2)",params![room,account])?;
                 json!({"ok":true})
             }
             _ => anyhow::bail!("not found"),
@@ -1393,6 +1431,174 @@ mod tests {
             response["device_key"].as_str().unwrap().to_owned(),
             response["account"].clone(),
         )
+    }
+    #[test]
+    fn existing_room_can_invite_three_friends_and_keep_history() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, owner) = login(&store, "room-owner");
+        let room = store
+            .social_action(&owner_key, "POST", "rooms", &json!({"name":"project"}))
+            .unwrap();
+        let room_id = room["room_id"].as_str().unwrap();
+        for subject in ["friend-one", "friend-two", "friend-three"] {
+            let (friend_key, friend) = login(&store, subject);
+            let owner_id = owner["id"].as_str().unwrap();
+            let friend_id = friend["id"].as_str().unwrap();
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO social_friends(a,b) VALUES(?1,?2),(?2,?1)",
+                    params![owner_id, friend_id],
+                )
+                .unwrap();
+            let invite = store
+                .social_action(
+                    &owner_key,
+                    "POST",
+                    &format!("rooms/{room_id}/invitations"),
+                    &json!({"friend_id":friend_id}),
+                )
+                .unwrap();
+            let invite_id = invite["id"].as_str().unwrap();
+            assert!(store
+                .social_action(
+                    &owner_key,
+                    "POST",
+                    &format!("rooms/{room_id}/invitations"),
+                    &json!({"friend_id":friend_id})
+                )
+                .is_err());
+            store
+                .social_action(
+                    &friend_key,
+                    "POST",
+                    &format!("room-invitations/{invite_id}/accept"),
+                    &json!({}),
+                )
+                .unwrap();
+            assert_eq!(store.social_room_access(room_id, &friend_key), Some(true));
+        }
+        let participants = store
+            .social_action(
+                &owner_key,
+                "GET",
+                &format!("rooms/{room_id}/participants"),
+                &json!({}),
+            )
+            .unwrap();
+        assert_eq!(participants["members"].as_array().unwrap().len(), 4);
+        store
+            .insert_message(
+                &uuid::Uuid::new_v4().to_string(),
+                room_id,
+                "agent",
+                "Agent",
+                "saved",
+                None,
+                &json!({}),
+            )
+            .unwrap();
+        assert_eq!(store.purge_messages_by_tier("free", "+1 hours").unwrap(), 0);
+        assert_eq!(store.get_history(room_id, 10, None).unwrap().len(), 1);
+    }
+    #[test]
+    fn only_owner_invites_and_can_remove_member_with_agent_admissions() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, owner) = login(&store, "owner-removal");
+        let (friend_key, friend) = login(&store, "friend-removal");
+        let (outsider_key, outsider) = login(&store, "outsider-removal");
+        let owner_id = owner["id"].as_str().unwrap();
+        let friend_id = friend["id"].as_str().unwrap();
+        let outsider_id = outsider["id"].as_str().unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO social_friends(a,b) VALUES(?1,?2),(?2,?1),(?2,?3),(?3,?2)",
+                params![owner_id, friend_id, outsider_id],
+            )
+            .unwrap();
+        let room = store
+            .social_action(
+                &owner_key,
+                "POST",
+                "rooms",
+                &json!({"name":"private-work","friend_id":friend_id}),
+            )
+            .unwrap();
+        let room_id = room["room_id"].as_str().unwrap();
+        let invitation = room["invitation"]["id"].as_str().unwrap();
+        store
+            .social_action(
+                &friend_key,
+                "POST",
+                &format!("room-invitations/{invitation}/accept"),
+                &json!({}),
+            )
+            .unwrap();
+        assert!(store
+            .social_action(
+                &friend_key,
+                "POST",
+                &format!("rooms/{room_id}/invitations"),
+                &json!({"friend_id":outsider_id})
+            )
+            .is_err());
+        let bot = store
+            .social_action(&friend_key, "POST", "agents", &json!({"name":"Friend Bot"}))
+            .unwrap();
+        let bot_id = bot["agent"]["id"].as_str().unwrap();
+        store
+            .social_action(
+                &friend_key,
+                "POST",
+                &format!("rooms/{room_id}/agents"),
+                &json!({"agent_ids":[bot_id]}),
+            )
+            .unwrap();
+        assert_eq!(
+            store.social_room_access(room_id, bot["api_key"].as_str().unwrap()),
+            Some(true)
+        );
+        store
+            .social_action(
+                &owner_key,
+                "DELETE",
+                &format!("rooms/{room_id}/members/{friend_id}"),
+                &json!({}),
+            )
+            .unwrap();
+        assert_eq!(store.social_room_access(room_id, &friend_key), Some(false));
+        assert_eq!(
+            store.social_room_access(room_id, bot["api_key"].as_str().unwrap()),
+            Some(false)
+        );
+        assert!(store
+            .social_action(
+                &friend_key,
+                "GET",
+                &format!("rooms/{room_id}/participants"),
+                &json!({})
+            )
+            .is_err());
+        let admissions: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM social_admissions WHERE room_id=?1 AND agent_id=?2",
+                params![room_id, bot_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(admissions, 0);
+        assert_eq!(
+            store.social_room_access(room_id, &outsider_key),
+            Some(false)
+        );
     }
     #[test]
     fn friend_alias_is_permanent_idempotent_and_requires_explicit_consent() {
