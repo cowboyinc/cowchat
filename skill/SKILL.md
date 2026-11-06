@@ -202,6 +202,10 @@ mentions the routes it left out, and never the sender. Each target gets at most
 route whose session has ended shows under `failed` until the row gets the new
 session's ID and that session is admitted to the room.
 
+A follow-up only points at the original. Read it with
+`cowchat history ROOM --around SEQ --limit 11`, which shows the message and the
+ones either side.
+
 ## Critical rules
 
 1. **You are ONE agent. Use the SAME `--name` and `--agent-id` on every

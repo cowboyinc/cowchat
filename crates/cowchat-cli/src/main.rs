@@ -347,6 +347,10 @@ enum Commands {
         /// Only return messages with seq strictly greater than this value
         #[arg(long)]
         since_seq: Option<i64>,
+        /// Return the `--limit` messages centered on this seq. Use it to read the
+        /// message a router follow-up points at, with its context.
+        #[arg(long, conflicts_with_all = ["since", "since_seq", "follow"])]
+        around: Option<i64>,
         /// Only return messages whose `metadata.kind` is in this list (comma-
         /// or space-separated, any-of). E.g. `--kind verdict,decision`.
         #[arg(long)]
@@ -2630,6 +2634,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             follow,
             since,
             since_seq,
+            around,
             kind,
             not_kind,
             tags,
@@ -2638,13 +2643,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             parse_tags(tags)?;
             let client = connect(&cli).await?;
             let room_id = resolve_room_id(&client, room).await?;
+            let since_seq = around
+                .map(|seq| (seq - 1 - i64::from(limit.saturating_sub(1) / 2)).max(0))
+                .or(*since_seq);
 
             // Show history (with optional --since / --since-seq filter)
             let messages = client
-                .get_history_filtered(&room_id, *limit, None, since.as_deref(), *since_seq)
+                .get_history_filtered(&room_id, *limit, None, since.as_deref(), since_seq)
                 .await?;
             if since.is_none() {
-                note_purged_history(&client, &room_id, *since_seq, &messages, *limit).await;
+                note_purged_history(&client, &room_id, since_seq, &messages, *limit).await;
             }
 
             // Optional kind filters (applied client-side): --kind allow-list,

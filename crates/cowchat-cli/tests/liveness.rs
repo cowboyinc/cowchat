@@ -1302,6 +1302,51 @@ async fn inline_charts_round_trip_through_local_and_encrypted_rooms() {
 }
 
 #[tokio::test]
+async fn history_around_returns_the_messages_either_side_of_a_seq() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let reader = CowchatClient::connect_tcp(&addr, &key, "reader", Some("reader"), vec![])
+        .await
+        .unwrap();
+    let cowchat = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command.args(["--tcp", &addr, "--key", &key, "--name", "context"]);
+        command.args(["--agent-id", "context-writer"]);
+        command.args(args);
+        command
+    };
+    for text in ["one", "two", "three", "four", "five"] {
+        let output = cowchat(&["send", "lobby", text]).output().await.unwrap();
+        assert!(output.status.success());
+    }
+    let messages = reader.get_history("lobby", 100, None).await.unwrap();
+    let middle = messages[2].seq.to_string();
+    let output = cowchat(&["history", "lobby", "--around", &middle, "--limit", "3"])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for text in ["two", "three", "four"] {
+        assert!(stdout.contains(text), "{stdout}");
+    }
+    for text in ["one", "five"] {
+        assert!(!stdout.contains(text), "{stdout}");
+    }
+
+    let first = messages[0].seq.to_string();
+    let output = cowchat(&["history", "lobby", "--around", &first, "--limit", "3"])
+        .output()
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("one"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn tags_round_trip_through_send_history_and_wait() {
     let (server, addr, key, _tmp) = start_test_server().await;
     let reader = CowchatClient::connect_tcp(&addr, &key, "reader", Some("reader"), vec![])
