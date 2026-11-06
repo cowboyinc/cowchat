@@ -15,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 mod lantern;
 mod leases;
+mod router;
 
 /// `metadata.kind` marking the last message of a conversation. `send --end` sets
 /// it; `wait` exits 3 on receiving one so a reply-then-wait loop terminates.
@@ -263,6 +264,8 @@ enum Commands {
     Lease(leases::Args),
     /// Publish and update a live room artifact using Gallop and OpenUI.
     Artifact(artifact::Args),
+    /// Decide which threads a room message should reach.
+    Router(router::Args),
     /// Run a local signed wake receiver and start the actor program only for work.
     ActorHost(actor_host::ActorHostArgs),
     /// Bridge one explicitly configured Telegram chat to an encrypted room.
@@ -2337,6 +2340,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Session { action } => session::run(&cli, action).await?,
         Commands::Lease(args) => leases::run(&cli, args).await?,
         Commands::Artifact(args) => artifact::run(&cli, args).await?,
+        Commands::Router(args) => router::run(args).await?,
         Commands::ActorHost(args) => actor_host::run(&cli, args).await?,
         Commands::TelegramBridge(args) => telegram::run(&cli, args).await?,
         Commands::Send {

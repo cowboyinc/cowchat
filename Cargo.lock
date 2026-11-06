@@ -453,6 +453,7 @@ dependencies = [
  "k256 0.13.4",
  "libc",
  "log",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

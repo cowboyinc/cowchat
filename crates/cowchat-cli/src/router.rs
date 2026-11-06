@@ -1,0 +1,580 @@
+//! Decides which threads a room message should reach. Reads the JSON lines that
+//! `cowchat wait --loop --drain` prints and writes one decision per wake.
+//!
+//! An exact pattern relays as is. A topic pattern only makes a thread a
+//! candidate: one judge call per message reads each candidate's wants note.
+use clap::{Args as ClapArgs, Subcommand};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+const ASK_KINDS: [&str; 5] = ["question", "decision", "request", "needs_ryan", "relay"];
+const QUIET_KINDS: [&str; 2] = ["status", "pulse"];
+const MAX_MESSAGE_CHARS: usize = 1500;
+const JUDGE_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_JUDGE_PROMPT: &str = include_str!("router-judge-prompt.txt");
+
+#[derive(ClapArgs)]
+pub struct Args {
+    #[command(subcommand)]
+    action: Action,
+}
+
+#[derive(Subcommand)]
+enum Action {
+    /// Check that a route table parses.
+    Check {
+        #[arg(long)]
+        routes: PathBuf,
+    },
+    /// Read `wait --loop --drain` output on stdin and print one JSON decision
+    /// per message that should reach someone.
+    Classify {
+        /// Tab-separated rows: id, title, exact pattern, topic pattern, wants note.
+        #[arg(long)]
+        routes: PathBuf,
+        /// Sender name to skip, normally this router's own.
+        #[arg(long = "self", value_name = "NAME")]
+        self_name: Option<String>,
+        /// File of sender names, one per line, that wake only on an ask kind or
+        /// an attention name.
+        #[arg(long)]
+        ignore_senders: Option<PathBuf>,
+        /// A word that always wakes the router when a message contains it (repeatable).
+        #[arg(long = "attention-name", value_name = "NAME")]
+        attention_names: Vec<String>,
+        /// Replace the built-in judge: this shell command reads the judge input on
+        /// stdin and prints the reply.
+        #[arg(long, conflicts_with = "no_judge")]
+        judge_command: Option<String>,
+        /// Model for the built-in judge.
+        #[arg(long, default_value = "sonnet")]
+        judge_model: String,
+        /// System prompt file for the built-in judge.
+        #[arg(long)]
+        judge_prompt: Option<PathBuf>,
+        /// Report candidates without judging them.
+        #[arg(long)]
+        no_judge: bool,
+    },
+}
+
+#[derive(Debug)]
+struct Route {
+    id: String,
+    title: String,
+    exact: Regex,
+    topic: Option<Regex>,
+    wants: String,
+}
+
+struct Rules {
+    routes: Vec<Route>,
+    self_name: Option<String>,
+    ignored: HashSet<String>,
+    attention: Option<Regex>,
+}
+
+#[derive(Deserialize)]
+struct RoomMessage {
+    seq: i64,
+    #[serde(default)]
+    agent_name: Option<String>,
+    content: String,
+    #[serde(default)]
+    metadata: serde_json::Value,
+}
+
+/// A message that should reach someone, before any judge call.
+#[derive(Debug)]
+struct Wake {
+    seq: i64,
+    sender: String,
+    kind: String,
+    line: String,
+    routes: Vec<usize>,
+    candidates: Vec<usize>,
+    flagged: bool,
+}
+
+#[derive(Serialize)]
+struct Decision<'a> {
+    seq: i64,
+    sender: &'a str,
+    kind: &'a str,
+    message: &'a str,
+    routes: Vec<&'a str>,
+    candidates: Vec<&'a str>,
+    relay: Vec<&'a str>,
+    attention: bool,
+    judge: &'static str,
+}
+
+enum Judge {
+    Off,
+    Command(String),
+    Claude { model: String, prompt: String },
+}
+
+fn pattern(source: &str) -> std::result::Result<Regex, regex::Error> {
+    Regex::new(&format!("(?i){source}"))
+}
+
+fn parse_routes(text: &str) -> std::result::Result<Vec<Route>, String> {
+    let mut routes = Vec::new();
+    for (index, row) in text.lines().enumerate() {
+        if row.is_empty() || row.starts_with('#') {
+            continue;
+        }
+        let line = index + 1;
+        let fields: Vec<&str> = row.split('\t').collect();
+        let [id, title, exact, rest @ ..] = fields.as_slice() else {
+            return Err(format!("line {line}: expected id, title and exact pattern"));
+        };
+        if id.is_empty() || exact.is_empty() {
+            return Err(format!("line {line}: id and exact pattern are required"));
+        }
+        let topic = rest.first().filter(|topic| !topic.is_empty());
+        routes.push(Route {
+            id: (*id).to_owned(),
+            title: (*title).to_owned(),
+            exact: pattern(exact).map_err(|error| format!("line {line}: exact: {error}"))?,
+            topic: topic
+                .map(|topic| pattern(topic))
+                .transpose()
+                .map_err(|error| format!("line {line}: topic: {error}"))?,
+            wants: rest.get(1).copied().unwrap_or_default().to_owned(),
+        });
+    }
+    Ok(routes)
+}
+
+fn attention_pattern(names: &[String]) -> Option<Regex> {
+    if names.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = names.iter().map(|name| regex::escape(name)).collect();
+    Regex::new(&format!(r"(?i)(?-u:\b)(?:{})(?-u:\b)", names.join("|"))).ok()
+}
+
+fn classify(rules: &Rules, message: &RoomMessage) -> Option<Wake> {
+    let sender = message.agent_name.as_deref().unwrap_or("?");
+    let kind = message.metadata["kind"].as_str().unwrap_or_default();
+    if QUIET_KINDS.contains(&kind) || rules.self_name.as_deref() == Some(sender) {
+        return None;
+    }
+    let content = message.content.replace(['\n', '\r', '\u{1f}'], " ");
+    let ask = ASK_KINDS.contains(&kind);
+    let named = |text: &str| rules.attention.as_ref().is_some_and(|re| re.is_match(text));
+    if rules.ignored.contains(sender) && !ask && !named(&content) {
+        return None;
+    }
+    let (mut routes, mut candidates) = (Vec::new(), Vec::new());
+    for (index, route) in rules.routes.iter().enumerate() {
+        if route.exact.is_match(&content) {
+            routes.push(index);
+        } else if route.topic.as_ref().is_some_and(|re| re.is_match(&content)) {
+            candidates.push(index);
+        }
+    }
+    if routes.is_empty() && candidates.is_empty() && !ask && !named(&content) {
+        return None;
+    }
+    let shown: String = content.chars().take(MAX_MESSAGE_CHARS).collect();
+    let line = format!("#{} {sender} [{kind}]: {shown}", message.seq);
+    Some(Wake {
+        seq: message.seq,
+        sender: sender.to_owned(),
+        kind: kind.to_owned(),
+        flagged: ask || named(&line),
+        line,
+        routes,
+        candidates,
+    })
+}
+
+fn judge_input(routes: &[Route], wake: &Wake) -> String {
+    let mut input = String::from("Threads:");
+    for (key, index) in wake.candidates.iter().enumerate() {
+        let route = &routes[*index];
+        input.push_str(&format!(
+            "\nT{} ({}): {}",
+            key + 1,
+            route.title,
+            route.wants
+        ));
+    }
+    let (header, text) = wake.line.split_once(": ").unwrap_or((&wake.line, ""));
+    input.push_str(&format!("\n\nMessage {header}:\n{text}"));
+    input
+}
+
+/// Candidate positions the judge picked, or None when the reply has no verdict.
+fn parse_verdict(reply: &str, candidates: usize) -> Option<Vec<usize>> {
+    let start = reply.find('{')?;
+    let end = reply.rfind('}')?;
+    let verdict: serde_json::Value = serde_json::from_str(reply.get(start..=end)?).ok()?;
+    let mut picked = Vec::new();
+    for key in verdict.get("relay")?.as_array()? {
+        let position = key
+            .as_str()
+            .and_then(|key| key.strip_prefix('T'))
+            .and_then(|number| number.parse::<usize>().ok())
+            .filter(|number| (1..=candidates).contains(number));
+        if let Some(position) = position {
+            if !picked.contains(&(position - 1)) {
+                picked.push(position - 1);
+            }
+        }
+    }
+    Some(picked)
+}
+
+/// The routes a message relays to, and whether it needs a person because
+/// nothing claimed it. A judge's no drops a message unless it asks or names someone.
+fn place(wake: &Wake, verdict: Option<&[usize]>) -> (Vec<usize>, bool) {
+    let mut relay = wake.routes.clone();
+    let Some(picked) = verdict.filter(|_| !wake.candidates.is_empty()) else {
+        let attention = relay.is_empty();
+        return (relay, attention);
+    };
+    relay.extend(picked.iter().map(|position| wake.candidates[*position]));
+    let attention = relay.is_empty() && wake.flagged;
+    (relay, attention)
+}
+
+async fn call_judge(judge: &Judge, input: &str) -> Option<String> {
+    let mut command = match judge {
+        Judge::Off => return None,
+        Judge::Command(shell) => {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", shell]);
+            command
+        }
+        Judge::Claude { model, prompt } => {
+            let mut command = tokio::process::Command::new("claude");
+            command.args(["-p", "--model", model, "--setting-sources", ""]);
+            command.args(["--strict-mcp-config", "--tools", ""]);
+            command.args(["--no-session-persistence", "--system-prompt", prompt]);
+            command.args(["--output-format", "json"]);
+            command
+        }
+    };
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().ok()?;
+    let mut stdin = child.stdin.take()?;
+    stdin.write_all(input.as_bytes()).await.ok()?;
+    drop(stdin);
+    let output = tokio::time::timeout(JUDGE_TIMEOUT, child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    if matches!(judge, Judge::Command(_)) {
+        return Some(stdout);
+    }
+    let reply: serde_json::Value = serde_json::from_str(&stdout).ok()?;
+    if reply["is_error"].as_bool() != Some(false) {
+        return None;
+    }
+    reply["result"].as_str().map(str::to_owned)
+}
+
+async fn decide(rules: &Rules, judge: &Judge, wake: &Wake) -> String {
+    let ids = |indexes: &[usize]| -> Vec<&str> {
+        indexes
+            .iter()
+            .map(|index| rules.routes[*index].id.as_str())
+            .collect()
+    };
+    let (verdict, outcome) = if wake.candidates.is_empty() {
+        (None, "none")
+    } else if matches!(judge, Judge::Off) {
+        (None, "off")
+    } else {
+        let reply = call_judge(judge, &judge_input(&rules.routes, wake)).await;
+        match reply.and_then(|reply| parse_verdict(&reply, wake.candidates.len())) {
+            Some(picked) => (Some(picked), "ok"),
+            None => (None, "failed"),
+        }
+    };
+    let (relay, attention) = place(wake, verdict.as_deref());
+    serde_json::to_string(&Decision {
+        seq: wake.seq,
+        sender: &wake.sender,
+        kind: &wake.kind,
+        message: &wake.line,
+        routes: ids(&wake.routes),
+        candidates: ids(&wake.candidates),
+        relay: ids(&relay),
+        attention,
+        judge: outcome,
+    })
+    .unwrap_or_default()
+}
+
+fn load_routes(path: &Path) -> Result<Vec<Route>> {
+    Ok(parse_routes(&std::fs::read_to_string(path)?)?)
+}
+
+pub async fn run(args: &Args) -> Result<()> {
+    match &args.action {
+        Action::Check { routes } => {
+            println!("{} routes ok", load_routes(routes)?.len());
+        }
+        Action::Classify {
+            routes,
+            self_name,
+            ignore_senders,
+            attention_names,
+            judge_command,
+            judge_model,
+            judge_prompt,
+            no_judge,
+        } => {
+            let ignored = match ignore_senders {
+                Some(path) => std::fs::read_to_string(path)?
+                    .lines()
+                    .map(str::to_owned)
+                    .collect(),
+                None => HashSet::new(),
+            };
+            let rules = Rules {
+                routes: load_routes(routes)?,
+                self_name: self_name.clone(),
+                ignored,
+                attention: attention_pattern(attention_names),
+            };
+            let judge = match (no_judge, judge_command) {
+                (true, _) => Judge::Off,
+                (false, Some(shell)) => Judge::Command(shell.clone()),
+                (false, None) => Judge::Claude {
+                    model: judge_model.clone(),
+                    prompt: match judge_prompt {
+                        Some(path) => std::fs::read_to_string(path)?,
+                        None => DEFAULT_JUDGE_PROMPT.to_owned(),
+                    },
+                },
+            };
+            let mut lines = BufReader::new(tokio::io::stdin()).lines();
+            while let Some(line) = lines.next_line().await? {
+                let Ok(message) = serde_json::from_str::<RoomMessage>(&line) else {
+                    continue;
+                };
+                if let Some(wake) = classify(&rules, &message) {
+                    println!("{}", decide(&rules, &judge, &wake).await);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const TABLE: &str = "# id\ttitle\texact\ttopic\twants\n\
+        a\tAlpha\tcore#1\\b\tpasskey\tAlpha wants\n\
+        b\tBeta\tbeta-branch\tpasskey|feeds\tBeta wants\n";
+
+    fn rules() -> Rules {
+        Rules {
+            routes: parse_routes(TABLE).unwrap(),
+            self_name: Some("router".to_owned()),
+            ignored: HashSet::from(["noisy".to_owned()]),
+            attention: attention_pattern(&["ryan".to_owned()]),
+        }
+    }
+
+    fn message(sender: &str, kind: &str, content: &str) -> RoomMessage {
+        RoomMessage {
+            seq: 7,
+            agent_name: Some(sender.to_owned()),
+            content: content.to_owned(),
+            metadata: if kind.is_empty() {
+                json!({})
+            } else {
+                json!({ "kind": kind })
+            },
+        }
+    }
+
+    fn wake(sender: &str, kind: &str, content: &str) -> Option<Wake> {
+        classify(&rules(), &message(sender, kind, content))
+    }
+
+    #[test]
+    fn routes_skip_comments_and_keep_every_column() {
+        let routes = parse_routes(TABLE).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].id, "a");
+        assert_eq!(routes[1].title, "Beta");
+        assert_eq!(routes[1].wants, "Beta wants");
+    }
+
+    #[test]
+    fn a_route_may_omit_its_topic_and_wants() {
+        let routes = parse_routes("a\tAlpha\tcore#1\n").unwrap();
+        assert!(routes[0].topic.is_none());
+        assert_eq!(routes[0].wants, "");
+    }
+
+    #[test]
+    fn bad_rows_name_their_line() {
+        for (table, expected) in [
+            ("# c\na\tAlpha\n", "line 2"),
+            ("a\tAlpha\t(\n", "line 1"),
+            ("a\tAlpha\tok\t(\n", "line 1"),
+            ("a\tAlpha\t\n", "line 1"),
+        ] {
+            let error = parse_routes(table).unwrap_err();
+            assert!(error.contains(expected), "{table:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_exact_match_routes_and_ignores_case() {
+        let wake = wake("coord", "", "CORE#1 is ready").unwrap();
+        assert_eq!(wake.routes, [0]);
+        assert!(wake.candidates.is_empty());
+    }
+
+    #[test]
+    fn a_topic_match_only_makes_a_candidate() {
+        let wake = wake("coord", "", "the passkey flow").unwrap();
+        assert!(wake.routes.is_empty());
+        assert_eq!(wake.candidates, [0, 1]);
+    }
+
+    #[test]
+    fn an_exact_match_beats_that_routes_own_topic() {
+        let wake = wake("coord", "", "core#1 and the passkey flow").unwrap();
+        assert_eq!(wake.routes, [0]);
+        assert_eq!(wake.candidates, [1]);
+    }
+
+    #[test]
+    fn quiet_kinds_own_posts_and_unrelated_messages_do_not_wake() {
+        assert!(wake("coord", "status", "core#1").is_none());
+        assert!(wake("coord", "pulse", "core#1").is_none());
+        assert!(wake("router", "", "core#1").is_none());
+        assert!(wake("coord", "", "merged the lint fix").is_none());
+    }
+
+    #[test]
+    fn ask_kinds_and_attention_names_wake_without_a_route() {
+        assert!(wake("coord", "question", "anyone around").is_some());
+        assert!(wake("coord", "", "ping Ryan about it").is_some());
+        assert!(wake("coord", "", "booked on ryanair").is_none());
+    }
+
+    #[test]
+    fn ignored_senders_wake_only_on_an_ask_or_a_name() {
+        assert!(wake("noisy", "", "core#1").is_none());
+        assert!(wake("noisy", "question", "core#1").is_some());
+        assert!(wake("noisy", "", "core#1 for ryan").is_some());
+    }
+
+    #[test]
+    fn newlines_fold_so_patterns_and_the_message_line_stay_on_one_line() {
+        let wake = wake("coord", "fyi", "first\ncore#1\rlast").unwrap();
+        assert_eq!(wake.routes, [0]);
+        assert_eq!(wake.line, "#7 coord [fyi]: first core#1 last");
+    }
+
+    #[test]
+    fn long_messages_are_cut_on_character_boundaries() {
+        let content = format!("core#1 {}", "é".repeat(MAX_MESSAGE_CHARS));
+        let wake = wake("coord", "", &content).unwrap();
+        let text = wake.line.split_once(": ").unwrap().1;
+        assert_eq!(text.chars().count(), MAX_MESSAGE_CHARS);
+    }
+
+    #[test]
+    fn the_judge_sees_only_candidates_under_stable_keys() {
+        let rules = rules();
+        let wake = classify(&rules, &message("coord", "", "core#1: the feeds")).unwrap();
+        assert_eq!(
+            judge_input(&rules.routes, &wake),
+            "Threads:\nT1 (Beta): Beta wants\n\nMessage #7 coord []:\ncore#1: the feeds"
+        );
+    }
+
+    #[test]
+    fn verdicts_survive_prose_and_drop_keys_that_are_not_candidates() {
+        assert_eq!(
+            parse_verdict(
+                "Sure:\n{\"relay\":\n[\"T2\",\"T9\",\"T0\",\"x\",3,\"T2\"]}\nDone",
+                2
+            ),
+            Some(vec![1])
+        );
+        assert_eq!(parse_verdict(r#"{"relay":[]}"#, 2), Some(vec![]));
+    }
+
+    #[test]
+    fn a_reply_without_a_relay_list_is_not_a_verdict() {
+        for reply in ["", "no", "{bad}", r#"{"other":1}"#, r#"{"relay":"T1"}"#] {
+            assert_eq!(parse_verdict(reply, 2), None, "{reply}");
+        }
+    }
+
+    #[test]
+    fn exact_routes_relay_with_no_judge_involved() {
+        let wake = wake("coord", "", "core#1").unwrap();
+        assert_eq!(place(&wake, None), (vec![0], false));
+    }
+
+    #[test]
+    fn the_judge_adds_only_the_candidates_it_picks() {
+        let wake = wake("coord", "", "core#1 and the feeds passkey").unwrap();
+        assert_eq!(place(&wake, Some(&[0])), (vec![0, 1], false));
+        let wake = self::wake("coord", "", "the passkey flow").unwrap();
+        assert_eq!(place(&wake, Some(&[1])), (vec![1], false));
+    }
+
+    #[test]
+    fn a_judge_no_drops_a_plain_message() {
+        let wake = wake("coord", "", "the passkey flow").unwrap();
+        assert_eq!(place(&wake, Some(&[])), (vec![], false));
+    }
+
+    #[test]
+    fn a_judge_no_still_needs_a_person_for_an_ask_or_a_name() {
+        let ask = wake("coord", "question", "the passkey flow").unwrap();
+        assert_eq!(place(&ask, Some(&[])), (vec![], true));
+        let named = wake("coord", "", "ryan: the passkey flow").unwrap();
+        assert_eq!(place(&named, Some(&[])), (vec![], true));
+    }
+
+    #[test]
+    fn a_failed_judge_sends_unclaimed_messages_to_a_person() {
+        let wake = wake("coord", "", "the passkey flow").unwrap();
+        assert_eq!(place(&wake, None), (vec![], true));
+        let routed = self::wake("coord", "", "core#1 and feeds").unwrap();
+        assert_eq!(place(&routed, None), (vec![0], false));
+    }
+
+    #[test]
+    fn an_ask_with_no_route_needs_a_person() {
+        let wake = wake("coord", "question", "anyone around").unwrap();
+        assert_eq!(place(&wake, None), (vec![], true));
+    }
+}
