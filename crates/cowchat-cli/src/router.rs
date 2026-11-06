@@ -129,6 +129,7 @@ struct Wake {
     line: String,
     routes: Vec<usize>,
     candidates: Vec<usize>,
+    matched: HashMap<usize, String>,
     flagged: bool,
 }
 
@@ -143,8 +144,17 @@ struct Decision<'a> {
     candidates: Vec<&'a str>,
     relay: Vec<&'a str>,
     missing: Vec<&'a str>,
+    reasons: Vec<Reason>,
     attention: bool,
     judge: &'static str,
+}
+
+/// Why a route was relayed to, carried on the follow-up so anyone can check it.
+#[derive(Clone, Deserialize, Serialize)]
+struct Reason {
+    route: String,
+    rule: String,
+    matched: String,
 }
 
 /// The fields of a [`Decision`] that `router mention` acts on.
@@ -154,6 +164,8 @@ struct RoutedMessage {
     message_id: String,
     sender: String,
     missing: Vec<String>,
+    #[serde(default)]
+    reasons: Vec<Reason>,
     attention: bool,
 }
 
@@ -216,12 +228,14 @@ fn classify(rules: &Rules, message: &RoomMessage) -> Option<Wake> {
     if rules.ignored.contains(sender) && !ask && !named(&content) {
         return None;
     }
-    let (mut routes, mut candidates) = (Vec::new(), Vec::new());
+    let (mut routes, mut candidates, mut matched) = (Vec::new(), Vec::new(), HashMap::new());
     for (index, route) in rules.routes.iter().enumerate() {
-        if route.exact.is_match(&content) {
+        if let Some(found) = route.exact.find(&content) {
             routes.push(index);
-        } else if route.topic.as_ref().is_some_and(|re| re.is_match(&content)) {
+            matched.insert(index, found.as_str().to_owned());
+        } else if let Some(found) = route.topic.as_ref().and_then(|re| re.find(&content)) {
             candidates.push(index);
+            matched.insert(index, found.as_str().to_owned());
         }
     }
     if routes.is_empty() && candidates.is_empty() && !ask && !named(&content) {
@@ -245,6 +259,7 @@ fn classify(rules: &Rules, message: &RoomMessage) -> Option<Wake> {
         line,
         routes,
         candidates,
+        matched,
     })
 }
 
@@ -361,6 +376,19 @@ async fn decide(rules: &Rules, judge: &Judge, wake: &Wake) -> String {
         }
     };
     let (relay, attention) = place(wake, verdict.as_deref());
+    let reasons = relay
+        .iter()
+        .map(|index| Reason {
+            route: rules.routes[*index].id.clone(),
+            rule: if wake.routes.contains(index) {
+                "exact"
+            } else {
+                "judge"
+            }
+            .to_owned(),
+            matched: wake.matched[index].clone(),
+        })
+        .collect();
     let relay = ids(&relay);
     let missing = relay
         .iter()
@@ -377,6 +405,7 @@ async fn decide(rules: &Rules, judge: &Judge, wake: &Wake) -> String {
         candidates: ids(&wake.candidates),
         relay,
         missing,
+        reasons,
         attention,
         judge: outcome,
     })
@@ -426,7 +455,12 @@ async fn post_follow_up(
 ) -> Result<()> {
     let content = format!("Routed #{} from {}.", routed.seq, routed.sender);
     let reply_to = Some(routed.message_id.as_str()).filter(|id| !id.is_empty());
-    let metadata = serde_json::json!({ "kind": ROUTED_KIND });
+    let reasons: Vec<&Reason> = routed
+        .reasons
+        .iter()
+        .filter(|reason| targets.contains(&reason.route))
+        .collect();
+    let metadata = serde_json::json!({ "kind": ROUTED_KIND, "reasons": reasons });
     crate::post_message(cli, room, &content, reply_to, targets, metadata).await?;
     Ok(())
 }
@@ -774,5 +808,20 @@ mod tests {
         assert!(!limit.allow("a", start + Duration::from_secs(60)));
         assert!(limit.allow("b", start + Duration::from_secs(60)));
         assert!(limit.allow("a", start + Duration::from_secs(3601)));
+    }
+
+    #[tokio::test]
+    async fn each_relay_records_the_rule_and_text_that_chose_it() {
+        let wake = classify(&rules(), &message("coord", "", "core#1 and passkey")).unwrap();
+        let judge = Judge::Command(r#"cat >/dev/null; echo '{"relay":["T1"]}'"#.to_owned());
+        let decision: serde_json::Value =
+            serde_json::from_str(&decide(&rules(), &judge, &wake).await).unwrap();
+        assert_eq!(
+            decision["reasons"],
+            json!([
+                {"route": "a", "rule": "exact", "matched": "core#1"},
+                {"route": "b", "rule": "judge", "matched": "passkey"},
+            ])
+        );
     }
 }

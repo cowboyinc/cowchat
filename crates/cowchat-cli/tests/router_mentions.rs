@@ -205,6 +205,10 @@ async fn a_routed_session_wakes_on_the_routers_follow_up() {
     assert_eq!(history.len(), 2);
     assert_eq!(follow_up.metadata["kind"], "routed");
     assert_eq!(
+        follow_up.metadata["reasons"],
+        serde_json::json!([{"route":worker.id,"rule":"exact","matched":"core#1"}])
+    );
+    assert_eq!(
         follow_up.metadata["mentions"],
         serde_json::json!([worker.id])
     );
