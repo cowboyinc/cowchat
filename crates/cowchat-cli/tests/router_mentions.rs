@@ -176,6 +176,7 @@ async fn a_routed_session_wakes_on_the_routers_follow_up() {
     assert_eq!(result["seq"], original.seq);
     assert_eq!(result["mentioned"], serde_json::json!([worker.id]));
     assert_eq!(result["failed"], serde_json::json!(["session:gone"]));
+    assert_eq!(result["limited"], serde_json::json!([]));
 
     let woken = as_session(
         &url,

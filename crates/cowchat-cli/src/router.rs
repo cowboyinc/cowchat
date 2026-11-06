@@ -12,10 +12,10 @@ use clap::{Args as ClapArgs, Subcommand};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -26,6 +26,7 @@ const ROUTED_KIND: &str = "routed";
 const QUIET_KINDS: [&str; 3] = ["status", "pulse", ROUTED_KIND];
 const MAX_MESSAGE_CHARS: usize = 1500;
 const JUDGE_TIMEOUT: Duration = Duration::from_secs(120);
+const WAKE_WINDOW: Duration = Duration::from_secs(3600);
 const DEFAULT_JUDGE_PROMPT: &str = include_str!("router-judge-prompt.txt");
 
 #[derive(ClapArgs)]
@@ -79,6 +80,10 @@ enum Action {
         /// Agent or `account:` ID to mention when nothing claims a message (repeatable).
         #[arg(long = "attention-mention", value_name = "ID")]
         attention_mentions: Vec<String>,
+        /// Most follow-ups one target gets in an hour. Counted for as long as this
+        /// command runs, so feed it from `wait --follow`.
+        #[arg(long, default_value = "12")]
+        max_wakes_per_hour: usize,
     },
 }
 
@@ -382,6 +387,37 @@ fn load_routes(path: &Path) -> Result<Vec<Route>> {
     Ok(parse_routes(&std::fs::read_to_string(path)?)?)
 }
 
+/// Caps how often one target is woken, so two sessions that route to each other
+/// can't wake one another forever.
+struct WakeLimit {
+    per_hour: usize,
+    recent: HashMap<String, VecDeque<Instant>>,
+}
+
+impl WakeLimit {
+    fn new(per_hour: usize) -> Self {
+        Self {
+            per_hour,
+            recent: HashMap::new(),
+        }
+    }
+
+    fn allow(&mut self, target: &str, now: Instant) -> bool {
+        let recent = self.recent.entry(target.to_owned()).or_default();
+        while recent
+            .front()
+            .is_some_and(|woken| now.duration_since(*woken) >= WAKE_WINDOW)
+        {
+            recent.pop_front();
+        }
+        if recent.len() >= self.per_hour {
+            return false;
+        }
+        recent.push_back(now);
+        true
+    }
+}
+
 async fn post_follow_up(
     cli: &Cli,
     room: &str,
@@ -397,21 +433,29 @@ async fn post_follow_up(
 
 /// The server refuses a whole message over one mention it can't accept, such as
 /// a session that has ended. Sending each target alone keeps the rest.
-async fn mention(cli: &Cli, room: &str, routed: &RoutedMessage, targets: Vec<String>) -> String {
-    let (mut mentioned, mut failed) = (Vec::new(), Vec::new());
+async fn mention(
+    cli: &Cli,
+    room: &str,
+    routed: &RoutedMessage,
+    targets: Vec<String>,
+) -> (Vec<String>, Vec<String>) {
+    if targets.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
     if post_follow_up(cli, room, routed, &targets).await.is_ok() {
-        mentioned = targets;
-    } else if targets.len() == 1 {
-        failed = targets;
-    } else {
-        for target in targets {
-            match post_follow_up(cli, room, routed, std::slice::from_ref(&target)).await {
-                Ok(()) => mentioned.push(target),
-                Err(_) => failed.push(target),
-            }
+        return (targets, Vec::new());
+    }
+    if targets.len() == 1 {
+        return (Vec::new(), targets);
+    }
+    let (mut mentioned, mut failed) = (Vec::new(), Vec::new());
+    for target in targets {
+        match post_follow_up(cli, room, routed, std::slice::from_ref(&target)).await {
+            Ok(()) => mentioned.push(target),
+            Err(_) => failed.push(target),
         }
     }
-    serde_json::json!({ "seq": routed.seq, "mentioned": mentioned, "failed": failed }).to_string()
+    (mentioned, failed)
 }
 
 pub async fn run(cli: &Cli, args: &Args) -> Result<()> {
@@ -466,7 +510,9 @@ pub async fn run(cli: &Cli, args: &Args) -> Result<()> {
         Action::Mention {
             room,
             attention_mentions,
+            max_wakes_per_hour,
         } => {
+            let mut limit = WakeLimit::new(*max_wakes_per_hour);
             let mut lines = BufReader::new(tokio::io::stdin()).lines();
             while let Some(line) = lines.next_line().await? {
                 let routed: RoutedMessage = serde_json::from_str(&line)?;
@@ -474,9 +520,21 @@ pub async fn run(cli: &Cli, args: &Args) -> Result<()> {
                 if routed.attention {
                     targets.extend(attention_mentions.iter().cloned());
                 }
-                if !targets.is_empty() {
-                    println!("{}", mention(cli, room, &routed, targets).await);
+                if targets.is_empty() {
+                    continue;
                 }
+                let now = Instant::now();
+                let (allowed, limited): (Vec<_>, Vec<_>) = targets
+                    .into_iter()
+                    .partition(|target| limit.allow(target, now));
+                let (mentioned, failed) = mention(cli, room, &routed, allowed).await;
+                let result = serde_json::json!({
+                    "seq": routed.seq,
+                    "mentioned": mentioned,
+                    "failed": failed,
+                    "limited": limited,
+                });
+                println!("{result}");
             }
         }
     }
@@ -705,5 +763,16 @@ mod tests {
         let decision: serde_json::Value =
             serde_json::from_str(&decide(&rules(), &Judge::Off, &wake).await).unwrap();
         assert_eq!(decision["missing"], json!(["b"]));
+    }
+
+    #[test]
+    fn a_target_past_its_hourly_limit_waits_for_the_window_to_pass() {
+        let start = Instant::now();
+        let mut limit = WakeLimit::new(2);
+        assert!(limit.allow("a", start));
+        assert!(limit.allow("a", start));
+        assert!(!limit.allow("a", start + Duration::from_secs(60)));
+        assert!(limit.allow("b", start + Duration::from_secs(60)));
+        assert!(limit.allow("a", start + Duration::from_secs(3601)));
     }
 }
