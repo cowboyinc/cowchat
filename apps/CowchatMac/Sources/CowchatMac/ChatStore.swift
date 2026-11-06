@@ -39,6 +39,7 @@ final class ChatStore: ObservableObject {
     @Published private(set) var readState = RoomReadState()
     /// Rooms whose switch shows every message, agents' unmarked ones included. Kept on this Mac.
     @Published private(set) var showsAllMessagesRoomIDs: Set<String> = []
+    @Published private var tagFilterByRoomID: [String: String] = [:]
     @Published private(set) var isSearchingMessages = false
     @Published private(set) var roomMessagePreviews: [String: String] = [:]
     @Published private(set) var lastThinkingAt: [String: [String: Date]] = [:]
@@ -1237,6 +1238,11 @@ final class ChatStore: ObservableObject {
         /// The timestamp of its newest message the feed shows, or nil when it shows none.
         let latest: String?
     }
+
+    /// The tag a room's feed is narrowed to, for this run of the app.
+    func tagFilter(in roomID: String) -> String? { tagFilterByRoomID[roomID] }
+
+    func setTagFilter(_ tag: String?, in roomID: String) { tagFilterByRoomID[roomID] = tag }
 
     func showsAllMessages(in roomID: String) -> Bool {
         showsAllMessagesRoomIDs.contains(roomID)
