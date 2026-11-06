@@ -3,6 +3,11 @@
 //!
 //! An exact pattern relays as is. A topic pattern only makes a thread a
 //! candidate: one judge call per message reads each candidate's wants note.
+//!
+//! `router mention` turns those decisions into room messages: a follow-up that
+//! mentions each route the original left out, so routed sessions wake through
+//! the normal mention path. A route's id is the agent ID it mentions.
+use crate::Cli;
 use clap::{Args as ClapArgs, Subcommand};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -17,7 +22,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ASK_KINDS: [&str; 5] = ["question", "decision", "request", "needs_ryan", "relay"];
-const QUIET_KINDS: [&str; 2] = ["status", "pulse"];
+const ROUTED_KIND: &str = "routed";
+const QUIET_KINDS: [&str; 3] = ["status", "pulse", ROUTED_KIND];
 const MAX_MESSAGE_CHARS: usize = 1500;
 const JUDGE_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_JUDGE_PROMPT: &str = include_str!("router-judge-prompt.txt");
@@ -65,6 +71,15 @@ enum Action {
         #[arg(long)]
         no_judge: bool,
     },
+    /// Read `router classify` output on stdin and post a follow-up mentioning
+    /// each route the message left out. Prints one JSON result per follow-up.
+    Mention {
+        /// Room ID or name.
+        room: String,
+        /// Agent or `account:` ID to mention when nothing claims a message (repeatable).
+        #[arg(long = "attention-mention", value_name = "ID")]
+        attention_mentions: Vec<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -87,6 +102,10 @@ struct Rules {
 struct RoomMessage {
     seq: i64,
     #[serde(default)]
+    message_id: String,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
     agent_name: Option<String>,
     content: String,
     #[serde(default)]
@@ -97,7 +116,10 @@ struct RoomMessage {
 #[derive(Debug)]
 struct Wake {
     seq: i64,
+    message_id: String,
     sender: String,
+    sender_id: String,
+    mentioned: Vec<String>,
     kind: String,
     line: String,
     routes: Vec<usize>,
@@ -108,14 +130,26 @@ struct Wake {
 #[derive(Serialize)]
 struct Decision<'a> {
     seq: i64,
+    message_id: &'a str,
     sender: &'a str,
     kind: &'a str,
     message: &'a str,
     routes: Vec<&'a str>,
     candidates: Vec<&'a str>,
     relay: Vec<&'a str>,
+    missing: Vec<&'a str>,
     attention: bool,
     judge: &'static str,
+}
+
+/// The fields of a [`Decision`] that `router mention` acts on.
+#[derive(Deserialize)]
+struct RoutedMessage {
+    seq: i64,
+    message_id: String,
+    sender: String,
+    missing: Vec<String>,
+    attention: bool,
 }
 
 enum Judge {
@@ -192,7 +226,15 @@ fn classify(rules: &Rules, message: &RoomMessage) -> Option<Wake> {
     let line = format!("#{} {sender} [{kind}]: {shown}", message.seq);
     Some(Wake {
         seq: message.seq,
+        message_id: message.message_id.clone(),
         sender: sender.to_owned(),
+        sender_id: message.agent_id.clone().unwrap_or_default(),
+        mentioned: message.metadata["mentions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect(),
         kind: kind.to_owned(),
         flagged: ask || named(&line),
         line,
@@ -314,14 +356,22 @@ async fn decide(rules: &Rules, judge: &Judge, wake: &Wake) -> String {
         }
     };
     let (relay, attention) = place(wake, verdict.as_deref());
+    let relay = ids(&relay);
+    let missing = relay
+        .iter()
+        .copied()
+        .filter(|id| *id != wake.sender_id && !wake.mentioned.iter().any(|seen| seen == id))
+        .collect();
     serde_json::to_string(&Decision {
         seq: wake.seq,
+        message_id: &wake.message_id,
         sender: &wake.sender,
         kind: &wake.kind,
         message: &wake.line,
         routes: ids(&wake.routes),
         candidates: ids(&wake.candidates),
-        relay: ids(&relay),
+        relay,
+        missing,
         attention,
         judge: outcome,
     })
@@ -332,7 +382,39 @@ fn load_routes(path: &Path) -> Result<Vec<Route>> {
     Ok(parse_routes(&std::fs::read_to_string(path)?)?)
 }
 
-pub async fn run(args: &Args) -> Result<()> {
+async fn post_follow_up(
+    cli: &Cli,
+    room: &str,
+    routed: &RoutedMessage,
+    targets: &[String],
+) -> Result<()> {
+    let content = format!("Routed #{} from {}.", routed.seq, routed.sender);
+    let reply_to = Some(routed.message_id.as_str()).filter(|id| !id.is_empty());
+    let metadata = serde_json::json!({ "kind": ROUTED_KIND });
+    crate::post_message(cli, room, &content, reply_to, targets, metadata).await?;
+    Ok(())
+}
+
+/// The server refuses a whole message over one mention it can't accept, such as
+/// a session that has ended. Sending each target alone keeps the rest.
+async fn mention(cli: &Cli, room: &str, routed: &RoutedMessage, targets: Vec<String>) -> String {
+    let (mut mentioned, mut failed) = (Vec::new(), Vec::new());
+    if post_follow_up(cli, room, routed, &targets).await.is_ok() {
+        mentioned = targets;
+    } else if targets.len() == 1 {
+        failed = targets;
+    } else {
+        for target in targets {
+            match post_follow_up(cli, room, routed, std::slice::from_ref(&target)).await {
+                Ok(()) => mentioned.push(target),
+                Err(_) => failed.push(target),
+            }
+        }
+    }
+    serde_json::json!({ "seq": routed.seq, "mentioned": mentioned, "failed": failed }).to_string()
+}
+
+pub async fn run(cli: &Cli, args: &Args) -> Result<()> {
     match &args.action {
         Action::Check { routes } => {
             println!("{} routes ok", load_routes(routes)?.len());
@@ -381,6 +463,22 @@ pub async fn run(args: &Args) -> Result<()> {
                 }
             }
         }
+        Action::Mention {
+            room,
+            attention_mentions,
+        } => {
+            let mut lines = BufReader::new(tokio::io::stdin()).lines();
+            while let Some(line) = lines.next_line().await? {
+                let routed: RoutedMessage = serde_json::from_str(&line)?;
+                let mut targets = routed.missing.clone();
+                if routed.attention {
+                    targets.extend(attention_mentions.iter().cloned());
+                }
+                if !targets.is_empty() {
+                    println!("{}", mention(cli, room, &routed, targets).await);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -406,6 +504,8 @@ mod tests {
     fn message(sender: &str, kind: &str, content: &str) -> RoomMessage {
         RoomMessage {
             seq: 7,
+            message_id: "original".to_owned(),
+            agent_id: Some(format!("{sender}-id")),
             agent_name: Some(sender.to_owned()),
             content: content.to_owned(),
             metadata: if kind.is_empty() {
@@ -576,5 +676,34 @@ mod tests {
     fn an_ask_with_no_route_needs_a_person() {
         let wake = wake("coord", "question", "anyone around").unwrap();
         assert_eq!(place(&wake, None), (vec![], true));
+    }
+
+    #[test]
+    fn follow_ups_never_wake_a_router() {
+        assert!(classify(&rules(), &message("other", "routed", "core#1 ready")).is_none());
+    }
+
+    #[tokio::test]
+    async fn only_routes_the_message_left_out_get_a_follow_up() {
+        let mut mentioned = message("coord", "", "core#1 beta-branch");
+        mentioned.metadata = json!({ "mentions": ["a"] });
+        let wake = classify(&rules(), &mentioned).unwrap();
+        let decision: serde_json::Value =
+            serde_json::from_str(&decide(&rules(), &Judge::Off, &wake).await).unwrap();
+        assert_eq!(decision["relay"], json!(["a", "b"]));
+        assert_eq!(decision["missing"], json!(["b"]));
+        assert_eq!(decision["message_id"], "original");
+    }
+
+    #[tokio::test]
+    async fn a_session_is_never_routed_its_own_message() {
+        let wake = classify(&rules(), &message("a", "", "core#1 beta-branch")).unwrap();
+        let wake = Wake {
+            sender_id: "a".to_owned(),
+            ..wake
+        };
+        let decision: serde_json::Value =
+            serde_json::from_str(&decide(&rules(), &Judge::Off, &wake).await).unwrap();
+        assert_eq!(decision["missing"], json!(["b"]));
     }
 }

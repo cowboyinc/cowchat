@@ -184,6 +184,23 @@ so their loop terminates instead of blocking for another turn:
 cowchat --name "me" send my-room "wrapping up — thanks!" --end
 ```
 
+## Router
+
+A router is a room member that wakes the sessions a message concerns. Each
+route row is tab-separated: agent ID, title, exact pattern, topic pattern, wants
+note. Exact matches relay; a topic match goes to one judge call.
+
+```bash
+cowchat --agent-id "$ROUTER" wait ROOM --loop --drain --cursor-file router.cursor \
+  | cowchat router classify --routes routes.tsv \
+  | cowchat --agent-id "$ROUTER" router mention ROOM --attention-mention account:OWNER
+```
+
+`router mention` replies to each message with a `routed` follow-up that
+mentions the routes it left out, and never the sender. Run the line in a loop:
+`wait --loop` returns after each wake. A route whose session has ended shows up
+under `failed` in its output until the row gets the new session's ID.
+
 ## Critical rules
 
 1. **You are ONE agent. Use the SAME `--name` and `--agent-id` on every

@@ -1892,6 +1892,25 @@ fn kind_skipped(msg_kind: Option<&str>, only: &[String], not: &[String]) -> bool
     false
 }
 
+async fn post_message(
+    cli: &Cli,
+    room: &str,
+    content: &str,
+    reply_to: Option<&str>,
+    mentions: &[String],
+    metadata: serde_json::Value,
+) -> Result<ChatMessage, Box<dyn std::error::Error>> {
+    if let Some(id) = resolve_agent_id(cli).filter(|id| id.starts_with("session:")) {
+        return session::send(cli, &id, room, content, reply_to, mentions, metadata).await;
+    }
+    let client = connect(cli).await?;
+    let room_id = resolve_room_id(&client, room).await?;
+    client.join_room(&room_id).await?;
+    Ok(client
+        .send_message_with_metadata(&room_id, content, reply_to, mentions.to_vec(), metadata)
+        .await?)
+}
+
 fn mentions_self(message: &ChatMessage, own_id: Option<&str>) -> bool {
     own_id.is_some_and(|id| {
         message
@@ -2340,7 +2359,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Session { action } => session::run(&cli, action).await?,
         Commands::Lease(args) => leases::run(&cli, args).await?,
         Commands::Artifact(args) => artifact::run(&cli, args).await?,
-        Commands::Router(args) => router::run(args).await?,
+        Commands::Router(args) => router::run(&cli, args).await?,
         Commands::ActorHost(args) => actor_host::run(&cli, args).await?,
         Commands::TelegramBridge(args) => telegram::run(&cli, args).await?,
         Commands::Send {
@@ -2381,31 +2400,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 metadata["attachments"] = upload_attachments(&cli, room, attachments).await?;
             }
             let msg =
-                if let Some(id) = resolve_agent_id(&cli).filter(|id| id.starts_with("session:")) {
-                    session::send(
-                        &cli,
-                        &id,
-                        room,
-                        message,
-                        reply_to.as_deref(),
-                        mentions,
-                        metadata,
-                    )
-                    .await?
-                } else {
-                    let client = connect(&cli).await?;
-                    let room_id = resolve_room_id(&client, room).await?;
-                    client.join_room(&room_id).await?;
-                    client
-                        .send_message_with_metadata(
-                            &room_id,
-                            message,
-                            reply_to.as_deref(),
-                            mentions.clone(),
-                            metadata,
-                        )
-                        .await?
-                };
+                post_message(&cli, room, message, reply_to.as_deref(), mentions, metadata).await?;
             println!("{}", format_message(&msg));
         }
 
