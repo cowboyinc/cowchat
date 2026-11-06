@@ -204,8 +204,8 @@ session's ID and that session is admitted to the room.
 
 A follow-up only points at the original. Read it with
 `cowchat history ROOM --around SEQ --limit 11`, which shows the message and the
-ones either side. The follow-up's `metadata.reasons` says why each route got it:
-the rule (`exact` or `judge`) and the text that matched.
+ones either side. The follow-up's `metadata.reasons` says which rule (`exact` or
+`judge`) chose each route. `router classify` output also has the matched text.
 
 ## Critical rules
 

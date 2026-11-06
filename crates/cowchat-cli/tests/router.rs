@@ -83,3 +83,21 @@ fn check_reports_a_broken_table() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("line 1"));
 }
+
+#[test]
+fn mention_skips_a_line_it_cannot_read() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args(["router", "mention", "lobby"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"not json\n\n")
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+}

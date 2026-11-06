@@ -447,6 +447,29 @@ impl WakeLimit {
     }
 }
 
+/// Metadata is plaintext even in an encrypted room, so the matched text stays out.
+fn follow_up_metadata(routed: &RoutedMessage, targets: &[String]) -> serde_json::Value {
+    let reasons: Vec<_> = routed
+        .reasons
+        .iter()
+        .filter(|reason| targets.contains(&reason.route))
+        .map(|reason| serde_json::json!({ "route": reason.route, "rule": reason.rule }))
+        .collect();
+    serde_json::json!({ "kind": ROUTED_KIND, "reasons": reasons })
+}
+
+fn targets(routed: &RoutedMessage, attention_mentions: &[String]) -> Vec<String> {
+    let mut targets = routed.missing.clone();
+    if routed.attention {
+        for id in attention_mentions {
+            if !targets.contains(id) {
+                targets.push(id.clone());
+            }
+        }
+    }
+    targets
+}
+
 async fn post_follow_up(
     cli: &Cli,
     room: &str,
@@ -455,12 +478,7 @@ async fn post_follow_up(
 ) -> Result<()> {
     let content = format!("Routed #{} from {}.", routed.seq, routed.sender);
     let reply_to = Some(routed.message_id.as_str()).filter(|id| !id.is_empty());
-    let reasons: Vec<&Reason> = routed
-        .reasons
-        .iter()
-        .filter(|reason| targets.contains(&reason.route))
-        .collect();
-    let metadata = serde_json::json!({ "kind": ROUTED_KIND, "reasons": reasons });
+    let metadata = follow_up_metadata(routed, targets);
     crate::post_message(cli, room, &content, reply_to, targets, metadata).await?;
     Ok(())
 }
@@ -549,11 +567,11 @@ pub async fn run(cli: &Cli, args: &Args) -> Result<()> {
             let mut limit = WakeLimit::new(*max_wakes_per_hour);
             let mut lines = BufReader::new(tokio::io::stdin()).lines();
             while let Some(line) = lines.next_line().await? {
-                let routed: RoutedMessage = serde_json::from_str(&line)?;
-                let mut targets = routed.missing.clone();
-                if routed.attention {
-                    targets.extend(attention_mentions.iter().cloned());
-                }
+                let Ok(routed) = serde_json::from_str::<RoutedMessage>(&line) else {
+                    eprintln!("router mention: skipped an unreadable line");
+                    continue;
+                };
+                let targets = targets(&routed, attention_mentions);
                 if targets.is_empty() {
                     continue;
                 }
@@ -822,6 +840,49 @@ mod tests {
                 {"route": "a", "rule": "exact", "matched": "core#1"},
                 {"route": "b", "rule": "judge", "matched": "passkey"},
             ])
+        );
+    }
+
+    #[test]
+    fn follow_up_reasons_carry_no_message_text() {
+        let routed = RoutedMessage {
+            seq: 7,
+            message_id: "original".to_owned(),
+            sender: "coord".to_owned(),
+            missing: vec!["a".to_owned()],
+            reasons: vec![
+                Reason {
+                    route: "a".to_owned(),
+                    rule: "exact".to_owned(),
+                    matched: "secret text".to_owned(),
+                },
+                Reason {
+                    route: "b".to_owned(),
+                    rule: "judge".to_owned(),
+                    matched: "other".to_owned(),
+                },
+            ],
+            attention: false,
+        };
+        assert_eq!(
+            follow_up_metadata(&routed, &["a".to_owned()]),
+            json!({"kind": "routed", "reasons": [{"route": "a", "rule": "exact"}]})
+        );
+    }
+
+    #[test]
+    fn a_target_named_twice_is_mentioned_once() {
+        let routed = RoutedMessage {
+            seq: 7,
+            message_id: String::new(),
+            sender: "coord".to_owned(),
+            missing: vec!["a".to_owned()],
+            reasons: Vec::new(),
+            attention: true,
+        };
+        assert_eq!(
+            targets(&routed, &["a".to_owned(), "owner".to_owned()]),
+            ["a", "owner"]
         );
     }
 }
