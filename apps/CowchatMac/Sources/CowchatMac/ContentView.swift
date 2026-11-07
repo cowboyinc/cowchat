@@ -176,7 +176,6 @@ struct ContentView: View {
             Group {
                 switch sheet {
                 case let .newRoom(request): NewRoomSheet(workspace: workspace, request: request)
-                case .newSession: NewSessionSheet(workspace: workspace)
                 case .joinWithCode: JoinWithCodeSheet(workspace: workspace)
                 case let .addPerson(session): AddPersonSheet(workspace: workspace, session: session)
                 }
