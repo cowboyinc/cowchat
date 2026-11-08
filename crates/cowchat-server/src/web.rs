@@ -1337,6 +1337,69 @@ mod tests {
                 .header(API_KEY_HEADER, key)
         };
         assert_eq!(history().send().await.unwrap().status(), StatusCode::OK);
+        let artifact_url = format!("http://{addr}/api/rooms/{room_id}/artifact");
+        let initial = http
+            .put(&artifact_url)
+            .header(API_KEY_HEADER, &owner_key)
+            .json(&json!({
+                "title": "Owner board", "view": "root = Stack([])", "data": {"owner": true},
+                "request_id": uuid::Uuid::new_v4(),
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        let patch = json!({
+            "patch": {"guest": true}, "expected_revision": initial["revision"],
+            "request_id": uuid::Uuid::new_v4(),
+        });
+        for request in [
+            http.put(&artifact_url).json(&json!({
+                "title": "Guest board", "view": "root = Stack([])", "data": {"guest": true},
+                "expected_revision": initial["revision"], "request_id": uuid::Uuid::new_v4(),
+            })),
+            http.patch(&artifact_url).json(&patch),
+            http.post(format!("{artifact_url}/rotate"))
+                .json(&json!({"request_id": uuid::Uuid::new_v4()})),
+            http.delete(&artifact_url),
+        ] {
+            let response = request.header(API_KEY_HEADER, key).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let unchanged = http
+            .get(&artifact_url)
+            .header(API_KEY_HEADER, &owner_key)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(unchanged, initial);
+        let updated = http
+            .patch(&artifact_url)
+            .header(API_KEY_HEADER, &owner_key)
+            .json(&patch)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(
+            updated["revision"],
+            initial["revision"].as_u64().unwrap() + 1
+        );
+        assert_eq!(updated["public_id"], initial["public_id"]);
+        assert_eq!(updated["data"]["guest"], true);
         assert_eq!(
             command(&mut guest, FrameType::JoinRoom, json!({"room_id": "lobby"}))
                 .await

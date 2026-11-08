@@ -244,6 +244,9 @@ fn authorize_artifact_room(
     no_auth: bool,
     access: ArtifactAccess,
 ) -> Result<(), ArtifactError> {
+    if matches!(access, ArtifactAccess::Write) && key.starts_with(super::social::GUEST_PREFIX) {
+        return Err(ArtifactError::NotFound);
+    }
     let room = query_room_by_id(tx, room)?.ok_or(ArtifactError::NotFound)?;
     if let Some(allowed) = super::social::room_access(tx, &room.room_id, key)? {
         return if allowed {
