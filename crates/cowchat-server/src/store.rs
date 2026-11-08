@@ -1223,7 +1223,13 @@ impl Store {
                 p.agent_id.unwrap_or_default()
             )
         });
-        let owner_key = social_owner.as_deref().unwrap_or(owner_key);
+        let guest_owner = owner_key
+            .starts_with(social::GUEST_PREFIX)
+            .then(|| format!("social-guest:{}", social::hash(owner_key)));
+        let owner_key = social_owner
+            .as_deref()
+            .or(guest_owner.as_deref())
+            .unwrap_or(owner_key);
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
@@ -1421,7 +1427,7 @@ impl Store {
 
     pub fn validate_api_key(&self, api_key: &str) -> Result<bool, StoreError> {
         if api_key.starts_with(social::PREFIX) {
-            return Ok(self.social_principal(api_key).is_some());
+            return Ok(self.social_credential_valid(api_key));
         }
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(

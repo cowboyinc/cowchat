@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub const PREFIX: &str = "csoc_";
+pub const GUEST_PREFIX: &str = "csoc_guest_";
+pub const GUEST_INVITE_PREFIX: &str = "cguest_invite_";
 pub const OWNER_PREFIX: &str = "\0cowchat:social:";
 
 #[derive(Clone, Debug)]
@@ -51,7 +53,19 @@ pub fn principal(conn: &Connection, key: &str) -> rusqlite::Result<Option<Princi
         |row| Ok(Principal { account_id: row.get(0)?, agent_id: row.get(1)?, session_id: row.get(2)?, mint_only: false }),
     ).optional()
 }
+fn guest_room(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT i.room_id FROM social_guest_invites i JOIN rooms r ON r.room_id=i.room_id
+         WHERE i.guest_digest=?1 AND i.revoked=0 AND i.guest_expires>unixepoch()",
+        [hash(key)],
+        |row| row.get(0),
+    )
+    .optional()
+}
 pub fn room_access(conn: &Connection, room: &str, key: &str) -> rusqlite::Result<Option<bool>> {
+    if key.starts_with(GUEST_PREFIX) {
+        return Ok(Some(guest_room(conn, key)?.as_deref() == Some(room)));
+    }
     let managed: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM social_rooms WHERE room_id=?1)",
         [room],
@@ -377,6 +391,12 @@ CREATE TABLE IF NOT EXISTS social_agents(id TEXT PRIMARY KEY,owner_id TEXT NOT N
 CREATE TABLE IF NOT EXISTS social_friend_requests(id TEXT PRIMARY KEY,from_id TEXT NOT NULL,to_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE UNIQUE INDEX IF NOT EXISTS social_pending_friend ON social_friend_requests(from_id,to_id) WHERE status='pending';
 CREATE TABLE IF NOT EXISTS social_friends(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b));
+CREATE TABLE IF NOT EXISTS social_guest_invites(
+    token_hash TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(room_id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, invite_expires INTEGER NOT NULL,
+    guest_digest TEXT UNIQUE, guest_expires INTEGER, revoked INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS social_guest_invites_by_room ON social_guest_invites(room_id);
 CREATE TABLE IF NOT EXISTS social_rooms(room_id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,kind TEXT NOT NULL DEFAULT 'chat');
 CREATE TABLE IF NOT EXISTS social_members(room_id TEXT NOT NULL,account_id TEXT NOT NULL,PRIMARY KEY(room_id,account_id));
 CREATE TABLE IF NOT EXISTS social_admissions(room_id TEXT NOT NULL,agent_id TEXT NOT NULL,PRIMARY KEY(room_id,agent_id));
@@ -424,6 +444,105 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
         let target = link_target(&conn, slug)?;
         account(&conn, &target)
     }
+    pub fn social_credential_valid(&self, key: &str) -> bool {
+        if key.starts_with(GUEST_PREFIX) {
+            return guest_room(&self.conn.lock().unwrap(), key).is_ok_and(|room| room.is_some());
+        }
+        self.social_principal(key).is_some()
+    }
+
+    pub fn create_social_guest_invite(
+        &self,
+        room: &str,
+        owner_key: &str,
+        token: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        anyhow::ensure!(
+            room_owner(&conn, room, owner_key)? == Some(true),
+            "unauthorized"
+        );
+        conn.execute(
+            "INSERT INTO social_guest_invites(token_hash,room_id,invite_expires)
+             VALUES(?1,?2,unixepoch()+900)",
+            params![hash(token), room],
+        )?;
+        Ok(())
+    }
+
+    pub fn redeem_social_guest_invite(
+        &self,
+        token: &str,
+        guest_key: &str,
+    ) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "UPDATE social_guest_invites SET guest_digest=?2, guest_expires=unixepoch()+86400
+             WHERE token_hash=?1 AND revoked=0 AND guest_digest IS NULL
+               AND invite_expires>unixepoch()
+             RETURNING room_id",
+                params![hash(token), hash(guest_key)],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn list_social_guest_invites(
+        &self,
+        room: &str,
+        owner_key: &str,
+    ) -> anyhow::Result<Vec<cowchat_core::InviteListEntry>> {
+        let conn = self.conn.lock().unwrap();
+        anyhow::ensure!(
+            room_owner(&conn, room, owner_key)? == Some(true),
+            "unauthorized"
+        );
+        let mut query = conn.prepare(
+            "SELECT token_hash,guest_digest IS NOT NULL,revoked OR
+                CASE WHEN guest_digest IS NULL THEN invite_expires<=unixepoch()
+                     ELSE guest_expires<=unixepoch() END,created_at
+             FROM social_guest_invites WHERE room_id=?1 ORDER BY created_at DESC,rowid DESC",
+        )?;
+        let rows = query.query_map([room], |row| {
+            Ok(cowchat_core::InviteListEntry {
+                invite_id: row.get(0)?,
+                room_id: room.to_string(),
+                single_use: true,
+                redeemed_count: row.get(1)?,
+                revoked: row.get(2)?,
+                created_at: row.get(3)?,
+                mine: true,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn revoke_social_guest_invite(
+        &self,
+        invite_id: &str,
+        owner_key: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let room: Option<String> = conn
+            .query_row(
+                "SELECT room_id FROM social_guest_invites WHERE token_hash=?1",
+                [invite_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(room) = room else { return Ok(None) };
+        if room_owner(&conn, &room, owner_key)? != Some(true) {
+            return Ok(None);
+        }
+        conn.execute(
+            "UPDATE social_guest_invites SET revoked=1 WHERE token_hash=?1",
+            [invite_id],
+        )?;
+        Ok(Some(room))
+    }
+
     pub fn social_principal(&self, key: &str) -> Option<Principal> {
         principal(&self.conn.lock().unwrap(), key).ok().flatten()
     }
@@ -918,6 +1037,11 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
         room_owner(&self.conn.lock().unwrap(), room, key).unwrap_or(Some(false))
     }
     pub fn social_identity_allowed(&self, id: &str, key: &str) -> bool {
+        if key.starts_with(GUEST_PREFIX)
+            && (id.starts_with("account:") || id.starts_with("session:"))
+        {
+            return false;
+        }
         let conn = self.conn.lock().unwrap();
         let assigned: bool = conn
             .query_row(
@@ -944,7 +1068,8 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                 ),
                 None => !assigned && session_bot.is_none(),
             },
-            None => !key.starts_with(PREFIX)
+            None => (!key.starts_with(PREFIX)
+                || (key.starts_with(GUEST_PREFIX) && guest_room(&conn, key).is_ok_and(|room| room.is_some())))
                 && !assigned
                 && session_bot.is_none()
                 && !conn.query_row(
@@ -1720,6 +1845,55 @@ mod tests {
     fn login(store: &Store, subject: &str) -> (String, Value) {
         login_named(store, subject, subject)
     }
+    #[test]
+    fn account_guest_invites_and_credentials_expire_independently() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner, _) = login(&store, "owner");
+        let room = store
+            .social_action(&owner, "POST", "rooms", &json!({"name": "Room"}))
+            .unwrap();
+        let room = room["room_id"].as_str().unwrap();
+        let expired = "cguest_invite_expired";
+        let active = "cguest_invite_active";
+        let guest = "csoc_guest_fixture";
+        store
+            .create_social_guest_invite(room, &owner, expired)
+            .unwrap();
+        store
+            .create_social_guest_invite(room, &owner, active)
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE social_guest_invites SET invite_expires=unixepoch() WHERE token_hash=?1",
+                [hash(expired)],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            store.redeem_social_guest_invite(expired, guest).unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .redeem_social_guest_invite(active, guest)
+                .unwrap()
+                .as_deref(),
+            Some(room)
+        );
+        assert!(store.social_credential_valid(guest));
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE social_guest_invites SET guest_expires=unixepoch() WHERE guest_digest=?1",
+                [hash(guest)],
+            )
+            .unwrap();
+        }
+        assert!(!store.social_credential_valid(guest));
+        assert_eq!(store.social_room_access(room, guest), Some(false));
+    }
+
     fn login_named(store: &Store, subject: &str, name: &str) -> (String, Value) {
         let verifier = "v".repeat(64);
         let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD

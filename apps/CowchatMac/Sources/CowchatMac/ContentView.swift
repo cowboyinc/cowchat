@@ -1021,8 +1021,10 @@ private struct ChatRoomView: View {
                             // copy:
                             Button("People…") { Task { await workspace.showPeople(of: room.id) } }
                         }
-                        if !store.connectionProfile.apiKey.hasPrefix("csoc_") {
+                        if !isAccountRoom || ownsRoom {
                             Button("Invites…") { isInvitesPresented = true }
+                        }
+                        if !store.connectionProfile.apiKey.hasPrefix("csoc_") {
                             Button("Slack…") { isSlackPresented = true }
                         }
                     }
@@ -1107,12 +1109,17 @@ private struct ChatRoomView: View {
 
     private func copyConnectPrompt() {
         Task {
-            // Every copy carries its own single-use invite; the mint is
-            // awaited when no cached one is ready.
-            let prompt = await store.copyableConnectPrompt(for: room)
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(prompt, forType: .string)
+            do {
+                let prompt = try await store.copyableConnectPrompt(for: room)
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(prompt, forType: .string)
+                hasCopiedEmptyRoomPrompt = true
+            } catch is CancellationError {
+                return
+            } catch {
+                store.errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -1343,7 +1350,7 @@ private struct ChatRoomView: View {
     }
 
     /// A connected room with no messages: the message glyph and "No messages yet", centred in the feed above the
-    /// composer, and in This Mac and API-key rooms Copy connect prompt 16 under it (navigation note, section 5.1).
+    /// composer, with Copy connect prompt below it.
     private var emptyRoom: some View {
         VStack(spacing: 0) {
             GallopIconView(icon: .message, fallbackSystemName: "bubble.left", size: 24)
@@ -1352,10 +1359,8 @@ private struct ChatRoomView: View {
             Text("No messages yet")
                 .gallopText(.h5, color: SemanticColor.textPrimary)
                 .padding(.top, 10)
-            if RoomPaneState.emptyOffersConnectPrompt(isAccountRoom: isAccountRoom) {
-                emptyRoomPromptButton
-                    .padding(.top, 16)
-            }
+            emptyRoomPromptButton
+                .padding(.top, 16)
         }
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1364,7 +1369,6 @@ private struct ChatRoomView: View {
     private var emptyRoomPromptButton: some View {
         Button {
             copyConnectPrompt()
-            hasCopiedEmptyRoomPrompt = true
         } label: {
             // Reserve the wider label's width, so the pill does not resize when its label turns to Copied.
             ZStack {
@@ -1376,7 +1380,6 @@ private struct ChatRoomView: View {
         .buttonStyle(CowchatPillButtonStyle(prominent: true))
         .macAccessibleAction(label: "Copy connect prompt") {
             copyConnectPrompt()
-            hasCopiedEmptyRoomPrompt = true
         }
     }
 

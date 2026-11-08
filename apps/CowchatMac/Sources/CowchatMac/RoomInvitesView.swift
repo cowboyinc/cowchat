@@ -18,13 +18,17 @@ struct RoomInvitesView: View {
     @State private var copiedFreshField: String?
     @State private var revokingIDs: Set<String> = []
 
+    private var isAccountRoom: Bool { store.connectionProfile.apiKey.hasPrefix("csoc_") }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Invites")
                         .gallopText(.h4, color: SemanticColor.textPrimary)
-                    Text("Invites let a stranger into \(room.name): redeeming one vends a fresh API key plus access to this room.")
+                    Text(isAccountRoom
+                         ? "Invite links expire in 15 minutes. Guests can read this room’s history and send messages for 24 hours."
+                         : "An invite grants access to \(room.name).")
                         .gallopText(.bodyM, color: SemanticColor.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -78,7 +82,9 @@ struct RoomInvitesView: View {
 
             HStack(spacing: 10) {
                 Spacer()
-                mintButton("New open invite", singleUse: false, style: .secondary)
+                if !isAccountRoom {
+                    mintButton("New open invite", singleUse: false, style: .secondary)
+                }
                 mintButton("New single-use invite", singleUse: true, style: .primary)
             }
         }

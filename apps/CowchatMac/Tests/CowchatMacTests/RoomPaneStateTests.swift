@@ -49,10 +49,4 @@ final class RoomPaneStateTests: XCTestCase {
         )
     }
 
-    /// Copy connect prompt shows in This Mac and API-key rooms, where a pasted prompt is still the way in, and never in
-    /// an account room, where sessions join by themselves.
-    func testOnlyRoomsOffTheAccountOfferTheConnectPrompt() {
-        XCTAssertFalse(RoomPaneState.emptyOffersConnectPrompt(isAccountRoom: true))
-        XCTAssertTrue(RoomPaneState.emptyOffersConnectPrompt(isAccountRoom: false))
-    }
 }

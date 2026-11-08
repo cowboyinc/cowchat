@@ -75,7 +75,7 @@ final class ConnectPromptTests: XCTestCase {
         XCTAssertTrue(store.connectPrompt(for: room).contains("cinv_first"))
 
         // Copying consumes and re-mints.
-        let copied = await store.copyableConnectPrompt(for: room)
+        let copied = try await store.copyableConnectPrompt(for: room)
         XCTAssertTrue(copied.contains("cinv_first"))
         while store.promptInviteTokens[room.id] == nil { await Task.yield() }
         XCTAssertEqual(store.promptInviteTokens[room.id], "cinv_second")
@@ -93,19 +93,39 @@ final class ConnectPromptTests: XCTestCase {
         let room = makeRoom(id: "room-2", name: "ops")
 
         // No ensurePromptInvite ran; the copy must still carry an invite.
-        let first = await store.copyableConnectPrompt(for: room)
+        let first = try await store.copyableConnectPrompt(for: room)
         XCTAssertTrue(first.contains("cinv_a"), "first copy should mint inline")
 
         // Two rapid copies produce two distinct invites.
         while store.promptInviteTokens[room.id] == nil { await Task.yield() }
-        let second = await store.copyableConnectPrompt(for: room)
-        let third = await store.copyableConnectPrompt(for: room)
+        let second = try await store.copyableConnectPrompt(for: room)
+        let third = try await store.copyableConnectPrompt(for: room)
         let tokens = [first, second, third].compactMap { prompt in
             ["cinv_a", "cinv_b", "cinv_c", "cinv_d"].first { prompt.contains($0) }
         }
         XCTAssertEqual(tokens.count, 3)
         XCTAssertEqual(Set(tokens).count, 3, "each copy must carry a distinct invite")
         XCTAssertFalse(third.contains("/api/keys"), "no self-serve fallback while minting works")
+    }
+
+    @MainActor
+    func testAccountRoomCopyMintsAnInviteAndReportsFailureWithoutSignupFallback() async throws {
+        let connection = PromptInviteStubConnection()
+        connection.invites = ["cguest_invite_fixture"]
+        let store = try makeGlobalStore(connection: connection, key: "csoc_fixture")
+        store.connectionStatus = .connected
+        let room = makeRoom(id: "room-3", name: "account chat")
+
+        let prompt = try await store.copyableConnectPrompt(for: room)
+        XCTAssertTrue(prompt.contains("cguest_invite_fixture"))
+        XCTAssertTrue(prompt.contains("room_id"))
+        XCTAssertFalse(prompt.contains("/api/keys"))
+        do {
+            _ = try await store.copyableConnectPrompt(for: room)
+            XCTFail("A refused account invite must not copy an unusable signup prompt")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
     }
 
     @MainActor
@@ -145,11 +165,12 @@ final class ConnectPromptTests: XCTestCase {
 
     @MainActor
     private func makeGlobalStore(
-        connection: (any CowchatConnectionProtocol)? = nil
+        connection: (any CowchatConnectionProtocol)? = nil,
+        key: String = "prompt-test-key"
     ) throws -> ChatStore {
         let profile = try ConnectionProfile.cowchatCloud(
             urlString: "wss://chat.cowchat.cowboy.inc/ws",
-            apiKey: "prompt-test-key"
+            apiKey: key
         )
         return ChatStore(
             connection: connection ?? CowchatConnection(profile: profile),

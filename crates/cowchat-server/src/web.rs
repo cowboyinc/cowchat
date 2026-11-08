@@ -487,6 +487,28 @@ async fn redeem_invite(
         );
     };
 
+    if token.starts_with(crate::store::social::GUEST_INVITE_PREFIX) {
+        if state.no_auth || state.broker.is_hosted() || state.api_key.is_empty() {
+            return invalid();
+        }
+        let key = format!(
+            "{}{}",
+            crate::store::social::GUEST_PREFIX,
+            crate::auth::generate_key()
+        );
+        let Ok(Some(room_id)) = state.store.redeem_social_guest_invite(token, &key) else {
+            return invalid();
+        };
+        let Some(room) = state.store.get_room(&room_id).ok().flatten() else {
+            return invalid();
+        };
+        return (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "api_key": key, "room_id": room_id, "room_name": room.name, "tier": "free",
+            })),
+        );
+    }
     let token_hash = crate::auth::hash_invite_token(token);
     let room_id = match state.store.redeem_invite(&token_hash) {
         Ok(Some(room_id)) => room_id,
@@ -572,7 +594,7 @@ async fn api_list_rooms(
                 && (state.no_auth
                     || state.broker.is_hosted()
                     || state.api_key.is_empty()
-                    || state.store.social_principal(key).is_none())
+                    || !state.store.social_credential_valid(key))
         })
     {
         return json_error(StatusCode::UNAUTHORIZED, "Invalid credential");
@@ -925,7 +947,10 @@ pub(crate) fn authenticated_key(state: &AppState, headers: &HeaderMap) -> Option
         return if state.no_auth || state.broker.is_hosted() || state.api_key.is_empty() {
             None
         } else {
-            state.store.social_principal(key).map(|_| key.to_string())
+            state
+                .store
+                .social_credential_valid(key)
+                .then(|| key.to_string())
         };
     }
     (key == state.api_key || state.store.validate_api_key(key).unwrap_or(false))
@@ -1146,6 +1171,234 @@ mod tests {
                 SessionAuth::new([0xab; 32], "wss://chat.example/ws".into()).unwrap(),
             )),
         }
+    }
+
+    #[tokio::test]
+    async fn account_room_prompt_grants_revocable_chat_access_to_one_room() {
+        use base64::Engine;
+        use serde_json::{json, Value};
+        use sha2::Digest;
+
+        fn account_key(store: &Store, subject: &str) -> String {
+            let verifier = "v".repeat(64);
+            let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sha2::Sha256::digest(verifier.as_bytes()));
+            let (request, state) = store
+                .social_oauth_start("github", &challenge, None, 49233, subject)
+                .unwrap();
+            store.social_oauth_claim("github", &state).unwrap();
+            let (_, code) = store
+                .social_oauth_complete("github", &state, subject, subject)
+                .unwrap();
+            store
+                .social_oauth_exchange(&request, &verifier, &code)
+                .unwrap()["device_key"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+
+        type Socket = tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >;
+        async fn command(socket: &mut Socket, kind: FrameType, payload: Value) -> Frame {
+            let id = uuid::Uuid::new_v4().to_string();
+            let frame = Frame {
+                id: Some(id.clone()),
+                reply_to: None,
+                frame_type: kind,
+                payload,
+            };
+            socket
+                .send(ClientMessage::Text(
+                    frame.to_line().unwrap().trim_end().to_owned().into(),
+                ))
+                .await
+                .unwrap();
+            loop {
+                let reply = next_text_frame(socket).await;
+                if reply.reply_to.as_deref() == Some(&id) {
+                    return reply;
+                }
+            }
+        }
+
+        async fn connect(addr: SocketAddr, key: &str, id: &str) -> (Socket, Frame) {
+            let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+            let reply = command(
+                &mut socket,
+                FrameType::Register,
+                json!({
+                    "key": key, "agent_id": id, "name": id, "capabilities": [],
+                    "protocol_version": cowchat_core::PROTOCOL_VERSION,
+                }),
+            )
+            .await;
+            (socket, reply)
+        }
+
+        let state = test_state();
+        let owner_key = account_key(&state.store, "owner");
+        let other_key = account_key(&state.store, "outsider");
+        let room = state
+            .store
+            .social_action(
+                &owner_key,
+                "POST",
+                "rooms",
+                &json!({"name": "Private Room"}),
+            )
+            .unwrap();
+        let room_id = room["room_id"].as_str().unwrap();
+        let (server, addr) = start_test_web_server(state.clone()).await;
+        let (mut owner, registered) = connect(addr, &owner_key, "room-owner").await;
+        assert_eq!(registered.frame_type, FrameType::Ok);
+        let (mut other, registered) = connect(addr, &other_key, "other-account").await;
+        assert_eq!(registered.frame_type, FrameType::Ok);
+        let create = json!({"room_id": room_id, "single_use": true});
+        assert_eq!(
+            command(&mut other, FrameType::CreateInvite, create.clone())
+                .await
+                .frame_type,
+            FrameType::Error
+        );
+        assert_eq!(
+            command(
+                &mut owner,
+                FrameType::CreateInvite,
+                json!({"room_id": room_id, "single_use": false})
+            )
+            .await
+            .frame_type,
+            FrameType::Error
+        );
+        let invite = command(&mut owner, FrameType::CreateInvite, create.clone()).await;
+        assert_eq!(invite.frame_type, FrameType::Ok);
+        let token = invite.payload["token"].as_str().unwrap();
+        assert!(!state.store.validate_api_key(token).unwrap());
+
+        let http = reqwest::Client::new();
+        let redeem = || {
+            http.post(format!("http://{addr}/api/invites/redeem"))
+                .json(&json!({"token": token}))
+        };
+        let (a, b) = tokio::join!(redeem().send(), redeem().send());
+        let (a, b) = (a.unwrap(), b.unwrap());
+        let (created, refused) = if a.status() == StatusCode::CREATED {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(refused.status(), StatusCode::NOT_FOUND);
+        let credential: Value = created.json().await.unwrap();
+        assert_eq!(credential["room_id"], room_id);
+        let key = credential["api_key"].as_str().unwrap();
+        assert!(state.store.social_principal(key).is_none());
+        let (_, spoofed) = connect(addr, key, "account:owner").await;
+        assert_eq!(spoofed.frame_type, FrameType::Error);
+        let (mut guest, registered) = connect(addr, key, "invited-guest").await;
+        assert_eq!(registered.frame_type, FrameType::Ok);
+        assert_eq!(
+            command(&mut guest, FrameType::JoinRoom, json!({"room_id": room_id}))
+                .await
+                .frame_type,
+            FrameType::Ok
+        );
+        let message = json!({"room_id": room_id, "content": "Hello from the invited guest"});
+        let sent = command(&mut guest, FrameType::SendMessage, message.clone()).await;
+        assert_eq!(sent.frame_type, FrameType::Ok);
+        assert_eq!(sent.payload["metadata"]["sender_kind"], "agent");
+        assert_eq!(
+            command(&mut owner, FrameType::JoinRoom, json!({"room_id": room_id}))
+                .await
+                .frame_type,
+            FrameType::Ok,
+        );
+        assert_eq!(
+            command(
+                &mut owner,
+                FrameType::SendMessage,
+                json!({"room_id": room_id, "content": "Welcome guest"})
+            )
+            .await
+            .frame_type,
+            FrameType::Ok,
+        );
+        loop {
+            let event = next_text_frame(&mut guest).await;
+            if event.frame_type == FrameType::MessageReceived {
+                assert_eq!(event.payload["content"], "Welcome guest");
+                break;
+            }
+        }
+        let history = || {
+            http.get(format!("http://{addr}/api/rooms/{room_id}/history"))
+                .header(API_KEY_HEADER, key)
+        };
+        assert_eq!(history().send().await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            command(&mut guest, FrameType::JoinRoom, json!({"room_id": "lobby"}))
+                .await
+                .frame_type,
+            FrameType::Error
+        );
+        assert_eq!(
+            command(&mut guest, FrameType::CreateInvite, create)
+                .await
+                .frame_type,
+            FrameType::Error
+        );
+        let rooms: Value = http
+            .get(format!("http://{addr}/api/rooms"))
+            .header(API_KEY_HEADER, key)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(rooms["rooms"].as_array().unwrap().len(), 1);
+        assert_eq!(rooms["rooms"][0]["room_id"], room_id);
+
+        let invites = command(
+            &mut owner,
+            FrameType::ListInvites,
+            json!({"room_id": room_id}),
+        )
+        .await;
+        let invite_id = invites.payload["invites"][0]["invite_id"].as_str().unwrap();
+        let revoke = json!({"invite_id": invite_id});
+        assert_eq!(
+            command(&mut other, FrameType::RevokeInvite, revoke.clone())
+                .await
+                .frame_type,
+            FrameType::Error
+        );
+        assert_eq!(
+            command(&mut owner, FrameType::RevokeInvite, revoke)
+                .await
+                .frame_type,
+            FrameType::Ok
+        );
+        assert_eq!(
+            history().send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // A socket opened before revocation also loses its credential.
+        assert_eq!(
+            command(&mut guest, FrameType::SendMessage, message)
+                .await
+                .frame_type,
+            FrameType::Error,
+        );
+        let (_, denied) = connect(addr, key, "revoked-guest").await;
+        assert_eq!(denied.frame_type, FrameType::Error);
+        assert_eq!(
+            state.store.get_history(room_id, 100, None).unwrap().len(),
+            2
+        );
+        server.abort();
     }
 
     #[tokio::test]

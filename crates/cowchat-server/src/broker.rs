@@ -188,7 +188,7 @@ impl Broker {
         if let Some(agent) = self.agents.get(agent_id) {
             if let Some(store) = self.access_store.get().and_then(std::sync::Weak::upgrade) {
                 if agent.api_key.starts_with(crate::store::social::PREFIX)
-                    && store.social_principal(&agent.api_key).is_none()
+                    && !store.social_credential_valid(&agent.api_key)
                 {
                     return;
                 }
