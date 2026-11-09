@@ -1255,6 +1255,10 @@ pub(crate) async fn handle_send_message(
             }
         }
     }
+    if let Err(error) = crate::tags::stamp_tags(&mut metadata, room_is_encrypted(&p.room_id, store))
+    {
+        return Frame::error(req_id, ErrorPayload::new(ErrorCode::InvalidPayload, error));
+    }
     if let Some(valid) = store.social_mentions_valid(&p.room_id, &p.mentions) {
         if !valid {
             return Frame::error(
@@ -2883,6 +2887,14 @@ async fn handle_subscribe(
         );
     }
 
+    if let Some(error) = p
+        .tags
+        .iter()
+        .find_map(|tag| cowchat_core::tags::MessageTag::parse(tag).err())
+    {
+        return Frame::error(req_id, ErrorPayload::new(ErrorCode::InvalidPayload, error));
+    }
+
     if let Err(error) = authorize_room(req_id, &p.room_id, agent_api_key, no_auth, store) {
         return error;
     }
@@ -2895,13 +2907,14 @@ async fn handle_subscribe(
 
     let subscription_id = uuid::Uuid::new_v4().to_string();
     let owner_key = if no_auth { "no-auth" } else { agent_api_key };
-    let sub = match store.create_subscription(
+    let sub = match store.create_tagged_subscription(
         &subscription_id,
         &p.room_id,
         owner_key,
         &p.webhook_url,
         &p.secret,
         &p.kinds,
+        &p.tags,
         p.only_from.as_deref(),
         p.not_from.as_deref(),
         p.exclude_thinking,
