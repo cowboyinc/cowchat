@@ -323,6 +323,44 @@ fn ids(body: &Value, key: &str) -> anyhow::Result<Vec<String>> {
         _ => anyhow::bail!("invalid {key}"),
     }
 }
+fn ensure_session_capacity(conn: &Connection, bot: &str) -> anyhow::Result<()> {
+    let active_sessions: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM social_sessions WHERE bot_id=?1 AND ended_at IS NULL",
+        [bot],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(active_sessions < 40, "active session limit reached");
+    let recent: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM social_sessions WHERE bot_id=?1 AND started_at>=unixepoch()-3600",
+        [bot],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(recent < 60, "session creation rate limit reached");
+    Ok(())
+}
+fn free_room_name(conn: &Connection, account: &str, stem: &str) -> anyhow::Result<String> {
+    let taken = conn
+        .prepare("SELECT room_name FROM social_sessions WHERE owner_id=?1 AND ended_at IS NULL")?
+        .query_map([account], |row| row.get::<_, String>(0))?
+        .collect::<Result<std::collections::HashSet<_>, _>>()?;
+    (1..=41)
+        .map(|number| {
+            if number == 1 {
+                stem.to_owned()
+            } else {
+                format!("{}-{number}", stem.chars().take(95).collect::<String>())
+            }
+        })
+        .find(|name| !taken.contains(name))
+        .ok_or_else(|| anyhow::anyhow!("session room limit reached"))
+}
+fn session_token() -> String {
+    format!(
+        "{PREFIX}{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
 fn approve(conn: &Connection, room: &str, owner: &str, ids: &[String]) -> anyhow::Result<()> {
     for id in ids {
         let owned: bool = conn.query_row(
@@ -556,6 +594,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
     }
     /// Register one stable agent session under a bot credential. A resumed
     /// session keeps its room; a different bot cannot claim its identity.
+    /// Registers a new session, or renews a live one with its own token.
     pub fn social_register_session(
         &self,
         key: &str,
@@ -564,6 +603,34 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
         harness: &str,
         folder: &str,
         branch: &str,
+    ) -> anyhow::Result<SessionRoom> {
+        self.register_session(key, session_id, name, harness, folder, branch, false)
+    }
+
+    /// What `session start` calls: as registering, and a session that ended can also
+    /// come back under its ID. Connecting never restarts one.
+    pub fn social_start_session(
+        &self,
+        key: &str,
+        session_id: &str,
+        name: &str,
+        harness: &str,
+        folder: &str,
+        branch: &str,
+    ) -> anyhow::Result<SessionRoom> {
+        self.register_session(key, session_id, name, harness, folder, branch, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn register_session(
+        &self,
+        key: &str,
+        session_id: &str,
+        name: &str,
+        harness: &str,
+        folder: &str,
+        branch: &str,
+        restart: bool,
     ) -> anyhow::Result<SessionRoom> {
         let suffix = session_id
             .strip_prefix("session:")
@@ -603,14 +670,47 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
         anyhow::ensure!(active, "bot revoked");
 
         let tx = conn.transaction()?;
-        let existing: Option<(String, String, String)> = tx
+        let existing: Option<(String, String, String, bool, Option<String>)> = tx
             .query_row(
-                "SELECT bot_id,room_id,room_name FROM social_sessions WHERE id=?1",
+                "SELECT bot_id,room_id,room_name,ended_at IS NOT NULL,minted_by FROM social_sessions WHERE id=?1",
                 [session_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()?;
-        if let Some((owner_bot, room_id, room_name)) = existing {
+        if let Some((owner_bot, room_id, room_name, true, minted_by)) = existing {
+            // Only the key that minted a session brings it back, so a leaked key
+            // restores no more than the sessions it made itself.
+            anyhow::ensure!(
+                restart
+                    && owner_bot == bot
+                    && p.session_id.is_none()
+                    && minted_by.as_deref() == Some(hash(key).as_str()),
+                "invalid credential"
+            );
+            // Ending a session keeps its room approvals so it can come back. An owner
+            // who ended it, or revoked its key, took them away, its own room included.
+            let restartable: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM social_admissions WHERE room_id=?1 AND agent_id=?2)",
+                params![room_id, session_id],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(restartable, "session cannot restart");
+            ensure_session_capacity(&tx, &bot)?;
+            let room_name = free_room_name(&tx, &p.account_id, &room_name)?;
+            let token = session_token();
+            tx.execute(
+                "UPDATE social_sessions SET name=?2,harness=?3,folder=?4,branch=?5,room_name=?6,token_digest=?7,ended_at=NULL,started_at=unixepoch(),last_seen=unixepoch() WHERE id=?1",
+                params![session_id, name, harness, folder, branch, room_name, hash(&token)],
+            )?;
+            tx.commit()?;
+            return Ok(SessionRoom {
+                room_id,
+                room_name,
+                agent_name: name.to_owned(),
+                session_token: Some(token),
+            });
+        }
+        if let Some((owner_bot, room_id, room_name, _, _)) = existing {
             anyhow::ensure!(
                 owner_bot == bot && p.session_id.as_deref() == Some(session_id),
                 "invalid credential"
@@ -628,18 +728,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             });
         }
         anyhow::ensure!(p.session_id.is_none(), "invalid credential");
-        let active_sessions: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM social_sessions WHERE bot_id=?1 AND ended_at IS NULL",
-            [&bot],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(active_sessions < 40, "active session limit reached");
-        let recent: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM social_sessions WHERE bot_id=?1 AND started_at>=unixepoch()-3600",
-            [&bot],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(recent < 60, "session creation rate limit reached");
+        ensure_session_capacity(&tx, &bot)?;
 
         let owner_key = format!("social-account:{}:{bot}", p.account_id);
         tx.execute(
@@ -659,22 +748,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             branch
         };
         let stem = super::normalize_room_name(stem).map_err(anyhow::Error::msg)?;
-        let taken = tx
-            .prepare(
-                "SELECT room_name FROM social_sessions WHERE owner_id=?1 AND ended_at IS NULL",
-            )?
-            .query_map([&p.account_id], |row| row.get::<_, String>(0))?
-            .collect::<Result<std::collections::HashSet<_>, _>>()?;
-        let room_name = (1..=41)
-            .map(|number| {
-                if number == 1 {
-                    stem.clone()
-                } else {
-                    format!("{}-{number}", stem.chars().take(95).collect::<String>())
-                }
-            })
-            .find(|name| !taken.contains(name))
-            .ok_or_else(|| anyhow::anyhow!("session room limit reached"))?;
+        let room_name = free_room_name(&tx, &p.account_id, &stem)?;
         let room_id = uuid::Uuid::new_v4().to_string();
         let internal_name = format!("session-{room_id}");
         tx.execute(
@@ -697,11 +771,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             "INSERT INTO social_admissions(room_id,agent_id) VALUES(?1,?2)",
             params![room_id, session_id],
         )?;
-        let token = format!(
-            "{PREFIX}{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
+        let token = session_token();
         tx.execute(
             "INSERT INTO social_sessions(id,bot_id,owner_id,name,harness,folder,branch,room_id,room_name,token_digest,minted_by,started_at,last_seen) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,unixepoch(),unixepoch())",
             params![session_id, bot, p.account_id, name, harness, folder, branch, room_id, room_name, hash(&token), hash(key)],
@@ -894,10 +964,12 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             "UPDATE social_sessions SET ended_at=unixepoch(),token_digest=NULL WHERE id=?1",
             [session_id],
         )?;
-        tx.execute(
-            "DELETE FROM social_admissions WHERE agent_id=?1",
-            [session_id],
-        )?;
+        if p.agent_id.is_none() {
+            tx.execute(
+                "DELETE FROM social_admissions WHERE agent_id=?1",
+                [session_id],
+            )?;
+        }
         tx.execute("DELETE FROM presence WHERE agent_id=?1", [session_id])?;
         tx.commit()?;
         Ok(room_id)
@@ -918,7 +990,6 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             [],
         )?;
         for id in &ids {
-            tx.execute("DELETE FROM social_admissions WHERE agent_id=?1", [id])?;
             tx.execute("DELETE FROM presence WHERE agent_id=?1", [id])?;
         }
         tx.commit()?;
@@ -1392,7 +1463,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                     "UPDATE social_credentials SET revoked=1 WHERE digest=?1",
                     [&digest],
                 )?;
-                tx.execute("DELETE FROM social_admissions WHERE agent_id IN (SELECT id FROM social_sessions WHERE minted_by=?1 AND ended_at IS NULL)", [&digest])?;
+                tx.execute("DELETE FROM social_admissions WHERE agent_id IN (SELECT id FROM social_sessions WHERE minted_by=?1)", [&digest])?;
                 tx.execute("DELETE FROM presence WHERE agent_id IN (SELECT id FROM social_sessions WHERE minted_by=?1 AND ended_at IS NULL)", [&digest])?;
                 tx.execute("UPDATE social_sessions SET ended_at=unixepoch(),token_digest=NULL WHERE minted_by=?1 AND ended_at IS NULL", [&digest])?;
                 json!({"ok":true})
@@ -1409,7 +1480,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                 )?;
                 tx.execute("DELETE FROM social_admissions WHERE agent_id=?1", [id])?;
                 tx.execute("DELETE FROM presence WHERE agent_id=?1 OR agent_id IN (SELECT id FROM social_sessions WHERE bot_id=?1)", [id])?;
-                tx.execute("DELETE FROM social_admissions WHERE agent_id IN (SELECT id FROM social_sessions WHERE bot_id=?1 AND ended_at IS NULL)", [id])?;
+                tx.execute("DELETE FROM social_admissions WHERE agent_id IN (SELECT id FROM social_sessions WHERE bot_id=?1)", [id])?;
                 tx.execute("UPDATE social_sessions SET ended_at=unixepoch(),token_digest=NULL WHERE bot_id=?1 AND ended_at IS NULL", [id])?;
                 json!({"ok":true})
             }
@@ -2092,6 +2163,211 @@ mod tests {
             Some(false)
         );
     }
+    fn restart_fixture(store: &Store, subject: &str) -> (String, String, String, String) {
+        let (owner_key, _) = login(store, subject);
+        let bot = store
+            .social_action(&owner_key, "POST", "agents", &json!({"name":"Bot"}))
+            .unwrap();
+        let bot_key = bot["api_key"].as_str().unwrap().to_owned();
+        let session = format!("session:{}", uuid::Uuid::new_v4());
+        store
+            .social_register_session(&bot_key, &session, "worker", "codex", "repo", "main")
+            .unwrap();
+        let room = store
+            .social_action(&owner_key, "POST", "rooms", &json!({"name":"shared"}))
+            .unwrap();
+        let room_id = room["room_id"].as_str().unwrap().to_owned();
+        store
+            .social_action(
+                &owner_key,
+                "POST",
+                &format!("rooms/{room_id}/agents"),
+                &json!({"agent_ids":[session]}),
+            )
+            .unwrap();
+        (owner_key, bot_key, session, room_id)
+    }
+
+    fn lapse(store: &Store, session: &str) {
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE social_sessions SET last_seen=unixepoch()-301 WHERE id=?1",
+                [session],
+            )
+            .unwrap();
+        store.social_expire_sessions().unwrap();
+    }
+
+    fn restart(store: &Store, key: &str, session: &str) -> anyhow::Result<SessionRoom> {
+        store.social_start_session(key, session, "worker", "codex", "repo", "main")
+    }
+
+    #[test]
+    fn a_lapsed_session_restarts_with_its_room_approvals() {
+        let store = Store::open_in_memory().unwrap();
+        let (_, bot_key, session, room_id) = restart_fixture(&store, "restart-lapse");
+        lapse(&store, &session);
+        assert_eq!(
+            store.social_mentions_valid(&room_id, std::slice::from_ref(&session)),
+            Some(false)
+        );
+        let restarted = restart(&store, &bot_key, &session).unwrap();
+        let token = restarted.session_token.as_deref().unwrap();
+        assert_eq!(store.social_room_access(&room_id, token), Some(true));
+        assert_eq!(
+            store.social_mentions_valid(&room_id, std::slice::from_ref(&session)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn connecting_never_restarts_an_ended_session() {
+        let store = Store::open_in_memory().unwrap();
+        let (_, bot_key, session, room_id) = restart_fixture(&store, "restart-connect");
+        lapse(&store, &session);
+        assert!(store
+            .social_register_session(&bot_key, &session, "worker", "codex", "repo", "main")
+            .is_err());
+        assert_eq!(
+            store.social_mentions_valid(&room_id, std::slice::from_ref(&session)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn a_session_that_ended_itself_restarts_but_only_for_its_own_bot() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, bot_key, session, room_id) = restart_fixture(&store, "restart-self");
+        let other = store
+            .social_action(&owner_key, "POST", "agents", &json!({"name":"Other"}))
+            .unwrap();
+        lapse(&store, &session);
+        assert!(restart(&store, other["api_key"].as_str().unwrap(), &session).is_err());
+        let restarted = restart(&store, &bot_key, &session).unwrap();
+        let token = restarted.session_token.clone().unwrap();
+        store.social_end_session(&token, &session).unwrap();
+        let again = restart(&store, &bot_key, &session).unwrap();
+        assert_eq!(
+            store.social_room_access(&room_id, again.session_token.as_deref().unwrap()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn only_the_key_that_minted_a_session_can_restart_it() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, _) = login(&store, "restart-key");
+        let bot = store
+            .social_action(&owner_key, "POST", "agents", &json!({"name":"Bot"}))
+            .unwrap();
+        let bot_id = bot["agent"]["id"].as_str().unwrap();
+        let minter = bot["api_key"].as_str().unwrap();
+        let other_key = store
+            .social_action(
+                &owner_key,
+                "POST",
+                &format!("agents/{bot_id}/credentials"),
+                &json!({"mint_only":true}),
+            )
+            .unwrap();
+        let session = format!("session:{}", uuid::Uuid::new_v4());
+        restart(&store, minter, &session).unwrap();
+        lapse(&store, &session);
+        assert!(restart(&store, other_key["api_key"].as_str().unwrap(), &session).is_err());
+        assert!(restart(&store, minter, &session).is_ok());
+    }
+
+    #[test]
+    fn an_owner_ending_a_session_revokes_its_restart() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, bot_key, session, _) = restart_fixture(&store, "restart-owner");
+        store.social_end_session(&owner_key, &session).unwrap();
+        assert!(restart(&store, &bot_key, &session).is_err());
+    }
+
+    #[test]
+    fn removing_an_ended_session_from_a_room_stays_removed_after_restart() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, bot_key, session, room_id) = restart_fixture(&store, "restart-removed");
+        lapse(&store, &session);
+        store
+            .social_action(
+                &owner_key,
+                "DELETE",
+                &format!("rooms/{room_id}/agents/{session}"),
+                &json!({}),
+            )
+            .unwrap();
+        let restarted = restart(&store, &bot_key, &session).unwrap();
+        assert_eq!(
+            store.social_room_access(&room_id, restarted.session_token.as_deref().unwrap()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn revoking_a_mint_key_drops_the_approvals_of_its_ended_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, _) = login(&store, "restart-revoked");
+        let bot = store
+            .social_action(
+                &owner_key,
+                "POST",
+                "agents",
+                &json!({"name":"Bot","mint_only":true}),
+            )
+            .unwrap();
+        let bot_id = bot["agent"]["id"].as_str().unwrap();
+        let leaked = bot["api_key"].as_str().unwrap();
+        let session = format!("session:{}", uuid::Uuid::new_v4());
+        restart(&store, leaked, &session).unwrap();
+        let room = store
+            .social_action(&owner_key, "POST", "rooms", &json!({"name":"shared"}))
+            .unwrap();
+        let room_id = room["room_id"].as_str().unwrap();
+        store
+            .social_action(
+                &owner_key,
+                "POST",
+                &format!("rooms/{room_id}/agents"),
+                &json!({"agent_ids":[session]}),
+            )
+            .unwrap();
+        lapse(&store, &session);
+        store
+            .social_action(
+                &owner_key,
+                "DELETE",
+                "credentials",
+                &json!({"api_key":leaked}),
+            )
+            .unwrap();
+        let replacement = store
+            .social_action(
+                &owner_key,
+                "POST",
+                &format!("agents/{bot_id}/credentials"),
+                &json!({"mint_only":true}),
+            )
+            .unwrap();
+        assert!(restart(&store, replacement["api_key"].as_str().unwrap(), &session).is_err());
+    }
+
+    #[test]
+    fn a_restart_takes_a_new_room_name_when_its_own_is_in_use() {
+        let store = Store::open_in_memory().unwrap();
+        let (_, bot_key, session, _) = restart_fixture(&store, "restart-name");
+        lapse(&store, &session);
+        let newer = format!("session:{}", uuid::Uuid::new_v4());
+        let taken = restart(&store, &bot_key, &newer).unwrap();
+        let restarted = restart(&store, &bot_key, &session).unwrap();
+        assert_eq!(taken.room_name, "repo");
+        assert_ne!(restarted.room_name, taken.room_name);
+    }
+
     #[test]
     fn social_mentions_require_current_room_membership() {
         let store = Store::open_in_memory().unwrap();
@@ -3538,16 +3814,6 @@ mod tests {
         assert!(store.get_room(&second.room_id).unwrap().is_some());
         assert!(store
             .social_register_session(
-                bot_key,
-                &second_id,
-                "codex-two",
-                "codex",
-                "cowchat",
-                "feature"
-            )
-            .is_err());
-        assert!(store
-            .social_register_session(
                 second_token,
                 &second_id,
                 "codex-two",
@@ -3558,16 +3824,6 @@ mod tests {
             .is_err());
         store.social_end_session(first_token, &first_id).unwrap();
         assert!(store.social_principal(first_token).is_none());
-        assert!(store
-            .social_register_session(
-                bot_key,
-                &first_id,
-                "claude-one",
-                "claude",
-                "cowchat",
-                "main"
-            )
-            .is_err());
         assert!(store
             .social_register_session(
                 first_token,
