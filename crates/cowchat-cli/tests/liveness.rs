@@ -1302,6 +1302,47 @@ async fn inline_charts_round_trip_through_local_and_encrypted_rooms() {
 }
 
 #[tokio::test]
+async fn a_mention_wakes_a_mentions_only_wait_in_a_plain_room() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let cowchat = |name: &str, args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command.args(["--tcp", &addr, "--key", &key, "--name", name]);
+        command.args(["--agent-id", name]);
+        command.args(args);
+        command
+    };
+    let sent = cowchat(
+        "mentioner",
+        &["send", "lobby", "hi", "--mention", "listener"],
+    )
+    .output()
+    .await
+    .unwrap();
+    assert!(sent.status.success());
+    let woken = cowchat(
+        "listener",
+        &[
+            "wait",
+            "lobby",
+            "--mentions-only",
+            "--since-seq",
+            "0",
+            "--timeout",
+            "3",
+        ],
+    )
+    .output()
+    .await
+    .unwrap();
+    assert!(
+        woken.status.success(),
+        "{}",
+        String::from_utf8_lossy(&woken.stderr)
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn history_around_returns_the_messages_either_side_of_a_seq() {
     let (server, addr, key, _tmp) = start_test_server().await;
     let reader = CowchatClient::connect_tcp(&addr, &key, "reader", Some("reader"), vec![])

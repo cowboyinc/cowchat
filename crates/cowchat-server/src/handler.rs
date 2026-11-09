@@ -1276,6 +1276,11 @@ pub(crate) async fn handle_send_message(
             metadata = serde_json::json!({});
         }
         metadata["mentions"] = serde_json::json!(p.mentions);
+    } else if !p.mentions.is_empty() {
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        metadata["mentions"] = serde_json::json!(p.mentions);
     }
     if let Some(principal) = store.social_principal(agent_api_key) {
         if principal.session_id.is_some() && metadata.get("display_external").is_none() {
