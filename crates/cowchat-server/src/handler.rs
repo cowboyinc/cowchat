@@ -207,21 +207,39 @@ pub async fn handle_frame(
     let req_id = frame.id.as_deref();
 
     if agent_api_key.starts_with(crate::store::social::PREFIX) {
-        if store.social_principal(agent_api_key).is_none() {
+        if !store.social_credential_valid(agent_api_key) {
             return Frame::error(
                 req_id,
                 ErrorPayload::new(ErrorCode::Unauthorized, "Credential revoked or expired"),
             );
         }
+        if agent_api_key.starts_with(crate::store::social::GUEST_PREFIX)
+            && !matches!(
+                frame.frame_type,
+                FrameType::Ping
+                    | FrameType::JoinRoom
+                    | FrameType::LeaveRoom
+                    | FrameType::SendMessage
+                    | FrameType::GetHistory
+                    | FrameType::ListRooms
+                    | FrameType::RoomInfo
+                    | FrameType::RoomTip
+            )
+        {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::Unauthorized,
+                    "Guest credentials can only use their invited room",
+                ),
+            );
+        }
         if matches!(
             frame.frame_type,
             FrameType::CreateRoom
-                | FrameType::CreateInvite
                 | FrameType::RedeemInvite
-                | FrameType::RevokeInvite
                 | FrameType::Subscribe
                 | FrameType::SubscribeActor
-                | FrameType::ListInvites
                 | FrameType::ListSubscriptions
                 | FrameType::EnableSubscription
                 | FrameType::Unsubscribe
@@ -1268,6 +1286,13 @@ pub(crate) async fn handle_send_message(
             metadata = serde_json::json!({});
         }
         metadata["sender_kind"] = serde_json::Value::String(kind.into());
+    }
+    if agent_api_key.starts_with(crate::store::social::GUEST_PREFIX) {
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        metadata["sender_kind"] = serde_json::json!("agent");
+        metadata["display_external"] = serde_json::json!(false);
     }
     let append = crate::store::MessageAppend {
         message_id: &message_id,
@@ -3112,6 +3137,36 @@ async fn handle_create_invite(
         Err(error) => return error,
     };
 
+    if agent_api_key.starts_with(crate::store::social::PREFIX) {
+        let token = format!(
+            "{}{}",
+            crate::store::social::GUEST_INVITE_PREFIX,
+            crate::auth::generate_key()
+        );
+        if !p.single_use
+            || store
+                .create_social_guest_invite(&room.room_id, agent_api_key, &token)
+                .is_err()
+        {
+            return Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::AccessDenied,
+                    "Only the room owner can create single-use account room invites",
+                ),
+            );
+        }
+        return Frame::ok(
+            req_id,
+            serde_json::to_value(InviteInfo {
+                token,
+                room_id: room.room_id,
+                room_name: room.name,
+                single_use: true,
+            })
+            .unwrap(),
+        );
+    }
     let token = crate::auth::generate_invite_token();
     let token_hash = crate::auth::hash_invite_token(&token);
     if let Err(e) = store.create_invite(&token_hash, &room.room_id, agent_api_key, p.single_use) {
@@ -3173,6 +3228,18 @@ async fn handle_revoke_invite(
             )
         }
     };
+    if agent_api_key.starts_with(crate::store::social::PREFIX) {
+        return match store.revoke_social_guest_invite(&token_hash, agent_api_key) {
+            Ok(Some(room_id)) => Frame::ok(
+                req_id,
+                serde_json::json!({"revoked": true, "room_id": room_id}),
+            ),
+            _ => Frame::error(
+                req_id,
+                ErrorPayload::new(ErrorCode::InviteNotFound, "Invite not found"),
+            ),
+        };
+    }
     let invite = match store.get_invite(&token_hash) {
         Ok(Some(invite)) => invite,
         Ok(None) => {
@@ -3244,6 +3311,25 @@ async fn handle_list_invites(
         Err(error) => return error,
     };
 
+    if agent_api_key.starts_with(crate::store::social::PREFIX) {
+        return match store.list_social_guest_invites(&room.room_id, agent_api_key) {
+            Ok(invites) => Frame::ok(
+                req_id,
+                serde_json::to_value(InviteList {
+                    room_id: room.room_id,
+                    invites,
+                })
+                .unwrap(),
+            ),
+            Err(_) => Frame::error(
+                req_id,
+                ErrorPayload::new(
+                    ErrorCode::AccessDenied,
+                    "Only the room owner can view account room invites",
+                ),
+            ),
+        };
+    }
     let invites = match store.list_room_invites(&room.room_id) {
         Ok(invites) => invites,
         Err(e) => {
@@ -3330,6 +3416,11 @@ async fn handle_redeem_invite(
         )
     };
 
+    if p.token
+        .starts_with(crate::store::social::GUEST_INVITE_PREFIX)
+    {
+        return invalid();
+    }
     let token_hash = crate::auth::hash_invite_token(&p.token);
 
     // No-burn: a live invite for a room the caller already accesses is a

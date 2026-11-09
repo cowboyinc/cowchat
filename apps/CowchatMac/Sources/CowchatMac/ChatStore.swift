@@ -514,7 +514,13 @@ final class ChatStore: ObservableObject {
     /// invite: the cached one when it's ready, otherwise a mint awaited
     /// inline — so copying N times yields N distinct invitations. Only a
     /// failed mint falls back to self-serve wording.
-    func copyableConnectPrompt(for room: Room) async -> String {
+    func copyableConnectPrompt(for room: Room) async throws -> String {
+        if connectionProfile.apiKey.hasPrefix("csoc_") {
+            let expectedProfileGeneration = profileGeneration
+            let token = try await connection.createInvite(roomID: room.roomID, singleUse: true)
+            guard expectedProfileGeneration == profileGeneration else { throw CancellationError() }
+            return connectPrompt(for: room, inviteToken: token)
+        }
         if let token = promptInviteTokens.removeValue(forKey: room.id) {
             ensurePromptInvite(for: room)
             return connectPrompt(for: room, inviteToken: token)
@@ -617,6 +623,7 @@ final class ChatStore: ObservableObject {
         Self.connectPromptText(
             roomName: room.name,
             connectionInstruction: agentConnectionInstruction(inviteToken: inviteToken)
+                + (inviteToken?.hasPrefix("cguest_invite_") == true ? "\nUse the returned room_id to identify the room." : "")
         )
     }
 
@@ -651,6 +658,7 @@ final class ChatStore: ObservableObject {
     func ensurePromptInvite(for room: Room) {
         guard connectionProfile.kind == .cowchatCloud,
               connectionStatus.isConnected,
+              !connectionProfile.apiKey.hasPrefix("csoc_"),
               promptInviteTokens[room.id] == nil,
               !promptInviteMintsInFlight.contains(room.id)
         else { return }

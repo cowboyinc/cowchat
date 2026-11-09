@@ -944,7 +944,7 @@ where
             && !no_auth
             && !api_key.is_empty()
             && !broker.is_hosted()
-            && store.social_principal(&payload.key).is_some())
+            && store.social_credential_valid(&payload.key))
             || (!payload.key.starts_with(crate::store::social::PREFIX)
                 && (no_auth
                     || (allow_keyless && payload.key.is_empty())
@@ -1248,7 +1248,13 @@ where
 
         let registered_name = store
             .social_display_name(&authenticated_key, &agent_id)
-            .unwrap_or_else(|| payload.name.clone());
+            .unwrap_or_else(|| {
+                if authenticated_key.starts_with(social::GUEST_PREFIX) {
+                    format!("Guest: {}", payload.name)
+                } else {
+                    payload.name.clone()
+                }
+            });
         log::info!(
             "Agent registered: {} ({}) capabilities={:?}{}",
             registered_name,
@@ -1309,7 +1315,7 @@ where
         let mut initial_write_ok = true;
         for frame in initial_frames {
             if outbound_key.starts_with(crate::store::social::PREFIX)
-                && (outbound_store.social_principal(&outbound_key).is_none()
+                && (!outbound_store.social_credential_valid(&outbound_key)
                     || (!(frame.frame_type == FrameType::RoomDestroyed
                         || (frame.frame_type == FrameType::Ok
                             && frame.reply_to.is_some()
@@ -1338,7 +1344,9 @@ where
         }
         while let Some(frame) = rx.recv().await {
             if outbound_key.starts_with(crate::store::social::PREFIX)
-                && (outbound_store.social_principal(&outbound_key).is_none()
+                && !(outbound_key.starts_with(social::GUEST_PREFIX)
+                    && frame.frame_type == FrameType::Error)
+                && (!outbound_store.social_credential_valid(&outbound_key)
                     || (!(frame.frame_type == FrameType::RoomDestroyed
                         || (frame.frame_type == FrameType::Ok
                             && frame.reply_to.is_some()
