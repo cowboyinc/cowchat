@@ -1325,7 +1325,7 @@ async fn tags_round_trip_through_send_history_and_wait() {
             "--tag",
             "urgent",
         ],
-        vec!["send", "lobby", "see COW-4857", "--tag", "linear=COW-4857"],
+        vec!["send", "lobby", "see COW-4857"],
     ] {
         let output = cowchat(&args).output().await.unwrap();
         assert!(
@@ -1347,7 +1347,7 @@ async fn tags_round_trip_through_send_history_and_wait() {
     );
     assert_eq!(
         messages[2].metadata["tags"],
-        serde_json::json!([{"key":"linear","value":"COW-4857","source":"author"}])
+        serde_json::json!([{"key":"linear","value":"COW-4857","source":"extractor"}])
     );
 
     let history = |tag: &'static str| {
@@ -1356,8 +1356,8 @@ async fn tags_round_trip_through_send_history_and_wait() {
     };
     let by_key = String::from_utf8(history("topic").await.stdout).unwrap();
     assert!(by_key.contains("labelled") && !by_key.contains("plain"));
-    let by_value = String::from_utf8(history("linear=COW-4857").await.stdout).unwrap();
-    assert!(by_value.contains("see COW-4857") && !by_value.contains("labelled"));
+    let by_extractor = String::from_utf8(history("linear=COW-4857").await.stdout).unwrap();
+    assert!(by_extractor.contains("see COW-4857") && !by_extractor.contains("labelled"));
     assert!(!history("Not A Tag").await.status.success());
 
     let woken = Command::new(env!("CARGO_BIN_EXE_cowchat"))

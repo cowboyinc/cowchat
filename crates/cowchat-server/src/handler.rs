@@ -1255,8 +1255,11 @@ pub(crate) async fn handle_send_message(
             }
         }
     }
-    if let Err(error) = crate::tags::stamp_tags(&mut metadata, room_is_encrypted(&p.room_id, store))
-    {
+    if let Err(error) = crate::tags::stamp_tags(
+        &mut metadata,
+        &p.content,
+        room_is_encrypted(&p.room_id, store),
+    ) {
         return Frame::error(req_id, ErrorPayload::new(ErrorCode::InvalidPayload, error));
     }
     if let Some(valid) = store.social_mentions_valid(&p.room_id, &p.mentions) {
