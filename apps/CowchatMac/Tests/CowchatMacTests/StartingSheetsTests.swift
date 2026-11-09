@@ -2,7 +2,7 @@ import XCTest
 @testable import CowchatMac
 
 /// The starting sheets' rules that need no server (navigation note, section 7, and the add-new-company note): New
-/// room's kinds and name check, New session's agent and Start, and the people list's order, height and more row.
+/// room's kinds and name check, and the people list's order, height and more row.
 final class StartingSheetsTests: XCTestCase {
     func testNewRoomListsTheKindsTheConnectionsAllow() {
         XCTAssertEqual(NewRoomKind.offered(signedIn: true, hasAPIKey: true), [.account, .thisMac, .apiKey])
@@ -20,31 +20,6 @@ final class StartingSheetsTests: XCTestCase {
         XCTAssertEqual(NewRoomKind.nameProblem(String(repeating: "a", count: 101)),
                        "Room names can contain at most 100 characters.")
         XCTAssertEqual(NewRoomKind.nameProblem("a\u{7}b"), "Room names cannot contain control characters.")
-    }
-
-    func testNewSessionStartsWithTheLastAgentWhileItIsConnected() {
-        let all: (LiveSession.Harness) -> Bool = { _ in true }
-        let onlyCodex: (LiveSession.Harness) -> Bool = { $0 == .codex }
-        XCTAssertEqual(NewSessionSheet.startingHarness(last: .codex, isConnected: all), .codex)
-        XCTAssertEqual(NewSessionSheet.startingHarness(last: nil, isConnected: all), .claudeCode)
-        XCTAssertEqual(NewSessionSheet.startingHarness(last: .claudeCode, isConnected: onlyCodex), .codex,
-                       "The last agent is skipped once it is not connected")
-        XCTAssertNil(NewSessionSheet.startingHarness(last: .codex, isConnected: { _ in false }))
-    }
-
-    func testNewSessionStartsWithAFolderAConnectedAgentAndABranchForANewWorktree() {
-        let folder = SessionFolder(name: "cowchat")
-        func canStart(folder: SessionFolder? = folder, connected: Bool = true, newWorktree: Bool = false,
-                      branch: String = "", busy: Bool = false) -> Bool {
-            NewSessionSheet.canStart(folder: folder, harnessIsConnected: connected, newWorktree: newWorktree,
-                                     branch: branch, busy: busy)
-        }
-        XCTAssertTrue(canStart())
-        XCTAssertFalse(canStart(folder: nil))
-        XCTAssertFalse(canStart(connected: false))
-        XCTAssertFalse(canStart(newWorktree: true), "A new worktree needs its branch")
-        XCTAssertTrue(canStart(newWorktree: true, branch: "pmandia/team-columns"))
-        XCTAssertFalse(canStart(busy: true))
     }
 
     private let people = ["chad", "adrian", "logan", "martin", "nico", "theo"].map {

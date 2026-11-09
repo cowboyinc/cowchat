@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The frame of the sheets that start something, New room, New session, Join with invite code and Add person
+/// The frame of the sheets that start something, New room, Join with invite code and Add person
 /// (add-new-company note, section 0), drawn from the Join sheet's: 480 wide on Surface/600 with 26 padding and its
 /// parts 20 apart, its height fitting its content. The title is Heading 4 on one line, truncated at the tail, with
 /// nothing under it. An error is one Caption line in Text/Error 8 above the buttons.

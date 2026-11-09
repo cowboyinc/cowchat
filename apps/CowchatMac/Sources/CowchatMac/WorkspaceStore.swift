@@ -80,10 +80,6 @@ final class WorkspaceStore: ObservableObject {
     /// The sheet that starts something, from the New menu, the File menu, a cell's right-click menu, a room's ⋯ menu
     /// or a friend's row on the Friends page (navigation note, section 7).
     @Published var starting: StartSheet?
-    /// Starts New session's agents. The prototype puts its own in.
-    var sessionLauncher: any SessionLauncher = SystemSessionLauncher()
-    /// Follows the live sessions after New session's Start, until the first new one registers and its room opens.
-    private var awaitingSession: AnyCancellable?
     /// A room's people, as its menu's People… shows them.
     @Published var roomPeople: SocialParticipants?
     /// The session rooms the archive rule is asking the server about now, so a room is asked about once at a time.
@@ -160,7 +156,6 @@ final class WorkspaceStore: ObservableObject {
         accountGlobal?.shutdownForRemoval()
         accountGlobal = nil
         watchingAccount = []
-        awaitingSession = nil
         liveSessions.clear()
         inbox.use(account: session?.account, scope: session.map(Self.accountScope))
         team.use(accountID: session?.account.id)
@@ -199,7 +194,8 @@ final class WorkspaceStore: ObservableObject {
         return social.rooms.first { $0.ownerId == viewer && $0.session?.agentId == agentID }?.name
     }
 
-    /// Opens a session's room, as first run and New session do when the session registers. Nothing is drafted.
+    /// Opens a session's room, as first run does when the session registers and as Add person and Add to session do once
+    /// the invitation is sent. Nothing is drafted.
     func openSession(_ session: LiveSession) async {
         guard let store = accountGlobal else { return }
         if !store.rooms.contains(where: { $0.id == session.roomID }) { try? await store.refreshRooms() }
@@ -566,12 +562,6 @@ final class WorkspaceStore: ObservableObject {
         starting = .newRoom(NewRoomRequest())
     }
 
-    /// "New session…" in the New menu and the File menu, while signed in.
-    func presentNewSession() {
-        guard social.phase == .signedIn else { return }
-        starting = .newSession
-    }
-
     /// "Join with invite code…", while the API-key connection is connected.
     func presentJoinWithCode() {
         guard canJoinWithCode else { return }
@@ -673,45 +663,6 @@ final class WorkspaceStore: ObservableObject {
             return true
         }
         return await addPeople([friendID], to: session).isEmpty
-    }
-
-    /// The agent New session starts on: the one used last on this Mac.
-    var lastSessionHarness: LiveSession.Harness? {
-        defaults.string(forKey: Self.lastSessionHarnessKey).flatMap(LiveSession.Harness.init(rawValue:))
-    }
-
-    static let lastSessionHarnessKey = "CowchatMac.lastSessionHarness"
-
-    /// The folders this Mac's sessions have run in, newest first, for New session's Folder menu: the folders of the
-    /// person's session rooms, live or ended, each with its path where the launcher knows it.
-    var sessionFolders: [SessionFolder] {
-        guard let viewer = social.account?.id else { return [] }
-        let made = social.rooms.compactMap { $0.ownerId == viewer ? $0.session : nil }
-            .sorted { ($0.startedAt.cowchatDate ?? .distantPast) > ($1.startedAt.cowchatDate ?? .distantPast) }
-        var seen: Set<String> = []
-        return made.compactMap { session in
-            guard seen.insert(session.folder).inserted else { return nil }
-            return SessionFolder(name: session.folder, path: sessionLauncher.path(ofFolder: session.folder))
-        }
-    }
-
-    /// The folder New session starts on: the folder of the person's newest live session.
-    var newestSessionFolder: SessionFolder? {
-        liveSessions.sessions.first.map { SessionFolder(name: $0.folder, path: sessionLauncher.path(ofFolder: $0.folder)) }
-    }
-
-    /// New session's Start (navigation note, section 7.3): the launcher starts the agent, and the first of the
-    /// person's sessions to register afterwards opens on its room, as first run opens the first session's. The agent
-    /// is kept for next time. It throws what the launcher said.
-    func startSession(_ request: SessionRequest) async throws {
-        let seen = Set(liveSessions.sessions.map(\.id))
-        try await sessionLauncher.start(request)
-        defaults.set(request.harness.rawValue, forKey: Self.lastSessionHarnessKey)
-        awaitingSession = liveSessions.$sessions.sink { [weak self] list in
-            guard let self, let new = list.first(where: { !seen.contains($0.id) }) else { return }
-            self.awaitingSession = nil
-            Task { await self.openSession(new) }
-        }
     }
 
     /// People… in an account room's menu: the room's people and agents from the server.
@@ -904,14 +855,12 @@ final class WorkspaceStore: ObservableObject {
 /// A sheet that starts something (navigation note, section 7).
 enum StartSheet: Identifiable {
     case newRoom(NewRoomRequest)
-    case newSession
     case joinWithCode
     case addPerson(LiveSession)
 
     var id: String {
         switch self {
         case let .newRoom(request): return "new-room/\(request.id)"
-        case .newSession: return "new-session"
         case .joinWithCode: return "join-with-code"
         case let .addPerson(session): return "add-person/\(session.id)"
         }
