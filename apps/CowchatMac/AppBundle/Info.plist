@@ -34,6 +34,8 @@
 	<string>https://github.com/cowboyinc/cowchat/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>H2eTZM51GKoaUZfJ5vzuvwd9inqQTC6Sv3wwdJGgzQc=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
 	<key>SURequireSignedFeed</key>
 	<true/>
 	<key>SUVerifyUpdateBeforeExtraction</key>

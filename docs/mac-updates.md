@@ -1,6 +1,6 @@
 # Mac app updates
 
-Cowchat uses Sparkle 2.10.0 for in-app updates. Choose **Cowchat → Check for Updates…**, or open **Preferences → Updates** to change automatic checks and automatic download/install. Sparkle asks before enabling background checks. Installation waits for quitting or an explicit relaunch; it does not interrupt a working session.
+Cowchat uses Sparkle 2.10.0 for in-app updates. Choose **Cowchat → Check for Updates…**, or open **Preferences → Updates** to change automatic checks and automatic download/install. Background checks are enabled by default; existing user choices are preserved. Automatic download and installation remain opt-in. Installation waits for quitting or an explicit relaunch; it does not interrupt a working session.
 
 The app bundle includes its local server. The existing application termination path waits for an app-owned helper to stop before an update replaces the bundle. Independently started servers and standalone CLI installations are not replaced or stopped. Update those with `brew upgrade --formula cowboyinc/tap/cowchat` or your existing package manager.
 
