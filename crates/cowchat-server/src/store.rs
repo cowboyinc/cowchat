@@ -2375,7 +2375,8 @@ fn enqueue_delivery_on(
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
     // Only a duplicate (subscription, seq) is benign. FK failures, injected
-    // failures, or delivery-ID collisions must roll back the complete append.
+    // failures, or delivery-ID collisions return an error: `append_message`
+    // rolls back the whole append on it, while `enqueue_deliveries` skips the row.
     Ok(conn.execute(
         "INSERT INTO subscription_deliveries
          (delivery_id, subscription_id, message_seq, message_id, next_attempt_at, attempts, deadline_at)
