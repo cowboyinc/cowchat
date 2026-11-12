@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import CowchatMac
 
 @MainActor
@@ -2150,6 +2151,28 @@ final class RoomTransitionTests: XCTestCase {
 
         await store.select(room: roomB)
         XCTAssertEqual(store.draft, "note for B")
+    }
+
+    /// Typing must not invalidate every view that observes the store (the window, the sidebar, the message list):
+    /// only the composer watches the draft.
+    @MainActor
+    func testTypingInTheComposerDoesNotChangeTheStore() async throws {
+        let room = try decodeRoom(id: "A", name: "A")
+        let store = makeStore(connection: MockRoomConnection())
+        store.rooms = [room]
+        await store.select(room: room)
+
+        var storeChanges = 0
+        var composerChanges = 0
+        let storeSink = store.objectWillChange.sink { storeChanges += 1 }
+        let composerSink = store.composer.objectWillChange.sink { composerChanges += 1 }
+        defer { storeSink.cancel(); composerSink.cancel() }
+
+        for prefix in ["h", "he", "hel", "hell", "hello"] { store.draft = prefix }
+
+        XCTAssertEqual(storeChanges, 0, "Each keystroke re-rendered every view observing the store")
+        XCTAssertEqual(composerChanges, 5)
+        XCTAssertEqual(store.composer.text, "hello")
     }
 
     @MainActor

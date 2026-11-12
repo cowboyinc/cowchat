@@ -16,6 +16,13 @@ private enum MemberRefreshOutcome {
     case invalidated
 }
 
+/// The open room's composer text, published apart from `ChatStore` so a keystroke redraws the composer alone rather
+/// than every view that watches the store.
+@MainActor
+final class ComposerDraft: ObservableObject {
+    @Published var text = ""
+}
+
 @MainActor
 final class ChatStore: ObservableObject {
     @Published var rooms: [Room] = []
@@ -29,7 +36,12 @@ final class ChatStore: ObservableObject {
     // Display-only plaintext; never enters history, previews, or persistence.
     private var decryptedDisplayCache: [String: (source: ChatMessage, display: ChatMessage)] = [:]
     private let roomCredentialStore: any CowchatCredentialStore
-    @Published var draft = ""
+    /// Only the composer observes `composer`; reading and writing `draft` goes through it without touching the store.
+    let composer = ComposerDraft()
+    var draft: String {
+        get { composer.text }
+        set { composer.text = newValue }
+    }
     @Published var searchText = "" {
         didSet { scheduleMessageSearch(restartInFlight: true) }
     }
