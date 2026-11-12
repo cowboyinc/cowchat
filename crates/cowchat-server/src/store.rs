@@ -188,14 +188,19 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         // Access checks run several cached statements per recipient of every broadcast.
         conn.set_prepared_statement_cache_capacity(128);
+        // Under WAL, NORMAL keeps the database consistent across a crash and drops the fsync on every commit; only
+        // the last transactions before a power loss can be lost. Without WAL it would risk corruption, so the
+        // default FULL stays unless WAL is confirmed.
+        let journal_mode: String =
+            conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        if journal_mode.eq_ignore_ascii_case("wal") {
+            conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
+        }
 
         // Step 1: Create tables (without new columns — old DBs may already have rooms table)
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
-            -- Under WAL, NORMAL keeps the database consistent across a crash and drops the fsync on every
-            -- commit; only the last transactions before a power loss can be lost.
-            PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;
 
             CREATE TABLE IF NOT EXISTS api_keys (
@@ -424,7 +429,7 @@ impl Store {
         backfill_message_seq(&conn)?;
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_id, seq);
-             CREATE INDEX IF NOT EXISTS idx_messages_room_agent ON messages(room_id, agent_id, seq);",
+             CREATE INDEX IF NOT EXISTS idx_messages_room_agent ON messages(room_id, agent_id, seq, agent_name);",
         )?;
 
         // Step 3: Seed data (runs after migrations so visibility column is guaranteed to exist)
@@ -1009,8 +1014,15 @@ impl Store {
         self.get_history_filtered(room_id, limit, before, None, None)
     }
 
-    /// The time of each room's latest message, as `get_history(room, 1, None)` would return it, under one lock and
-    /// without reading message content. Rooms with no messages are absent.
+    /// Runs raw SQL against the store, for tests in other modules that need a state no public method creates.
+    #[cfg(test)]
+    pub(crate) fn execute_batch_for_test(&self, sql: &str) {
+        self.conn.lock().unwrap().execute_batch(sql).unwrap();
+    }
+
+    /// The time of each room's latest message, ordered as `get_history(room, 1, None)` orders it, under one lock and
+    /// without reading message content. Rooms with no messages are absent. Unlike `get_history`, a latest message
+    /// whose other columns fail to decode still reports its time.
     pub fn last_message_times(
         &self,
         room_ids: &[&str],
@@ -1191,14 +1203,7 @@ impl Store {
     ) -> Result<Vec<(String, String, Option<(String, Option<String>, Option<u8>)>)>, StoreError>
     {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT m.agent_id, m.agent_name, p.status, p.status_detail, p.progress
-               FROM (SELECT agent_id, MAX(agent_name) AS agent_name, MAX(seq) AS mseq
-                       FROM messages WHERE room_id = ?1 GROUP BY agent_id) m
-               LEFT JOIN presence p ON p.agent_id = m.agent_id
-              ORDER BY m.mseq DESC
-              LIMIT ?2",
-        )?;
+        let mut stmt = conn.prepare(ROOM_PARTICIPANTS_SQL)?;
         let rows = stmt
             .query_map(params![room_id, limit as i64], |row| {
                 let agent_id: String = row.get(0)?;
@@ -2136,9 +2141,10 @@ impl Store {
         )
     }
 
-    /// Enqueues one delivery per `(seq, message_id)` in a single transaction, as `enqueue_delivery` does for one.
-    /// A message that cannot be enqueued is skipped, as the per-message callers already did. Returns how many were
-    /// newly enqueued.
+    /// Enqueues one delivery per `(seq, message_id)`, as `enqueue_delivery` does for one, in a single transaction.
+    /// A message that cannot be enqueued is skipped, as the per-message callers already did. If the transaction
+    /// itself fails, each message is enqueued on its own instead, so one failure never loses the others. Returns how
+    /// many were newly enqueued.
     pub fn enqueue_deliveries(
         &self,
         subscription_id: &str,
@@ -2146,12 +2152,16 @@ impl Store {
         next_attempt_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<usize, StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        if let Ok(enqueued) =
+            enqueue_deliveries_in_transaction(&mut conn, subscription_id, messages, next_attempt_at)
+        {
+            return Ok(enqueued);
+        }
         let mut enqueued = 0;
         for (seq, message_id) in messages {
             let delivery_id = uuid::Uuid::new_v4().to_string();
             if let Ok(true) = enqueue_delivery_on(
-                &tx,
+                &conn,
                 &delivery_id,
                 subscription_id,
                 *seq,
@@ -2161,7 +2171,6 @@ impl Store {
                 enqueued += 1;
             }
         }
-        tx.commit()?;
         Ok(enqueued)
     }
 
@@ -2360,6 +2369,46 @@ fn replay_append_on(
         timestamp: parse_timestamp(&created_at),
         seq,
     }))
+}
+
+/// The room board's participants: each agent that has posted in a room, latest first, with its durable presence.
+const ROOM_PARTICIPANTS_SQL: &str =
+    "SELECT m.agent_id, m.agent_name, p.status, p.status_detail, p.progress
+               FROM (SELECT agent_id, MAX(agent_name) AS agent_name, MAX(seq) AS mseq
+                       FROM messages WHERE room_id = ?1 GROUP BY agent_id) m
+               LEFT JOIN presence p ON p.agent_id = m.agent_id
+              ORDER BY m.mseq DESC
+              LIMIT ?2";
+
+/// Enqueues the batch in one transaction, skipping a message whose insert fails on its own. Returns an error, with
+/// nothing committed, when a failure ends the transaction itself, as a full disk or a `RAISE(ROLLBACK)` does.
+fn enqueue_deliveries_in_transaction(
+    conn: &mut Connection,
+    subscription_id: &str,
+    messages: &[(i64, &str)],
+    next_attempt_at: DateTime<Utc>,
+) -> Result<usize, StoreError> {
+    let tx = conn.transaction()?;
+    let mut enqueued = 0;
+    for (seq, message_id) in messages {
+        let delivery_id = uuid::Uuid::new_v4().to_string();
+        match enqueue_delivery_on(
+            &tx,
+            &delivery_id,
+            subscription_id,
+            *seq,
+            message_id,
+            next_attempt_at,
+        ) {
+            Ok(true) => enqueued += 1,
+            Ok(false) => {}
+            // SQLite has already rolled the transaction back; later inserts would commit one by one.
+            Err(error) if tx.is_autocommit() => return Err(error),
+            Err(_) => {}
+        }
+    }
+    tx.commit()?;
+    Ok(enqueued)
 }
 
 fn enqueue_delivery_on(
@@ -3396,13 +3445,30 @@ mod tests {
     fn file_store_commits_without_a_full_fsync() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sync.db")).unwrap();
+        let conn = store.conn.lock().unwrap();
+        let journal: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+        assert_eq!(synchronous, 1, "expected NORMAL (1) under WAL");
+    }
+
+    #[test]
+    fn a_store_without_wal_keeps_full_sync() {
+        let store = Store::open_in_memory().unwrap();
         let synchronous: i64 = store
             .conn
             .lock()
             .unwrap()
             .query_row("PRAGMA synchronous", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(synchronous, 1, "expected NORMAL (1) under WAL");
+        assert_eq!(
+            synchronous, 2,
+            "an in-memory database has no WAL, so it keeps FULL (2)"
+        );
     }
 
     #[test]
@@ -3410,18 +3476,15 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let conn = store.conn.lock().unwrap();
         let plan: Vec<String> = conn
-            .prepare(
-                "EXPLAIN QUERY PLAN SELECT agent_id, MAX(agent_name), MAX(seq)
-                   FROM messages WHERE room_id = ?1 GROUP BY agent_id",
-            )
+            .prepare(&format!("EXPLAIN QUERY PLAN {ROOM_PARTICIPANTS_SQL}"))
             .unwrap()
-            .query_map(["lobby"], |row| row.get::<_, String>(3))
+            .query_map(params!["lobby", 10], |row| row.get::<_, String>(3))
             .unwrap()
             .map(Result::unwrap)
             .collect();
         assert!(
             plan.iter()
-                .any(|step| step.contains("idx_messages_room_agent")),
+                .any(|step| step.contains("COVERING INDEX idx_messages_room_agent")),
             "{plan:?}"
         );
         assert!(
@@ -3499,6 +3562,78 @@ mod tests {
         let due = store.load_due_deliveries(now, 10).unwrap();
         assert_eq!(due.len(), 1, "deliveries stay serialized per subscription");
         assert_eq!(due[0].message_seq, 1);
+    }
+
+    fn store_with_batch_subscription() -> Store {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_subscription(
+                "batch-sub",
+                "lobby",
+                "owner",
+                "https://example.com/hook",
+                "secret",
+                &[],
+                None,
+                None,
+                false,
+                0,
+            )
+            .unwrap();
+        store
+    }
+
+    fn enqueued_seqs(store: &Store) -> Vec<i64> {
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT message_seq FROM subscription_deliveries WHERE subscription_id = 'batch-sub' ORDER BY message_seq")
+            .unwrap();
+        let seqs = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        seqs
+    }
+
+    #[test]
+    fn batched_backfill_skips_a_message_that_fails_on_its_own() {
+        let store = store_with_batch_subscription();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_two BEFORE INSERT ON subscription_deliveries
+                 WHEN NEW.message_seq = 2 BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+            )
+            .unwrap();
+        let backlog = [(1, "m1"), (2, "m2"), (3, "m3")];
+        let enqueued = store
+            .enqueue_deliveries("batch-sub", &backlog, chrono::Utc::now())
+            .unwrap();
+        assert_eq!(enqueued, 2);
+        assert_eq!(enqueued_seqs(&store), vec![1, 3]);
+    }
+
+    #[test]
+    fn batched_backfill_keeps_the_other_messages_when_the_transaction_fails() {
+        let store = store_with_batch_subscription();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER roll_back_two BEFORE INSERT ON subscription_deliveries
+                 WHEN NEW.message_seq = 2 BEGIN SELECT RAISE(ROLLBACK, 'rolled back'); END;",
+            )
+            .unwrap();
+        let backlog = [(1, "m1"), (2, "m2"), (3, "m3")];
+        let enqueued = store
+            .enqueue_deliveries("batch-sub", &backlog, chrono::Utc::now())
+            .unwrap();
+        assert_eq!(enqueued, 2);
+        assert_eq!(enqueued_seqs(&store), vec![1, 3]);
     }
 
     #[test]
