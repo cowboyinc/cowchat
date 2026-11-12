@@ -71,3 +71,39 @@ final class MessageRenderingTests: XCTestCase {
         XCTAssertFalse(plannedSources.contains(content))
     }
 }
+
+/// A redraw of the room rebuilds every row, so the parsing a message needs must happen once per distinct content.
+final class MessageParseCacheTests: XCTestCase {
+    @MainActor
+    func testRebuildingAMessageReusesItsLayout() {
+        let content = "Intro \(UUID()).\n\n## Heading\n\n- item"
+        let misses = MessageTextLayout.cache.misses
+
+        let first = MessageTextLayout.cached(for: content)
+        for _ in 0..<50 { _ = ExpandableMessageText(content: content) }
+        let again = MessageTextLayout.cached(for: content)
+
+        XCTAssertTrue(first === again)
+        XCTAssertEqual(MessageTextLayout.cache.misses, misses + 1, "the message was parsed more than once")
+    }
+
+    @MainActor
+    func testLayoutMatchesTheUncachedParse() {
+        let content = "Intro.\n\n## Heading\n\n- item"
+        let layout = MessageTextLayout.cached(for: content)
+        XCTAssertEqual(layout.collapsedPlan, MessageRenderPlan.make(for: content))
+        XCTAssertNil(layout.chart)
+        XCTAssertFalse(layout.showsResponseControl)
+    }
+
+    func testInlineMarkdownIsParsedOncePerText() {
+        let text = "some **bold** \(UUID())"
+        let misses = MessageContentParser.inlineCache.misses
+
+        let first = MessageContentParser.attributedInline(text)
+        for _ in 0..<50 { _ = MessageContentParser.attributedInline(text) }
+
+        XCTAssertEqual(MessageContentParser.inlineCache.misses, misses + 1)
+        XCTAssertEqual(MessageContentParser.attributedInline(text), first)
+    }
+}

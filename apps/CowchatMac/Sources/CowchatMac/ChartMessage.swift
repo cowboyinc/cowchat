@@ -37,7 +37,28 @@ struct ChartMessage {
         self.png = png
     }
 
+    /// Identifies this chart in `decodedImages`, so a redraw reuses its decoded image.
+    private let imageKey = ImageKey()
+
+    /// Decoded charts, each costing its bitmap size, so the cache stays bounded however many charts a room holds.
+    static let decodedImages: NSCache<ImageKey, NSImage> = {
+        let cache = NSCache<ImageKey, NSImage>()
+        cache.totalCostLimit = 64 << 20
+        return cache
+    }()
+
+    final class ImageKey: NSObject {}
+
+    /// The chart's image, decoded again only after the cache has let it go.
     var image: NSImage? {
+        if let image = Self.decodedImages.object(forKey: imageKey) { return image }
+        guard let image = Self.decode(png) else { return nil }
+        let pixels = image.representations.first.map { $0.pixelsWide * $0.pixelsHigh } ?? 0
+        Self.decodedImages.setObject(image, forKey: imageKey, cost: pixels * 4)
+        return image
+    }
+
+    private static func decode(_ png: Data) -> NSImage? {
         guard let source = CGImageSourceCreateWithData(png as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,

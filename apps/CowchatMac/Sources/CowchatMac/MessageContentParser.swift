@@ -80,11 +80,15 @@ enum MessageContentParser {
         return result
     }
 
+    static let inlineCache = ParseCache<AttributedString>(countLimit: 4_000, byteLimit: 8 << 20)
+
     static func attributedInline(_ source: String) -> AttributedString {
-        var options = AttributedString.MarkdownParsingOptions()
-        options.interpretedSyntax = .inlineOnlyPreservingWhitespace
-        return (try? AttributedString(markdown: source, options: options))
-            ?? AttributedString(source)
+        inlineCache.value(for: source) { source in
+            var options = AttributedString.MarkdownParsingOptions()
+            options.interpretedSyntax = .inlineOnlyPreservingWhitespace
+            return (try? AttributedString(markdown: source, options: options))
+                ?? AttributedString(source)
+        }
     }
 
     private struct ProseBlock {

@@ -1206,6 +1206,7 @@ private struct ChatRoomView: View {
                                         onSaveAttachment: room.encrypted ? nil : { saveAttachment($0) },
                                         onOpenAttachment: room.encrypted ? nil : { openAttachment($0) }
                                     )
+                                    .equatable()
                                     ForEach(
                                         pulseAnchors.byMessageID[message.id] ?? [],
                                         id: \.agentID
@@ -1545,7 +1546,17 @@ private struct FeedBottomOffsetKey: PreferenceKey {
     }
 }
 
-private struct MessageFeedRow: View {
+/// Equatable so the feed can skip a row whose message has not changed: the room view redraws on every store change,
+/// and the attachment closures it passes are new each time. Whether each closure is set is all that differs between
+/// them, since the room they act on is the row's own.
+private struct MessageFeedRow: View, Equatable {
+    static func == (lhs: MessageFeedRow, rhs: MessageFeedRow) -> Bool {
+        lhs.message == rhs.message && lhs.isMine == rhs.isMine && lhs.now == rhs.now && lhs.quiet == rhs.quiet
+            && lhs.senderName == rhs.senderName
+            && (lhs.onSaveAttachment == nil) == (rhs.onSaveAttachment == nil)
+            && (lhs.onOpenAttachment == nil) == (rhs.onOpenAttachment == nil)
+    }
+
     let message: ChatMessage
     let isMine: Bool
     let now: Date
@@ -1808,31 +1819,55 @@ enum MessageRenderPlan: Equatable {
     }
 }
 
+/// What a message's text view draws before it is opened: its chart, its collapsed preview and that preview's plan.
+/// Built once per distinct content, since the room view rebuilds every row on each redraw.
+final class MessageTextLayout {
+    static let cache = ParseCache<MessageTextLayout>(countLimit: 2_000, byteLimit: 32 << 20)
+
+    let chart: ChartMessage?
+    let collapsedPreview: MessagePreview.CollapsedPreview
+    let collapsedPlan: MessageRenderPlan
+    let showsResponseControl: Bool
+
+    init(content: String, makeRenderPlan: (String) -> MessageRenderPlan) {
+        let chart = ChartMessage(content: content)
+        self.chart = chart
+        let preview = MessagePreview.collapsedPreview(for: chart?.title ?? content)
+        collapsedPreview = preview
+        collapsedPlan = makeRenderPlan(preview.source)
+        showsResponseControl = MessagePreview.needsDisclosure(for: content)
+    }
+
+    static func cached(for content: String) -> MessageTextLayout {
+        cache.value(for: content) { MessageTextLayout(content: $0, makeRenderPlan: MessageRenderPlan.make) }
+    }
+}
+
 struct ExpandableMessageText: View {
     let content: String
     var textColor: Color
     @Environment(\.mentionMarks) private var mentionMarks
     @State private var isExpanded = false
     @State private var expandedPlan: MessageRenderPlan?
-    private let chart: ChartMessage?
-    private let collapsedPreview: MessagePreview.CollapsedPreview
-    private let collapsedPlan: MessageRenderPlan
+    private let layout: MessageTextLayout
     private let makeRenderPlan: (String) -> MessageRenderPlan
 
+    private var chart: ChartMessage? { layout.chart }
+    private var collapsedPreview: MessagePreview.CollapsedPreview { layout.collapsedPreview }
+    private var collapsedPlan: MessageRenderPlan { layout.collapsedPlan }
+
+    /// `makeRenderPlan` replaces the planner for tests; a message drawn with the default planner shares its layout
+    /// through `MessageTextLayout.cache`.
     init(
         content: String,
         textColor: Color = SemanticColor.textSecondary,
-        makeRenderPlan: @escaping (String) -> MessageRenderPlan = MessageRenderPlan.make
+        makeRenderPlan: ((String) -> MessageRenderPlan)? = nil
     ) {
         self.content = content
         self.textColor = textColor
-        self.makeRenderPlan = makeRenderPlan
-
-        let chart = ChartMessage(content: content)
-        self.chart = chart
-        let preview = MessagePreview.collapsedPreview(for: chart?.title ?? content)
-        collapsedPreview = preview
-        collapsedPlan = makeRenderPlan(preview.source)
+        self.makeRenderPlan = makeRenderPlan ?? MessageRenderPlan.make
+        layout = makeRenderPlan.map { MessageTextLayout(content: content, makeRenderPlan: $0) }
+            ?? MessageTextLayout.cached(for: content)
     }
 
     var body: some View {
@@ -1948,9 +1983,7 @@ struct ExpandableMessageText: View {
         }
     }
 
-    private var showsResponseControl: Bool {
-        MessagePreview.needsDisclosure(for: content)
-    }
+    private var showsResponseControl: Bool { layout.showsResponseControl }
 
     private func toggleExpansion() {
         if !isExpanded, expandedPlan == nil {

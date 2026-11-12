@@ -796,7 +796,7 @@ final class ChatStore: ObservableObject {
             errorMessage = nil
             guard reloadedProfile != connectionProfile else { return }
             roomSecrets.removeAll()
-            decryptedDisplayCache.removeAll()
+            clearDisplayedPlaintext()
             unlockedRoomIDs.removeAll()
             connectionProfile = reloadedProfile
             stableAgentID = Self.resolveAgentID(
@@ -839,7 +839,7 @@ final class ChatStore: ObservableObject {
         connectionConfigurationError = nil
         errorMessage = nil
         roomSecrets.removeAll()
-        decryptedDisplayCache.removeAll()
+        clearDisplayedPlaintext()
         unlockedRoomIDs.removeAll()
         connectionProfile = profile
         stableAgentID = Self.resolveAgentID(
@@ -983,7 +983,9 @@ final class ChatStore: ObservableObject {
                 if let current = currentByID[roomID] { refreshed.append(current) }
             }
         }
-        rooms = refreshed.sorted(by: roomSort)
+        // The list refreshes every 30 seconds; republishing an unchanged one redraws every view that watches the store.
+        let sorted = refreshed.sorted(by: roomSort)
+        if sorted != rooms { rooms = sorted }
         refreshSlackBadges()
         // `list_rooms` is an authoritative server snapshot. It includes this
         // client only when the registration restored membership before the
@@ -1464,12 +1466,21 @@ final class ChatStore: ObservableObject {
         return display
     }
 
+    /// Drops every decrypted message text this Mac holds in memory: the store's own cache and the feed's render caches,
+    /// which key what they draw by the text itself.
+    private func clearDisplayedPlaintext() {
+        decryptedDisplayCache.removeAll()
+        MessageTextLayout.cache.removeAll()
+        MessageContentParser.inlineCache.removeAll()
+        ChartMessage.decodedImages.removeAllObjects()
+    }
+
     private func loadRoomSecret(for room: Room) {
         guard room.encrypted else { return }
         do {
             let account = RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id)
             if let secret = try roomCredentialStore.credential(for: account) {
-                decryptedDisplayCache.removeAll()
+                clearDisplayedPlaintext()
                 roomSecrets[room.id] = secret
                 unlockedRoomIDs.insert(room.id)
             }
@@ -1482,7 +1493,7 @@ final class ChatStore: ObservableObject {
             _ = try RoomCrypto.decrypt(encrypted.content, secret: secret, roomID: room.id)
         }
         try roomCredentialStore.setCredential(secret, for: RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id))
-        decryptedDisplayCache.removeAll()
+        clearDisplayedPlaintext()
         roomSecrets[room.id] = secret
         unlockedRoomIDs.insert(room.id)
     }
@@ -1499,7 +1510,7 @@ final class ChatStore: ObservableObject {
 
     func forgetRoomSecret(for room: Room) throws {
         try roomCredentialStore.setCredential(nil, for: RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id))
-        decryptedDisplayCache.removeAll()
+        clearDisplayedPlaintext()
         roomSecrets.removeValue(forKey: room.id)
         unlockedRoomIDs.remove(room.id)
     }

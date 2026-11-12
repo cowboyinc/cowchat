@@ -2153,6 +2153,22 @@ final class RoomTransitionTests: XCTestCase {
         XCTAssertEqual(store.draft, "note for B")
     }
 
+    /// The room list refreshes every 30 seconds; an unchanged list must not redraw every view that watches the store.
+    @MainActor
+    func testRefreshingAnUnchangedRoomListDoesNotRepublishRooms() async throws {
+        let connection = MockRoomConnection()
+        connection.listedRooms = [try decodeRoom(id: "A", name: "A"), try decodeRoom(id: "B", name: "B")]
+        let store = makeStore(connection: connection)
+        try await store.refreshRooms()
+
+        var roomPublishes = 0
+        let sink = store.$rooms.dropFirst().sink { _ in roomPublishes += 1 }
+        defer { sink.cancel() }
+        try await store.refreshRooms()
+
+        XCTAssertEqual(roomPublishes, 0)
+    }
+
     /// Typing must not invalidate every view that observes the store (the window, the sidebar, the message list):
     /// only the composer watches the draft.
     @MainActor
@@ -2737,6 +2753,35 @@ final class RoomTransitionTests: XCTestCase {
         } catch ChatStore.AttachmentError.encryptedRoom {} catch {
             XCTFail("Unexpected attachment error: \(error)")
         }
+    }
+
+    /// The feed caches what it draws by text, and an unlocked room's text is plaintext, so forgetting a key must drop it.
+    @MainActor
+    func testForgettingARoomKeyDropsItsPlaintextFromTheRenderCaches() async throws {
+        let room = try JSONDecoder().decode(Room.self, from: Data(#"{"room_id":"encrypted-cache","name":"Private","encrypted":true}"#.utf8))
+        let plaintext = "private \(UUID())"
+        let wire = try RoomCrypto.encrypt(plaintext, secret: "room-secret", roomID: room.id)
+        let message = try decodeMessage(id: "m", roomID: room.id, content: wire, timestamp: "2026-09-21T00:00:00Z", sequence: 1)
+        let connection = MockRoomConnection()
+        connection.historiesByRoom[room.id] = [message]
+        let suite = "RoomCryptoTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ChatStore(connection: connection, defaults: defaults, roomCredentialStore: RoomTransitionCredentialStore())
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+        try store.saveRoomSecret("room-secret", for: room)
+
+        _ = ExpandableMessageText(content: store.displayMessage(message).content)
+        _ = MessageContentParser.attributedInline(plaintext)
+        XCTAssertTrue(MessageTextLayout.cache.contains(plaintext))
+        XCTAssertTrue(MessageContentParser.inlineCache.contains(plaintext))
+
+        try store.forgetRoomSecret(for: room)
+
+        XCTAssertFalse(MessageTextLayout.cache.contains(plaintext))
+        XCTAssertFalse(MessageContentParser.inlineCache.contains(plaintext))
     }
 
     private func decodeRoom(
