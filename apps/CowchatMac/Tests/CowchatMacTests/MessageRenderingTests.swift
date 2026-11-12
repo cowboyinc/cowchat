@@ -79,12 +79,10 @@ final class MessageParseCacheTests: XCTestCase {
         let content = "Intro \(UUID()).\n\n## Heading\n\n- item"
         let misses = MessageTextLayout.cache.misses
 
-        let first = MessageTextLayout.cached(for: content)
         for _ in 0..<50 { _ = ExpandableMessageText(content: content) }
-        let again = MessageTextLayout.cached(for: content)
 
-        XCTAssertTrue(first === again)
-        XCTAssertEqual(MessageTextLayout.cache.misses, misses + 1, "the message was parsed more than once")
+        XCTAssertEqual(MessageTextLayout.cache.misses, misses + 1, "the views parsed the message more than once")
+        XCTAssertTrue(MessageTextLayout.cache.contains(content), "the views did not use the shared cache")
     }
 
     @MainActor

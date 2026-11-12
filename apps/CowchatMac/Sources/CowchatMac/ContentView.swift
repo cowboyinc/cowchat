@@ -1548,7 +1548,8 @@ private struct FeedBottomOffsetKey: PreferenceKey {
 
 /// Equatable so the feed can skip a row whose message has not changed: the room view redraws on every store change,
 /// and the attachment closures it passes are new each time. Whether each closure is set is all that differs between
-/// them, since the room they act on is the row's own.
+/// them, since the room they act on is the row's own. A skipped row also skips its agent-app lookup, so an app installed
+/// or removed shows on the row at its next change, such as the minute's timestamp tick.
 private struct MessageFeedRow: View, Equatable {
     static func == (lhs: MessageFeedRow, rhs: MessageFeedRow) -> Bool {
         lhs.message == rhs.message && lhs.isMine == rhs.isMine && lhs.now == rhs.now && lhs.quiet == rhs.quiet

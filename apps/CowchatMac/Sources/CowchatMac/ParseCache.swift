@@ -40,3 +40,13 @@ final class ParseCache<Value>: @unchecked Sendable {
         return value
     }
 }
+
+/// The caches that hold message text as the feed draws it. An unlocked room's text is plaintext, so whatever drops a
+/// store's decrypted text, or the store itself, must clear these too.
+enum RenderCaches {
+    static func clearPlaintext() {
+        MessageTextLayout.cache.removeAll()
+        MessageContentParser.inlineCache.removeAll()
+        ChartMessage.decodedImages.removeAllObjects()
+    }
+}

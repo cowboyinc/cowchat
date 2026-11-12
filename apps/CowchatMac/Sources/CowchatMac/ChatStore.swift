@@ -735,6 +735,7 @@ final class ChatStore: ObservableObject {
         profileGeneration += 1
         connection.disconnect()
         connectionStatus = .disconnected
+        clearDisplayedPlaintext()
     }
 
     func stopOwnedLocalServer() {
@@ -1461,18 +1462,16 @@ final class ChatStore: ObservableObject {
             display.content = "Encrypted message — add the room key to read it."
         }
         // Bound memory independently of how many rooms have been visited.
-        if decryptedDisplayCache.count >= 1_000 { decryptedDisplayCache.removeAll() }
+        if decryptedDisplayCache.count >= 1_000 { clearDisplayedPlaintext() }
         decryptedDisplayCache[message.id] = (message, display)
         return display
     }
 
-    /// Drops every decrypted message text this Mac holds in memory: the store's own cache and the feed's render caches,
-    /// which key what they draw by the text itself.
+    /// Drops the decrypted text this store holds and the feed's shared render caches, which key what they draw by the
+    /// text itself. Clearing the shared caches costs other stores only a re-parse.
     private func clearDisplayedPlaintext() {
         decryptedDisplayCache.removeAll()
-        MessageTextLayout.cache.removeAll()
-        MessageContentParser.inlineCache.removeAll()
-        ChartMessage.decodedImages.removeAllObjects()
+        RenderCaches.clearPlaintext()
     }
 
     private func loadRoomSecret(for room: Room) {
@@ -1480,7 +1479,8 @@ final class ChatStore: ObservableObject {
         do {
             let account = RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id)
             if let secret = try roomCredentialStore.credential(for: account) {
-                clearDisplayedPlaintext()
+                // An unchanged key decrypts to the same text, so what is already drawn stays valid.
+                if roomSecrets[room.id] != secret { clearDisplayedPlaintext() }
                 roomSecrets[room.id] = secret
                 unlockedRoomIDs.insert(room.id)
             }

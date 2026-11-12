@@ -103,4 +103,18 @@ final class ChartImageCacheTests: XCTestCase {
     func testDecodedChartImagesHaveAByteBudget() {
         XCTAssertEqual(ChartMessage.decodedImages.totalCostLimit, 64 << 20)
     }
+
+    func testAChartIsDecodedOnceAndDroppedWithThePlaintext() throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../../test-fixtures/chart-v1.txt")
+        let chart = try XCTUnwrap(ChartMessage(content: String(contentsOf: url)))
+
+        let first = try XCTUnwrap(chart.image)
+        XCTAssertTrue(chart.image === first, "the chart was decoded again")
+        XCTAssertNotNil(ChartMessage.decodedImages.object(forKey: chart.imageKey))
+
+        RenderCaches.clearPlaintext()
+
+        XCTAssertNil(ChartMessage.decodedImages.object(forKey: chart.imageKey))
+    }
 }

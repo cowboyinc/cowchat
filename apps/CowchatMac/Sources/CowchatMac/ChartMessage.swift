@@ -38,7 +38,7 @@ struct ChartMessage {
     }
 
     /// Identifies this chart in `decodedImages`, so a redraw reuses its decoded image.
-    private let imageKey = ImageKey()
+    let imageKey = ImageKey()
 
     /// Decoded charts, each costing its bitmap size, so the cache stays bounded however many charts a room holds.
     static let decodedImages: NSCache<ImageKey, NSImage> = {
