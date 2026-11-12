@@ -10,7 +10,7 @@ use cowchat_core::{ChatMessage, Room};
 use dashmap::DashMap;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -186,11 +186,16 @@ impl Store {
 
     fn initialize(&self) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
+        // Access checks run several cached statements per recipient of every broadcast.
+        conn.set_prepared_statement_cache_capacity(128);
 
         // Step 1: Create tables (without new columns — old DBs may already have rooms table)
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
+            -- Under WAL, NORMAL keeps the database consistent across a crash and drops the fsync on every
+            -- commit; only the last transactions before a power loss can be lost.
+            PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;
 
             CREATE TABLE IF NOT EXISTS api_keys (
@@ -418,7 +423,8 @@ impl Store {
         // approximates insertion order, so this gives stable per-room seqs.
         backfill_message_seq(&conn)?;
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_id, seq);",
+            "CREATE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_id, seq);
+             CREATE INDEX IF NOT EXISTS idx_messages_room_agent ON messages(room_id, agent_id, seq);",
         )?;
 
         // Step 3: Seed data (runs after migrations so visibility column is guaranteed to exist)
@@ -1001,6 +1007,29 @@ impl Store {
         before: Option<DateTime<Utc>>,
     ) -> Result<Vec<ChatMessage>, StoreError> {
         self.get_history_filtered(room_id, limit, before, None, None)
+    }
+
+    /// The time of each room's latest message, as `get_history(room, 1, None)` would return it, under one lock and
+    /// without reading message content. Rooms with no messages are absent.
+    pub fn last_message_times(
+        &self,
+        room_ids: &[&str],
+    ) -> Result<HashMap<String, DateTime<Utc>>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT created_at FROM messages WHERE room_id = ?1
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        )?;
+        let mut times = HashMap::new();
+        for room_id in room_ids {
+            let created_at: Option<String> = stmt
+                .query_row(params![room_id], |row| row.get(0))
+                .optional()?;
+            if let Some(created_at) = created_at {
+                times.insert((*room_id).to_string(), parse_timestamp(&created_at));
+            }
+        }
+        Ok(times)
     }
 
     /// Backwards-compatible wrapper for the message_id-based `since` filter.
@@ -2105,6 +2134,35 @@ impl Store {
             message_id,
             next_attempt_at,
         )
+    }
+
+    /// Enqueues one delivery per `(seq, message_id)` in a single transaction, as `enqueue_delivery` does for one.
+    /// A message that cannot be enqueued is skipped, as the per-message callers already did. Returns how many were
+    /// newly enqueued.
+    pub fn enqueue_deliveries(
+        &self,
+        subscription_id: &str,
+        messages: &[(i64, &str)],
+        next_attempt_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<usize, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut enqueued = 0;
+        for (seq, message_id) in messages {
+            let delivery_id = uuid::Uuid::new_v4().to_string();
+            if let Ok(true) = enqueue_delivery_on(
+                &tx,
+                &delivery_id,
+                subscription_id,
+                *seq,
+                message_id,
+                next_attempt_at,
+            ) {
+                enqueued += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(enqueued)
     }
 
     pub fn abandon_delivery(&self, delivery_id: &str, reason: &str) -> Result<(), StoreError> {
@@ -3331,6 +3389,115 @@ mod tests {
         let due = store.load_due_deliveries(chrono::Utc::now(), 10).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].message_seq, 3);
+    }
+
+    #[test]
+    fn file_store_commits_without_a_full_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("sync.db")).unwrap();
+        let synchronous: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1, "expected NORMAL (1) under WAL");
+    }
+
+    #[test]
+    fn room_board_reads_an_index_rather_than_the_room_history() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn.lock().unwrap();
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT agent_id, MAX(agent_name), MAX(seq)
+                   FROM messages WHERE room_id = ?1 GROUP BY agent_id",
+            )
+            .unwrap()
+            .query_map(["lobby"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("idx_messages_room_agent")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|step| step.contains("TEMP B-TREE FOR GROUP BY")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn last_message_times_match_the_latest_history_entry() {
+        let store = Store::open_in_memory().unwrap();
+        for room in ["alpha", "beta", "empty"] {
+            store.create_room(room, room, None, None, None).unwrap();
+        }
+        for (id, room) in [("a1", "alpha"), ("a2", "alpha"), ("b1", "beta")] {
+            store
+                .insert_message(
+                    id,
+                    room,
+                    "agent",
+                    "Agent",
+                    "hi",
+                    None,
+                    &serde_json::json!({}),
+                )
+                .unwrap();
+        }
+        let times = store
+            .last_message_times(&["alpha", "beta", "empty"])
+            .unwrap();
+        for room in ["alpha", "beta"] {
+            let latest = store.get_history(room, 1, None).unwrap();
+            assert_eq!(
+                times.get(room),
+                latest.last().map(|m| &m.timestamp),
+                "{room}"
+            );
+        }
+        assert!(!times.contains_key("empty"));
+    }
+
+    #[test]
+    fn batched_backfill_enqueues_each_message_once() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_subscription(
+                "batch-sub",
+                "lobby",
+                "owner",
+                "https://example.com/hook",
+                "secret",
+                &[],
+                None,
+                None,
+                false,
+                0,
+            )
+            .unwrap();
+        let now = chrono::Utc::now();
+        let backlog = [(1, "m1"), (2, "m2"), (3, "m3")];
+        assert_eq!(
+            store
+                .enqueue_deliveries("batch-sub", &backlog, now)
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            store
+                .enqueue_deliveries("batch-sub", &backlog, now)
+                .unwrap(),
+            0
+        );
+        let due = store.load_due_deliveries(now, 10).unwrap();
+        assert_eq!(due.len(), 1, "deliveries stay serialized per subscription");
+        assert_eq!(due[0].message_seq, 1);
     }
 
     #[test]

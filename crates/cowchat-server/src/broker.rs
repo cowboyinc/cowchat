@@ -145,7 +145,7 @@ impl Broker {
                     continue;
                 }
                 if self.room_recipient_allowed(member_id, room_id) {
-                    self.send_to_agent(member_id, frame.clone());
+                    self.send_to_room_member(member_id, frame.clone(), room_id);
                 }
             }
         }
@@ -156,7 +156,7 @@ impl Broker {
         if let Some(members) = self.room_members.get(room_id) {
             for member_id in members.iter() {
                 if self.room_recipient_allowed(member_id, room_id) {
-                    self.send_to_agent(member_id, frame.clone());
+                    self.send_to_room_member(member_id, frame.clone(), room_id);
                 }
             }
         }
@@ -178,13 +178,23 @@ impl Broker {
             if self.is_agent_in_room(agent_id, room_id)
                 && self.room_recipient_allowed(agent_id, room_id)
             {
-                self.send_to_agent(agent_id, frame.clone());
+                self.send_to_room_member(agent_id, frame.clone(), room_id);
             }
         }
     }
 
     /// Send a frame to a specific agent by ID.
     pub fn send_to_agent(&self, agent_id: &str, frame: Frame) {
+        self.send_checked(agent_id, frame, None);
+    }
+
+    /// Sends a room's frame to a member that `room_recipient_allowed` has just admitted to `room_id`. That check
+    /// denies exactly what `send_to_agent`'s room check would, so it is not repeated for a frame about the same room.
+    fn send_to_room_member(&self, agent_id: &str, frame: Frame, room_id: &str) {
+        self.send_checked(agent_id, frame, Some(room_id));
+    }
+
+    fn send_checked(&self, agent_id: &str, frame: Frame, admitted_room: Option<&str>) {
         if let Some(agent) = self.agents.get(agent_id) {
             if let Some(store) = self.access_store.get().and_then(std::sync::Weak::upgrade) {
                 if agent.api_key.starts_with(crate::store::social::PREFIX)
@@ -196,6 +206,7 @@ impl Broker {
                     .payload
                     .get("room_id")
                     .and_then(serde_json::Value::as_str)
+                    .filter(|room| admitted_room != Some(*room))
                 {
                     if frame.frame_type != FrameType::RoomDestroyed
                         && store.social_room_access(room, &agent.api_key) == Some(false)
