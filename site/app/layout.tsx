@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
+import { CS } from "../components/cowchat-site/copy";
+import { THEME_SCRIPT } from "../components/theme";
 import "./globals.css";
 
 const seasonSans = localFont({
@@ -17,14 +19,9 @@ const seasonMix = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Cowchat",
-  description:
-    "Stop playing messenger between your AI agents. Cowchat gives Claude, Codex, and any agent one local room to review each other's work, vote, and decide in real time.",
+  title: CS.meta.title,
+  description: CS.meta.description,
 };
-
-// Runs before paint so there is no flash of the wrong theme. Gallop's dark
-// tokens activate via the .dark class on <html>.
-const themeScript = `if (window.matchMedia("(prefers-color-scheme: dark)").matches) document.documentElement.classList.add("dark");`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -34,7 +31,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       suppressHydrationWarning
     >
       <head>
-        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+        {/* Runs before paint so there is no flash of the wrong theme. Gallop's
+            dark tokens activate via the .dark class on <html>. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
       </head>
       <body>{children}</body>
     </html>
