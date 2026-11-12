@@ -105,3 +105,23 @@ final class MessageParseCacheTests: XCTestCase {
         XCTAssertEqual(MessageContentParser.attributedInline(text), first)
     }
 }
+
+final class MessageExpansionTests: XCTestCase {
+    /// Forgetting a room key turns an open message's text into a placeholder; the old plaintext plan must not draw.
+    func testAnOpenMessageWhoseTextChangedDrawsNoOldPlan() {
+        let plaintext = "Secret.\n\n## Heading\n\n- item"
+        let expansion = MessageExpansion(content: plaintext, plan: MessageRenderPlan.make(for: plaintext), isOpen: true)
+
+        XCTAssertNotNil(expansion.openPlan(for: plaintext))
+        XCTAssertNil(expansion.openPlan(for: "Encrypted message — add the room key to read it."))
+        XCTAssertNil(expansion.plan(for: "Encrypted message — add the room key to read it."))
+    }
+
+    func testAClosedMessageKeepsItsPlanForReopening() {
+        let content = "Long message"
+        let expansion = MessageExpansion(content: content, plan: .plainText(content), isOpen: false)
+
+        XCTAssertNil(expansion.openPlan(for: content))
+        XCTAssertEqual(expansion.plan(for: content), .plainText(content))
+    }
+}

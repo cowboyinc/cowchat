@@ -2788,6 +2788,8 @@ final class RoomTransitionTests: XCTestCase {
         fixture.store.shutdownForRemoval()
 
         XCTAssertFalse(MessageTextLayout.cache.contains(fixture.plaintext))
+        XCTAssertNotEqual(fixture.store.displayMessage(fixture.message).content, fixture.plaintext,
+                          "a removed store must not decrypt again")
     }
 
     /// The store bounds the plaintext it holds by clearing its display cache; the render caches must not outlast that.

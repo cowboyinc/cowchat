@@ -1844,12 +1844,26 @@ final class MessageTextLayout {
     }
 }
 
+/// A message's full render plan, kept with the text it was built from. A message whose text has changed since, as an
+/// encrypted one does when its room key is forgotten, gets no plan, so its view never draws the old text again.
+struct MessageExpansion: Equatable {
+    let content: String
+    let plan: MessageRenderPlan
+    var isOpen: Bool
+
+    func plan(for current: String) -> MessageRenderPlan? { current == content ? plan : nil }
+
+    func openPlan(for current: String) -> MessageRenderPlan? { isOpen ? plan(for: current) : nil }
+}
+
 struct ExpandableMessageText: View {
     let content: String
     var textColor: Color
     @Environment(\.mentionMarks) private var mentionMarks
-    @State private var isExpanded = false
-    @State private var expandedPlan: MessageRenderPlan?
+    @State private var expansion: MessageExpansion?
+
+    /// Open only while the message still has the text it was opened with.
+    private var isExpanded: Bool { expansion?.openPlan(for: content) != nil }
     private let layout: MessageTextLayout
     private let makeRenderPlan: (String) -> MessageRenderPlan
 
@@ -1909,7 +1923,7 @@ struct ExpandableMessageText: View {
                 }
             }
 
-            renderedContent(isExpanded ? (expandedPlan ?? collapsedPlan) : collapsedPlan)
+            renderedContent(expansion?.openPlan(for: content) ?? collapsedPlan)
 
             if !isExpanded, collapsedPreview.isTruncated {
                 Text("…")
@@ -1987,10 +2001,11 @@ struct ExpandableMessageText: View {
     private var showsResponseControl: Bool { layout.showsResponseControl }
 
     private func toggleExpansion() {
-        if !isExpanded, expandedPlan == nil {
-            expandedPlan = makeRenderPlan(content)
+        let plan = expansion?.plan(for: content) ?? makeRenderPlan(content)
+        let isOpen = !isExpanded
+        withAnimation(.easeInOut(duration: 0.16)) {
+            expansion = MessageExpansion(content: content, plan: plan, isOpen: isOpen)
         }
-        withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
     }
 
     private func headingStyle(for level: Int) -> GallopTextStyle {

@@ -735,6 +735,9 @@ final class ChatStore: ObservableObject {
         profileGeneration += 1
         connection.disconnect()
         connectionStatus = .disconnected
+        // A caller still holding this store must find nothing left to decrypt with.
+        roomSecrets.removeAll()
+        unlockedRoomIDs.removeAll()
         clearDisplayedPlaintext()
     }
 
