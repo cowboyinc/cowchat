@@ -71,3 +71,57 @@ final class MessageRenderingTests: XCTestCase {
         XCTAssertFalse(plannedSources.contains(content))
     }
 }
+
+/// A redraw of the room rebuilds every row, so the parsing a message needs must happen once per distinct content.
+final class MessageParseCacheTests: XCTestCase {
+    @MainActor
+    func testRebuildingAMessageReusesItsLayout() {
+        let content = "Intro \(UUID()).\n\n## Heading\n\n- item"
+        let misses = MessageTextLayout.cache.misses
+
+        for _ in 0..<50 { _ = ExpandableMessageText(content: content) }
+
+        XCTAssertEqual(MessageTextLayout.cache.misses, misses + 1, "the views parsed the message more than once")
+        XCTAssertTrue(MessageTextLayout.cache.contains(content), "the views did not use the shared cache")
+    }
+
+    @MainActor
+    func testLayoutMatchesTheUncachedParse() {
+        let content = "Intro.\n\n## Heading\n\n- item"
+        let layout = MessageTextLayout.cached(for: content)
+        XCTAssertEqual(layout.collapsedPlan, MessageRenderPlan.make(for: content))
+        XCTAssertNil(layout.chart)
+        XCTAssertFalse(layout.showsResponseControl)
+    }
+
+    func testInlineMarkdownIsParsedOncePerText() {
+        let text = "some **bold** \(UUID())"
+        let misses = MessageContentParser.inlineCache.misses
+
+        let first = MessageContentParser.attributedInline(text)
+        for _ in 0..<50 { _ = MessageContentParser.attributedInline(text) }
+
+        XCTAssertEqual(MessageContentParser.inlineCache.misses, misses + 1)
+        XCTAssertEqual(MessageContentParser.attributedInline(text), first)
+    }
+}
+
+final class MessageExpansionTests: XCTestCase {
+    /// Forgetting a room key turns an open message's text into a placeholder; the old plaintext plan must not draw.
+    func testAnOpenMessageWhoseTextChangedDrawsNoOldPlan() {
+        let plaintext = "Secret.\n\n## Heading\n\n- item"
+        let expansion = MessageExpansion(content: plaintext, plan: MessageRenderPlan.make(for: plaintext), isOpen: true)
+
+        XCTAssertNotNil(expansion.openPlan(for: plaintext))
+        XCTAssertNil(expansion.openPlan(for: "Encrypted message — add the room key to read it."))
+        XCTAssertNil(expansion.plan(for: "Encrypted message — add the room key to read it."))
+    }
+
+    func testAClosedMessageKeepsItsPlanForReopening() {
+        let content = "Long message"
+        let expansion = MessageExpansion(content: content, plan: .plainText(content), isOpen: false)
+
+        XCTAssertNil(expansion.openPlan(for: content))
+        XCTAssertEqual(expansion.plan(for: content), .plainText(content))
+    }
+}

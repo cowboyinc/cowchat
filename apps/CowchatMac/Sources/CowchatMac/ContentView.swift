@@ -873,7 +873,6 @@ private struct ChatRoomView: View {
     @State private var roomKeyDraft = ""
     @State private var roomKeyError: String?
     @State private var isComposerExpanded = false
-    @State private var isFieldHovering = false
     @State private var isDestroyConfirmationPresented = false
     @State private var isDestroyingRoom = false
     @State private var isInvitesPresented = false
@@ -1207,6 +1206,7 @@ private struct ChatRoomView: View {
                                         onSaveAttachment: room.encrypted ? nil : { saveAttachment($0) },
                                         onOpenAttachment: room.encrypted ? nil : { openAttachment($0) }
                                     )
+                                    .equatable()
                                     ForEach(
                                         pulseAnchors.byMessageID[message.id] ?? [],
                                         id: \.agentID
@@ -1450,46 +1450,17 @@ private struct ChatRoomView: View {
                     .padding(.bottom, 8)
             }
 
-            HStack(spacing: 8) {
-                ComposerTextField(
-                    text: $store.draft,
-                    placeholder: "Message \(title)",
-                    isEnabled: !room.encrypted || store.unlockedRoomIDs.contains(room.id),
-                    onSubmit: sendDraft,
-                    onCancel: {
-                        withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
-                    },
-                    mentionMarks: mentionMarks
-                )
-                .frame(height: ComposerTextField.naturalHeight)
-                .padding(.horizontal, 16)
-                .frame(height: 44)
-                .background(
-                    isFieldHovering ? SemanticColor.textfieldHover : SemanticColor.textfieldDefault,
-                    in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(isFieldHovering ? SemanticColor.borderHover : SemanticColor.borderDefault, lineWidth: 1)
+            ComposerInputRow(
+                composer: store.composer,
+                placeholder: "Message \(title)",
+                isEnabled: isRoomWritable,
+                isSendable: store.connectionStatus.isConnected && isRoomWritable,
+                mentionMarks: mentionMarks,
+                onSubmit: sendDraft,
+                onCancel: {
+                    withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
                 }
-                .onHover { isFieldHovering = $0 }
-
-                Button { sendDraft() } label: {
-                    GallopIconView(icon: .send, fallbackSystemName: "paperplane.fill", size: 18)
-                        .foregroundStyle(SemanticColor.buttonPrimaryIconDefault)
-                        .frame(width: 36, height: 36)
-                        .background(SemanticColor.buttonPrimaryDefault, in: Circle())
-                        .overlay { Circle().stroke(Palette.nugget300, lineWidth: 1) }
-                }
-                .buttonStyle(.plain)
-                .disabled(!canSend)
-                .opacity(canSend ? 1 : 0.4)
-                .macAccessibleAction(
-                    label: "Send message",
-                    isEnabled: canSend,
-                    action: sendDraft
-                )
-            }
+            )
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -1502,10 +1473,67 @@ private struct ChatRoomView: View {
         store.sendDraft(mentions: ownsRoom ? sessions.mentions(in: store.draft) : [])
     }
 
+    private var isRoomWritable: Bool {
+        !room.encrypted || store.unlockedRoomIDs.contains(room.id)
+    }
+}
+
+/// The composer's field and send button. It alone observes the draft, so typing redraws this row and not the room
+/// view, its message list or anything else that watches `ChatStore`.
+private struct ComposerInputRow: View {
+    @ObservedObject var composer: ComposerDraft
+    let placeholder: String
+    let isEnabled: Bool
+    /// Whether the room can take a message now, before the draft's own text is considered.
+    let isSendable: Bool
+    let mentionMarks: MentionMarks
+    let onSubmit: () -> Void
+    let onCancel: () -> Void
+    @State private var isFieldHovering = false
+
     private var canSend: Bool {
-        store.connectionStatus.isConnected
-            && (!room.encrypted || store.unlockedRoomIDs.contains(room.id))
-            && !store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        isSendable && !composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ComposerTextField(
+                text: $composer.text,
+                placeholder: placeholder,
+                isEnabled: isEnabled,
+                onSubmit: onSubmit,
+                onCancel: onCancel,
+                mentionMarks: mentionMarks
+            )
+            .frame(height: ComposerTextField.naturalHeight)
+            .padding(.horizontal, 16)
+            .frame(height: 44)
+            .background(
+                isFieldHovering ? SemanticColor.textfieldHover : SemanticColor.textfieldDefault,
+                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(isFieldHovering ? SemanticColor.borderHover : SemanticColor.borderDefault, lineWidth: 1)
+            }
+            .onHover { isFieldHovering = $0 }
+
+            Button(action: onSubmit) {
+                GallopIconView(icon: .send, fallbackSystemName: "paperplane.fill", size: 18)
+                    .foregroundStyle(SemanticColor.buttonPrimaryIconDefault)
+                    .frame(width: 36, height: 36)
+                    .background(SemanticColor.buttonPrimaryDefault, in: Circle())
+                    .overlay { Circle().stroke(Palette.nugget300, lineWidth: 1) }
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSend)
+            .opacity(canSend ? 1 : 0.4)
+            .macAccessibleAction(
+                label: "Send message",
+                isEnabled: canSend,
+                action: onSubmit
+            )
+        }
     }
 }
 
@@ -1518,7 +1546,18 @@ private struct FeedBottomOffsetKey: PreferenceKey {
     }
 }
 
-private struct MessageFeedRow: View {
+/// Equatable so the feed can skip a row whose message has not changed: the room view redraws on every store change,
+/// and the attachment closures it passes are new each time. Whether each closure is set is all that differs between
+/// them, since the room they act on is the row's own. A skipped row also skips its agent-app lookup, so an app installed
+/// or removed shows on the row at its next change, such as the minute's timestamp tick.
+private struct MessageFeedRow: View, Equatable {
+    static func == (lhs: MessageFeedRow, rhs: MessageFeedRow) -> Bool {
+        lhs.message == rhs.message && lhs.isMine == rhs.isMine && lhs.now == rhs.now && lhs.quiet == rhs.quiet
+            && lhs.senderName == rhs.senderName
+            && (lhs.onSaveAttachment == nil) == (rhs.onSaveAttachment == nil)
+            && (lhs.onOpenAttachment == nil) == (rhs.onOpenAttachment == nil)
+    }
+
     let message: ChatMessage
     let isMine: Bool
     let now: Date
@@ -1781,31 +1820,69 @@ enum MessageRenderPlan: Equatable {
     }
 }
 
-struct ExpandableMessageText: View {
-    let content: String
-    var textColor: Color
-    @Environment(\.mentionMarks) private var mentionMarks
-    @State private var isExpanded = false
-    @State private var expandedPlan: MessageRenderPlan?
-    private let chart: ChartMessage?
-    private let collapsedPreview: MessagePreview.CollapsedPreview
-    private let collapsedPlan: MessageRenderPlan
-    private let makeRenderPlan: (String) -> MessageRenderPlan
+/// What a message's text view draws before it is opened: its chart, its collapsed preview and that preview's plan.
+/// Built once per distinct content, since the room view rebuilds every row on each redraw.
+final class MessageTextLayout {
+    static let cache = ParseCache<MessageTextLayout>(countLimit: 2_000, byteLimit: 32 << 20)
 
-    init(
-        content: String,
-        textColor: Color = SemanticColor.textSecondary,
-        makeRenderPlan: @escaping (String) -> MessageRenderPlan = MessageRenderPlan.make
-    ) {
-        self.content = content
-        self.textColor = textColor
-        self.makeRenderPlan = makeRenderPlan
+    let chart: ChartMessage?
+    let collapsedPreview: MessagePreview.CollapsedPreview
+    let collapsedPlan: MessageRenderPlan
+    let showsResponseControl: Bool
 
+    init(content: String, makeRenderPlan: (String) -> MessageRenderPlan) {
         let chart = ChartMessage(content: content)
         self.chart = chart
         let preview = MessagePreview.collapsedPreview(for: chart?.title ?? content)
         collapsedPreview = preview
         collapsedPlan = makeRenderPlan(preview.source)
+        showsResponseControl = MessagePreview.needsDisclosure(for: content)
+    }
+
+    static func cached(for content: String) -> MessageTextLayout {
+        cache.value(for: content) { MessageTextLayout(content: $0, makeRenderPlan: MessageRenderPlan.make) }
+    }
+}
+
+/// A message's full render plan, kept with the text it was built from. A message whose text has changed since, as an
+/// encrypted one does when its room key is forgotten, gets no plan, so its view never draws the old text again.
+struct MessageExpansion: Equatable {
+    let content: String
+    let plan: MessageRenderPlan
+    var isOpen: Bool
+
+    func plan(for current: String) -> MessageRenderPlan? { current == content ? plan : nil }
+
+    func openPlan(for current: String) -> MessageRenderPlan? { isOpen ? plan(for: current) : nil }
+}
+
+struct ExpandableMessageText: View {
+    let content: String
+    var textColor: Color
+    @Environment(\.mentionMarks) private var mentionMarks
+    @State private var expansion: MessageExpansion?
+
+    /// Open only while the message still has the text it was opened with.
+    private var isExpanded: Bool { expansion?.openPlan(for: content) != nil }
+    private let layout: MessageTextLayout
+    private let makeRenderPlan: (String) -> MessageRenderPlan
+
+    private var chart: ChartMessage? { layout.chart }
+    private var collapsedPreview: MessagePreview.CollapsedPreview { layout.collapsedPreview }
+    private var collapsedPlan: MessageRenderPlan { layout.collapsedPlan }
+
+    /// `makeRenderPlan` replaces the planner for tests; a message drawn with the default planner shares its layout
+    /// through `MessageTextLayout.cache`.
+    init(
+        content: String,
+        textColor: Color = SemanticColor.textSecondary,
+        makeRenderPlan: ((String) -> MessageRenderPlan)? = nil
+    ) {
+        self.content = content
+        self.textColor = textColor
+        self.makeRenderPlan = makeRenderPlan ?? MessageRenderPlan.make
+        layout = makeRenderPlan.map { MessageTextLayout(content: content, makeRenderPlan: $0) }
+            ?? MessageTextLayout.cached(for: content)
     }
 
     var body: some View {
@@ -1846,7 +1923,7 @@ struct ExpandableMessageText: View {
                 }
             }
 
-            renderedContent(isExpanded ? (expandedPlan ?? collapsedPlan) : collapsedPlan)
+            renderedContent(expansion?.openPlan(for: content) ?? collapsedPlan)
 
             if !isExpanded, collapsedPreview.isTruncated {
                 Text("…")
@@ -1921,15 +1998,14 @@ struct ExpandableMessageText: View {
         }
     }
 
-    private var showsResponseControl: Bool {
-        MessagePreview.needsDisclosure(for: content)
-    }
+    private var showsResponseControl: Bool { layout.showsResponseControl }
 
     private func toggleExpansion() {
-        if !isExpanded, expandedPlan == nil {
-            expandedPlan = makeRenderPlan(content)
+        let plan = expansion?.plan(for: content) ?? makeRenderPlan(content)
+        let isOpen = !isExpanded
+        withAnimation(.easeInOut(duration: 0.16)) {
+            expansion = MessageExpansion(content: content, plan: plan, isOpen: isOpen)
         }
-        withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
     }
 
     private func headingStyle(for level: Int) -> GallopTextStyle {

@@ -97,3 +97,24 @@ extension ChartMessageTests {
         try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: "/tmp/cowchat-interactive-chart-preview.png"))
     }
 }
+
+final class ChartImageCacheTests: XCTestCase {
+    /// Decoded charts can be megabytes each, so their cache is bounded by bitmap size, not by message text.
+    func testDecodedChartImagesHaveAByteBudget() {
+        XCTAssertEqual(ChartMessage.decodedImages.totalCostLimit, 64 << 20)
+    }
+
+    func testAChartIsDecodedOnceAndDroppedWithThePlaintext() throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../../test-fixtures/chart-v1.txt")
+        let chart = try XCTUnwrap(ChartMessage(content: String(contentsOf: url)))
+
+        let first = try XCTUnwrap(chart.image)
+        XCTAssertTrue(chart.image === first, "the chart was decoded again")
+        XCTAssertNotNil(ChartMessage.decodedImages.object(forKey: chart.imageKey))
+
+        RenderCaches.clearPlaintext()
+
+        XCTAssertNil(ChartMessage.decodedImages.object(forKey: chart.imageKey))
+    }
+}
