@@ -1,6 +1,7 @@
 /*
  * VENDORED from cowboyinc/gallop packages/foundations/src/gallop.css
- * at commit 121e38465ef5696bf27ed332a573347e4ae87959 (foundations v0.5.0).
+ * at commit 7180b2a1e4e05acbc82c157bbdf80bcd3a0c2497 (foundations v0.7.0),
+ * the same file the @cowboyinc/gallop-foundations 0.7.0 package ships as dist/gallop.css.
  * Do not edit by hand — refresh by re-copying from the gallop repo.
  */
 
@@ -35,7 +36,7 @@
   /* ── Colour palette ────────────────────────────────────────────────────── */
 
   /* Hay — warm off-white to mid taupe */
-  --color-hay-50:  #FDFCFB;
+  --color-hay-50:  #FCFAF8;
   --color-hay-100: #F9F7F5;
   --color-hay-200: #F4F0EB;
   --color-hay-300: #F1EBE5;
@@ -75,14 +76,14 @@
 
   /* Canyon — deep terracotta red */
   --color-canyon-50:  #FDF3F1;
-  --color-canyon-100: #F4D6D0;
-  --color-canyon-200: #EEA79C;
-  --color-canyon-300: #EA7A64;
-  --color-canyon-400: #E34F31;
-  --color-canyon-500: #CD3214;
-  --color-canyon-600: #B22D10;
-  --color-canyon-700: #93240B;
-  --color-canyon-800: #771F0B;
+  --color-canyon-100: #F4D8D0;
+  --color-canyon-200: #EEAF9C;
+  --color-canyon-300: #EA8864;
+  --color-canyon-400: #E35531;
+  --color-canyon-500: #CD3914;
+  --color-canyon-600: #B23010;
+  --color-canyon-700: #93260B;
+  --color-canyon-800: #77210B;
   --color-canyon-900: #470E00;
   --color-canyon-950: #290800;
 
@@ -122,7 +123,7 @@
   --color-surface-700: #FFFFFF;
 
   /* Surface — Glass (frosted/translucent layers; opacity encoded as 8-digit hex RRGGBBAA) */
-  --color-surface-glass-500:              #FFFFFFCC;
+  --color-surface-glass-500:              #FCFAF8B8;
   --color-surface-glass-border-highlight: #FFFFFFCC;
   --color-surface-glass-border-shadow:    #2E282414;
   --color-surface-glass-off-hover:        #2E28240A;
@@ -262,9 +263,9 @@
   --color-notification-warning-text-default:   #BA5208;
   --color-notification-warning-icon-primary:   #EB7214;
   --color-notification-error-default:          #FDF3F1;
-  --color-notification-error-border-default:   #EEA79C;
-  --color-notification-error-text-default:     #B22D10;
-  --color-notification-error-icon-primary:     #CD3214;
+  --color-notification-error-border-default:   #EEAF9C;
+  --color-notification-error-text-default:     #B23010;
+  --color-notification-error-icon-primary:     #CD3914;
   --color-notification-info-default:           #F0F6FA;
   --color-notification-info-border-default:    #AACADA;
   --color-notification-info-text-default:      #1D5E86;
@@ -276,7 +277,7 @@
   --text-size-0:  10px;
   --text-size-1:  12px;
   --text-size-2:  13px;
-  --text-size-3:  14px;
+  --text-size-3:  15px;
   --text-size-4:  16px;
   --text-size-5:  17px;
   --text-size-6:  20px;
@@ -307,7 +308,7 @@
   --color-surface-700: var(--color-bison-700);
 
   /* Surface — Glass */
-  --color-surface-glass-500:              #2E2824CC;
+  --color-surface-glass-500:              #2E2824B8;
   --color-surface-glass-border-highlight: #FFFFFF14;
   --color-surface-glass-border-shadow:    #0F0E0CA3;
   --color-surface-glass-off-hover:        #0F0E0C29;
@@ -380,8 +381,8 @@
   --color-notification-warning-border-default: #5F2702;
   --color-notification-warning-text-default:   #F48732;
   --color-notification-error-default:          #290800;
-  --color-notification-error-border-default:   #771F0B;
-  --color-notification-error-text-default:     #EA7A64;
+  --color-notification-error-border-default:   #77210B;
+  --color-notification-error-text-default:     #EA8864;
   --color-notification-info-default:           #001829;
   --color-notification-info-border-default:    #07304B;
   --color-notification-info-text-default:      #7EAFC8;
