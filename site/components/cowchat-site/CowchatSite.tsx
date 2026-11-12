@@ -1,6 +1,6 @@
 'use client'
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
-import { Button } from './gallop'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { Button, ButtonLink } from './gallop'
 import * as G from './icons'
 import { HeroShot } from './shots/hero/HeroShot'
 import { JoinShot } from './shots/join/JoinShot'
@@ -64,6 +64,8 @@ function InstallRow({ row, copied, onCopy }: { row: CsInstall; copied: boolean; 
         <div>
           <h3>{row.title}</h3>
           <p>{row.line}</p>
+          {/* The piece's README on GitHub, which has the full setup. */}
+          {row.guide && <TextLink className="cs-install-guide" href={row.guide} size="s" data-cs-guide={row.id}>{CS.install.guide}</TextLink>}
         </div>
       </div>
       <div className="sf-code cs-code">
@@ -136,18 +138,14 @@ export function CowchatSite() {
     })
   }
 
-  const go = (id: string) => (event: MouseEvent) => {
-    event.preventDefault()
-    document.getElementById(id)?.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' })
-  }
-  const download = () => window.location.assign(DOWNLOAD)
-  const github = () => window.location.assign(GITHUB)
-
-  // The hero's two actions, again in the close: Download for Mac and the install section (plan, Decisions 2).
+  // The hero's two actions, again in the close: Download for Mac and the install section (plan, Decisions 2). Both are
+  // links. Download for Mac goes to the latest release in the same tab. Install goes to the install section by its
+  // fragment, so the browser moves the keyboard's next Tab into the section; cowchat-site.css makes the scroll smooth
+  // where motion is allowed.
   const actions = (where: 'hero' | 'start') => (
     <div ref={where === 'hero' ? heroActions : undefined} className="ms-actions cs-actions">
-      <Button variant="primary" size="m" type="button" data-cs-download={where} onClick={download}>{CS.nav.download}</Button>
-      <Button variant="secondary" size="m" type="button" data-cs-install-link={where} onClick={go('install')}>{CS.hero.install}</Button>
+      <ButtonLink variant="primary" size="m" href={DOWNLOAD} data-cs-download={where}>{CS.nav.download}</ButtonLink>
+      <ButtonLink variant="secondary" size="m" href="#install" data-cs-install-link={where}>{CS.hero.install}</ButtonLink>
     </div>
   )
 
@@ -160,8 +158,8 @@ export function CowchatSite() {
             <span className="ms-brand-word cs-brand-word">{CS.brand.name}</span>
           </a>
           <div className="ms-doors">
-            <Button variant="secondary" size="s" type="button" data-cs-github="bar" onClick={github}>{CS.nav.github}</Button>
-            <span className="ms-bar-request cs-bar-download" data-shown={barDownload || undefined} inert={!barDownload}><span><Button variant="primary" size="s" type="button" data-cs-download="bar" onClick={download}>{CS.nav.download}</Button></span></span>
+            <ButtonLink variant="secondary" size="s" href={GITHUB} data-cs-github="bar">{CS.nav.github}</ButtonLink>
+            <span className="ms-bar-request cs-bar-download" data-shown={barDownload || undefined} inert={!barDownload}><span><ButtonLink variant="primary" size="s" href={DOWNLOAD} data-cs-download="bar">{CS.nav.download}</ButtonLink></span></span>
           </div>
         </div>
       </header>
@@ -259,7 +257,7 @@ export function CowchatSite() {
             <div className="cs-repo" data-cs-repo="">
               <p className="cs-repo-name">{CS.open.repository}</p>
               <p className="cs-repo-license">{CS.open.license}</p>
-              <Button variant="secondary" size="m" type="button" iconBefore={<G.Outgoing />} data-cs-github="open" onClick={github}>{CS.open.action}</Button>
+              <ButtonLink variant="secondary" size="m" href={GITHUB} iconBefore={<G.Outgoing />} data-cs-github="open">{CS.open.action}</ButtonLink>
             </div>
           </div>
         </section>

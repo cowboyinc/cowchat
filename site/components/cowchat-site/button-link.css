@@ -1,0 +1,15 @@
+/* ButtonLink (gallop.tsx): the hover and pressed states that gallop.css's button utilities give an enabled <button>,
+   given to a link, which :enabled never matches. Each value is the utility's own (gallop.css, Button utilities). */
+a.btn-primary-glow:hover::after {
+  background: radial-gradient(
+    ellipse 80% 60% at 50% 120%,
+    color-mix(in srgb, var(--color-nugget-200) 38%, transparent),
+    color-mix(in srgb, var(--color-nugget-300) 20%, transparent) 50%,
+    transparent 75%
+  );
+}
+a:active > .btn-primary-icon-shadow { filter: drop-shadow(0 1px 1px var(--color-nugget-400)); }
+a:hover > .btn-primary-icon-color { color: var(--color-button-primary-icon-hover); }
+a:active > .btn-primary-icon-color { color: var(--color-button-primary-icon-pressed); }
+a:hover > .btn-secondary-icon-color { color: var(--color-button-secondary-icon-hover); }
+a:active > .btn-secondary-icon-color { color: var(--color-button-secondary-icon-pressed); }

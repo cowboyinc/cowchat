@@ -1,9 +1,15 @@
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import type { AnchorHTMLAttributes, ButtonHTMLAttributes, ReactNode } from 'react'
+import './button-link.css'
 
 /* Gallop's Button and Spinner as @cowboyinc/gallop-components 0.7.0 renders them (dist/index.mjs), since the site
    cannot install the package from Cowboy's private registry. Each draws the package's own Tailwind classes on Gallop's
    tokens (gallop.css), so it looks and behaves as the package's does. Only what the page uses is here: the primary and
-   secondary Button at sizes s and m with an icon before the label, and the default Spinner. */
+   secondary Button at sizes s and m with an icon before the label, and the default Spinner.
+
+   ButtonLink is the same Button drawn as a link, for an action that goes to an address: Download for Mac, GitHub and
+   Install. The package's Button is a <button> only. A link is never disabled, so the link's classes drop the package's
+   enabled: and disabled: prefixes, and button-link.css gives a link the hover and pressed states that gallop.css's
+   button utilities key on :enabled. */
 
 const join = (...parts: (string | false | undefined)[]) => parts.filter(Boolean).join(' ')
 
@@ -12,6 +18,13 @@ const BUTTON_BASE = 'inline-flex items-center justify-center rounded-full cursor
 const BUTTON_VARIANT = {
   primary: 'relative overflow-hidden bg-button-primary-default enabled:hover:bg-button-primary-hover enabled:active:bg-button-primary-pressed disabled:bg-button-primary-disabled text-button-primary-text-default enabled:hover:text-button-primary-text-hover enabled:active:text-button-primary-text-pressed btn-primary-glow btn-primary-text-shadow',
   secondary: 'bg-button-secondary-default enabled:hover:bg-button-secondary-hover enabled:active:bg-button-secondary-pressed disabled:bg-button-secondary-disabled text-button-secondary-text-default enabled:hover:text-button-secondary-text-hover enabled:active:text-button-secondary-text-pressed',
+}
+
+const LINK_BASE = 'inline-flex items-center justify-center rounded-full cursor-pointer select-none transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus focus-visible:ring-offset-2'
+
+const LINK_VARIANT = {
+  primary: 'relative overflow-hidden bg-button-primary-default hover:bg-button-primary-hover active:bg-button-primary-pressed text-button-primary-text-default hover:text-button-primary-text-hover active:text-button-primary-text-pressed btn-primary-glow btn-primary-text-shadow',
+  secondary: 'bg-button-secondary-default hover:bg-button-secondary-hover active:bg-button-secondary-pressed text-button-secondary-text-default hover:text-button-secondary-text-hover active:text-button-secondary-text-pressed',
 }
 
 const BUTTON_SIZE = {
@@ -35,6 +48,23 @@ export function Button({ variant = 'primary', size = 'm', iconBefore, className,
       {iconBefore && <span className={join('shrink-0', ICON_SIZE[size], ICON_BEFORE_NUDGE[size], ICON_TONE[variant])}>{iconBefore}</span>}
       {children}
     </button>
+  )
+}
+
+type ButtonLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
+  href: string
+  variant?: keyof typeof LINK_VARIANT
+  size?: keyof typeof BUTTON_SIZE
+  iconBefore?: ReactNode
+}
+
+// Opens its address in the same tab, as a link does by default.
+export function ButtonLink({ variant = 'primary', size = 'm', iconBefore, className, children, ...props }: ButtonLinkProps) {
+  return (
+    <a className={join(LINK_BASE, LINK_VARIANT[variant], BUTTON_SIZE[size], className)} {...props}>
+      {iconBefore && <span className={join('shrink-0', ICON_SIZE[size], ICON_BEFORE_NUDGE[size], ICON_TONE[variant])}>{iconBefore}</span>}
+      {children}
+    </a>
   )
 }
 

@@ -1,6 +1,8 @@
 /* The rules this page shares with cowboy.inc's home and Marshal's site, copied from the prototype where all three are
    designed (cowboyinc/prototype-site at 39d5d7f63): only the rules the page's markup uses, in the order the prototype
-   loads them, with their values as they are there. A change made there is carried here by hand.
+   loads them, with their values as they are there. A change made there is carried here by hand. One change is this
+   site's own: the bar's and the actions' rules that name a button also name a link, since Download for Mac, GitHub and
+   Install are links here.
 
    - src/components/site/site-structured.css: the column (.ss-wrap) and the line under a heading (.ss-line).
    - src/components/site/site-full.css: the section's rhythm (.sf-section), the centred head (.sf-head) and the command
@@ -58,7 +60,7 @@
 .ms-brand { display: inline-flex; align-items: center; gap: var(--sp-1); justify-self: start; color: var(--color-text-primary); text-decoration: none; }
 .ms-brand-word { font-family: var(--font-display); font-size: var(--type-h4-size); line-height: var(--type-h4-lh); font-weight: var(--type-h4-wght); }
 .ms-doors { display: flex; align-items: center; gap: var(--sp-1); justify-self: end; }
-.ms-doors button { flex: none; white-space: nowrap; }
+.ms-doors :is(button, a) { flex: none; white-space: nowrap; }
 .ms-bar-request { display: grid; grid-template-columns: 0fr; margin-left: calc(-1 * var(--sp-1)); opacity: 0; visibility: hidden; transition: grid-template-columns 300ms var(--ease-out), margin-left 300ms var(--ease-out), opacity 200ms var(--ease-out), visibility 0s linear 300ms; }
 .ms-bar-request[data-shown] { grid-template-columns: 1fr; margin-left: 0; opacity: 1; visibility: visible; transition: grid-template-columns 300ms var(--ease-out), margin-left 300ms var(--ease-out), opacity 200ms var(--ease-out) 100ms, visibility 0s; }
 /* The clip box reaches 4px past the button so its focus ring is not cut while the column is open. */
@@ -74,7 +76,7 @@
 .ms-hero-title { margin: 0; font-family: var(--font-display); font-size: var(--type-title-size); line-height: var(--type-title-lh); font-weight: var(--type-title-wght); letter-spacing: -0.01em; text-wrap: balance; }
 .ms-lede { max-width: 38em; margin: var(--sp-3) 0 0; color: var(--color-text-secondary); font-size: var(--text-size-6); line-height: var(--line-height-3); text-wrap: balance; }
 .ms-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--sp-2) var(--sp-4); margin-top: var(--sp-5); }
-.ms-actions button { flex: none; white-space: nowrap; }
+.ms-actions :is(button, a) { flex: none; white-space: nowrap; }
 .ms-quiet-action { display: inline-flex; align-items: center; gap: var(--sp-05); white-space: nowrap; }
 .ms-quiet-action svg { width: 16px; height: 16px; }
 

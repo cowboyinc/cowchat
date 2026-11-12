@@ -15,10 +15,10 @@ npm run build      # writes out/
 
 `/` is the marketing page designed in the prototype (cowboyinc/prototype-site, `/cowchat-site`, PR 531) and ported here section for section on 12 November 2026. `/how-it-works` sends the reader to `/` with a meta refresh, since the static export ignores Next's redirects.
 
-- `components/cowchat-site/CowchatSite.tsx` draws the page, and `copy.ts` holds every word. Codex wrote the words, so a change of words starts in the prototype.
+- `components/cowchat-site/CowchatSite.tsx` draws the page, and `copy.ts` holds every word. Codex wrote the words, so a change of words starts in the prototype. Three install strings differ from the prototype's: Codex rewrote them here on 12 November 2026, since the plugin and the hooks need an agent connected in the Mac app first, and `copy.ts` records which.
 - `components/cowchat-site/shots/` holds the four product shots, drawn in React from Gallop's tokens and icons as recreations of the Mac app's screens. Each shot's `REHEARSAL.md` records what was filmed and checked in the prototype.
 - `shared.css` holds the rules the page shares with cowboy.inc's home and Marshal's site, copied from the prototype. `cowchat-site.css` and `shots/shots.css` are the page's own.
-- `gallop.tsx` and `icons.tsx` are local copies of Gallop's Button, Spinner and the eight icons the page draws. `app/tokens.css` holds the spacing, radius, type, motion and elevation tokens the page reads that Gallop does not publish, at the prototype's values.
+- `gallop.tsx` and `icons.tsx` are local copies of Gallop's Button, Spinner and the eight icons the page draws. `gallop.tsx` also draws the Button as a link, for Download for Mac, GitHub and Install, with `button-link.css` giving the link Gallop's hover and pressed states. `app/tokens.css` holds the spacing, radius, type, motion and elevation tokens the page reads that Gallop does not publish, at the prototype's values.
 - `components/theme.ts` follows the system's light or dark scheme, before the first paint and whenever the scheme changes.
 
 Comments that cite "plan" mean the prototype's `docs/plans/cowchat-site.md`. The prototype's `copy.test.ts`, which checks the copy's shape, is not here, since this site has no test runner.

@@ -7,6 +7,9 @@
 
 .cs .ss-wrap { max-width: calc(1080px + 2 * var(--sp-5)); }
 .cs-section { scroll-margin-top: 72px; }
+/* Install is a link to #install, so the browser moves the keyboard's next Tab into the section. The page scrolls there
+   smoothly where motion is allowed, as the prototype's scroll did; globals.css's reduced-motion rule keeps it instant. */
+@media (prefers-reduced-motion: no-preference) { html:has(.cs) { scroll-behavior: smooth; } }
 
 /* The app's icon, rounded as macOS masks it. */
 .cs-icon { display: block; flex: none; border-radius: 22.5%; }
@@ -58,6 +61,7 @@
 .cs-install-head h3 { margin: 0; font-size: var(--type-body-m-size); line-height: var(--type-body-m-lh); font-weight: var(--type-weight-strong); }
 .cs-install-head p { margin: var(--sp-025) 0 0; color: var(--color-text-secondary); font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); text-wrap: pretty; }
 .cs-install-head .cs-mark { width: 32px; height: 32px; background: var(--color-surface-600); }
+.cs-install-guide { display: inline-block; margin-top: var(--sp-025); }
 .cs .cs-code { max-width: none; margin: 0; }
 
 /* ---- Open source: on Marshal's band, the words at the left and the repository at the right. ---- */
@@ -65,7 +69,7 @@
 .cs-repo { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-05); padding: var(--sp-3); border-radius: var(--r-lg); background: var(--color-surface-600); box-shadow: var(--shadow-raised); }
 .cs-repo-name { margin: 0; font-family: var(--font-mono); font-size: var(--type-code-size); line-height: var(--type-code-lh); }
 .cs-repo-license { margin: 0 0 var(--sp-2); color: var(--color-text-secondary); font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); }
-.cs-repo button { flex: none; white-space: nowrap; }
+.cs-repo :is(button, a) { flex: none; white-space: nowrap; }
 
 /* ---- The close: the icon, one line and the hero's two actions, centred on the page's ground. ---- */
 .cs-start { padding: var(--sp-10) 0; }

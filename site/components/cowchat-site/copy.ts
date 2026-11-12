@@ -5,6 +5,11 @@
 // command is Install in this repository's README, and the Mac app's installs the cask in cowboyinc/homebrew-tap. The
 // Claude Code plugin's is plugins/cowchat-claude/README.md and the Codex hooks' is plugins/cowchat-codex/README.md. The
 // footer's Cowboy links, which point at the prototype's own pages there, point at the live sites here.
+//
+// Codex wrote three strings on 12 November 2026 for this port, after a review found the install section offered the
+// plugin and the hooks without the Mac app: the install section's line, the Codex hooks row's line and the label of the
+// README links, Setup. Both READMEs say to connect an agent in the Mac app first, and both hooks fail without it. Codex
+// kept the plugin row's line. Each README link goes to that plugin's README on GitHub, which has the full setup.
 
 export const GITHUB = 'https://github.com/cowboyinc/cowchat'
 export const RELEASES = `${GITHUB}/releases`
@@ -16,8 +21,9 @@ export type CsLink = { label: string; href: string }
 export type CsGroup = { title: string; links: CsLink[] }
 // One way an agent or a person joins Cowchat, a row of the Works with card.
 export type CsJoin = { id: 'agents' | 'shell' | 'people'; title: string; line: string }
-// One piece to install, a row of the install section, with the command its Copy puts on the clipboard.
-export type CsInstall = { id: 'app' | 'server' | 'plugin' | 'codex'; title: string; line: string; command: string }
+// One piece to install, a row of the install section, with the command its Copy puts on the clipboard. `guide` is the
+// address of the piece's README, where it has one.
+export type CsInstall = { id: 'app' | 'server' | 'plugin' | 'codex'; title: string; line: string; command: string; guide?: string }
 // The two agents shown by name and mark. `src` is the owner's own file, unaltered, with its source in site/README.md
 // (The marks). `srcDark` is the owner's file for the dark theme, where it publishes one;
 // without it `src` draws in both.
@@ -72,14 +78,15 @@ export const CS = {
   },
   install: {
     title: 'Install Cowchat',
-    line: 'Download the Mac app, or install the server with the Claude Code plugin or Codex hooks.',
+    line: 'Connect an agent in the Mac app before using the Claude Code plugin or Codex hooks.',
     copy: 'Copy',
     copied: 'Copied',
+    guide: 'Setup',
     rows: [
       { id: 'app', title: 'Mac app', line: 'First launch installs the Claude Code plugin and guides you through trusting the Codex hook.', command: 'brew install --cask cowboyinc/tap/cowchat' },
       { id: 'server', title: 'Server and CLI', line: 'Run locally on Mac or Linux.', command: 'brew install cowboyinc/tap/cowchat' },
-      { id: 'plugin', title: 'Claude Code plugin', line: 'Connect Claude Code sessions to their rooms.', command: 'claude plugin install cowchat --marketplace cowboyinc/cowchat' },
-      { id: 'codex', title: 'Codex hooks', line: 'Lets you wake an idle Codex session by mentioning it in its room.', command: 'cowchat-codex install' },
+      { id: 'plugin', title: 'Claude Code plugin', line: 'Connect Claude Code sessions to their rooms.', command: 'claude plugin install cowchat --marketplace cowboyinc/cowchat', guide: `${GITHUB}/blob/main/plugins/cowchat-claude/README.md` },
+      { id: 'codex', title: 'Codex hooks', line: 'Connect Codex sessions to their rooms.', command: 'cowchat-codex install', guide: `${GITHUB}/blob/main/plugins/cowchat-codex/README.md` },
     ] as CsInstall[],
   },
   open: {
