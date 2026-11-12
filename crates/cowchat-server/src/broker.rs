@@ -115,13 +115,17 @@ impl Broker {
     pub fn bind_access_store(&self, store: &Arc<crate::store::Store>) {
         let _ = self.access_store.set(Arc::downgrade(store));
     }
-    fn room_recipient_allowed(&self, id: &str, room: &str) -> bool {
-        let Some(store) = self.access_store.get().and_then(std::sync::Weak::upgrade) else {
-            return true;
+    /// The key a room member is connected with, when that key may receive the room's frames. Returning the key lets
+    /// the send that follows tell whether the member reconnected with a different key in between.
+    fn admitted_key(&self, id: &str, room: &str) -> Option<String> {
+        let agent = self.agents.get(id)?;
+        let allowed = match self.access_store.get().and_then(std::sync::Weak::upgrade) {
+            Some(store) => store
+                .social_room_access(room, &agent.api_key)
+                .unwrap_or(true),
+            None => true,
         };
-        self.agents
-            .get(id)
-            .is_some_and(|a| store.social_room_access(room, &a.api_key).unwrap_or(true))
+        allowed.then(|| agent.api_key.clone())
     }
     pub fn lock_agent_lifecycle(&self) -> std::sync::MutexGuard<'_, ()> {
         self.agent_lifecycle.lock().unwrap()
@@ -144,8 +148,8 @@ impl Broker {
                 if member_id == sender_id {
                     continue;
                 }
-                if self.room_recipient_allowed(member_id, room_id) {
-                    self.send_to_agent(member_id, frame.clone());
+                if let Some(key) = self.admitted_key(member_id, room_id) {
+                    self.send_to_room_member(member_id, frame.clone(), room_id, &key);
                 }
             }
         }
@@ -155,8 +159,8 @@ impl Broker {
     pub fn broadcast_to_room_all(&self, room_id: &str, frame: &Frame) {
         if let Some(members) = self.room_members.get(room_id) {
             for member_id in members.iter() {
-                if self.room_recipient_allowed(member_id, room_id) {
-                    self.send_to_agent(member_id, frame.clone());
+                if let Some(key) = self.admitted_key(member_id, room_id) {
+                    self.send_to_room_member(member_id, frame.clone(), room_id, &key);
                 }
             }
         }
@@ -175,16 +179,28 @@ impl Broker {
         );
 
         for agent_id in mentions {
-            if self.is_agent_in_room(agent_id, room_id)
-                && self.room_recipient_allowed(agent_id, room_id)
-            {
-                self.send_to_agent(agent_id, frame.clone());
+            if !self.is_agent_in_room(agent_id, room_id) {
+                continue;
+            }
+            if let Some(key) = self.admitted_key(agent_id, room_id) {
+                self.send_to_room_member(agent_id, frame.clone(), room_id, &key);
             }
         }
     }
 
     /// Send a frame to a specific agent by ID.
     pub fn send_to_agent(&self, agent_id: &str, frame: Frame) {
+        self.send_checked(agent_id, frame, None);
+    }
+
+    /// Sends a room's frame to a member that `admitted_key` has just admitted to `room_id` with `key`. That check
+    /// denies exactly what `send_to_agent`'s room check would, so it is not repeated for a frame about the same room
+    /// sent to the same key.
+    fn send_to_room_member(&self, agent_id: &str, frame: Frame, room_id: &str, key: &str) {
+        self.send_checked(agent_id, frame, Some((room_id, key)));
+    }
+
+    fn send_checked(&self, agent_id: &str, frame: Frame, admitted: Option<(&str, &str)>) {
         if let Some(agent) = self.agents.get(agent_id) {
             if let Some(store) = self.access_store.get().and_then(std::sync::Weak::upgrade) {
                 if agent.api_key.starts_with(crate::store::social::PREFIX)
@@ -196,6 +212,7 @@ impl Broker {
                     .payload
                     .get("room_id")
                     .and_then(serde_json::Value::as_str)
+                    .filter(|room| admitted != Some((*room, agent.api_key.as_str())))
                 {
                     if frame.frame_type != FrameType::RoomDestroyed
                         && store.social_room_access(room, &agent.api_key) == Some(false)
@@ -432,6 +449,137 @@ mod tests {
     use super::*;
     use cowchat_core::AgentInfo;
     use tokio::sync::Notify;
+
+    fn connect(
+        agents: &DashMap<String, AgentConnection>,
+        id: &str,
+        key: &str,
+    ) -> mpsc::Receiver<Frame> {
+        let (sender, receiver) = mpsc::channel(16);
+        agents.insert(
+            id.into(),
+            AgentConnection::new(
+                AgentInfo {
+                    agent_id: id.into(),
+                    name: id.into(),
+                    capabilities: vec![],
+                    connected_at: None,
+                    last_active: None,
+                    status: None,
+                    status_detail: None,
+                    progress: None,
+                },
+                "session".into(),
+                sender,
+                tokio::spawn(async {}),
+                tokio::spawn(async {}),
+                Arc::new(Notify::new()),
+                key.into(),
+            ),
+        );
+        receiver
+    }
+
+    fn drain(receiver: &mut mpsc::Receiver<Frame>) -> Vec<FrameType> {
+        let mut frames = Vec::new();
+        while let Ok(frame) = receiver.try_recv() {
+            frames.push(frame.frame_type);
+        }
+        frames
+    }
+
+    /// A broker with an access store, a social room "managed" that a plain API key may not read, and an ordinary
+    /// room "open". "plain" and "sender" are members of both.
+    fn broker_with_managed_room() -> (Broker, Arc<crate::store::Store>, mpsc::Receiver<Frame>) {
+        let store = Arc::new(crate::store::Store::open_in_memory().unwrap());
+        for room in ["managed", "open"] {
+            store.create_room(room, room, None, None, None).unwrap();
+        }
+        store.execute_batch_for_test(
+            "INSERT INTO social_rooms(room_id, owner_id) VALUES ('managed', 'owner');",
+        );
+        let agents = Arc::new(DashMap::new());
+        let members = Arc::new(DashMap::new());
+        let broker = Broker::new(agents.clone(), members.clone());
+        broker.bind_access_store(&store);
+        let plain = connect(&agents, "plain", "plain-api-key");
+        let _sender = connect(&agents, "sender", "sender-api-key");
+        for room in ["managed", "open"] {
+            members.insert(
+                room.to_string(),
+                vec!["plain".to_string(), "sender".to_string()],
+            );
+        }
+        (broker, store, plain)
+    }
+
+    fn room_frame(frame_type: FrameType, room: &str) -> Frame {
+        Frame::event(frame_type, serde_json::json!({ "room_id": room }))
+    }
+
+    #[tokio::test]
+    async fn broadcasts_drop_a_member_the_room_denies() {
+        let (broker, store, mut plain) = broker_with_managed_room();
+        let frame = room_frame(FrameType::MessageReceived, "managed");
+        broker.broadcast_to_room("managed", "sender", &frame);
+        broker.broadcast_to_room_all("managed", &frame);
+        let message = store
+            .insert_message(
+                "m",
+                "managed",
+                "sender",
+                "sender",
+                "hi @plain",
+                None,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        broker.send_mentions(&["plain".to_string()], &message, "managed");
+        assert!(drain(&mut plain).is_empty());
+
+        broker.broadcast_to_room(
+            "open",
+            "sender",
+            &room_frame(FrameType::MessageReceived, "open"),
+        );
+        assert_eq!(drain(&mut plain), vec![FrameType::MessageReceived]);
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_frame_about_another_room_is_checked_against_that_room() {
+        let (broker, _store, mut plain) = broker_with_managed_room();
+        // Admitted to "open", but the frame names "managed", which this key may not read.
+        broker.broadcast_to_room(
+            "open",
+            "sender",
+            &room_frame(FrameType::MessageReceived, "managed"),
+        );
+        broker.broadcast_to_room_all("open", &room_frame(FrameType::MessageReceived, "managed"));
+        assert!(drain(&mut plain).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_direct_send_still_checks_the_room_except_for_room_destroyed() {
+        let (broker, _store, mut plain) = broker_with_managed_room();
+        broker.send_to_agent("plain", room_frame(FrameType::MessageReceived, "managed"));
+        assert!(drain(&mut plain).is_empty());
+        broker.send_to_agent("plain", room_frame(FrameType::RoomDestroyed, "managed"));
+        assert_eq!(drain(&mut plain), vec![FrameType::RoomDestroyed]);
+    }
+
+    #[tokio::test]
+    async fn a_member_that_reconnects_with_another_key_is_checked_again() {
+        let (broker, _store, mut plain) = broker_with_managed_room();
+        // Admitted to "open" with one key; by the send the connection carries another, so the frame is
+        // checked again for that key rather than trusted.
+        broker.send_to_room_member(
+            "plain",
+            room_frame(FrameType::MessageReceived, "managed"),
+            "managed",
+            "a-different-key",
+        );
+        assert!(drain(&mut plain).is_empty());
+    }
 
     #[tokio::test]
     async fn saturated_outbound_queue_disconnects_lagging_agent() {

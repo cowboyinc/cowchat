@@ -1694,12 +1694,12 @@ async fn handle_list_rooms(
     };
 
     // Enrich rooms with member counts and last activity
+    let room_ids: Vec<&str> = rooms.iter().map(|room| room.room_id.as_str()).collect();
+    let last_activity = store.last_message_times(&room_ids).unwrap_or_default();
     for room in &mut rooms {
         let count = broker.get_room_members(&room.room_id).len();
         room.member_count = Some(count);
-        if let Ok(msgs) = store.get_history(&room.room_id, 1, None) {
-            room.last_activity = msgs.last().map(|m| m.timestamp);
-        }
+        room.last_activity = last_activity.get(&room.room_id).copied();
     }
 
     Frame {
@@ -2939,19 +2939,12 @@ async fn handle_subscribe(
         if backlog.is_empty() {
             break;
         }
-        for msg in &backlog {
-            if !crate::webhooks::matches_filter(&sub, msg) {
-                continue;
-            }
-            let delivery_id = uuid::Uuid::new_v4().to_string();
-            let _ = store.enqueue_delivery(
-                &delivery_id,
-                &sub.subscription_id,
-                msg.seq,
-                &msg.message_id,
-                now,
-            );
-        }
+        let matching: Vec<(i64, &str)> = backlog
+            .iter()
+            .filter(|msg| crate::webhooks::matches_filter(&sub, msg))
+            .map(|msg| (msg.seq, msg.message_id.as_str()))
+            .collect();
+        let _ = store.enqueue_deliveries(&sub.subscription_id, &matching, now);
         backfill_cursor = backlog
             .last()
             .map(|message| message.seq)
@@ -3090,19 +3083,12 @@ async fn handle_enable_subscription(
     if let Ok(backlog) =
         store.get_history_filtered(&sub.room_id, 1000, None, None, Some(sub.last_delivered_seq))
     {
-        for msg in backlog {
-            if !crate::webhooks::matches_filter(&sub, &msg) {
-                continue;
-            }
-            let delivery_id = uuid::Uuid::new_v4().to_string();
-            let _ = store.enqueue_delivery(
-                &delivery_id,
-                &sub.subscription_id,
-                msg.seq,
-                &msg.message_id,
-                now,
-            );
-        }
+        let matching: Vec<(i64, &str)> = backlog
+            .iter()
+            .filter(|msg| crate::webhooks::matches_filter(&sub, msg))
+            .map(|msg| (msg.seq, msg.message_id.as_str()))
+            .collect();
+        let _ = store.enqueue_deliveries(&sub.subscription_id, &matching, now);
     }
     webhook_mgr.wake();
 
