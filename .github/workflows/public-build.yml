@@ -6,6 +6,16 @@ on:
 permissions:
   contents: read
 jobs:
+  release-publisher:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: bash scripts/test-publish-release.sh
   rust:
     strategy:
       fail-fast: false

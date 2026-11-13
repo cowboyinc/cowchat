@@ -140,6 +140,84 @@ The release fails closed unless the repository defines all five Apple secrets:
 simple headless layout; `build-dmg.sh` remains the Gallop-styled local release
 builder when Finder automation is available.
 
+## Stable Mac download and release recovery
+
+The release publisher attaches `Cowchat.dmg` as a byte-identical copy of the
+signed, notarized `Cowchat-<version>.dmg`. Consumers should use
+`https://github.com/cowboyinc/cowchat/releases/latest/download/Cowchat.dmg` once
+the initial alias backfill is complete. Versioned assets and Homebrew checksums
+remain unchanged.
+
+`scripts/publish-release.sh TAG REPO DIST_DIR POLICY MODE` requires Bash, Python 3,
+`jq`, `gh` with `api --paginate --slurp` support, and `curl`. `full` mode requires the versioned DMG and all four CLI
+archives. `installer-only` mode requires just the versioned DMG and is restricted
+to `preserve` policy on an already-published stable release. Non-stable tags,
+missing local artifacts, metadata failures, and differing/incomplete remote
+assets fail explicitly. The script never deletes or overwrites release assets.
+
+New releases are drafts until all uploaded bytes are verified. A retry can fill
+missing assets or resume an identical draft, but a rebuild may produce different
+signed bytes. Recover the original run artifacts or cut a new version in that
+case. For an incomplete draft asset, inspect the tag and asset ID, explicitly delete
+only that never-published asset, then retry using the original artifacts. An
+existing prerelease is not automatically converted; use a new stable release
+or a separately reviewed promotion. Incomplete published assets require
+explicit operator recovery; do not use
+`--clobber` to repair a published installer.
+
+Tag pushes use `auto` promotion, which only advances latest to a greater numeric
+stable version. Manual dispatch defaults to `preserve`; opt into `promote_latest`
+only to advance latest. Historical runs do not open Homebrew downgrade PRs.
+Dispatch checks out the selected tag, so it can use this publisher only when that
+tag contains `scripts/publish-release.sh`. For older tags, use the installer-only
+backfill procedure below from a checkout containing this publisher; redispatching
+an old tag does not retrofit the new scripts.
+Publication and tap preparation share a fixed Actions concurrency group.
+Actions may replace pending runs in this group: if a tag's job is cancelled
+without publishing, dispatch the updated workflow again. This is not a FIFO
+queue. Old workflow reruns and manual release edits bypass the lock.
+
+Public probes retry five times with a 10-second connection timeout and a
+300-second transfer deadline per attempt. A failure after publication
+reports **release published; public download verification failed**. First recheck
+the public URL without modifying assets. Restore missing assets only from the
+original verified artifacts. If bytes differ, investigate or publish a new
+version. Do not delete or unpublish as automatic rollback. Daily monitoring is
+not included; manual publishers must preserve this contract.
+A successful run may report a skipped stable-URL check when GitHub reports a
+different latest tag, including a stale API response after promotion. That result
+does not verify the stable URL or guarantee a Homebrew PR was opened. Confirm
+the intended latest tag, stable download, and tap PR before declaring a release
+ready; rerun verification from the original artifacts if needed.
+
+### Maintainer rollout for the first alias
+
+1. Merge the publisher PR. Pause other release writers and ensure no old workflow
+   is active. Backfill is a coordinated manual operation outside the Actions lock.
+2. Re-read the current latest release and immutability state. Download its existing
+   versioned DMG, without rebuilding it, into a temporary directory.
+3. With a write-capable account, run the tested installer-only path:
+
+   ```sh
+   bash scripts/publish-release.sh "$TAG" cowboyinc/cowchat "$DIST_DIR" preserve installer-only
+   ```
+
+4. Recheck latest after upload. If it changed, stop and reassess; do not silently
+   modify another release. Compare both downloaded DMGs' SHA-256 hashes and run
+   `hdiutil verify` and `xcrun stapler validate` on the alias on macOS.
+5. Only after the public stable URL serves the verified installer, merge the
+   dashboard link PR. If releases become immutable before backfill, wait for the
+   next normal release containing the alias. Keep the dashboard PR unmerged.
+
+If the link later breaks, the consumer rollback is the previous releases-page
+URL. Do not alter versioned assets used by Homebrew or existing links.
+
+Run publisher regression tests without credentials or network:
+
+```sh
+bash scripts/test-publish-release.sh
+```
+
 ## CLI
 
 ```bash
