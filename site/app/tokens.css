@@ -1,0 +1,81 @@
+/* The tokens the page reads that Gallop's foundations do not publish: spacing, radius, the bridge from the type
+   scale's names to Gallop's steps, motion, elevation and the sheet's scrim. Each is copied with its value from the
+   prototype where the page is designed (cowboyinc/prototype-site at 39d5d7f63, src/app/globals.css :root). No Gallop
+   name is redefined here. */
+:root {
+  /* Spacing, on Gallop's 4 and 8 grid. */
+  --sp-025: 2px;
+  --sp-05: 4px;
+  --sp-1: 8px;
+  --sp-125: 10px;
+  --sp-15: 12px;
+  --sp-2: 16px;
+  --sp-25: 20px;
+  --sp-3: 24px;
+  --sp-4: 32px;
+  --sp-5: 40px;
+  --sp-6: 48px;
+  --sp-8: 64px;
+  --sp-10: 80px;
+
+  /* Radius. */
+  --r-sm: 4px;
+  --r-md: 14px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+
+  /* The type scale's names on Gallop's published steps. The three largest are flat values, which do not shrink with
+     the package's steps 8 to 10 under 768px. */
+  --type-title-size: 56px;
+  --type-title-lh: 64px;
+  --type-title-wght: 720;
+  --type-h1-size: 44px;
+  --type-h1-lh: 52px;
+  --type-h2-size: 36px;
+  --type-h2-lh: 44px;
+  --type-h2-wght: 780;
+  --type-h3-size: var(--text-size-7);
+  --type-h3-lh: var(--line-height-4);
+  --type-h4-size: var(--text-size-6);
+  --type-h4-lh: var(--line-height-3);
+  --type-h4-wght: 780;
+  --type-h4-ls: 0.01em;
+  --type-h5-size: var(--text-size-5);
+  --type-h5-lh: var(--line-height-2);
+  --type-h5-wght: 750;
+  --type-body-l-size: var(--text-size-4);
+  --type-body-l-lh: var(--line-height-2);
+  --type-body-l-ls: 0.025em;
+  --type-body-m-size: var(--text-size-3);
+  --type-body-m-lh: var(--line-height-1);
+  --type-body-m-ls: 0.03em;
+  --type-body-s-size: var(--text-size-2);
+  --type-body-s-lh: var(--line-height-1);
+  --type-body-s-ls: 0.035em;
+  --type-code-size: var(--text-size-3);
+  --type-code-lh: var(--line-height-1);
+  --type-caption-size: var(--text-size-1);
+  --type-caption-lh: var(--line-height-0);
+  --type-caption-ls: 0.04em;
+  --type-weight-regular: 550;
+  --type-weight-strong: 750;
+
+  /* Motion. */
+  --ease-in: ease-in;
+  --ease-out: ease-out;
+  --motion-press: 50ms;
+  --motion-enter: 180ms;
+  --motion-hover-control: 200ms;
+  --motion-progress: 250ms;
+
+  /* Elevation: a raised card, and the floating sheet with the glass's light edges. */
+  --shadow-raised: 0 4px 4px -4px var(--color-hay-600), 0 0 1px 0 var(--color-bison-100);
+  --shadow-hairline: rgba(0,0,0,0.04);
+  --shadow-ambient: rgba(0,0,0,0.08);
+  --inset-glass: inset 0 1px 0 0 var(--color-surface-glass-border-highlight),
+                 inset 0 -1px 0 0 var(--color-surface-glass-border-highlight);
+  --shadow-floating: var(--inset-glass), 0 1px 4px 1px var(--shadow-ambient), 0 0.5px 0 0.5px var(--shadow-hairline);
+
+  /* The window's dimming under a sheet. */
+  --color-scrim-heavy: rgba(15,14,12,0.4);
+}

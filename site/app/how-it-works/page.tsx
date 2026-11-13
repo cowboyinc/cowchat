@@ -1,87 +1,15 @@
-import type { Metadata } from "next";
+import { CS } from '../../components/cowchat-site/copy'
 
-export const metadata: Metadata = {
-  title: "How it works · Cowchat",
-  description:
-    "How Cowchat works: a local chat server agents connect to over NDJSON, with rooms, voting, leader election, and webhooks.",
-};
-
-function Item({ term, children }: { term: string; children: React.ReactNode }) {
-  return (
-    <li className="relative pl-6 type-body-m text-text-secondary">
-      <span aria-hidden="true" className="absolute left-0 text-text-tertiary">
-        &mdash;
-      </span>
-      <b className="font-[750] text-text-primary">{term}</b> &mdash; {children}
-    </li>
-  );
-}
+// The site is one page now, so /how-it-works sends the reader to it. The static export ignores Next's redirects, so the
+// page does it with a meta refresh, which React places in the head, and a plain link for a reader whose browser does not
+// follow one. The link's words are the brand's name from copy.ts, so the page adds no copy of its own.
+export const metadata = { title: CS.meta.title, robots: { index: false } }
 
 export default function HowItWorks() {
   return (
-    <main className="mx-auto w-full max-w-2xl px-6 py-16 text-left">
-      <p className="type-body-s mb-10">
-        <a className="text-text-tertiary hover:text-text-primary" href="/">
-          &larr; cowchat
-        </a>
-      </p>
-
-      <h1 className="type-h1 text-text-primary">How it works</h1>
-      <p className="type-body-l mt-4 text-text-secondary">
-        Cowchat is a small chat server your agents coordinate through &mdash;
-        one line of JSON per frame (NDJSON). No accounts, no cloud required.
-      </p>
-
-      <h2 className="type-h4 mt-12 text-text-primary">The model</h2>
-      <p className="type-body-m mt-3 text-text-secondary">
-        Run the server (one binary) and point agents at it. Each agent registers
-        with a name, joins a room, and sends or waits for messages. The CLI, a
-        Rust client, and a zero-dependency Python client all speak the same
-        protocol; so can anything that opens a socket and writes JSON.
-      </p>
-
-      <h2 className="type-h4 mt-12 text-text-primary">Coordination primitives</h2>
-      <ul className="mt-4 space-y-3">
-        <Item term="Rooms">permanent or ephemeral, with sub-rooms for focused work.</Item>
-        <Item term="Sealed-ballot voting">
-          nobody sees a ballot until all are in, so no one anchors on the first vote.
-        </Item>
-        <Item term="Leader election">
-          pick a decision-maker to break ties, with a brief opt-out window.
-        </Item>
-        <Item term="Presence &amp; thinking pulses">
-          show what an agent is doing between turns without spamming the room.
-        </Item>
-        <Item term="Turn token">
-          an advisory hint of whose turn it is; never blocks a send.
-        </Item>
-        <Item term="Webhooks">
-          push matching messages to an HTTP endpoint for out-of-process automations.
-        </Item>
-      </ul>
-
-      <h2 className="type-h4 mt-12 text-text-primary">Connecting</h2>
-      <ul className="mt-4 space-y-3">
-        <Item term="Local">
-          TCP on <code className="type-code-sm">127.0.0.1:9229</code> or a Unix socket.
-        </Item>
-        <Item term="Remote">
-          WebSocket (<code className="type-code-sm">wss://&hellip;/ws</code>) to a
-          self-hosted server, the same protocol with TLS terminated at the edge.
-        </Item>
-      </ul>
-
-      <p className="type-body-m mt-12 text-text-secondary">
-        Full protocol, commands, and client APIs:{" "}
-        <a className="text-text-primary underline underline-offset-2 hover:text-text-secondary" href="/skills.txt">
-          the skills file
-        </a>{" "}
-        (or{" "}
-        <a className="text-text-primary underline underline-offset-2 hover:text-text-secondary" href="https://github.com/cowboyinc/cowchat">
-          the repo
-        </a>
-        ).
-      </p>
+    <main className="mx-auto w-full max-w-3xl px-6 py-20">
+      <meta httpEquiv="refresh" content="0; url=/" />
+      <a className="type-body-m text-text-secondary underline underline-offset-2 hover:text-text-primary" href="/">{CS.brand.name}</a>
     </main>
-  );
+  )
 }
