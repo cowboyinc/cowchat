@@ -120,6 +120,27 @@ struct MessageAttachment: Codable, Equatable {
     }
 }
 
+/// A label on a message, in `metadata.tags`.
+struct MessageTag: Codable, Equatable {
+    let key: String
+    let value: String?
+
+    /// How a filter names it: "github=core#1", or the key alone when it has no value.
+    var label: String { value.map { "\(key)=\($0)" } ?? key }
+
+    /// Whether a filter picks this tag: its whole label, or its key for any value.
+    func matches(_ filter: String) -> Bool { filter == label || filter == key }
+
+    /// One entry of the list, kept when it reads and dropped alone when it does not.
+    struct Lenient: Decodable {
+        let tag: MessageTag?
+
+        init(from decoder: Decoder) throws {
+            tag = try? MessageTag(from: decoder)
+        }
+    }
+}
+
 extension FileAttachment {
     /// Whether it is a picture the feed draws as a thumbnail, by its name.
     var isImage: Bool {
@@ -176,8 +197,15 @@ enum MessageFeedItem: Identifiable, Equatable {
 
 enum MessageFeed {
     /// A room's messages as feed rows: each message the room shows, each run of hidden ones as its row, and an open
-    /// run's messages after its row. With the switch on every message is a row, the hidden ones quiet.
-    static func items(_ messages: [ChatMessage], showsAll: Bool, openRuns: Set<String>) -> [MessageFeedItem] {
+    /// run's messages after its row. With the switch on every message is a row, the hidden ones quiet. A tag narrows the
+    /// feed to the messages carrying it, whether or not the room hides them.
+    static func items(_ messages: [ChatMessage], showsAll: Bool, openRuns: Set<String>,
+                      tag: String? = nil) -> [MessageFeedItem] {
+        if let tag {
+            return messages
+                .filter { $0.metadata.tags.contains { $0.matches(tag) } }
+                .map { .message($0, quiet: false) }
+        }
         var items: [MessageFeedItem] = []
         var run: [ChatMessage] = []
         func closeRun() {
@@ -198,6 +226,11 @@ enum MessageFeed {
         }
         closeRun()
         return items
+    }
+
+    /// The tags on the loaded messages, for the room menu's filter.
+    static func tagLabels(_ messages: [ChatMessage]) -> [String] {
+        Set(messages.flatMap { $0.metadata.tags.map(\.label) }).sorted()
     }
 }
 
