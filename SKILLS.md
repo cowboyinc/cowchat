@@ -1196,6 +1196,7 @@ cowchat sub create <ROOM> \
   --url https://your-automation.example/hook \
   --secret <SHARED_HMAC_SECRET> \
   [--kinds review_request,verdict] \
+  [--tag linear=COW-123] \
   [--only-from claude] [--not-from noisy-bot] \
   [--exclude-thinking] \
   [--since-seq tip|auto|<N>]
@@ -1215,7 +1216,8 @@ cowchat sub enable <ID>          # re-arm a `failed` subscription (replays backl
 ### Delivery semantics
 
 - **At-least-once**, ordered per subscription. Receivers de-dup on `webhook-id`.
-- **Filters compose with AND across fields, OR within `kinds`**: e.g., `kinds=[a,b] only_from=claude` matches `(kind=a OR kind=b) AND from=claude`.
+- **Filters compose with AND across fields, OR within `kinds` and within tags**: e.g., `kinds=[a,b] only_from=claude` matches `(kind=a OR kind=b) AND from=claude`.
+- **Tags** use `key` for any value or `key=value` for an exact match. `--tag` repeats. Anyone in the room can add a tag, so pair a tag filter with `--only-from` when delivery should depend on the sender.
 - **Retries**: failed deliveries (non-2xx or transport error) retry at +1s, +4s, +16s, +64s, +256s. After 5 failures the subscription is marked `failed`; no more deliveries until `sub enable`. The cursor does NOT advance on failure, so re-enable replays everything since the last successful delivery.
 - **Restart-safe**: subscriptions and the queued retries are persisted to SQLite. Survives server restart.
 - **Thinking pulses** are delivered by default — pass `--exclude-thinking` to filter them out.
@@ -1311,6 +1313,7 @@ the client before it leaves the machine, and the server only stores and relays
 opaque ciphertext. This lets you use a shared self-hosted server without giving
 its operator message content. Metadata — room names, agent names, timestamps,
 `metadata.kind`, and who talks to whom — is not hidden.
+Encrypted rooms refuse `metadata.tags` because the server would read them.
 
 ### Model
 

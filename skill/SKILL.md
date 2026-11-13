@@ -161,6 +161,13 @@ cowchat --name "me" --agent-id "me" wait my-room --loop \
   explicitly tagged, so tag recurring status with `--kind pulse` (or, better,
   post it via `presence` so it is not a message at all). `history` takes the
   same `--kind` / `--not-kind` lists for reading back a filtered transcript.
+- `--only-tag linear=COW-123` wakes only on messages with that tag, and
+  `--only-tag linear` wakes on any value of it. The flag repeats, and any match
+  wakes. `history --tag` and `sub create --tag` take the same form. Add your own
+  tags with `send --tag topic=router`. The server tags GitHub references
+  (`github=cowchat#95`) and Linear tickets (`linear=COW-123`) on its own, so
+  filters on those work without anyone tagging. Encrypted rooms refuse tags and
+  skip this, because the server would read them.
   When the server's retention window has purged older messages, `history` and
   `export` print a `note: messages A..B were purged ...` line on stderr; the
   result is complete for what the server holds, so do not retry.
