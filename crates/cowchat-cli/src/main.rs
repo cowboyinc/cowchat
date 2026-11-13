@@ -3277,10 +3277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Monitoring events (Ctrl+C to stop)...");
             while let Ok(event) = events.recv().await {
                 if *json {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&event.frame).unwrap_or_default()
-                    );
+                    println!("{}", monitor_json_line(&event.frame));
                 } else {
                     print_event(&event.frame, room_secret.as_deref());
                 }
@@ -4264,6 +4261,17 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
     }
 }
 
+/// One `monitor --json` line. An event of a type this build does not know is
+/// written as `{"unknown":true,"id":…}`: re-serialising it would invent the
+/// type `"unknown"`, which no peer sent, and print a payload whose sensitivity
+/// is unknown.
+fn monitor_json_line(frame: &cowchat_core::Frame) -> String {
+    if frame.frame_type == cowchat_core::FrameType::Unknown {
+        return serde_json::json!({"unknown": true, "id": frame.id}).to_string();
+    }
+    serde_json::to_string(frame).unwrap_or_default()
+}
+
 /// The line printed for an event of a type this build does not know.
 ///
 /// The payload is deliberately withheld: this output lands in terminals, CI
@@ -4292,7 +4300,7 @@ mod room_key_tests {
     };
     use clap::Parser;
 
-    /// An unknown event's payload must never be printed. Listen-loop output lands
+    /// An unknown event's payload must never be printed. `monitor` and `shell` output lands
     /// in agent transcripts, and a payload of an unknown type is exactly the one
     /// whose sensitivity is unknown — the same rule the client's debug diagnostic
     /// applies. Before unknown-frame tolerance these lines were dropped unparsed;
@@ -4343,6 +4351,33 @@ mod room_key_tests {
             rendered.len() < 300,
             "a 4 KiB id must not produce a 4 KiB line: {} chars",
             rendered.len()
+        );
+    }
+
+    /// `monitor --json` must not leak an unknown event's payload either, and must
+    /// not pass it off as a frame of type "unknown".
+    #[test]
+    fn monitor_json_withholds_an_unknown_events_payload() {
+        let frame = cowchat_core::Frame {
+            id: Some("evt-7".into()),
+            reply_to: None,
+            frame_type: cowchat_core::FrameType::Unknown,
+            payload: serde_json::json!({"token": "cinv_canary_deadbeef"}),
+        };
+        let line = super::monitor_json_line(&frame);
+        assert!(!line.contains("cinv_canary_deadbeef"), "{line}");
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value, serde_json::json!({"unknown": true, "id": "evt-7"}));
+
+        let known = cowchat_core::Frame {
+            id: Some("p1".into()),
+            reply_to: None,
+            frame_type: cowchat_core::FrameType::Ping,
+            payload: serde_json::json!({}),
+        };
+        assert_eq!(
+            super::monitor_json_line(&known),
+            serde_json::to_string(&known).unwrap()
         );
     }
 

@@ -4640,9 +4640,9 @@ fn unknown_frame_types_parse_instead_of_failing() {
 }
 
 /// An unknown *request* must be answered with an error that carries `reply_to`, so the
-/// caller fails fast instead of blocking until timeout. Today the parse failure produces
-/// an uncorrelated error frame (`reply_to: None`), which a `reply_to`-keyed client drops
-/// as an unhandled event.
+/// caller fails fast instead of blocking until timeout. Before `FrameType::Unknown`, the
+/// parse failure produced an uncorrelated error frame (`reply_to: None`), which a
+/// `reply_to`-keyed client dropped as an unhandled event.
 #[tokio::test]
 async fn unknown_requests_get_a_correlated_error_and_keep_the_connection() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -4734,8 +4734,9 @@ async fn unknown_requests_get_a_correlated_error_and_keep_the_connection() {
 }
 
 /// An event-shaped unknown frame (no id, no reply_to) parses as ignorable, and a
-/// connection carrying one stays usable. This covers the parse layer and the
-/// server side; the client's own tolerance is tested in `cowchat-client`.
+/// server connection that receives one stays usable. The client's own tolerance
+/// of unknown events is tested in `cowchat-client`
+/// (`an_unknown_event_is_delivered_and_the_connection_stays_usable`).
 #[tokio::test]
 async fn an_unknown_event_frame_is_ignorable_and_not_fatal() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -4776,6 +4777,12 @@ async fn an_unknown_event_frame_is_ignorable_and_not_fatal() {
         parsed.reply_to.is_none() && parsed.id.is_none(),
         "an event carries no correlation, which is what makes it ignorable"
     );
+
+    // Send it over the connection; the server must not drop the connection.
+    write_half
+        .write_all(format!("{event}\n").as_bytes())
+        .await
+        .unwrap();
 
     // The connection is unaffected: a normal request still round-trips.
     line.clear();
