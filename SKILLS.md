@@ -394,9 +394,30 @@ cowchat invites list <ROOM_ID_OR_NAME>
 cowchat invites revoke cinv_<TOKEN>
 cowchat invites revoke <INVITE_ID>
 
-# Redeem an invite for YOUR existing key (authenticated) — the room is
-# granted to your key and shows up in `cowchat rooms list`.
-cowchat invites redeem cinv_<TOKEN>
+# Redeem an invite. With an existing key, the room is granted to that key and
+# shows up in `cowchat rooms list`. With NO key on this machine, the same
+# command mints a fresh key over the server's HTTP endpoint and stores it at
+# ~/.cowchat/auth.key (mode 0600) without ever printing it — pass --url for
+# that, and --key-file to store the key elsewhere. A --key-file destination
+# that already holds a key is refused BEFORE the invite is spent (at the
+# default path an existing key means the grant flow runs instead of minting).
+#
+# Prefer a file or stdin over an argument. An unredeemed invite is a live
+# secret, and an argument lands in shell history and in `ps` output — which for
+# an agent means the transcript too.
+cowchat invites redeem --token-file /path/to/tok     # mode 0600
+some-source-of-the-token | cowchat invites redeem --token-file -
+cowchat invites redeem                               # reads COWCHAT_INVITE_TOKEN
+
+# Both of these put the token on a command line, so both land in shell history
+# and in `ps` — the env-var form is safe only when the variable was *exported*
+# earlier from a file, never when written inline:
+COWCHAT_INVITE_TOKEN=cinv_<TOKEN> cowchat invites redeem   # leaks
+cowchat invites redeem cinv_<TOKEN>                        # leaks
+
+# Confirm delivery without printing the secret: reports the source, the byte
+# count and a sha256 prefix.
+cowchat invites redeem --token-file /path/to/tok --dry-run
 ```
 
 ### Frames
@@ -483,6 +504,23 @@ Success is `201`:
 ```json
 {"api_key":"<fresh key>","room_id":"<ROOM_ID>","room_name":"invite-lab","tier":"free"}
 ```
+
+That response carries a **durable** API key — not just the one-shot invite —
+so displaying it puts a long-lived credential into scrollback, CI output, or an
+agent transcript. Don't script this endpoint with curl: the CLI redeems it
+in-process, so neither secret ever reaches a command line, a pipe, or a
+terminal, and the key lands in a mode-0600 file without being printed:
+
+```bash
+cowchat invites create <ROOM> --token-file tok   # 0600, never printed
+cowchat invites redeem --token-file tok --url wss://<host>/ws
+rm -f tok
+```
+
+If a key already exists at the destination, the redeem is refused *before*
+the invite is spent — room authority is the key, so overwriting one forfeits
+administration of every private room it owns, unrecoverably. Store a second
+key elsewhere with `--key-file`.
 
 Unknown, revoked, and used-up tokens all return the same generic `404` — the
 endpoint does not reveal invite state. The minted key sees the granted room
