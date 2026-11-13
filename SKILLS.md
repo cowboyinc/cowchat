@@ -394,13 +394,14 @@ cowchat invites list <ROOM_ID_OR_NAME>
 cowchat invites revoke cinv_<TOKEN>
 cowchat invites revoke <INVITE_ID>
 
-# Redeem an invite. With an existing key, the room is granted to that key and
-# shows up in `cowchat rooms list`. With NO key on this machine, the same
+# Redeem an invite. With an existing identity for the server (a key, a saved
+# hosted credential or a bound session), the room is granted to it and shows
+# up in `cowchat rooms list`. With NO identity on this machine, the same
 # command mints a fresh key over the server's HTTP endpoint and stores it at
-# ~/.cowchat/auth.key (mode 0600) without ever printing it — pass --url for
-# that, and --key-file to store the key elsewhere. A --key-file destination
-# that already holds a key is refused BEFORE the invite is spent (at the
-# default path an existing key means the grant flow runs instead of minting).
+# ~/.cowchat/auth.key (mode 0600) without ever printing it — pass
+# --url wss://<host>/ws for that (ws:// only for localhost), and --key-file to
+# store the key elsewhere. A --key-file destination that already holds a key
+# is refused BEFORE the invite is spent.
 #
 # Prefer a file or stdin over an argument. An unredeemed invite is a live
 # secret, and an argument lands in shell history and in `ps` output — which for

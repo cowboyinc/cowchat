@@ -36,6 +36,56 @@ fn tmpdir(tag: &str) -> PathBuf {
     dir
 }
 
+/// The CLI under test with a hermetic environment: a fresh HOME, and none of
+/// the variables an agent session exports (the plugin hooks set COWCHAT_URL,
+/// COWCHAT_AGENT_ID and COWCHAT_SESSION_FILE), so a test can neither reach a
+/// real server nor pick up a real key. A test that needs a particular HOME
+/// sets it again.
+fn cowchat() -> Command {
+    let mut command = Command::new(bin());
+    command.env("HOME", tmpdir("home"));
+    for var in [
+        "COWCHAT_URL",
+        "COWCHAT_AGENT_ID",
+        "COWCHAT_SESSION_FILE",
+        "COWCHAT_ROOM_KEY",
+        "COWCHAT_INVITE_TOKEN",
+        "CODEX_SESSION_ID",
+    ] {
+        command.env_remove(var);
+    }
+    command
+}
+
+/// Accept one connection, failing the test after a deadline instead of hanging
+/// the suite when the CLI never connects.
+fn accept_within(listener: &std::net::TcpListener) -> std::net::TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the CLI never connected"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("accept failed: {e}"),
+        }
+    }
+}
+
+/// No connection reached `listener`.
+fn never_contacted(listener: &std::net::TcpListener) -> bool {
+    listener.set_nonblocking(true).unwrap();
+    matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+}
+
 #[cfg(unix)]
 fn mode(path: &std::path::Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
@@ -50,9 +100,20 @@ fn serve_one(
     status_line: &'static str,
     body: &'static str,
 ) -> std::thread::JoinHandle<String> {
+    serve_one_after(listener, status_line, body, || {})
+}
+
+/// `serve_one`, running `before_reply` once the request has arrived.
+fn serve_one_after(
+    listener: std::net::TcpListener,
+    status_line: &'static str,
+    body: &'static str,
+    before_reply: impl FnOnce() + Send + 'static,
+) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("the CLI should connect");
+        let mut stream = accept_within(&listener);
         let request = read_http_request(&mut stream);
+        before_reply();
         let response = format!(
             "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -99,11 +160,10 @@ fn redeem_accepts_a_token_file() {
     let tok = dir.join("token");
     fs::write(&tok, "cinv_from_file\n").unwrap();
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["invites", "redeem", "--token-file"])
         .arg(&tok)
         .arg("--dry-run")
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
 
@@ -127,9 +187,8 @@ fn redeem_accepts_a_token_file() {
 /// `--token-file -` reads the token from stdin.
 #[test]
 fn redeem_accepts_a_token_on_stdin() {
-    let mut child = Command::new(bin())
+    let mut child = cowchat()
         .args(["invites", "redeem", "--token-file", "-", "--dry-run"])
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -161,7 +220,7 @@ fn redeem_accepts_a_token_on_stdin() {
 /// The env fallback exists so a token need not appear on a command line at all.
 #[test]
 fn redeem_accepts_a_token_from_the_environment() {
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["invites", "redeem", "--dry-run"])
         .env("COWCHAT_INVITE_TOKEN", "cinv_from_env")
         .output()
@@ -187,11 +246,10 @@ fn redeem_rejects_conflicting_token_sources() {
     let tok = dir.join("token");
     fs::write(&tok, "cinv_file").unwrap();
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["invites", "redeem", "cinv_positional", "--token-file"])
         .arg(&tok)
         .arg("--dry-run")
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
 
@@ -212,7 +270,7 @@ fn redeem_rejects_conflicting_token_sources() {
 /// a regression against v0.9.1, and inconsistent with `resolve_agent_id`.
 #[test]
 fn an_explicit_token_overrides_the_environment() {
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["invites", "redeem", "cinv_explicit", "--dry-run"])
         .env("COWCHAT_INVITE_TOKEN", "cinv_ambient")
         .output()
@@ -229,9 +287,8 @@ fn an_explicit_token_overrides_the_environment() {
 /// With no token anywhere, the error must name the ways to supply one.
 #[test]
 fn redeem_without_a_token_explains_the_options() {
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["invites", "redeem", "--dry-run"])
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
 
@@ -255,19 +312,18 @@ fn keyless_redeem_stores_the_minted_key_0600_and_never_prints_it() {
     let key_path = dir.join("nested").join("auth.key");
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
     let server = serve_one(
         listener,
         "201 Created",
         r#"{"api_key":"1e2d3c4b5a69788796a5b4c3d2e1f0091e2d3c4b5a69788796a5b4c3d2e1f009","room_id":"r1","room_name":"invite-lab","tier":"free"}"#,
     );
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["--url", &url, "invites", "redeem", "--token-file"])
         .arg(&tok)
         .arg("--key-file")
         .arg(&key_path)
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
     let request = server.join().unwrap();
@@ -312,14 +368,13 @@ fn an_occupied_destination_refuses_before_the_invite_is_spent() {
     fs::write(&key_path, "k_original\n").unwrap();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["--url", &url, "invites", "redeem", "--token-file"])
         .arg(&tok)
         .arg("--key-file")
         .arg(&key_path)
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
 
@@ -355,15 +410,14 @@ fn a_server_error_stores_nothing() {
     let key_path = dir.join("auth.key");
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
     let server = serve_one(listener, "404 Not Found", r#"{"error":"not found"}"#);
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["--url", &url, "invites", "redeem", "--token-file"])
         .arg(&tok)
         .arg("--key-file")
         .arg(&key_path)
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
     server.join().unwrap();
@@ -399,19 +453,18 @@ fn a_late_server_failure_says_the_invite_may_be_spent() {
     let key_path = dir.join("auth.key");
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
     let server = serve_one(
         listener,
         "500 Internal Server Error",
         r#"{"error":"grant failed","api_key":"leakcanary123"}"#,
     );
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["--url", &url, "invites", "redeem", "--token-file"])
         .arg(&tok)
         .arg("--key-file")
         .arg(&key_path)
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
     server.join().unwrap();
@@ -444,19 +497,18 @@ fn a_non_object_json_error_body_is_withheld() {
     let key_path = dir.join("auth.key");
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
     let server = serve_one(
         listener,
         "502 Bad Gateway",
         r#"[{"apiKey":"leakarray456"}]"#,
     );
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["--url", &url, "invites", "redeem", "--token-file"])
         .arg(&tok)
         .arg("--key-file")
         .arg(&key_path)
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
     server.join().unwrap();
@@ -485,14 +537,13 @@ fn an_empty_leftover_reservation_gets_removal_guidance() {
     fs::write(&key_path, "").unwrap();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["--url", &url, "invites", "redeem", "--token-file"])
         .arg(&tok)
         .arg("--key-file")
         .arg(&key_path)
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
 
@@ -532,19 +583,18 @@ fn an_existing_parent_directory_keeps_its_mode() {
     fs::write(&tok, "cinv_sharedparent\n").unwrap();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
     let server = serve_one(
         listener,
         "201 Created",
         r#"{"api_key":"1e2d3c4b5a69788796a5b4c3d2e1f0091e2d3c4b5a69788796a5b4c3d2e1f009"}"#,
     );
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["--url", &url, "invites", "redeem", "--token-file"])
         .arg(&tok)
         .arg("--key-file")
         .arg(shared.join("auth.key"))
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
     server.join().unwrap();
@@ -570,19 +620,18 @@ fn keyless_redeem_accepts_a_bare_relative_key_file() {
     fs::write(&tok, "cinv_relative\n").unwrap();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
     let server = serve_one(
         listener,
         "201 Created",
         r#"{"api_key":"1e2d3c4b5a69788796a5b4c3d2e1f0091e2d3c4b5a69788796a5b4c3d2e1f009"}"#,
     );
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["--url", &url, "invites", "redeem", "--token-file"])
         .arg(&tok)
         .args(["--key-file", "mykey"])
         .current_dir(&dir)
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
     server.join().unwrap();
@@ -603,12 +652,11 @@ fn keyless_redeem_without_a_url_explains_the_requirement() {
     let tok = dir.join("tok");
     fs::write(&tok, "cinv_nourl\n").unwrap();
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args(["invites", "redeem", "--token-file"])
         .arg(&tok)
         .arg("--key-file")
         .arg(dir.join("auth.key"))
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .output()
         .expect("run cowchat");
 
@@ -647,17 +695,16 @@ fn a_non_regular_refused_destination_is_never_opened() {
     );
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
 
     // If the CLI opened the FIFO (no writer exists), it would block forever —
     // so run it under a deadline and kill it, making a reintroduced bug a
     // failure rather than a hung suite.
-    let mut child = Command::new(bin())
+    let mut child = cowchat()
         .args(["--url", &url, "invites", "redeem", "--token-file"])
         .arg(&tok)
         .arg("--key-file")
         .arg(&fifo)
-        .env_remove("COWCHAT_INVITE_TOKEN")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -702,7 +749,7 @@ fn a_failed_mint_releases_the_token_reservation() {
     let addr = listener.local_addr().unwrap().to_string();
     let reservation_probe = token_path.clone();
     let server = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("the CLI should connect");
+        let stream = accept_within(&listener);
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
@@ -739,7 +786,7 @@ fn a_failed_mint_releases_the_token_reservation() {
         assert_eq!(create["type"], "create_invite");
     });
 
-    let out = Command::new(bin())
+    let out = cowchat()
         .args([
             "--tcp",
             &addr,
@@ -771,21 +818,435 @@ fn a_failed_mint_releases_the_token_reservation() {
     );
 }
 
-/// `invites create --token-file` exists so the token never has to be retyped onto
-/// a command line.
-///
-/// This asserts only that the flag is offered. The write itself needs a live
-/// server to mint an invite, so it is **not** covered here — do not read this as
-/// coverage of the 0600 mode or the never-printed property.
+/// A minimal NDJSON server for `--tcp`: answers each frame with the matching
+/// reply from `replies` (frame type → (reply type, payload)) and returns the
+/// frame types it received, in order.
+fn serve_ndjson(
+    listener: std::net::TcpListener,
+    replies: &'static [(&'static str, &'static str, &'static str)],
+) -> std::thread::JoinHandle<Vec<String>> {
+    use std::io::{BufRead, BufReader};
+    std::thread::spawn(move || {
+        let stream = accept_within(&listener);
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        let mut seen = Vec::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            let frame: serde_json::Value = serde_json::from_str(&line).expect("parse frame");
+            let frame_type = frame["type"].as_str().unwrap_or_default().to_string();
+            seen.push(frame_type.clone());
+            let Some((_, reply_type, payload)) = replies
+                .iter()
+                .find(|(request, _, _)| *request == frame_type)
+            else {
+                break;
+            };
+            let id = frame["id"].as_str().expect("frame id");
+            let response = format!(
+                "{{\"id\":\"srv\",\"reply_to\":\"{id}\",\"type\":\"{reply_type}\",\"payload\":{payload}}}\n"
+            );
+            if writer.write_all(response.as_bytes()).is_err() {
+                break;
+            }
+        }
+        seen
+    })
+}
+
+/// `invites create --token-file` writes the minted token to a 0600 file and
+/// never prints it.
+#[cfg(unix)]
 #[test]
-fn create_accepts_a_token_file_destination() {
-    let out = Command::new(bin())
-        .args(["invites", "create", "--help"])
+fn create_writes_the_token_to_a_0600_file_without_printing_it() {
+    let dir = tmpdir("createok");
+    let token_path = dir.join("tok");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = serve_ndjson(
+        listener,
+        &[
+            ("register", "ok", r#"{"agent_id":"probe"}"#),
+            ("room_info", "ok", r#"{"room_id":"r1"}"#),
+            (
+                "create_invite",
+                "ok",
+                r#"{"token":"cinv_created_canary","room_id":"r1","room_name":"invite-lab","single_use":true}"#,
+            ),
+        ],
+    );
+
+    let out = cowchat()
+        .args([
+            "--tcp",
+            &addr,
+            "--key",
+            "testkey",
+            "invites",
+            "create",
+            "r1",
+            "--token-file",
+        ])
+        .arg(&token_path)
         .output()
         .expect("run cowchat");
+    let seen = server.join().unwrap();
+
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("--token-file"),
-        "create must offer a file destination for the token.\nstdout: {stdout}"
+        out.status.success(),
+        "create failed.\nstdout: {stdout}\nstderr: {stderr}"
     );
+    assert!(seen.iter().any(|t| t == "create_invite"), "{seen:?}");
+    assert_eq!(
+        fs::read_to_string(&token_path).unwrap().trim(),
+        "cinv_created_canary"
+    );
+    assert_eq!(mode(&token_path), 0o600);
+    assert!(
+        !stdout.contains("cinv_created_canary") && !stderr.contains("cinv_created_canary"),
+        "the token must never be printed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains(&*token_path.to_string_lossy()),
+        "the output should name where the token was written.\nstdout: {stdout}"
+    );
+}
+
+/// With no key anywhere, a plain `invites redeem` against a remote server mints
+/// a key and stores it at the default `~/.cowchat/auth.key`.
+#[cfg(unix)]
+#[test]
+fn keyless_redeem_defaults_to_the_auth_key_under_home() {
+    let home = tmpdir("defaulthome");
+    let tok = home.join("tok");
+    fs::write(&tok, "cinv_default_path\n").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let server = serve_one(
+        listener,
+        "201 Created",
+        r#"{"api_key":"1e2d3c4b5a69788796a5b4c3d2e1f0091e2d3c4b5a69788796a5b4c3d2e1f009"}"#,
+    );
+
+    let out = cowchat()
+        .env("HOME", &home)
+        .args(["--url", &url, "invites", "redeem", "--token-file"])
+        .arg(&tok)
+        .output()
+        .expect("run cowchat");
+    let request = server.join().unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "default-path mint failed: {stderr}");
+    assert!(
+        request.starts_with("POST /api/invites/redeem "),
+        "{request}"
+    );
+    let key_path = home.join(".cowchat").join("auth.key");
+    assert_eq!(fs::read_to_string(&key_path).unwrap().trim(), MINTED_KEY);
+    assert_eq!(mode(&key_path), 0o600);
+}
+
+/// A machine that already has a key grants the room to it over the WebSocket
+/// instead of minting another: the HTTP redeem endpoint is never called and
+/// the key is untouched.
+#[test]
+fn an_existing_auth_key_grants_instead_of_minting() {
+    let home = tmpdir("haskey");
+    fs::create_dir_all(home.join(".cowchat")).unwrap();
+    fs::write(home.join(".cowchat").join("auth.key"), "existing-key\n").unwrap();
+    let tok = home.join("tok");
+    fs::write(&tok, "cinv_grant_path\n").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let server = serve_one(listener, "400 Bad Request", "{}");
+
+    let _ = cowchat()
+        .env("HOME", &home)
+        .args(["--url", &url, "invites", "redeem", "--token-file"])
+        .arg(&tok)
+        .output()
+        .expect("run cowchat");
+    let request = server.join().unwrap();
+
+    assert!(
+        request.starts_with("GET /ws "),
+        "the CLI must connect to authenticate, not POST the mint endpoint.\nrequest: {request}"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join(".cowchat").join("auth.key")).unwrap(),
+        "existing-key\n"
+    );
+}
+
+/// The port's adaptation to hosted credentials: a saved hosted credential for
+/// this server is an identity, so redeem grants rather than minting a key the
+/// hosted credential would shadow.
+#[cfg(unix)]
+#[test]
+fn a_hosted_credential_for_the_server_grants_instead_of_minting() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tmpdir("hosted");
+    let data = home.join(".cowchat");
+    fs::create_dir_all(&data).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let hosted = data.join("hosted-bot.json");
+    fs::write(
+        &hosted,
+        serde_json::json!({"url": url, "api_key": "hosted-key"}).to_string(),
+    )
+    .unwrap();
+    fs::set_permissions(&hosted, fs::Permissions::from_mode(0o600)).unwrap();
+    let tok = home.join("tok");
+    fs::write(&tok, "cinv_hosted\n").unwrap();
+    let server = serve_one(listener, "400 Bad Request", "{}");
+
+    let _ = cowchat()
+        .env("HOME", &home)
+        .args(["--url", &url, "invites", "redeem", "--token-file"])
+        .arg(&tok)
+        .output()
+        .expect("run cowchat");
+    let request = server.join().unwrap();
+
+    assert!(request.starts_with("GET /ws "), "request: {request}");
+    assert!(!data.join("auth.key").exists(), "no key may be minted");
+}
+
+/// A session-only hosted credential is still the identity to use: redeem goes
+/// through `connect`, which explains `session start`, and mints nothing.
+#[cfg(unix)]
+#[test]
+fn a_session_only_hosted_credential_is_not_bypassed_by_minting() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tmpdir("mintonly");
+    let data = home.join(".cowchat");
+    fs::create_dir_all(&data).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let hosted = data.join("hosted-bot.json");
+    fs::write(
+        &hosted,
+        serde_json::json!({"url": url, "api_key": "hosted-key", "kind": "mint_only"}).to_string(),
+    )
+    .unwrap();
+    fs::set_permissions(&hosted, fs::Permissions::from_mode(0o600)).unwrap();
+    let tok = home.join("tok");
+    fs::write(&tok, "cinv_mintonly\n").unwrap();
+
+    let out = cowchat()
+        .env("HOME", &home)
+        .args(["--url", &url, "invites", "redeem", "--token-file"])
+        .arg(&tok)
+        .output()
+        .expect("run cowchat");
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("session start"), "{stderr}");
+    assert!(
+        never_contacted(&listener),
+        "nothing may be sent to the server"
+    );
+    assert!(!data.join("auth.key").exists(), "no key may be minted");
+}
+
+/// Over a local socket or TCP address there is nothing to mint against, so a
+/// redeem with no key goes through the authenticated grant, as it did before
+/// this change (a local server may run without auth).
+#[test]
+fn a_local_redeem_without_a_key_still_uses_the_grant() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = serve_ndjson(
+        listener,
+        &[
+            ("register", "ok", r#"{"agent_id":"probe"}"#),
+            (
+                "redeem_invite",
+                "ok",
+                r#"{"room_id":"r1","room_name":"invite-lab","granted":true}"#,
+            ),
+        ],
+    );
+    let home = tmpdir("localgrant");
+    let tok = home.join("tok");
+    fs::write(&tok, "cinv_local\n").unwrap();
+
+    let _ = cowchat()
+        .env("HOME", &home)
+        .args(["--tcp", &addr, "invites", "redeem", "--token-file"])
+        .arg(&tok)
+        .output()
+        .expect("run cowchat");
+    let seen = server.join().unwrap();
+
+    assert!(seen.iter().any(|t| t == "redeem_invite"), "{seen:?}");
+    assert!(!home.join(".cowchat").join("auth.key").exists());
+}
+
+/// The token and the minted key cross the network, so a cleartext ws:// URL to
+/// another machine is refused before anything is reserved or sent.
+#[test]
+fn keyless_redeem_refuses_cleartext_to_a_remote_host() {
+    let dir = tmpdir("cleartext");
+    let tok = dir.join("tok");
+    fs::write(&tok, "cinv_cleartext\n").unwrap();
+    let key_path = dir.join("auth.key");
+
+    let out = cowchat()
+        .args([
+            "--url",
+            "ws://cowchat.invalid/ws",
+            "invites",
+            "redeem",
+            "--token-file",
+        ])
+        .arg(&tok)
+        .arg("--key-file")
+        .arg(&key_path)
+        .output()
+        .expect("run cowchat");
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("wss://"), "{stderr}");
+    assert!(!key_path.exists(), "nothing may be reserved");
+}
+
+/// An error string that echoes the submitted invite, or carries something
+/// key-shaped, is withheld; so is a plain-text body.
+#[test]
+fn an_error_body_that_reflects_a_secret_is_withheld() {
+    for (body, secret) in [
+        (
+            r#"{"error":"rejected token cinv_reflect_canary"}"#,
+            "cinv_reflect_canary",
+        ),
+        (
+            r#"{"error":"key 9f8e7d6c5b4a39281706f5e4d3c2b1a0 was revoked"}"#,
+            "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+        ),
+        ("plain text leaked-secret-canary", "leaked-secret-canary"),
+    ] {
+        let dir = tmpdir("reflect");
+        let tok = dir.join("tok");
+        fs::write(&tok, "cinv_reflect_canary\n").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let server = serve_one(listener, "400 Bad Request", body);
+
+        let out = cowchat()
+            .args(["--url", &url, "invites", "redeem", "--token-file"])
+            .arg(&tok)
+            .arg("--key-file")
+            .arg(dir.join("auth.key"))
+            .output()
+            .expect("run cowchat");
+        server.join().unwrap();
+
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains(secret), "{body}: {stderr}");
+        assert!(stderr.contains("withheld"), "{body}: {stderr}");
+    }
+}
+
+/// A short, ordinary error message is still shown, so a real refusal stays
+/// actionable.
+#[test]
+fn an_ordinary_error_message_is_still_shown() {
+    let dir = tmpdir("ordinary");
+    let tok = dir.join("tok");
+    fs::write(&tok, "cinv_ordinary\n").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let server = serve_one(
+        listener,
+        "429 Too Many Requests",
+        r#"{"error":"rate limited"}"#,
+    );
+
+    let out = cowchat()
+        .args(["--url", &url, "invites", "redeem", "--token-file"])
+        .arg(&tok)
+        .arg("--key-file")
+        .arg(dir.join("auth.key"))
+        .output()
+        .expect("run cowchat");
+    server.join().unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("rate limited"), "{stderr}");
+}
+
+/// Another writer can fill the reserved destination while the request is in
+/// flight (a local server starting up writes its own key to an empty
+/// auth.key). That key must survive both a successful mint and a failure.
+#[test]
+fn a_key_written_during_the_request_is_never_replaced_or_removed() {
+    for (status, body) in [
+        (
+            "201 Created",
+            r#"{"api_key":"1e2d3c4b5a69788796a5b4c3d2e1f0091e2d3c4b5a69788796a5b4c3d2e1f009"}"#,
+        ),
+        ("404 Not Found", r#"{"error":"not found"}"#),
+    ] {
+        let dir = tmpdir("race");
+        let tok = dir.join("tok");
+        fs::write(&tok, "cinv_race\n").unwrap();
+        let key_path = dir.join("auth.key");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let racer = key_path.clone();
+        let server = serve_one_after(listener, status, body, move || {
+            // Replace the reservation the way a local server would: a new file.
+            let _ = fs::remove_file(&racer);
+            fs::write(&racer, "server-key\n").unwrap();
+        });
+
+        let out = cowchat()
+            .args(["--url", &url, "invites", "redeem", "--token-file"])
+            .arg(&tok)
+            .arg("--key-file")
+            .arg(&key_path)
+            .output()
+            .expect("run cowchat");
+        server.join().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&key_path).unwrap(),
+            "server-key\n",
+            "{status}: the other writer's key must survive"
+        );
+        if status.starts_with("201") {
+            assert!(
+                !out.status.success(),
+                "the install must be reported as failed"
+            );
+            let saved: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+                .collect();
+            assert_eq!(
+                saved.len(),
+                1,
+                "the minted key must be kept in its temporary"
+            );
+            assert_eq!(
+                fs::read_to_string(saved[0].path()).unwrap().trim(),
+                MINTED_KEY
+            );
+        }
+    }
 }
