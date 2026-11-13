@@ -159,4 +159,35 @@ final class MessagesForPeopleTests: XCTestCase {
         XCTAssertEqual(wrongShape.attachments, [])
         XCTAssertEqual(wrongShape.metadata.displayExternal, false)
     }
+
+    private func tagged(_ id: String, _ tags: [[String: String]]) throws -> ChatMessage {
+        try message(id, metadata: ["sender_kind": "agent", "tags": tags])
+    }
+
+    func testTagsDecodeAndAMalformedOneIsDroppedAlone() throws {
+        let decoded = try message("t", metadata: ["tags": [["key": "github", "value": "core#1", "source": "extractor"],
+                                                          ["value": "no key"], ["key": "urgent"]]])
+        XCTAssertEqual(decoded.metadata.tags.map(\.label), ["github=core#1", "urgent"])
+    }
+
+    func testATagFilterShowsOnlyMatchingMessagesEvenWhenARoomHidesThem() throws {
+        let messages = [
+            try person("p"),
+            try tagged("a", [["key": "github", "value": "core#1"]]),
+            try tagged("b", [["key": "github", "value": "core#2"]]),
+        ]
+        let exact = MessageFeed.items(messages, showsAll: false, openRuns: [], tag: "github=core#1")
+        XCTAssertEqual(exact.map(\.id), ["a"])
+        XCTAssertEqual(exact, [.message(messages[1], quiet: false)])
+        let anyValue = MessageFeed.items(messages, showsAll: false, openRuns: [], tag: "github")
+        XCTAssertEqual(anyValue.map(\.id), ["a", "b"])
+    }
+
+    func testAFilterListsEachLoadedTagOnceInOrder() throws {
+        let messages = [
+            try tagged("a", [["key": "topic", "value": "router"], ["key": "github", "value": "core#1"]]),
+            try tagged("b", [["key": "topic", "value": "router"]]),
+        ]
+        XCTAssertEqual(MessageFeed.tagLabels(messages), ["github=core#1", "topic=router"])
+    }
 }

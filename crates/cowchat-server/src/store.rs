@@ -314,6 +314,7 @@ impl Store {
                 webhook_url         TEXT NOT NULL,
                 secret              TEXT NOT NULL,
                 kinds               TEXT,         -- JSON array; NULL = match all kinds
+                tags                TEXT,         -- JSON array of tag filters; NULL = match all
                 only_from           TEXT,
                 not_from            TEXT,
                 exclude_thinking    INTEGER NOT NULL DEFAULT 0,
@@ -387,6 +388,7 @@ impl Store {
             "TEXT NOT NULL DEFAULT 'private'",
         );
         Self::migrate_add_column(&conn, "rooms", "owner_key", "TEXT");
+        ensure_column_exists(&conn, "subscriptions", "tags", "TEXT")?;
         Self::migrate_add_column(&conn, "rooms", "encrypted", "INTEGER NOT NULL DEFAULT 0");
         ensure_column_exists(
             &conn,
@@ -937,7 +939,7 @@ impl Store {
             let mut stmt = tx.prepare(
                 "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                         only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-                        status, failure_count, created_at
+                        status, failure_count, created_at, tags
                  FROM subscriptions WHERE room_id = ?1 AND (status = 'active' OR subscription_id IN (SELECT subscription_id FROM actor_subscriptions))",
             )?;
             let subscriptions = stmt.query_map([append.room_id], map_subscription_row)?;
@@ -1909,11 +1911,45 @@ impl Store {
         exclude_thinking: bool,
         since_seq: i64,
     ) -> Result<cowchat_core::Subscription, StoreError> {
+        self.create_tagged_subscription(
+            subscription_id,
+            room_id,
+            owner_key,
+            webhook_url,
+            secret,
+            kinds,
+            &[],
+            only_from,
+            not_from,
+            exclude_thinking,
+            since_seq,
+        )
+    }
+
+    pub fn create_tagged_subscription(
+        &self,
+        subscription_id: &str,
+        room_id: &str,
+        owner_key: &str,
+        webhook_url: &str,
+        secret: &str,
+        kinds: &[String],
+        tags: &[String],
+        only_from: Option<&str>,
+        not_from: Option<&str>,
+        exclude_thinking: bool,
+        since_seq: i64,
+    ) -> Result<cowchat_core::Subscription, StoreError> {
         let conn = self.conn.lock().unwrap();
         let kinds_json = if kinds.is_empty() {
             None
         } else {
             Some(serde_json::to_string(kinds).unwrap_or_else(|_| "[]".to_string()))
+        };
+        let tags_json = if tags.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string()))
         };
         let now = chrono::Utc::now();
         let now_str = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -1921,8 +1957,8 @@ impl Store {
             "INSERT INTO subscriptions
              (subscription_id, room_id, owner_key, webhook_url, secret, kinds,
               only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-              status, failure_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, 'active', 0, ?11)",
+              status, failure_count, created_at, tags)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, 'active', 0, ?11, ?12)",
             params![
                 subscription_id,
                 room_id,
@@ -1935,6 +1971,7 @@ impl Store {
                 exclude_thinking as i64,
                 since_seq,
                 now_str,
+                tags_json,
             ],
         )?;
         Ok(cowchat_core::Subscription {
@@ -1942,6 +1979,7 @@ impl Store {
             room_id: room_id.to_string(),
             webhook_url: webhook_url.to_string(),
             kinds: kinds.to_vec(),
+            tags: tags.to_vec(),
             only_from: only_from.map(String::from),
             not_from: not_from.map(String::from),
             exclude_thinking,
@@ -1963,7 +2001,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                     only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-                    status, failure_count, created_at
+                    status, failure_count, created_at, tags
              FROM subscriptions WHERE subscription_id = ?1",
         )?;
         let mut rows = stmt.query(params![subscription_id])?;
@@ -1984,7 +2022,7 @@ impl Store {
             Some(_) => (
                 "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                         only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-                        status, failure_count, created_at
+                        status, failure_count, created_at, tags
                  FROM subscriptions
                  WHERE owner_key = ?1 AND room_id = ?2
                  ORDER BY created_at DESC",
@@ -1993,7 +2031,7 @@ impl Store {
             None => (
                 "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                         only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-                        status, failure_count, created_at
+                        status, failure_count, created_at, tags
                  FROM subscriptions
                  WHERE owner_key = ?1
                  ORDER BY created_at DESC",
@@ -2024,7 +2062,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT subscription_id, room_id, owner_key, webhook_url, secret, kinds,
                     only_from, not_from, exclude_thinking, since_seq, last_delivered_seq,
-                    status, failure_count, created_at
+                    status, failure_count, created_at, tags
              FROM subscriptions WHERE room_id = ?1 AND status = 'active'",
         )?;
         let mut rows = stmt.query(params![room_id])?;
@@ -2245,7 +2283,12 @@ fn map_subscription_row(
     let status: String = row.get(11)?;
     let failure_count: i64 = row.get(12)?;
     let created_at_str: String = row.get(13)?;
+    let tags_json: Option<String> = row.get(14)?;
     let kinds: Vec<String> = kinds_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let tags: Vec<String> = tags_json
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
@@ -2258,6 +2301,7 @@ fn map_subscription_row(
             room_id,
             webhook_url,
             kinds,
+            tags,
             only_from,
             not_from,
             exclude_thinking: exclude_thinking != 0,
