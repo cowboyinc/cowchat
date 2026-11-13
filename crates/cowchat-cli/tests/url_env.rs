@@ -22,11 +22,14 @@ fn cowchat_url_is_the_server_unless_a_connection_is_named() {
     let url = "ws://127.0.0.1:1/ws";
     // no connection named: the WebSocket from COWCHAT_URL is tried
     let e = status(&[], url, home.path());
-    assert!(e.contains("Ws("), "{e}");
+    assert!(e.contains("WebSocket error"), "{e}");
     // an explicit socket or TCP address is used instead
     let sock = home.path().join("none.sock");
-    assert!(!status(&["--socket", sock.to_str().unwrap()], url, home.path()).contains("Ws("));
-    assert!(!status(&["--tcp", "127.0.0.1:1"], url, home.path()).contains("Ws("));
+    assert!(
+        !status(&["--socket", sock.to_str().unwrap()], url, home.path())
+            .contains("WebSocket error")
+    );
+    assert!(!status(&["--tcp", "127.0.0.1:1"], url, home.path()).contains("WebSocket error"));
     // set but empty: the default socket, not a WebSocket
-    assert!(!status(&[], "", home.path()).contains("Ws("));
+    assert!(!status(&[], "", home.path()).contains("WebSocket error"));
 }

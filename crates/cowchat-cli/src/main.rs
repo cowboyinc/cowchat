@@ -3946,7 +3946,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // With no key to authenticate as — or an explicit destination
                 // for a fresh one — redeem over HTTP and mint. Otherwise fall
                 // through to the authenticated grant below.
-                if key_file.is_some() || load_key(&cli.key).trim().is_empty() {
+                if key_file.is_some() || load_key(&cli.key, cli.url.as_deref()).trim().is_empty() {
                     return keyless_redeem(&cli, &resolved, key_file.as_deref()).await;
                 }
                 resolved_token = Some(resolved);
