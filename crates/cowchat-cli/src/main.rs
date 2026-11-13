@@ -1067,8 +1067,10 @@ fn create_dirs_hardened(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// Bytes written into a `SecretSlot` before the irreversible step, so a full
-/// disk or a file-size limit fails while nothing has been spent. Keys and
-/// invite tokens are far shorter.
+/// disk or a file-size limit normally fails while nothing has been spent. Keys
+/// and invite tokens are far shorter. Non-zero, so compression and zero-block
+/// detection cannot skip the allocation; on copy-on-write filesystems the
+/// rewrite can still need new blocks, and that failure is reported as unsaved.
 const SECRET_SLOT_BYTES: usize = 4096;
 
 /// A private file prepared for a secret before the irreversible step that
@@ -1082,8 +1084,10 @@ const SECRET_SLOT_BYTES: usize = 4096;
 /// or followed) and pre-filled with `SECRET_SLOT_BYTES`. It is published with a
 /// hard link, which fails rather than replace anything that appeared at the
 /// destination meanwhile, so another writer's key is never overwritten or
-/// removed. When publishing fails, the temporary is kept and named, because it
-/// may hold the only copy of the secret.
+/// removed; `cowchat-server`'s first-start key creation publishes the same
+/// way, so neither side replaces the other. When publishing fails, the
+/// temporary is kept and named, because it may hold the only copy of the
+/// secret.
 ///
 /// It deliberately *differs* from `auth.rs` on parent directories: that copy
 /// chmods a pre-existing parent to 0700 unconditionally, so pointing it at an
@@ -1140,7 +1144,7 @@ impl SecretSlot {
                 Err(e) => return Err(e),
             };
             let filled = file
-                .write_all(&[0; SECRET_SLOT_BYTES])
+                .write_all(&[b'.'; SECRET_SLOT_BYTES])
                 .and_then(|()| file.sync_all());
             if let Err(e) = filled {
                 drop(file);
