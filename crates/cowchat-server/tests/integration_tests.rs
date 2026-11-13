@@ -4663,6 +4663,7 @@ async fn unknown_requests_get_a_correlated_error_and_keep_the_connection() {
             capabilities: vec![],
             reconnect: false,
             protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+            session: None,
         })
         .unwrap(),
     };
@@ -4755,6 +4756,7 @@ async fn an_unknown_event_frame_is_ignorable_and_not_fatal() {
             capabilities: vec![],
             reconnect: false,
             protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+            session: None,
         })
         .unwrap(),
     };
