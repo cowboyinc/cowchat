@@ -373,3 +373,55 @@ fn append_upgrade_adds_receipts_and_bounds_legacy_pending_deliveries() {
         2
     );
 }
+
+#[test]
+fn tag_filters_survive_a_reopen_and_gate_the_delivery_outbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tags.db");
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .create_tagged_subscription(
+                "sub",
+                "lobby",
+                "owner",
+                "https://example.com/hook",
+                "secret",
+                &[],
+                &["linear=COW-1".to_owned()],
+                None,
+                None,
+                true,
+                0,
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let subscription = store.get_subscription("sub").unwrap().unwrap().0;
+    assert_eq!(subscription.tags, ["linear=COW-1"]);
+
+    let untagged = json!({});
+    let tagged = json!({"tags":[{"key":"linear","value":"COW-1","source":"extractor"}]});
+    store.append_message(&append("plain", &untagged)).unwrap();
+    store.append_message(&append("labelled", &tagged)).unwrap();
+    let due = store.load_due_deliveries(Utc::now(), 32).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].message_id, "labelled");
+}
+
+#[test]
+fn a_database_from_before_tag_filters_gains_the_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    {
+        let store = Store::open(&path).unwrap();
+        subscribe(&store);
+    }
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("ALTER TABLE subscriptions DROP COLUMN tags")
+        .unwrap();
+    drop(conn);
+    let store = Store::open(&path).unwrap();
+    let subscription = store.get_subscription("sub").unwrap().unwrap().0;
+    assert!(subscription.tags.is_empty());
+}

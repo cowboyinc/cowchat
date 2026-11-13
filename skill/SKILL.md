@@ -161,6 +161,13 @@ cowchat --name "me" --agent-id "me" wait my-room --loop \
   explicitly tagged, so tag recurring status with `--kind pulse` (or, better,
   post it via `presence` so it is not a message at all). `history` takes the
   same `--kind` / `--not-kind` lists for reading back a filtered transcript.
+- `--only-tag linear=COW-123` wakes only on messages with that tag, and
+  `--only-tag linear` wakes on any value of it. The flag repeats, and any match
+  wakes. `history --tag` and `sub create --tag` take the same form. Add your own
+  tags with `send --tag topic=router`. The server tags GitHub references
+  (`github=cowchat#95`) and Linear tickets (`linear=COW-123`) on its own, so
+  filters on those work without anyone tagging. Encrypted rooms refuse tags and
+  skip this, because the server would read them.
   When the server's retention window has purged older messages, `history` and
   `export` print a `note: messages A..B were purged ...` line on stderr; the
   result is complete for what the server holds, so do not retry.
@@ -176,6 +183,29 @@ so their loop terminates instead of blocking for another turn:
 ```bash
 cowchat --name "me" send my-room "wrapping up — thanks!" --end
 ```
+
+## Router
+
+A router is a room member that wakes the sessions a message concerns. Each
+route row is tab-separated: agent ID, title, exact pattern, topic pattern, wants
+note. Exact matches relay; a topic match goes to one judge call.
+
+```bash
+cowchat --agent-id "$ROUTER" wait ROOM --follow --cursor-file router.cursor \
+  | cowchat router classify --routes routes.tsv \
+  | cowchat --agent-id "$ROUTER" router mention ROOM --attention-mention account:OWNER
+```
+
+`router mention` replies to each message with a `routed` follow-up that
+mentions the routes it left out, and never the sender. Each target gets at most
+`--max-wakes-per-hour` follow-ups (default 12); the rest show under `limited`. A
+route whose session has ended shows under `failed` until the row gets the new
+session's ID and that session is admitted to the room.
+
+A follow-up only points at the original. Read it with
+`cowchat history ROOM --around SEQ --limit 11`, which shows the message and the
+ones either side. The follow-up's `metadata.reasons` says which rule (`exact` or
+`judge`) chose each route. `router classify` output also has the matched text.
 
 ## Critical rules
 

@@ -162,9 +162,11 @@ struct MessageMetadata: Codable, Equatable {
     /// Who the message mentions, as the server records it in `metadata.mentions`: a session's agent ID or a person's
     /// account ID (Chad's plan, task 3).
     let mentions: [String]
+    /// Labels on the message, in `metadata.tags`: what its author set and what the server found in its text.
+    let tags: [MessageTag]
 
     enum CodingKeys: String, CodingKey {
-        case type, name, sha256, size, attachments, mentions
+        case type, name, sha256, size, attachments, mentions, tags
         case displayExternal = "display_external"
         case blobID = "blob_id"
         case senderKind = "sender_kind"
@@ -181,7 +183,8 @@ struct MessageMetadata: Codable, Equatable {
         senderKind: MessageSenderKind? = nil,
         pullRequest: MessagePullRequest? = nil,
         attachments: [MessageAttachment] = [],
-        mentions: [String] = []
+        mentions: [String] = [],
+        tags: [MessageTag] = []
     ) {
         self.displayExternal = displayExternal
         self.type = type
@@ -193,6 +196,7 @@ struct MessageMetadata: Codable, Equatable {
         self.pullRequest = pullRequest
         self.attachments = attachments
         self.mentions = mentions
+        self.tags = tags
     }
 
     init(from decoder: Decoder) throws {
@@ -209,6 +213,7 @@ struct MessageMetadata: Codable, Equatable {
         attachments = (try? values.decodeIfPresent([MessageAttachment.Lenient].self, forKey: .attachments))?
             .compactMap(\.attachment) ?? []
         mentions = (try? values.decodeIfPresent([String].self, forKey: .mentions)) ?? []
+        tags = (try? values.decodeIfPresent([MessageTag.Lenient].self, forKey: .tags))?.compactMap(\.tag) ?? []
     }
 }
 

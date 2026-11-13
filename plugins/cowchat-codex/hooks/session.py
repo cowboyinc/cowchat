@@ -119,10 +119,16 @@ def hook_main(event, payload):
             if not saved or not any(marker in error.stderr for marker in
                                     ("session heartbeat failed: 401", "session heartbeat failed: 404")):
                 raise
-            agent_id = f"session:{uuid.uuid4()}"
-            common = [cli_binary, "--url", url, "--name", name, "--agent-id", agent_id]
-            result = json.loads(run(common + ["session", "start", "--id", agent_id,
-                                        "--harness", "codex", "--folder", folder, "--branch", branch]).stdout)
+            def start_fresh():
+                return json.loads(run(common + ["session", "start", "--id", agent_id,
+                                                "--harness", "codex", "--folder", folder,
+                                                "--branch", branch]).stdout)
+            try:
+                result = start_fresh()
+            except subprocess.CalledProcessError:
+                agent_id = f"session:{uuid.uuid4()}"
+                common = [cli_binary, "--url", url, "--name", name, "--agent-id", agent_id]
+                result = start_fresh()
         record = {"thread_id": identifier, "id": agent_id, "name": name, "folder": folder, "branch": branch,
                   "session_file": result["session_file"], "parent_pid": parent_pid,
                   "parent_started": parent_started}

@@ -117,6 +117,7 @@ class SessionHookTest(unittest.TestCase):
                 "#!/usr/bin/env python3\n"
                 "import json,os,sys\n"
                 "with open(os.environ['CALLS'],'a') as out: out.write(json.dumps(sys.argv[1:])+'\\n')\n"
+                "if os.getenv('REFUSE_RESTART') and not os.getenv('COWCHAT_SESSION_FILE') and sys.argv[sys.argv.index('--id')+1] in open(os.environ['CALLS']).read().rsplit('\\n',2)[0]: print('restart refused',file=sys.stderr); sys.exit(1)\n"
                 "if os.getenv('COWCHAT_SESSION_FILE'): print('session heartbeat failed: 401 Unauthorized',file=sys.stderr); sys.exit(1)\n"
                 "print(json.dumps({'session_file':os.environ['MOCK_SESSION_FILE'],'room_id':'r','room_name':'work'}))\n"
             )
@@ -134,7 +135,15 @@ class SessionHookTest(unittest.TestCase):
             ids = [args[args.index("--id") + 1] for args in starts]
             self.assertEqual(len(ids), 3)
             self.assertEqual(ids[0], ids[1])
-            self.assertNotEqual(ids[1], ids[2])
+            self.assertEqual(ids[1], ids[2])
+            env["REFUSE_RESTART"] = "1"
+            subprocess.run([sys.executable, str(ROOT / "hooks" / "session.py"), "start"], input=payload, text=True,
+                           env=env, check=True, capture_output=True)
+            starts = [json.loads(line) for line in calls.read_text().splitlines()]
+            ids = [args[args.index("--id") + 1] for args in starts]
+            self.assertEqual(ids[3], ids[2])
+            self.assertEqual(ids[4], ids[2])
+            self.assertNotEqual(ids[5], ids[2])
 
 
 if __name__ == "__main__":

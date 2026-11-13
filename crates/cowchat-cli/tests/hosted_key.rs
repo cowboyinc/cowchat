@@ -681,7 +681,7 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         .filter_map(|line| line.strip_prefix("export COWCHAT_AGENT_ID="))
         .collect::<Vec<_>>();
     assert_eq!(ids.len(), 2);
-    assert_ne!(ids[0], ids[1]);
+    assert_eq!(ids[0], ids[1]);
     task.abort();
     std::env::remove_var("COWCHAT_SOCIAL_PUBLIC_ORIGIN");
 }

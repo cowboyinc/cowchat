@@ -7,6 +7,7 @@ mod telegram;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use cowchat_client::{ClientError, CowchatClient};
+use cowchat_core::tags::{tags_match_any, MessageTag};
 use cowchat_core::{ChatMessage, ErrorCode, FrameType};
 use std::io::Write;
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 mod lantern;
 mod leases;
+mod router;
 
 /// `metadata.kind` marking the last message of a conversation. `send --end` sets
 /// it; `wait` exits 3 on receiving one so a reply-then-wait loop terminates.
@@ -262,6 +264,8 @@ enum Commands {
     Lease(leases::Args),
     /// Publish and update a live room artifact using Gallop and OpenUI.
     Artifact(artifact::Args),
+    /// Decide which threads a room message should reach.
+    Router(router::Args),
     /// Run a local signed wake receiver and start the actor program only for work.
     ActorHost(actor_host::ActorHostArgs),
     /// Bridge one explicitly configured Telegram chat to an encrypted room.
@@ -288,6 +292,10 @@ enum Commands {
         /// loop terminates cleanly instead of blocking for another turn.
         #[arg(long, conflicts_with = "kind")]
         end: bool,
+        /// Add a tag, as `key` or `key=value` (repeatable). Peers can filter on
+        /// tags via `wait --only-tag`, `history --tag` and `sub create --tag`.
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
         /// Mention an agent by agent-id (repeatable). Mentions route the message
         /// to `addressed`-mode actor subscriptions.
         #[arg(long = "mention")]
@@ -339,6 +347,10 @@ enum Commands {
         /// Only return messages with seq strictly greater than this value
         #[arg(long)]
         since_seq: Option<i64>,
+        /// Return the `--limit` messages centered on this seq. Use it to read the
+        /// message a router follow-up points at, with its context.
+        #[arg(long, conflicts_with_all = ["since", "since_seq", "follow"])]
+        around: Option<i64>,
         /// Only return messages whose `metadata.kind` is in this list (comma-
         /// or space-separated, any-of). E.g. `--kind verdict,decision`.
         #[arg(long)]
@@ -347,6 +359,10 @@ enum Commands {
         /// space-separated) — e.g. `--not-kind pulse,fyi` to drop heartbeats.
         #[arg(long)]
         not_kind: Option<String>,
+        /// Only return messages with this tag, as `key` for any value or
+        /// `key=value` (repeatable, any-of).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
         /// Write to file instead of stdout
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
@@ -424,6 +440,10 @@ enum Commands {
         /// Untagged messages are never suppressed by this filter.
         #[arg(long)]
         not_kind: Option<String>,
+        /// Only wake on messages with this tag, as `key` for any value or
+        /// `key=value` (repeatable, any-of).
+        #[arg(long = "only-tag", value_name = "TAG")]
+        only_tags: Vec<String>,
         /// Print peer `thinking` pulses to stderr while blocked, for live
         /// visibility during long runs. Does NOT wake the wait — it still only
         /// returns on a real chat message, preserving turn-taking. Content is
@@ -862,6 +882,10 @@ enum SubAction {
         /// Restrict to specific `--kind` values on the message (comma-separated).
         #[arg(long, value_delimiter = ',')]
         kinds: Vec<String>,
+        /// Only deliver messages with this tag, as `key` for any value or
+        /// `key=value` (repeatable, any-of).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
         /// Only deliver messages from this `--name`.
         #[arg(long)]
         only_from: Option<String>,
@@ -1505,6 +1529,7 @@ async fn run_wait_multiple(
     not_from: Option<&str>,
     only_kind: Option<&str>,
     not_kind: Option<&str>,
+    only_tags: &[String],
     text_mode: bool,
     drain: bool,
     since_seq: Option<&str>,
@@ -1691,6 +1716,7 @@ async fn run_wait_multiple(
                         &only_kinds,
                         &not_kinds,
                     )
+                    && tags_match_any(only_tags, &msg.metadata)
             };
             let mut batch = Vec::new();
             if drain {
@@ -1849,6 +1875,11 @@ fn parse_kinds(spec: Option<&String>) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Parse `--tag` specs so a typo fails loudly rather than filtering out everything.
+fn parse_tags(specs: &[String]) -> Result<Vec<MessageTag>, String> {
+    specs.iter().map(|spec| MessageTag::parse(spec)).collect()
+}
+
 /// True if a message carrying `msg_kind` should be SKIPPED (not woken on / not
 /// shown) under the given `only`/`not` kind lists. `only` is any-of allow-list;
 /// `not` is an exclude-list. An untagged message (`msg_kind == None`) is skipped
@@ -1863,6 +1894,25 @@ fn kind_skipped(msg_kind: Option<&str>, only: &[String], not: &[String]) -> bool
         return true;
     }
     false
+}
+
+async fn post_message(
+    cli: &Cli,
+    room: &str,
+    content: &str,
+    reply_to: Option<&str>,
+    mentions: &[String],
+    metadata: serde_json::Value,
+) -> Result<ChatMessage, Box<dyn std::error::Error>> {
+    if let Some(id) = resolve_agent_id(cli).filter(|id| id.starts_with("session:")) {
+        return session::send(cli, &id, room, content, reply_to, mentions, metadata).await;
+    }
+    let client = connect(cli).await?;
+    let room_id = resolve_room_id(&client, room).await?;
+    client.join_room(&room_id).await?;
+    Ok(client
+        .send_message_with_metadata(&room_id, content, reply_to, mentions.to_vec(), metadata)
+        .await?)
 }
 
 fn mentions_self(message: &ChatMessage, own_id: Option<&str>) -> bool {
@@ -1886,6 +1936,7 @@ async fn run_wait_follow(
     not_from: Option<&String>,
     only_kind: Option<&String>,
     not_kind: Option<&String>,
+    only_tags: &[String],
     show_thinking: bool,
     text: bool,
     output: Option<&PathBuf>,
@@ -1998,6 +2049,7 @@ async fn run_wait_follow(
                         message.agent_name == *name || message.agent_id == *name
                     }) || (mentions_only && !mentions_self(&message, own_id.as_deref()))
                         || kind_skipped(msg_kind, &only_kinds, &not_kinds)
+                        || !tags_match_any(only_tags, &message.metadata)
                     {
                         advance_cursor(&mut cursor, cursor_file, message.seq)?;
                         continue;
@@ -2311,6 +2363,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Session { action } => session::run(&cli, action).await?,
         Commands::Lease(args) => leases::run(&cli, args).await?,
         Commands::Artifact(args) => artifact::run(&cli, args).await?,
+        Commands::Router(args) => router::run(&cli, args).await?,
         Commands::ActorHost(args) => actor_host::run(&cli, args).await?,
         Commands::TelegramBridge(args) => telegram::run(&cli, args).await?,
         Commands::Send {
@@ -2320,6 +2373,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             reply_to,
             kind,
             end,
+            tags,
             mentions,
             pull_request,
             attachments,
@@ -2335,6 +2389,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(kind) = kind {
                 metadata["kind"] = serde_json::json!(kind);
             }
+            if !tags.is_empty() {
+                metadata["tags"] = serde_json::json!(parse_tags(tags)?);
+            }
             if let Some(display_external) =
                 external_display_flag(*display_external, resolve_agent_id(&cli).as_deref())
             {
@@ -2347,31 +2404,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 metadata["attachments"] = upload_attachments(&cli, room, attachments).await?;
             }
             let msg =
-                if let Some(id) = resolve_agent_id(&cli).filter(|id| id.starts_with("session:")) {
-                    session::send(
-                        &cli,
-                        &id,
-                        room,
-                        message,
-                        reply_to.as_deref(),
-                        mentions,
-                        metadata,
-                    )
-                    .await?
-                } else {
-                    let client = connect(&cli).await?;
-                    let room_id = resolve_room_id(&client, room).await?;
-                    client.join_room(&room_id).await?;
-                    client
-                        .send_message_with_metadata(
-                            &room_id,
-                            message,
-                            reply_to.as_deref(),
-                            mentions.clone(),
-                            metadata,
-                        )
-                        .await?
-                };
+                post_message(&cli, room, message, reply_to.as_deref(), mentions, metadata).await?;
             println!("{}", format_message(&msg));
         }
 
@@ -2601,19 +2634,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             follow,
             since,
             since_seq,
+            around,
             kind,
             not_kind,
+            tags,
             output,
         } => {
+            parse_tags(tags)?;
             let client = connect(&cli).await?;
             let room_id = resolve_room_id(&client, room).await?;
+            let since_seq = around
+                .map(|seq| (seq - 1 - i64::from(limit.saturating_sub(1) / 2)).max(0))
+                .or(*since_seq);
 
             // Show history (with optional --since / --since-seq filter)
             let messages = client
-                .get_history_filtered(&room_id, *limit, None, since.as_deref(), *since_seq)
+                .get_history_filtered(&room_id, *limit, None, since.as_deref(), since_seq)
                 .await?;
             if since.is_none() {
-                note_purged_history(&client, &room_id, *since_seq, &messages, *limit).await;
+                note_purged_history(&client, &room_id, since_seq, &messages, *limit).await;
             }
 
             // Optional kind filters (applied client-side): --kind allow-list,
@@ -2625,6 +2664,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|m| {
                     let msg_kind = m.metadata.get("kind").and_then(|v| v.as_str());
                     !kind_skipped(msg_kind, &only_kinds, &not_kinds)
+                        && tags_match_any(tags, &m.metadata)
                 })
                 .collect();
 
@@ -2707,6 +2747,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             not_from,
             only_kind,
             not_kind,
+            only_tags,
             show_thinking,
             output,
             drain,
@@ -2727,6 +2768,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     not_from.as_deref(),
                     only_kind.as_deref(),
                     not_kind.as_deref(),
+                    only_tags,
                     *text,
                     *drain,
                     since_seq.as_deref(),
@@ -2747,6 +2789,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     not_from.as_ref(),
                     only_kind.as_ref(),
                     not_kind.as_ref(),
+                    only_tags,
                     *show_thinking,
                     *text,
                     output.as_ref(),
@@ -2867,7 +2910,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if kind_skipped(msg_kind, &only_kinds, &not_kinds) {
                     return false;
                 }
-                true
+                tags_match_any(only_tags, &msg.metadata)
             };
 
             // Inner loop: keep advancing the bookmark until the returned message
@@ -3366,6 +3409,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     url,
                     secret,
                     kinds,
+                    tags,
                     only_from,
                     not_from,
                     exclude_thinking,
@@ -3382,11 +3426,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         })?),
                     };
                     let sub = client
-                        .create_subscription(
+                        .create_tagged_subscription(
                             &room_id,
                             url,
                             secret,
                             kinds.clone(),
+                            tags.clone(),
                             only_from.as_deref(),
                             not_from.as_deref(),
                             *exclude_thinking,

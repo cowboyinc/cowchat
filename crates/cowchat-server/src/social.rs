@@ -251,7 +251,7 @@ async fn action(
             };
             match (field("id"), field("name"), field("harness"), field("folder"), field("branch")) {
                 (Ok(id), Ok(name), Ok(harness), Ok(folder), Ok(branch)) => state.store
-                    .social_register_session(&key, id, name, harness, folder, branch)
+                    .social_start_session(&key, id, name, harness, folder, branch)
                     .map(|room| {
                         if let Ok(event) = state.store.social_session_state_by_id(id) {
                             broadcast_session_state(&state.broker, &state.store, &event);

@@ -107,8 +107,11 @@ def hook_main(event, payload):
                 for marker in ("session heartbeat failed: 401", "session heartbeat failed: 404")
             ):
                 raise
-            agent_id = f"session:{uuid.uuid4()}"
-            result = json.loads(run(start_command(agent_id)).stdout)
+            try:
+                result = json.loads(run(start_command(agent_id)).stdout)
+            except subprocess.CalledProcessError:
+                agent_id = f"session:{uuid.uuid4()}"
+                result = json.loads(run(start_command(agent_id)).stdout)
         session_file = result["session_file"]
         record = {"id": agent_id, "name": name, "folder": folder, "branch": branch, "session_file": session_file}
         temporary = records / f".{uuid.uuid4()}.tmp"

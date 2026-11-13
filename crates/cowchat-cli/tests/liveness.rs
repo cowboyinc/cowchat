@@ -1302,6 +1302,176 @@ async fn inline_charts_round_trip_through_local_and_encrypted_rooms() {
 }
 
 #[tokio::test]
+async fn a_mention_wakes_a_mentions_only_wait_in_a_plain_room() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let cowchat = |name: &str, args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command.args(["--tcp", &addr, "--key", &key, "--name", name]);
+        command.args(["--agent-id", name]);
+        command.args(args);
+        command
+    };
+    let sent = cowchat(
+        "mentioner",
+        &["send", "lobby", "hi", "--mention", "listener"],
+    )
+    .output()
+    .await
+    .unwrap();
+    assert!(sent.status.success());
+    let woken = cowchat(
+        "listener",
+        &[
+            "wait",
+            "lobby",
+            "--mentions-only",
+            "--since-seq",
+            "0",
+            "--timeout",
+            "3",
+        ],
+    )
+    .output()
+    .await
+    .unwrap();
+    assert!(
+        woken.status.success(),
+        "{}",
+        String::from_utf8_lossy(&woken.stderr)
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn history_around_returns_the_messages_either_side_of_a_seq() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let reader = CowchatClient::connect_tcp(&addr, &key, "reader", Some("reader"), vec![])
+        .await
+        .unwrap();
+    let cowchat = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command.args(["--tcp", &addr, "--key", &key, "--name", "context"]);
+        command.args(["--agent-id", "context-writer"]);
+        command.args(args);
+        command
+    };
+    for text in ["one", "two", "three", "four", "five"] {
+        let output = cowchat(&["send", "lobby", text]).output().await.unwrap();
+        assert!(output.status.success());
+    }
+    let messages = reader.get_history("lobby", 100, None).await.unwrap();
+    let middle = messages[2].seq.to_string();
+    let output = cowchat(&["history", "lobby", "--around", &middle, "--limit", "3"])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for text in ["two", "three", "four"] {
+        assert!(stdout.contains(text), "{stdout}");
+    }
+    for text in ["one", "five"] {
+        assert!(!stdout.contains(text), "{stdout}");
+    }
+
+    let first = messages[0].seq.to_string();
+    let output = cowchat(&["history", "lobby", "--around", &first, "--limit", "3"])
+        .output()
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("one"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn tags_round_trip_through_send_history_and_wait() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let reader = CowchatClient::connect_tcp(&addr, &key, "reader", Some("reader"), vec![])
+        .await
+        .unwrap();
+    let cowchat = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command.args(["--tcp", &addr, "--key", &key, "--name", "tagger"]);
+        command.args(["--agent-id", "tag-writer"]);
+        command.args(args);
+        command
+    };
+    for args in [
+        vec!["send", "lobby", "plain"],
+        vec![
+            "send",
+            "lobby",
+            "labelled",
+            "--tag",
+            "topic=router",
+            "--tag",
+            "urgent",
+        ],
+        vec!["send", "lobby", "see COW-4857"],
+    ] {
+        let output = cowchat(&args).output().await.unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let messages = reader.get_history("lobby", 100, None).await.unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0].metadata.get("tags"), None);
+    assert_eq!(
+        messages[1].metadata["tags"],
+        serde_json::json!([
+            {"key":"topic","value":"router","source":"author"},
+            {"key":"urgent","source":"author"}
+        ])
+    );
+    assert_eq!(
+        messages[2].metadata["tags"],
+        serde_json::json!([{"key":"linear","value":"COW-4857","source":"extractor"}])
+    );
+
+    let history = |tag: &'static str| {
+        let mut command = cowchat(&["history", "lobby", "--tag", tag]);
+        async move { command.output().await.unwrap() }
+    };
+    let by_key = String::from_utf8(history("topic").await.stdout).unwrap();
+    assert!(by_key.contains("labelled") && !by_key.contains("plain"));
+    let by_extractor = String::from_utf8(history("linear=COW-4857").await.stdout).unwrap();
+    assert!(by_extractor.contains("see COW-4857") && !by_extractor.contains("labelled"));
+    assert!(!history("Not A Tag").await.status.success());
+
+    let woken = Command::new(env!("CARGO_BIN_EXE_cowchat"))
+        .args(["--tcp", &addr, "--key", &key, "--name", "waiter"])
+        .args(["--agent-id", "tag-waiter", "wait", "lobby"])
+        .args(["--since-seq", "0", "--only-tag", "linear", "--timeout", "5"])
+        .output()
+        .await
+        .unwrap();
+    let woken = String::from_utf8(woken.stdout).unwrap();
+    assert!(woken.contains("see COW-4857") && !woken.contains("labelled"));
+
+    reader.join_room("lobby").await.unwrap();
+    let error = reader
+        .send_message_with_metadata(
+            "lobby",
+            "bad tag",
+            None,
+            vec![],
+            serde_json::json!({"tags":[{"key":"Bad Key"}]}),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("tag key"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn external_visibility_flag_survives_room_history() {
     let (server, addr, key, _tmp) = start_test_server().await;
     let reader = CowchatClient::connect_tcp(&addr, &key, "reader", Some("reader"), vec![])
