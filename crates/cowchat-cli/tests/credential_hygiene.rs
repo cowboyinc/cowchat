@@ -86,6 +86,19 @@ fn never_contacted(listener: &std::net::TcpListener) -> bool {
     matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
 }
 
+/// The secret temporaries in `dir`: `.<name>.<pid>.<nonce>.tmp`.
+fn temporaries(dir: &std::path::Path) -> Vec<PathBuf> {
+    fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            name.starts_with('.') && name.ends_with(".tmp")
+        })
+        .collect()
+}
+
 #[cfg(unix)]
 fn mode(path: &std::path::Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
@@ -423,10 +436,8 @@ fn a_server_error_stores_nothing() {
     server.join().unwrap();
 
     assert!(!out.status.success(), "a 404 must fail the redeem");
-    assert!(
-        !key_path.exists(),
-        "nothing may be stored, and the reservation must be released for a retry"
-    );
+    assert!(!key_path.exists(), "nothing may be stored");
+    assert!(temporaries(&dir).is_empty(), "the slot must be discarded");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("404"),
@@ -525,14 +536,13 @@ fn a_non_object_json_error_body_is_withheld() {
     );
 }
 
-/// An interrupted redeem leaves a zero-byte reservation behind. That file must
-/// not wedge the flow with a claim that "a key already exists" — the error must
-/// say it is empty, holds no secret, and name the exact removal command.
+/// Nothing is ever left at the destination before the key is complete, so an
+/// empty file there is someone else's and is refused like any other.
 #[test]
-fn an_empty_leftover_reservation_gets_removal_guidance() {
-    let dir = tmpdir("leftover");
+fn an_existing_empty_destination_is_refused_before_the_invite_is_spent() {
+    let dir = tmpdir("emptydest");
     let tok = dir.join("tok");
-    fs::write(&tok, "cinv_leftover\n").unwrap();
+    fs::write(&tok, "cinv_emptydest\n").unwrap();
     let key_path = dir.join("auth.key");
     fs::write(&key_path, "").unwrap();
 
@@ -547,23 +557,14 @@ fn an_empty_leftover_reservation_gets_removal_guidance() {
         .output()
         .expect("run cowchat");
 
-    // Still a refusal: an empty file may be another in-flight redeem's live
-    // reservation, so it is never silently reclaimed.
-    assert!(!out.status.success(), "must still refuse");
-    listener.set_nonblocking(true).unwrap();
+    assert!(!out.status.success(), "must refuse");
     assert!(
-        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
-        "the refusal must happen before the server is contacted"
+        never_contacted(&listener),
+        "the refusal must precede the request"
     );
+    assert_eq!(fs::read_to_string(&key_path).unwrap(), "");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("empty") && stderr.contains("rm "),
-        "the error must say the file is empty and name the removal command: {stderr}"
-    );
-    assert!(
-        !stderr.contains("Redeem with that key"),
-        "must not tell the operator to use a key that does not exist: {stderr}"
-    );
+    assert!(stderr.contains("still live"), "{stderr}");
 }
 
 /// Regression: the secret writer used to chmod the destination's parent
@@ -669,15 +670,11 @@ fn keyless_redeem_without_a_url_explains_the_requirement() {
         stderr.contains("--url"),
         "the error should point at --url.\nstderr: {stderr}"
     );
-    assert!(
-        !dir.join("auth.key").exists(),
-        "no reservation may be left behind"
-    );
+    assert!(!dir.join("auth.key").exists(), "nothing may be left behind");
 }
 
 /// A refused destination must be judged without being opened: a FIFO would
-/// block the open forever, and a symlink would be followed elsewhere. Only a
-/// zero-length regular file earns the "leftover reservation" hint.
+/// block the open forever, and a symlink would be followed elsewhere.
 #[cfg(unix)]
 #[test]
 fn a_non_regular_refused_destination_is_never_opened() {
@@ -728,18 +725,15 @@ fn a_non_regular_refused_destination_is_never_opened() {
 
     assert!(!status.success(), "a FIFO destination must be refused");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("empty"),
-        "a FIFO is not a leftover reservation and must not get the rm hint: {stderr}"
-    );
+    assert!(stderr.contains("already exists"), "{stderr}");
 }
 
-/// Regression for the create-path reservation leak: when the server refuses to
-/// mint, the reserved token file must be released — otherwise the next attempt
-/// is refused over a possibly-unredeemed token that never existed. Uses a
+/// When the server refuses to mint, nothing may be left behind: the token's
+/// file is prepared before minting (as a private temporary, never at the
+/// destination) and discarded on failure. Uses a
 /// minimal NDJSON server: register → ok, room_info → ok, create_invite → error.
 #[test]
-fn a_failed_mint_releases_the_token_reservation() {
+fn a_failed_mint_leaves_nothing_behind() {
     use std::io::{BufRead, BufReader};
 
     let dir = tmpdir("mintfail");
@@ -747,7 +741,8 @@ fn a_failed_mint_releases_the_token_reservation() {
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let reservation_probe = token_path.clone();
+    let probe_dir = dir.clone();
+    let probe_dest = token_path.clone();
     let server = std::thread::spawn(move || {
         let stream = accept_within(&listener);
         stream
@@ -773,14 +768,15 @@ fn a_failed_mint_releases_the_token_reservation() {
         let create = exchange(
             "error",
             r#"{"code":"internal_error","message":"mint refused by test server"}"#,
-            // The reservation must exist NOW — after the reserve, before the
-            // error reply that triggers the release. Without this probe the
-            // test stays green even if the create path never reserves at all.
+            // The slot must exist NOW, before the error reply that discards
+            // it — and the destination must still be untouched.
             &|| {
-                assert!(
-                    reservation_probe.exists(),
-                    "the token destination must be reserved before minting is attempted"
+                assert_eq!(
+                    temporaries(&probe_dir).len(),
+                    1,
+                    "the token's file must be prepared before minting is attempted"
                 );
+                assert!(!probe_dest.exists(), "the destination must stay untouched");
             },
         );
         assert_eq!(create["type"], "create_invite");
@@ -806,11 +802,8 @@ fn a_failed_mint_releases_the_token_reservation() {
         !out.status.success(),
         "a refused mint must fail the command"
     );
-    assert!(
-        !token_path.exists(),
-        "the reservation must be released when minting fails, or the next \
-         attempt is refused over a token that never existed"
-    );
+    assert!(!token_path.exists(), "no token file may be left");
+    assert!(temporaries(&dir).is_empty(), "the slot must be discarded");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("mint refused by test server"),
@@ -1189,9 +1182,10 @@ fn an_ordinary_error_message_is_still_shown() {
     assert!(stderr.contains("rate limited"), "{stderr}");
 }
 
-/// Another writer can fill the reserved destination while the request is in
-/// flight (a local server starting up writes its own key to an empty
-/// auth.key). That key must survive both a successful mint and a failure.
+/// Another writer can create the destination while the request is in flight
+/// (a local server starting up writes its own auth.key). Its key must survive
+/// both a successful mint and a failure; a minted key is kept in its
+/// temporary, and a failure leaves nothing behind.
 #[test]
 fn a_key_written_during_the_request_is_never_replaced_or_removed() {
     for (status, body) in [
@@ -1209,8 +1203,6 @@ fn a_key_written_during_the_request_is_never_replaced_or_removed() {
         let url = format!("ws://{}/ws", listener.local_addr().unwrap());
         let racer = key_path.clone();
         let server = serve_one_after(listener, status, body, move || {
-            // Replace the reservation the way a local server would: a new file.
-            let _ = fs::remove_file(&racer);
             fs::write(&racer, "server-key\n").unwrap();
         });
 
@@ -1233,20 +1225,232 @@ fn a_key_written_during_the_request_is_never_replaced_or_removed() {
                 !out.status.success(),
                 "the install must be reported as failed"
             );
-            let saved: Vec<_> = fs::read_dir(&dir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
-                .collect();
+            let saved = temporaries(&dir);
             assert_eq!(
                 saved.len(),
                 1,
                 "the minted key must be kept in its temporary"
             );
             assert_eq!(
-                fs::read_to_string(saved[0].path()).unwrap().trim(),
-                MINTED_KEY
+                fs::read_to_string(&saved[0]).unwrap(),
+                format!("{MINTED_KEY}\n")
+            );
+            #[cfg(unix)]
+            assert_eq!(mode(&saved[0]), 0o600);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains(&*saved[0].to_string_lossy()),
+                "the error must name where the key is: {stderr}"
+            );
+            assert!(!stderr.contains(MINTED_KEY), "{stderr}");
+        } else {
+            assert!(
+                temporaries(&dir).is_empty(),
+                "{status}: nothing may be left"
             );
         }
     }
+}
+
+/// Run the CLI with a file-size limit, as a stand-in for a full disk: writes
+/// past `limit` bytes fail with EFBIG instead of raising SIGXFSZ.
+#[cfg(target_os = "linux")]
+fn with_file_size_limit(command: &mut Command, limit: u64) -> &mut Command {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(move || {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let rlim = libc::rlimit {
+                rlim_cur: limit,
+                rlim_max: limit,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &rlim) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })
+    }
+}
+
+/// A disk that cannot hold the key fails before the invite is spent: the key's
+/// file is pre-sized before the request.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_disk_refuses_before_the_invite_is_spent() {
+    let dir = tmpdir("fullbefore");
+    let tok = dir.join("tok");
+    fs::write(&tok, "cinv_full\n").unwrap();
+    let key_path = dir.join("auth.key");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+
+    let out = with_file_size_limit(
+        cowchat()
+            .args(["--url", &url, "invites", "redeem", "--token-file"])
+            .arg(&tok)
+            .arg("--key-file")
+            .arg(&key_path),
+        1024,
+    )
+    .output()
+    .expect("run cowchat");
+
+    assert!(!out.status.success());
+    assert!(never_contacted(&listener), "nothing may be sent");
+    assert!(!key_path.exists());
+    assert!(temporaries(&dir).is_empty(), "the slot must be removed");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("still live"), "{stderr}");
+}
+
+/// If the key still cannot be written after the mint, the CLI must say it was
+/// not saved — never name a file that does not hold it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_key_that_cannot_be_written_is_reported_as_not_saved() {
+    let dir = tmpdir("fullafter");
+    let tok = dir.join("tok");
+    fs::write(&tok, "cinv_full\n").unwrap();
+    let key_path = dir.join("auth.key");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    // Longer than the slot and the limit, so the write after the mint fails.
+    let key = "k".repeat(6000);
+    let body: &'static str = Box::leak(format!(r#"{{"api_key":"{key}"}}"#).into_boxed_str());
+    let server = serve_one(listener, "201 Created", body);
+
+    let out = with_file_size_limit(
+        cowchat()
+            .args(["--url", &url, "invites", "redeem", "--token-file"])
+            .arg(&tok)
+            .arg("--key-file")
+            .arg(&key_path),
+        5000,
+    )
+    .output()
+    .expect("run cowchat");
+    server.join().unwrap();
+
+    assert!(!out.status.success());
+    assert!(!key_path.exists());
+    assert!(
+        temporaries(&dir).is_empty(),
+        "a partial key must not be kept"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not saved anywhere"), "{stderr}");
+    assert!(stderr.contains("already spent"), "{stderr}");
+    assert!(!stderr.contains("saved at"), "{stderr}");
+    assert!(!stderr.contains(&key[..64]), "{stderr}");
+}
+
+/// A bound session is an identity: redeem goes through the session path and
+/// never mints, even with no key file and no hosted credential.
+#[test]
+fn a_bound_session_is_not_bypassed_by_minting() {
+    let home = tmpdir("session");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let tok = home.join("tok");
+    fs::write(&tok, "cinv_session\n").unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let mut requests = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        requests.push(read_http_request(&mut stream));
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                }
+            }
+            requests
+        })
+    };
+
+    let out = cowchat()
+        .env("HOME", &home)
+        .args([
+            "--url",
+            &url,
+            "--agent-id",
+            "session:00000000-0000-4000-8000-000000000001",
+            "invites",
+            "redeem",
+            "--token-file",
+        ])
+        .arg(&tok)
+        .output()
+        .expect("run cowchat");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = watcher.join().unwrap();
+
+    assert!(
+        requests.iter().all(|r| !r.contains("/api/invites/redeem")),
+        "a bound session must not mint: {requests:?}"
+    );
+    assert!(!home.join(".cowchat").join("auth.key").exists());
+    assert!(
+        !out.status.success(),
+        "no session record exists, so the redeem fails"
+    );
+}
+
+/// Minting with --key-file while a saved hosted credential exists says the
+/// hosted credential keeps taking precedence.
+#[cfg(unix)]
+#[test]
+fn minting_beside_a_hosted_credential_says_which_key_is_used() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tmpdir("shadow");
+    let data = home.join(".cowchat");
+    fs::create_dir_all(&data).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let hosted = data.join("hosted-bot.json");
+    fs::write(
+        &hosted,
+        serde_json::json!({"url": url, "api_key": "hosted-key"}).to_string(),
+    )
+    .unwrap();
+    fs::set_permissions(&hosted, fs::Permissions::from_mode(0o600)).unwrap();
+    let tok = home.join("tok");
+    fs::write(&tok, "cinv_shadow\n").unwrap();
+    let key_path = home.join("minted.key");
+    let server = serve_one(
+        listener,
+        "201 Created",
+        r#"{"api_key":"1e2d3c4b5a69788796a5b4c3d2e1f0091e2d3c4b5a69788796a5b4c3d2e1f009"}"#,
+    );
+
+    let out = cowchat()
+        .env("HOME", &home)
+        .args(["--url", &url, "invites", "redeem", "--token-file"])
+        .arg(&tok)
+        .arg("--key-file")
+        .arg(&key_path)
+        .output()
+        .expect("run cowchat");
+    let request = server.join().unwrap();
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        request.starts_with("POST /api/invites/redeem "),
+        "{request}"
+    );
+    assert_eq!(fs::read_to_string(&key_path).unwrap().trim(), MINTED_KEY);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("takes precedence"), "{stdout}");
+    assert!(!stdout.contains(MINTED_KEY), "{stdout}");
 }

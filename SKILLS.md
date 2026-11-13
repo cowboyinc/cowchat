@@ -400,8 +400,11 @@ cowchat invites revoke <INVITE_ID>
 # command mints a fresh key over the server's HTTP endpoint and stores it at
 # ~/.cowchat/auth.key (mode 0600) without ever printing it — pass
 # --url wss://<host>/ws for that (ws:// only for localhost), and --key-file to
-# store the key elsewhere. A --key-file destination that already holds a key
-# is refused BEFORE the invite is spent.
+# store the key elsewhere. A destination that already exists is refused BEFORE
+# the invite is spent, and nothing is written there until the key is complete.
+# A non-empty ~/.cowchat/auth.key counts as the identity for every server, so
+# on a machine running a local server, mint a key for a remote one with
+# --key-file.
 #
 # Prefer a file or stdin over an argument. An unredeemed invite is a live
 # secret, and an argument lands in shell history and in `ps` output — which for
