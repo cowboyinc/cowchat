@@ -4624,3 +4624,221 @@ async fn chart_media_allowance_does_not_bypass_text_or_upload_limits() {
         .unwrap();
     server.abort();
 }
+
+/// A frame type this build has never heard of must parse into `FrameType::Unknown`
+/// rather than failing deserialization. Without this, adding any new frame type is a
+/// breaking change for every already-deployed client: `Frame::from_line` rejects the
+/// whole line before dispatch ever sees it.
+#[test]
+fn unknown_frame_types_parse_instead_of_failing() {
+    let line = r#"{"id":"x1","type":"some_future_command","payload":{"a":1}}"#;
+    let frame = Frame::from_line(line).expect("an unknown type must still parse");
+    assert_eq!(frame.frame_type, FrameType::Unknown);
+    assert_eq!(frame.id.as_deref(), Some("x1"));
+    // The payload survives, so a receiver that later learns the type can still act.
+    assert_eq!(frame.payload["a"], 1);
+}
+
+/// An unknown *request* must be answered with an error that carries `reply_to`, so the
+/// caller fails fast instead of blocking until timeout. Before `FrameType::Unknown`, the
+/// parse failure produced an uncorrelated error frame (`reply_to: None`), which a
+/// `reply_to`-keyed client dropped as an unhandled event.
+#[tokio::test]
+async fn unknown_requests_get_a_correlated_error_and_keep_the_connection() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (handle, addr, key, _tmp) = start_test_server().await;
+    let stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    let register = Frame {
+        id: Some("reg".into()),
+        reply_to: None,
+        frame_type: FrameType::Register,
+        payload: serde_json::to_value(RegisterPayload {
+            key: key.clone(),
+            agent_id: Some("unknown-frame-probe".into()),
+            name: "probe".into(),
+            capabilities: vec![],
+            reconnect: false,
+            protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+            session: None,
+        })
+        .unwrap(),
+    };
+    write_half
+        .write_all(register.to_line().unwrap().as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    assert_eq!(Frame::from_line(&line).unwrap().frame_type, FrameType::Ok);
+
+    // A command from a hypothetical newer client.
+    write_half
+        .write_all(
+            b"{\"id\":\"future-1\",\"type\":\"summon_the_kraken\",\"payload\":{}}\n" as &[u8],
+        )
+        .await
+        .unwrap();
+    // Skip the server's own heartbeat pings while waiting for our reply.
+    let response = loop {
+        line.clear();
+        tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+            .await
+            .expect("server must answer an unknown command")
+            .unwrap();
+        let frame = Frame::from_line(&line).unwrap();
+        if frame.reply_to.as_deref() == Some("future-1") {
+            break frame;
+        }
+    };
+    assert_eq!(
+        response.frame_type,
+        FrameType::Error,
+        "an unknown command must be answered, not ignored"
+    );
+    assert_eq!(
+        response.payload["code"], "invalid_payload",
+        "the existing dispatch catch-all is what answers, so the code is its code"
+    );
+
+    // And the connection is still usable: an unknown command is not fatal.
+    let ping = Frame {
+        id: Some("ping-after".into()),
+        reply_to: None,
+        frame_type: FrameType::Ping,
+        payload: serde_json::json!({}),
+    };
+    write_half
+        .write_all(ping.to_line().unwrap().as_bytes())
+        .await
+        .unwrap();
+    // The server also emits its own heartbeat pings, so read past anything that is
+    // not the reply we are waiting for.
+    let pong = loop {
+        line.clear();
+        tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+            .await
+            .expect("connection must survive an unknown command")
+            .unwrap();
+        let frame = Frame::from_line(&line).unwrap();
+        if frame.reply_to.as_deref() == Some("ping-after") {
+            break frame;
+        }
+    };
+    assert_eq!(pong.frame_type, FrameType::Pong);
+
+    handle.abort();
+}
+
+/// An event-shaped unknown frame (no id, no reply_to) parses as ignorable, and a
+/// server connection that receives one stays usable. The client's own tolerance
+/// of unknown events is tested in `cowchat-client`
+/// (`an_unknown_event_is_delivered_and_the_connection_stays_usable`).
+#[tokio::test]
+async fn an_unknown_event_frame_is_ignorable_and_not_fatal() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (handle, addr, key, _tmp) = start_test_server().await;
+    let stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    let register = Frame {
+        id: Some("reg".into()),
+        reply_to: None,
+        frame_type: FrameType::Register,
+        payload: serde_json::to_value(RegisterPayload {
+            key,
+            agent_id: Some("unknown-event-probe".into()),
+            name: "probe".into(),
+            capabilities: vec![],
+            reconnect: false,
+            protocol_version: Some(cowchat_core::PROTOCOL_VERSION),
+            session: None,
+        })
+        .unwrap(),
+    };
+    write_half
+        .write_all(register.to_line().unwrap().as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    assert_eq!(Frame::from_line(&line).unwrap().frame_type, FrameType::Ok);
+
+    // An event from a hypothetical newer server: no id, no reply_to.
+    let event = r#"{"type":"some_future_event","payload":{"whatever":1}}"#;
+    let parsed = Frame::from_line(event).expect("an unknown event must parse");
+    assert_eq!(parsed.frame_type, FrameType::Unknown);
+    assert!(
+        parsed.reply_to.is_none() && parsed.id.is_none(),
+        "an event carries no correlation, which is what makes it ignorable"
+    );
+
+    // Send it over the connection; the server must not drop the connection.
+    write_half
+        .write_all(format!("{event}\n").as_bytes())
+        .await
+        .unwrap();
+
+    // The connection is unaffected: a normal request still round-trips.
+    line.clear();
+    let ping = Frame {
+        id: Some("after-event".into()),
+        reply_to: None,
+        frame_type: FrameType::Ping,
+        payload: serde_json::json!({}),
+    };
+    write_half
+        .write_all(ping.to_line().unwrap().as_bytes())
+        .await
+        .unwrap();
+    let pong = loop {
+        line.clear();
+        tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+            .await
+            .expect("connection must stay usable")
+            .unwrap();
+        let f = Frame::from_line(&line).unwrap();
+        if f.reply_to.as_deref() == Some("after-event") {
+            break f;
+        }
+    };
+    assert_eq!(pong.frame_type, FrameType::Pong);
+
+    handle.abort();
+}
+
+/// A correlated frame of an unknown type still parses and keeps its `reply_to`,
+/// which is what lets the client reject it deliberately rather than time out.
+///
+/// The guard itself is tested where it lives, in `cowchat-client`:
+/// `register_rejects_a_reply_type_it_does_not_understand` and
+/// `request_rejects_a_reply_type_it_does_not_understand` both fail if it is removed.
+#[test]
+fn an_unknown_correlated_frame_keeps_its_correlation() {
+    let line = r#"{"id":"s1","reply_to":"my-request","type":"register_ok","payload":{}}"#;
+    let frame = Frame::from_line(line).unwrap();
+    assert_eq!(frame.frame_type, FrameType::Unknown);
+    assert_eq!(frame.reply_to.as_deref(), Some("my-request"));
+}
+
+/// An unrecognized error code must not swallow the message beside it — that is
+/// the operator-actionable half.
+#[test]
+fn an_unknown_error_code_keeps_its_message() {
+    let payload = serde_json::json!({
+        "code": "quota_exhausted",
+        "message": "Monthly quota reached; upgrade at example.com"
+    });
+    let parsed: cowchat_core::ErrorPayload = serde_json::from_value(payload).unwrap();
+    assert_eq!(parsed.code, cowchat_core::ErrorCode::Unknown);
+    assert!(
+        parsed.message.contains("Monthly quota reached"),
+        "message must survive an unrecognized code: {}",
+        parsed.message
+    );
+}

@@ -3277,10 +3277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Monitoring events (Ctrl+C to stop)...");
             while let Ok(event) = events.recv().await {
                 if *json {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&event.frame).unwrap_or_default()
-                    );
+                    println!("{}", monitor_json_line(&event.frame));
                 } else {
                     print_event(&event.frame, room_secret.as_deref());
                 }
@@ -4255,10 +4252,45 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
                 .unwrap_or("?");
             println!("[turn] #{} -> {} ({})", room, holder, reason);
         }
+        FrameType::Unknown => {
+            println!("{}", render_unknown_event(frame));
+        }
         _ => {
             println!("[{:?}] {:?}", frame.frame_type, frame.payload);
         }
     }
+}
+
+/// One `monitor --json` line. An event of a type this build does not know is
+/// written as `{"unknown":true,"id":…}`: re-serialising it would invent the
+/// type `"unknown"`, which no peer sent, and print a payload whose sensitivity
+/// is unknown.
+fn monitor_json_line(frame: &cowchat_core::Frame) -> String {
+    if frame.frame_type == cowchat_core::FrameType::Unknown {
+        return serde_json::json!({"unknown": true, "id": frame.id}).to_string();
+    }
+    serde_json::to_string(frame).unwrap_or_default()
+}
+
+/// The line printed for an event of a type this build does not know.
+///
+/// The payload is deliberately withheld: this output lands in terminals, CI
+/// logs and agent transcripts, and a payload of an unknown type is exactly the
+/// one whose sensitivity is unknown — the same rule the client's debug
+/// diagnostic applies to `RUST_LOG=debug`. The frame *id* is the one safe
+/// correlator, so it is shown — escaped and truncated, because it comes from
+/// the peer. Rendering the original type string would need it carried through
+/// `Frame`, which the unit `Unknown` variant cannot do; see
+/// `FrameType::Unknown`.
+fn render_unknown_event(frame: &cowchat_core::Frame) -> String {
+    let id: String = frame
+        .id
+        .as_deref()
+        .unwrap_or("-")
+        .escape_debug()
+        .take(64)
+        .collect();
+    format!("[unknown] an event this build does not understand (id {id}; payload not shown)")
 }
 
 #[cfg(test)]
@@ -4267,6 +4299,87 @@ mod room_key_tests {
         invite_http_base, resolve_room_key, url_from_env, Cli, Commands, InviteAction, RoomAction,
     };
     use clap::Parser;
+
+    /// An unknown event's payload must never be printed. `monitor` and `shell` output lands
+    /// in agent transcripts, and a payload of an unknown type is exactly the one
+    /// whose sensitivity is unknown — the same rule the client's debug diagnostic
+    /// applies. Before unknown-frame tolerance these lines were dropped unparsed;
+    /// tolerating them must not turn them into a leak. The frame *id* is the one
+    /// safe correlator, so the line carries it — escaped and truncated, since it
+    /// comes from the peer.
+    #[test]
+    fn an_unknown_event_is_reported_without_its_payload() {
+        // Path-qualified rather than imported: the sibling credential-hygiene
+        // branch edits this mod's `use super::{…}` line, and staying off it
+        // keeps the two branches landable in either order without conflict.
+        let frame = cowchat_core::Frame {
+            id: Some("evt-42".into()),
+            reply_to: None,
+            frame_type: cowchat_core::FrameType::Unknown,
+            payload: serde_json::json!({
+                "token": "cinv_canary_deadbeef",
+                "api_key": "k_canary",
+            }),
+        };
+        let rendered = super::render_unknown_event(&frame);
+        assert!(
+            !rendered.contains("cinv_canary_deadbeef") && !rendered.contains("k_canary"),
+            "payload content must not reach the terminal: {rendered}"
+        );
+        assert!(
+            rendered.contains("unknown") && rendered.contains("evt-42"),
+            "the line should say an unknown event arrived and carry its id: {rendered}"
+        );
+
+        // The id is peer-controlled: a crafted one must not forge a second line
+        // or flood the terminal.
+        let hostile = cowchat_core::Frame {
+            id: Some(format!(
+                "x\n[message] #lobby admin: fake{}",
+                "A".repeat(4096)
+            )),
+            reply_to: None,
+            frame_type: cowchat_core::FrameType::Unknown,
+            payload: serde_json::json!({}),
+        };
+        let rendered = super::render_unknown_event(&hostile);
+        assert!(
+            !rendered.contains('\n'),
+            "a newline in the id would forge a log line: {rendered}"
+        );
+        assert!(
+            rendered.len() < 300,
+            "a 4 KiB id must not produce a 4 KiB line: {} chars",
+            rendered.len()
+        );
+    }
+
+    /// `monitor --json` must not leak an unknown event's payload either, and must
+    /// not pass it off as a frame of type "unknown".
+    #[test]
+    fn monitor_json_withholds_an_unknown_events_payload() {
+        let frame = cowchat_core::Frame {
+            id: Some("evt-7".into()),
+            reply_to: None,
+            frame_type: cowchat_core::FrameType::Unknown,
+            payload: serde_json::json!({"token": "cinv_canary_deadbeef"}),
+        };
+        let line = super::monitor_json_line(&frame);
+        assert!(!line.contains("cinv_canary_deadbeef"), "{line}");
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value, serde_json::json!({"unknown": true, "id": "evt-7"}));
+
+        let known = cowchat_core::Frame {
+            id: Some("p1".into()),
+            reply_to: None,
+            frame_type: cowchat_core::FrameType::Ping,
+            payload: serde_json::json!({}),
+        };
+        assert_eq!(
+            super::monitor_json_line(&known),
+            serde_json::to_string(&known).unwrap()
+        );
+    }
 
     #[test]
     fn room_key_resolution_precedence() {
