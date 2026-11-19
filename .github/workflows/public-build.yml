@@ -52,6 +52,11 @@ jobs:
       - if: runner.os == 'macOS'
         working-directory: apps/CowchatMac
         run: swift test && swift build -c release
+      - if: runner.os == 'macOS'
+        working-directory: apps/CowchatKit
+        run: |
+          swift test
+          xcodebuild -scheme CowchatKit -destination 'generic/platform=iOS Simulator' build
   charts:
     runs-on: ubuntu-latest
     timeout-minutes: 15
