@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class GallopTokensParityTests: XCTestCase {
     /// Resolves an adaptive SwiftUI Color to its sRGB hex under the given appearance.

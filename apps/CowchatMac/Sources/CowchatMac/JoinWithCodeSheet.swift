@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// Join with invite code (navigation note, section 7.2), from the New menu and the File menu, in place of Settings ›
 /// Connection's invite field and Find a room's token field. One secure field takes the code, since the code grants a

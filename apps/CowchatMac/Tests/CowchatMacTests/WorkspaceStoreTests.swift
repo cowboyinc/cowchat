@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 @MainActor
 private final class StubConnection: CowchatConnectionProtocol {

@@ -1,0 +1,250 @@
+#if canImport(AppKit)
+import AppKit
+#else
+import UIKit
+#endif
+import SwiftUI
+
+public enum GallopFontFamily: String, Sendable {
+    case display
+    case sans
+    case mono
+}
+
+/// One Gallop semantic type role (desktop values).
+public struct GallopTextStyle: Sendable, Equatable {
+    public let name: String
+    public let family: GallopFontFamily
+    /// Variable-font weight axis value as authored in Figma (e.g. 550, 780).
+    public let weight: Int
+    /// Font size in points.
+    public let size: CGFloat
+    /// Target line height in points.
+    public let lineHeight: CGFloat
+    /// Letter spacing in em (relative to size).
+    public let letterSpacing: CGFloat
+
+    public init(
+        name: String,
+        family: GallopFontFamily,
+        weight: Int,
+        size: CGFloat,
+        lineHeight: CGFloat,
+        letterSpacing: CGFloat
+    ) {
+        self.name = name
+        self.family = family
+        self.weight = weight
+        self.size = size
+        self.lineHeight = lineHeight
+        self.letterSpacing = letterSpacing
+    }
+
+    /// Nearest system font weight for the variable axis value.
+    public var fontWeight: Font.Weight {
+        switch weight {
+        case ..<450: .regular
+        case ..<600: .medium
+        case ..<700: .semibold
+        case ..<760: .bold
+        default: .heavy
+        }
+    }
+
+    /// Letter spacing in points, as SwiftUI's `.tracking` expects.
+    public var tracking: CGFloat { letterSpacing * size }
+
+    /// Extra spacing needed to stretch the system font's natural line height to
+    /// the Gallop line height. Kept for source compatibility; `.gallopText(_:)`
+    /// uses the active provider's exact native-font metrics instead.
+    public var lineSpacing: CGFloat {
+        max(0, lineHeight - SystemFontProvider().naturalLineHeight(for: self))
+    }
+}
+
+public struct GallopLineLayout: Sendable, Equatable {
+    public let lineSpacing: CGFloat
+    /// Half the leading. The earlier path pads the line by it above and below; on the exact path it is the distance
+    /// the glyphs move down.
+    public let verticalPadding: CGFloat
+
+    public init(targetLineHeight: CGFloat, naturalLineHeight: CGFloat) {
+        let leading = targetLineHeight - naturalLineHeight
+        // SwiftUI clamps negative line spacing before macOS 26. Preserve exact
+        // positive leading and contract the outer line box as far as the legacy
+        // renderer allows; macOS 26+ uses `.lineHeight(.exact(points:))` below.
+        lineSpacing = max(0, leading)
+        verticalPadding = leading / 2
+    }
+}
+
+#if canImport(AppKit)
+public typealias GallopNativeFont = NSFont
+#else
+public typealias GallopNativeFont = UIFont
+#endif
+
+extension GallopNativeFont {
+    public var gallopNaturalLineHeight: CGFloat {
+        // SwiftUI rounds a native font's line fragment up to a whole point.
+        ceil(ascender - descender + leading)
+    }
+}
+
+/// Maps a text style to a concrete font. The default is `SeasonFontProvider`
+/// (bundled Season Sans/Mix); `SystemFontProvider` is its degradation path
+/// and remains available for tests or explicit override via the environment.
+public protocol GallopFontProvider: Sendable {
+    func font(for style: GallopTextStyle) -> Font
+    /// Italic or oblique counterpart to the font returned by `font(for:)`.
+    func italicFont(for style: GallopTextStyle) -> Font
+    /// Natural line height of the same native font returned by `font(for:)`.
+    /// Custom providers should override the default so Gallop can reproduce
+    /// its authored line boxes exactly.
+    func naturalLineHeight(for style: GallopTextStyle) -> CGFloat
+}
+
+public extension GallopFontProvider {
+    public func italicFont(for style: GallopTextStyle) -> Font {
+        font(for: style).italic()
+    }
+
+    public func naturalLineHeight(for style: GallopTextStyle) -> CGFloat {
+        SystemFontProvider().naturalLineHeight(for: style)
+    }
+}
+
+public struct SystemFontProvider: GallopFontProvider {
+    public init() {}
+
+    public func font(for style: GallopTextStyle) -> Font {
+        Font(nativeFont(for: style))
+    }
+
+    public func naturalLineHeight(for style: GallopTextStyle) -> CGFloat {
+        nativeFont(for: style).gallopNaturalLineHeight
+    }
+
+    #if canImport(AppKit)
+    public func nativeFont(for style: GallopTextStyle) -> NSFont {
+        let weight: NSFont.Weight = switch style.weight {
+        case ..<450: .regular
+        case ..<600: .medium
+        case ..<700: .semibold
+        case ..<760: .bold
+        default: .heavy
+        }
+
+        switch style.family {
+        case .sans:
+            return NSFont.systemFont(ofSize: style.size, weight: weight)
+        case .mono:
+            return NSFont.monospacedSystemFont(ofSize: style.size, weight: weight)
+        case .display:
+            let base = NSFont.systemFont(ofSize: style.size, weight: weight)
+            guard let descriptor = base.fontDescriptor.withDesign(.serif),
+                  let serif = NSFont(descriptor: descriptor, size: style.size)
+            else { return base }
+            return serif
+        }
+    }
+    #else
+    public func nativeFont(for style: GallopTextStyle) -> UIFont {
+        let weight: UIFont.Weight = switch style.weight {
+        case ..<450: .regular
+        case ..<600: .medium
+        case ..<700: .semibold
+        case ..<760: .bold
+        default: .heavy
+        }
+
+        switch style.family {
+        case .sans:
+            return UIFont.systemFont(ofSize: style.size, weight: weight)
+        case .mono:
+            return UIFont.monospacedSystemFont(ofSize: style.size, weight: weight)
+        case .display:
+            let base = UIFont.systemFont(ofSize: style.size, weight: weight)
+            guard let descriptor = base.fontDescriptor.withDesign(.serif) else { return base }
+            return UIFont(descriptor: descriptor, size: style.size)
+        }
+    }
+    #endif
+}
+
+private struct GallopFontProviderKey: EnvironmentKey {
+    /// Season fonts by default; SeasonFontProvider itself degrades to
+    /// SystemFontProvider when the bundled fonts are unavailable.
+    static let defaultValue: any GallopFontProvider = SeasonFontProvider()
+}
+
+public extension EnvironmentValues {
+    public var gallopFontProvider: any GallopFontProvider {
+        get { self[GallopFontProviderKey.self] }
+        set { self[GallopFontProviderKey.self] = newValue }
+    }
+}
+
+/// How `gallopText` sets a role's line box. macOS 26's exact line height draws leading text well, but a centred or
+/// trailing line that wraps is drawn about 27 points right of its frame and cut off at the frame's end. Text that isn't
+/// leading takes the earlier line box, from `GallopLineLayout`'s line spacing and padding, which aligns correctly.
+public enum GallopLineBox: Equatable {
+    case exactLineHeight
+    case lineSpacing
+
+    public static func path(for alignment: TextAlignment) -> GallopLineBox {
+        alignment == .leading ? .exactLineHeight : .lineSpacing
+    }
+}
+
+private struct GallopTextModifier: ViewModifier {
+    let style: GallopTextStyle
+    @Environment(\.gallopFontProvider) private var provider
+    @Environment(\.multilineTextAlignment) private var alignment
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, iOS 26.0, *), GallopLineBox.path(for: alignment) == .exactLineHeight {
+            let layout = GallopLineLayout(
+                targetLineHeight: style.lineHeight,
+                naturalLineHeight: provider.naturalLineHeight(for: style)
+            )
+            content
+                .font(provider.font(for: style))
+                .tracking(style.tracking)
+                .lineHeight(.exact(points: style.lineHeight))
+                // The exact line height puts all the leading under the line. Moving the glyphs down by half of it
+                // centres them as the earlier path does, and the baselines move with them so baseline-aligned stacks
+                // still line up.
+                .offset(y: layout.verticalPadding)
+                .alignmentGuide(.firstTextBaseline) { $0[.firstTextBaseline] + layout.verticalPadding }
+                .alignmentGuide(.lastTextBaseline) { $0[.lastTextBaseline] + layout.verticalPadding }
+        } else {
+            legacyBody(content: content)
+        }
+        #else
+        legacyBody(content: content)
+        #endif
+    }
+
+    private func legacyBody(content: Content) -> some View {
+        let layout = GallopLineLayout(
+            targetLineHeight: style.lineHeight,
+            naturalLineHeight: provider.naturalLineHeight(for: style)
+        )
+
+        return content
+            .font(provider.font(for: style))
+            .tracking(style.tracking)
+            .lineSpacing(layout.lineSpacing)
+            .padding(.vertical, layout.verticalPadding)
+    }
+}
+
+public extension View {
+    /// Applies a Gallop type role: font, weight, tracking, and exact line box.
+    public func gallopText(_ style: GallopTextStyle) -> some View {
+        modifier(GallopTextModifier(style: style))
+    }
+}

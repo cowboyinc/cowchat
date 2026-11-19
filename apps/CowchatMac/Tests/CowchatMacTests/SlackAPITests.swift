@@ -3,6 +3,7 @@ import SwiftUI
 import Foundation
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class SlackAPITests: XCTestCase {
     func testSlackIsUnavailableForLocalRooms() {

@@ -1,4 +1,5 @@
 import AppKit
+import CowchatKit
 
 /// Maps agent display names to installed companion apps. Single source of
 /// truth for both the avatar app-icon lookup and the "Open in …" actions.

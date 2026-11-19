@@ -1,6 +1,7 @@
 import AppKit
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 @MainActor
 private final class AppTerminationProbe {

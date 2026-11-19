@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 /// The Inbox's and Team's store logic, on the replies `GET /social/v1/inbox` and `GET /social/v1/team` send (Chad's
 /// plan, tasks 5 and 12).

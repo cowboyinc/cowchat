@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 enum CowchatOnboarding {
     static let currentVersion = 1

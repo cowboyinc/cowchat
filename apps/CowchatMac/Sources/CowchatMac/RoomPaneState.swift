@@ -1,3 +1,6 @@
+import CowchatKit
+
+
 /// What the main pane renders for a selected room. Purely derived from live signals; persisted flags never gate
 /// rendering. "Loading" means an in-flight history fetch on an established connection only.
 ///
