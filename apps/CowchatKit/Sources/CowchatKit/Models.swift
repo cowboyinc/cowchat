@@ -225,6 +225,12 @@ public struct FileAttachment: Equatable {
     public let blobID: String
     public let name: String
     public let size: Int?
+
+    public init(blobID: String, name: String, size: Int?) {
+        self.blobID = blobID
+        self.name = name
+        self.size = size
+    }
 }
 
 public struct ChatMessage: Codable, Identifiable, Equatable {

@@ -1,9 +1,10 @@
 import Foundation
 import Network
-import CowchatKit
 
 @MainActor
-final class SocialOAuthCallback {
+public final class SocialOAuthCallback {
+    public init() {}
+
     private var listener: NWListener?
     private var ready: CheckedContinuation<UInt16, Error>?
     private var completion: CheckedContinuation<String, Error>?
@@ -14,7 +15,7 @@ final class SocialOAuthCallback {
     private var timeout: Task<Void, Never>?
     private var connections: [NWConnection] = []
 
-    func start() async throws -> UInt16 {
+    public func start() async throws -> UInt16 {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         let listener = try NWListener(using: parameters, on: .any)
@@ -47,7 +48,7 @@ final class SocialOAuthCallback {
         }
     }
 
-    func wait(requestID: String, expiresIn: Int) async throws -> String {
+    public func wait(requestID: String, expiresIn: Int) async throws -> String {
         expectedRequestID = requestID
         timeout = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: UInt64(min(max(expiresIn, 1), 600)) * 1_000_000_000) }
@@ -59,9 +60,9 @@ final class SocialOAuthCallback {
         return try await withCheckedThrowingContinuation { completion = $0 }
     }
 
-    func expect(requestID: String) { expectedRequestID = requestID }
+    public func expect(requestID: String) { expectedRequestID = requestID }
 
-    func cancel(_ error: Error = CancellationError()) {
+    public func cancel(_ error: Error = CancellationError()) {
         terminalError = error
         ready?.resume(throwing: error)
         ready = nil
@@ -79,7 +80,7 @@ final class SocialOAuthCallback {
         connections = []
     }
 
-    static func completionCode(from header: String, port: UInt16, requestID: String) -> String? {
+    public static func completionCode(from header: String, port: UInt16, requestID: String) -> String? {
         let lines = header.components(separatedBy: "\r\n")
         guard let first = lines.first else { return nil }
         let request = first.split(separator: " ")
