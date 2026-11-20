@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 /// Settings' Account page, the first in Settings: the name and the handle in 40 fields with Save, the sign-ins the
 /// account is linked to with Link for the rest, and Sign out. Every button is 36.

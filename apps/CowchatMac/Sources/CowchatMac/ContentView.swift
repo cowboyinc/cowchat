@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 private enum AppAppearance: String, CaseIterable, Identifiable {
     case system

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 /// In-feed "what is this agent doing" pill, rendered under that agent's
 /// latest message. Wraps freely — pulse text is prose, not a status code.

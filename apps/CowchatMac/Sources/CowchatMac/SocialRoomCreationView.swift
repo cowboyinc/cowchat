@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 struct SocialRoomDraft: Identifiable {
     let id = UUID()

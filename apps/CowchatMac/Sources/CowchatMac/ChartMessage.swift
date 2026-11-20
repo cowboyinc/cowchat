@@ -1,6 +1,7 @@
 import AppKit
 import ImageIO
 import SwiftUI
+import CowchatKit
 
 /// An image is part of normal message content, so room encryption protects it
 /// and local rooms do not need a separate HTTP attachment server.

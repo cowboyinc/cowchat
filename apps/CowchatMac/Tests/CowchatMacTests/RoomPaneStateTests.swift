@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class RoomPaneStateTests: XCTestCase {
     func testDisconnectedWithNothingLoadedIsOffline() {

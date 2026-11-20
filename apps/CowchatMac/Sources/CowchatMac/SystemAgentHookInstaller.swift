@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import CowchatKit
 
 /// Connects the installed coding agents to the Cowchat hooks. Process arguments
 /// are passed directly; neither a room credential nor user text enters a shell.

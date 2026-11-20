@@ -1,0 +1,24 @@
+// swift-tools-version: 5.9
+
+import PackageDescription
+
+let package = Package(
+    name: "CowchatKit",
+    platforms: [.macOS(.v13), .iOS(.v17)],
+    products: [
+        .library(name: "CowchatKit", targets: ["CowchatKit"]),
+    ],
+    targets: [
+        .target(
+            name: "CowchatKit",
+            resources: [
+                // Directory-preserving copies: GallopIcon and SeasonFonts look up
+                // "Icons/svg/<name>.svg" and "Fonts/<name>.ttf" by subpath.
+                .copy("Bundled/Fonts"),
+                .copy("Bundled/Icons"),
+            ]
+        ),
+        .testTarget(name: "CowchatKitTests", dependencies: ["CowchatKit"]),
+    ],
+    swiftLanguageVersions: [.v5]
+)

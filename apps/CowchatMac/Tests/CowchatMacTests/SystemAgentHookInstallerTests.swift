@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class SystemAgentHookInstallerTests: XCTestCase {
     @MainActor

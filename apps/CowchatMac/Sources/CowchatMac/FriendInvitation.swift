@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import CowchatKit
 
 struct FriendInvitationRoute: Codable, Equatable, Identifiable {
     let slug: String

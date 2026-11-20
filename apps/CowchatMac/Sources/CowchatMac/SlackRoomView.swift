@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import CowchatKit
 
 struct SlackWorkspace: Decodable, Identifiable, Equatable {
     let id: String

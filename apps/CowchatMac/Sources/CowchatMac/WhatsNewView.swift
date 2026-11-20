@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// Shared sheet chrome keeps integration and release notes consistent with Settings.
 struct CowchatSheetHeader: View {
