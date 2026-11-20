@@ -180,14 +180,17 @@ public enum GallopIcon: String, CaseIterable, Sendable {
         return image
     }
     #else
+    // UIImage cannot read a bare SVG file, so an iOS app ships the icons in an asset catalog of its own.
+    private func catalogImage(in bundle: Bundle?) -> UIImage? {
+        bundle.flatMap { UIImage(named: rawValue, in: $0, with: nil) } ?? UIImage(named: rawValue, in: .main, with: nil)
+    }
+
     private func nativeImage(in bundle: Bundle?) -> UIImage? {
-        guard let bundle else { return nil }
-        return UIImage(named: rawValue, in: bundle, with: nil)?.withRenderingMode(.alwaysTemplate)
+        catalogImage(in: bundle)?.withRenderingMode(.alwaysTemplate)
     }
 
     private func originalNativeImage(in bundle: Bundle?) -> UIImage? {
-        guard let bundle else { return nil }
-        return UIImage(named: rawValue, in: bundle, with: nil)?.withRenderingMode(.alwaysOriginal)
+        catalogImage(in: bundle)?.withRenderingMode(.alwaysOriginal)
     }
     #endif
 }
