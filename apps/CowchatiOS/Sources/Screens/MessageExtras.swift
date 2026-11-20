@@ -175,6 +175,8 @@ struct ChartView: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
+                    // On an iPad's wide column a chart would otherwise fill the screen.
+                    .frame(maxWidth: 560, alignment: .leading)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .accessibilityLabel(title)
             } else {
