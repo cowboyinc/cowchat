@@ -5,10 +5,13 @@ applications:
       phases:
         preBuild:
           commands:
-            - npm ci
+            # Any pnpm 12 switches itself to the exact version site/package.json
+            # pins in packageManager, so only the major is named here.
+            - npm install --global --no-fund --no-audit pnpm@12
+            - pnpm install --frozen-lockfile
         build:
           commands:
-            - npm run build
+            - pnpm run build
       artifacts:
         baseDirectory: out
         files:

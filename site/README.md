@@ -3,10 +3,10 @@
 This folder is Cowchat's public site. It is a Next.js 15 app exported statically to `out/`, and AWS Amplify serves it from `main` (`../amplify.yml`). It uses Tailwind 4 over a vendored copy of Gallop's foundations CSS (`app/gallop.css`, v0.7.0) and the two Season fonts in `app/fonts/`. The site cannot reach Cowboy's private npm registry, so nothing from Gallop's packages is installed, and what the page needs is copied in.
 
 ```sh
-npm ci
-npm run dev        # http://localhost:3000
-npm run typecheck
-npm run build      # writes out/
+pnpm install       # pnpm version pinned in package.json; `corepack enable` provides it
+pnpm run dev       # http://localhost:3000
+pnpm run typecheck
+pnpm run build     # writes out/
 ```
 
 `predev` and `prebuild` copy `../SKILLS.md` to `public/skills.txt`, which agents read at `/skills.txt`.

@@ -1,0 +1,5 @@
+# pnpm settings for this package (it is not a multi-package workspace).
+
+# Install scripts npm already ran; pnpm 12 fails the install until each is decided.
+allowBuilds:
+  sharp: true # next/image
