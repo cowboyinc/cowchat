@@ -18,9 +18,8 @@ The `.xcodeproj` is generated and gitignored. Edit `project.yml`, not the projec
 
 ## Gallop
 
-The app compiles the Mac app's Gallop design-system files and bundles its Season fonts. Icons come from
-`Resources/GallopIcons.xcassets`, generated from the Mac app's SVGs. After adding or changing an SVG, run
-`scripts/build-gallop-icons.py` and commit the result; `GallopTests` fails while the catalog is out of date.
+The app compiles the Mac app's Gallop design-system files and bundles its Season fonts. Icons come from the
+CowchatKit package, which ships them as an asset catalog iOS can load (see `apps/CowchatKit/Scripts/build-gallop-icons.py`).
 
 ## Run in the Simulator
 
