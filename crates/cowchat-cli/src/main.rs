@@ -230,6 +230,11 @@ struct Cli {
     #[arg(long, global = true)]
     key: Option<String>,
 
+    /// Read the API key from this file. `invites redeem` stores a newly minted
+    /// key here instead of reading one.
+    #[arg(long, global = true, value_name = "PATH", conflicts_with = "key")]
+    key_file: Option<PathBuf>,
+
     /// Pre-shared key for end-to-end encrypted rooms. Overrides the
     /// COWCHAT_ROOM_KEY environment variable.
     /// Content is encrypted before send and decrypted after receive, per-room.
@@ -932,20 +937,12 @@ enum InviteAction {
         /// mode-0600 sidecar, then consume it without it ever reaching argv.
         #[arg(long, value_name = "PATH")]
         token_file: Option<String>,
-        /// Report where the token was resolved from, and a fingerprint of it,
+        /// Report where the token was resolved from, and its length,
         /// without contacting a server. Never prints the token itself: this
         /// command confirms delivery of a secret, and its output goes to
         /// terminals, CI logs and agent transcripts.
         #[arg(long)]
         dry_run: bool,
-        /// Where to store a newly minted key. With no key available (or with
-        /// this flag), the redeem uses the server's HTTP endpoint to mint a
-        /// fresh key and stores it here — mode 0600, never printed, never
-        /// touching a shell. Defaults to the standard auth key path. With an
-        /// existing key and no flag, the redeem grants the room to that key
-        /// instead.
-        #[arg(long, value_name = "PATH")]
-        key_file: Option<String>,
     },
 }
 
@@ -1018,18 +1015,6 @@ fn resolve_invite_token(
         return Err("The invite token is empty.".to_string());
     }
     Ok(trimmed.to_string())
-}
-
-/// A short, non-reversible fingerprint of a secret, for confirming *which*
-/// value was resolved without putting the value itself on a terminal, in CI
-/// output, or in an agent transcript.
-fn secret_fingerprint(secret: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(secret.as_bytes());
-    format!(
-        "sha256:{:02x}{:02x}{:02x}{:02x}",
-        digest[0], digest[1], digest[2], digest[3]
-    )
 }
 
 /// Create `dir` and any missing ancestors, hardening only the directories this
@@ -1252,7 +1237,7 @@ fn displayable_error(body: &str, token: &str) -> String {
 async fn keyless_redeem(
     cli: &Cli,
     token: &str,
-    key_file: Option<&str>,
+    key_file: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(url) = cli.url.as_deref() else {
         return Err(
@@ -1279,8 +1264,8 @@ async fn keyless_redeem(
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let dest = match key_file {
-        Some(path) => std::path::PathBuf::from(path),
-        None => default_key_path(),
+        Some(path) => path.to_path_buf(),
+        None => server_key_path(url).ok_or("Minting a key needs a ws:// or wss:// server URL.")?,
     };
     let slot = SecretSlot::prepare(&dest).map_err(|e| {
         // A refusal here happens before the POST, so "still live" is true —
@@ -1405,9 +1390,8 @@ async fn keyless_redeem(
 
     // Deliberately does not print the key.
     println!(
-        "Invite redeemed — a new API key was minted and stored at {} (mode 0600, {}).",
-        dest.display(),
-        secret_fingerprint(&key)
+        "Invite redeemed — a new API key was minted and stored at {} (mode 0600).",
+        dest.display()
     );
     if let (Some(name), Some(id)) = (
         redeemed.get("room_name").and_then(|v| v.as_str()),
@@ -1418,13 +1402,13 @@ async fn keyless_redeem(
     if hosted_credential(&default_data_dir().join("hosted-bot.json"), url).is_some() {
         println!(
             "  Note: the saved hosted credential for this server takes precedence, so \
-             cowchat keeps using it for {url}; this key is not loaded automatically."
+             cowchat keeps using it for {url}; pass --key-file {} to use this key.",
+            dest.display()
         );
-    } else if dest != default_key_path() {
+    } else if key_file.is_some() {
         println!(
-            "  Note: cowchat loads {} automatically; a key stored elsewhere must be \
-             supplied explicitly.",
-            default_key_path().display()
+            "  Note: pass --key-file {} to use this key.",
+            dest.display()
         );
     }
     Ok(())
@@ -1473,8 +1457,66 @@ fn default_socket_path() -> &'static str {
     )
 }
 
+/// The local server's listener key, also the fallback key for any server.
 fn default_key_path() -> PathBuf {
     default_data_dir().join("auth.key")
+}
+
+/// Where a key minted by one server's invite is kept:
+/// `~/.cowchat/servers/NAME/api.key`, NAME from the server's HTTP origin plus a
+/// digest of it, so two origins never share a file.
+fn server_key_path(url: &str) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let scheme = match parsed.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        _ => return None,
+    };
+    let host = parsed.host_str()?;
+    let origin = match parsed.port() {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    };
+    let readable: String = origin
+        .replacen("://", "_", 1)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let digest = hex::encode(Sha256::digest(origin.as_bytes()));
+    Some(
+        default_data_dir()
+            .join("servers")
+            .join(format!("{readable}-{}", &digest[..12]))
+            .join("api.key"),
+    )
+}
+
+fn read_key_file(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
+/// `--key-file PATH`: the key, read before any connection. A missing, empty or
+/// non-regular file is an error rather than a fall-back to another key.
+fn key_from_file(path: &std::path::Path) -> Result<String, String> {
+    let regular = std::fs::metadata(path)
+        .map_err(|e| format!("Cannot read the key file {} ({e}).", path.display()))?;
+    if !regular.is_file() {
+        return Err(format!(
+            "The key file {} is not a regular file.",
+            path.display()
+        ));
+    }
+    read_key_file(path).ok_or_else(|| format!("The key file {} is empty.", path.display()))
 }
 
 #[derive(serde::Deserialize)]
@@ -1509,11 +1551,11 @@ fn load_key(key_arg: &Option<String>, url: Option<&str>) -> String {
         if let Some(key) = hosted_key(&default_data_dir().join("hosted-bot.json"), url) {
             return key;
         }
+        if let Some(key) = server_key_path(url).and_then(|path| read_key_file(&path)) {
+            return key;
+        }
     }
-    let key_path = default_key_path();
-    std::fs::read_to_string(key_path)
-        .map(|key| key.trim().to_string())
-        .unwrap_or_default()
+    read_key_file(&default_key_path()).unwrap_or_default()
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
@@ -1537,15 +1579,18 @@ fn url_from_env(cli: &mut Cli, socket_given: bool, env_url: Option<String>) {
 
 /// Whether `connect` would authenticate as someone: an explicit key, a bound
 /// hosted session, a saved hosted credential for this server (of any kind — a
-/// session-only one is still the identity to use, through `session start`), or
-/// a non-empty `auth.key`.
+/// session-only one is still the identity to use, through `session start`), a
+/// key minted for this server, or a non-empty `auth.key`.
 fn has_identity_for(cli: &Cli) -> bool {
     cli.key.is_some()
         || resolve_agent_id(cli).is_some_and(|id| id.starts_with("session:"))
         || cli.url.as_deref().is_some_and(|url| {
             hosted_credential(&default_data_dir().join("hosted-bot.json"), url).is_some()
+                || server_key_path(url)
+                    .and_then(|path| read_key_file(&path))
+                    .is_some()
         })
-        || std::fs::read_to_string(default_key_path()).is_ok_and(|key| !key.trim().is_empty())
+        || read_key_file(&default_key_path()).is_some()
 }
 
 fn resolve_agent_id(cli: &Cli) -> Option<String> {
@@ -2841,6 +2886,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let socket_given =
         matches.value_source("socket") == Some(clap::parser::ValueSource::CommandLine);
     url_from_env(&mut cli, socket_given, env_non_empty("COWCHAT_URL"));
+    let redeeming = matches!(
+        &cli.command,
+        Commands::Invites {
+            action: InviteAction::Redeem { .. }
+        }
+    );
+    if let (Some(path), false) = (&cli.key_file, redeeming) {
+        cli.key = Some(key_from_file(path)?);
+    }
     require_stable_named_agent(&cli)?;
 
     match &cli.command {
@@ -3979,7 +4033,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 token,
                 token_file,
                 dry_run,
-                key_file,
             } = action
             {
                 let resolved = resolve_invite_token(
@@ -3998,9 +4051,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "COWCHAT_INVITE_TOKEN"
                     };
                     println!(
-                        "Resolved invite token from {source} ({} bytes, {})",
-                        resolved.len(),
-                        secret_fingerprint(&resolved)
+                        "Resolved invite token from {source} ({} bytes)",
+                        resolved.len()
                     );
                     println!("Dry run — no server was contacted. The token is not printed.");
                     return Ok(());
@@ -4009,8 +4061,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // --key-file, or when a remote server is named and this
                 // machine has no identity for it. Otherwise grant the room to
                 // the identity `connect` uses, as before.
-                if key_file.is_some() || (cli.url.is_some() && !has_identity_for(&cli)) {
-                    return keyless_redeem(&cli, &resolved, key_file.as_deref()).await;
+                if cli.key_file.is_some() || (cli.url.is_some() && !has_identity_for(&cli)) {
+                    return keyless_redeem(&cli, &resolved, cli.key_file.as_deref()).await;
                 }
                 resolved_token = Some(resolved);
             }
@@ -4066,11 +4118,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 )
                                 .into());
                             }
-                            println!(
-                                "Invite token written to {} (mode 0600, {}).",
-                                dest.display(),
-                                secret_fingerprint(&invite.token)
-                            );
+                            println!("Invite token written to {} (mode 0600).", dest.display());
                             Some(dest)
                         }
                         None => {
@@ -5022,13 +5070,11 @@ mod room_key_tests {
                         token,
                         token_file,
                         dry_run,
-                        key_file,
                     },
             } => {
                 assert_eq!(token.as_deref(), Some("cinv_abc"));
                 assert!(token_file.is_none());
                 assert!(!dry_run);
-                assert!(key_file.is_none());
             }
             _ => panic!("expected invites redeem"),
         }

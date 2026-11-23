@@ -14,12 +14,7 @@ use std::process::{Command, Stdio};
 const MINTED_KEY: &str = "1e2d3c4b5a69788796a5b4c3d2e1f0091e2d3c4b5a69788796a5b4c3d2e1f009";
 
 fn bin() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("cowchat")
+    PathBuf::from(env!("CARGO_BIN_EXE_cowchat"))
 }
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -192,8 +187,8 @@ fn redeem_accepts_a_token_file() {
          and its output reaches terminals, CI logs and agent transcripts.\nstdout: {stdout}"
     );
     assert!(
-        stdout.contains("from file") && stdout.contains("sha256:"),
-        "dry-run should name the source and fingerprint the value.\nstdout: {stdout}"
+        stdout.contains("from file") && !stdout.contains("sha256:"),
+        "dry-run should name the source and print nothing derived from the value.\nstdout: {stdout}"
     );
 }
 
@@ -225,7 +220,7 @@ fn redeem_accepts_a_token_on_stdin() {
         "token leaked: {stdout}"
     );
     assert!(
-        stdout.contains("from stdin") && stdout.contains("sha256:"),
+        stdout.contains("from stdin") && !stdout.contains("sha256:"),
         "stdout: {stdout}"
     );
 }
@@ -246,7 +241,7 @@ fn redeem_accepts_a_token_from_the_environment() {
     );
     assert!(!stdout.contains("cinv_from_env"), "token leaked: {stdout}");
     assert!(
-        stdout.contains("COWCHAT_INVITE_TOKEN") && stdout.contains("sha256:"),
+        stdout.contains("COWCHAT_INVITE_TOKEN") && !stdout.contains("sha256:"),
         "stdout: {stdout}"
     );
 }
@@ -363,8 +358,8 @@ fn keyless_redeem_stores_the_minted_key_0600_and_never_prints_it() {
         "the key must never be printed.\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains("sha256:") && stdout.contains("invite-lab"),
-        "success should fingerprint the key and name the granted room.\nstdout: {stdout}"
+        !stdout.contains("sha256:") && stdout.contains("invite-lab"),
+        "success should name the granted room and print nothing derived from the key.\nstdout: {stdout}"
     );
 }
 
@@ -908,16 +903,17 @@ fn create_writes_the_token_to_a_0600_file_without_printing_it() {
         "the token must never be printed.\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains(&*token_path.to_string_lossy()),
-        "the output should name where the token was written.\nstdout: {stdout}"
+        stdout.contains(&*token_path.to_string_lossy()) && !stdout.contains("sha256:"),
+        "the output should name where the token was written, and nothing derived from it.\nstdout: {stdout}"
     );
 }
 
 /// With no key anywhere, a plain `invites redeem` against a remote server mints
-/// a key and stores it at the default `~/.cowchat/auth.key`.
+/// a key and stores it under `~/.cowchat/servers/`, never as the local server's
+/// `~/.cowchat/auth.key`.
 #[cfg(unix)]
 #[test]
-fn keyless_redeem_defaults_to_the_auth_key_under_home() {
+fn keyless_redeem_defaults_to_a_key_for_that_server() {
     let home = tmpdir("defaulthome");
     let tok = home.join("tok");
     fs::write(&tok, "cinv_default_path\n").unwrap();
@@ -943,9 +939,16 @@ fn keyless_redeem_defaults_to_the_auth_key_under_home() {
         request.starts_with("POST /api/invites/redeem "),
         "{request}"
     );
-    let key_path = home.join(".cowchat").join("auth.key");
+    assert!(!home.join(".cowchat").join("auth.key").exists());
+    let servers: Vec<_> = fs::read_dir(home.join(".cowchat").join("servers"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(servers.len(), 1);
+    let key_path = servers[0].path().join("api.key");
     assert_eq!(fs::read_to_string(&key_path).unwrap().trim(), MINTED_KEY);
     assert_eq!(mode(&key_path), 0o600);
+    assert_eq!(mode(&servers[0].path()), 0o700);
 }
 
 /// A machine that already has a key grants the room to it over the WebSocket
