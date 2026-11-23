@@ -1457,3 +1457,139 @@ fn minting_beside_a_hosted_credential_says_which_key_is_used() {
     assert!(stdout.contains("takes precedence"), "{stdout}");
     assert!(!stdout.contains(MINTED_KEY), "{stdout}");
 }
+
+/// A `ws://` URL nothing listens on, so a command fails fast after reading its key.
+fn closed_url() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    format!("ws://{}/ws", listener.local_addr().unwrap())
+}
+
+fn set_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn a_key_on_the_command_line_warns_that_it_leaks() {
+    let out = cowchat()
+        .args([
+            "--url",
+            &closed_url(),
+            "--key",
+            "k_argv_secret",
+            "rooms",
+            "list",
+        ])
+        .output()
+        .expect("run cowchat");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning: --key") && stderr.contains("--key-file"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("k_argv_secret"), "{stderr}");
+
+    let dir = tmpdir("quietkey");
+    let key_file = dir.join("api.key");
+    fs::write(&key_file, "k_file_secret\n").unwrap();
+    set_mode(&key_file, 0o600);
+    let out = cowchat()
+        .args(["--url", &closed_url(), "rooms", "list", "--key-file"])
+        .arg(&key_file)
+        .output()
+        .expect("run cowchat");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("warning"), "{stderr}");
+}
+
+#[test]
+fn an_occupied_key_file_advice_keeps_the_key_off_the_command_line() {
+    let dir = tmpdir("occupiedadvice");
+    let tok = dir.join("tok");
+    fs::write(&tok, "cinv_precious\n").unwrap();
+    let key_path = dir.join("other.key");
+    fs::write(&key_path, "k_original\n").unwrap();
+    let out = cowchat()
+        .args(["--url", &closed_url(), "invites", "redeem", "--token-file"])
+        .arg(&tok)
+        .arg("--key-file")
+        .arg(&key_path)
+        .output()
+        .expect("run cowchat");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("without --key-file"), "{stderr}");
+    assert!(stderr.contains("servers"), "{stderr}");
+    assert!(!stderr.contains("--key "), "{stderr}");
+}
+
+#[test]
+fn redeem_refuses_the_local_server_key_as_its_destination() {
+    let home = tmpdir("authkeydest");
+    fs::create_dir_all(home.join(".cowchat")).unwrap();
+    let tok = home.join("tok");
+    fs::write(&tok, "cinv_precious\n").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let out = cowchat()
+        .env("HOME", &home)
+        .args(["--url", &url, "invites", "redeem", "--token-file"])
+        .arg(&tok)
+        .arg("--key-file")
+        .arg(
+            home.join(".cowchat")
+                .join("..")
+                .join(".cowchat")
+                .join("auth.key"),
+        )
+        .output()
+        .expect("run cowchat");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("local server"), "{stderr}");
+    assert!(stderr.contains("still live"), "{stderr}");
+    assert!(never_contacted(&listener));
+    assert!(!home.join(".cowchat").join("auth.key").exists());
+}
+
+#[test]
+fn a_key_file_open_to_others_or_behind_a_link_warns() {
+    let dir = tmpdir("widekey");
+    let key_file = dir.join("api.key");
+    fs::write(&key_file, "k_wide\n").unwrap();
+    set_mode(&key_file, 0o644);
+    let link = dir.join("link.key");
+    std::os::unix::fs::symlink(&key_file, &link).unwrap();
+    for (path, problem) in [(&key_file, "other users"), (&link, "symbolic link")] {
+        let out = cowchat()
+            .args(["--url", &closed_url(), "rooms", "list", "--key-file"])
+            .arg(path)
+            .output()
+            .expect("run cowchat");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("warning") && stderr.contains(problem),
+            "{problem}: {stderr}"
+        );
+        assert!(!stderr.contains("k_wide"), "{stderr}");
+    }
+}
+
+#[test]
+fn a_saved_key_open_to_others_warns() {
+    let home = tmpdir("wideauth");
+    fs::create_dir_all(home.join(".cowchat")).unwrap();
+    let auth_key = home.join(".cowchat").join("auth.key");
+    fs::write(&auth_key, "k_wide_auth\n").unwrap();
+    set_mode(&auth_key, 0o644);
+    let out = cowchat()
+        .env("HOME", &home)
+        .args(["--url", &closed_url(), "rooms", "list"])
+        .output()
+        .expect("run cowchat");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning") && stderr.contains("other users"),
+        "{stderr}"
+    );
+}

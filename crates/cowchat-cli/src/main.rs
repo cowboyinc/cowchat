@@ -226,7 +226,8 @@ struct Cli {
     #[arg(long, global = true)]
     url: Option<String>,
 
-    /// API key for authenticated remote servers (local connections are keyless)
+    /// API key for authenticated remote servers (local connections are keyless).
+    /// Visible in shell history and `ps`; prefer --key-file.
     #[arg(long, global = true)]
     key: Option<String>,
 
@@ -1263,20 +1264,36 @@ async fn keyless_redeem(
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let dest = match key_file {
-        Some(path) => path.to_path_buf(),
-        None => server_key_path(url).ok_or("Minting a key needs a ws:// or wss:// server URL.")?,
-    };
+    let server_path =
+        server_key_path(url).ok_or("Minting a key needs a ws:// or wss:// server URL.")?;
+    let dest = key_file.map_or_else(|| server_path.clone(), std::path::Path::to_path_buf);
+    if same_location(&dest, &default_key_path()) {
+        return Err(format!(
+            "{} is the local server's own key, so a key minted by {url} will not be \
+             stored there. Nothing was redeemed — the invite is still live. Leave out \
+             --key-file to keep the key for that server, or choose another path.",
+            dest.display()
+        )
+        .into());
+    }
     let slot = SecretSlot::prepare(&dest).map_err(|e| {
         // A refusal here happens before the POST, so "still live" is true —
         // this is the one place that claim is safe.
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
+        if e.kind() == std::io::ErrorKind::AlreadyExists && key_file.is_some() {
             format!(
                 "A file already exists at {} and will not be overwritten. Nothing \
-                 was redeemed — the invite is still live. If that file holds a \
-                 key, redeem with it available to grant it the room instead of \
-                 minting; if it is not a key, move it aside or store the new key \
-                 elsewhere with --key-file.",
+                 was redeemed — the invite is still live. If it holds a key for this \
+                 server, save that key at {} (mode 0600) and run the same redeem \
+                 without --key-file to grant it the room; otherwise move the file \
+                 aside or choose another --key-file path.",
+                dest.display(),
+                server_path.display()
+            )
+        } else if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!(
+                "A file already exists at {} and will not be overwritten. Nothing \
+                 was redeemed — the invite is still live. Move it aside, or store \
+                 the new key elsewhere with --key-file.",
                 dest.display()
             )
         } else {
@@ -1498,6 +1515,64 @@ fn server_key_path(url: &str) -> Option<PathBuf> {
     )
 }
 
+/// Whether two paths name the same file, which need not exist yet.
+fn same_location(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let resolve = |path: &std::path::Path| match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => {
+            let parent = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            std::fs::canonicalize(parent)
+                .map(|parent| parent.join(name))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    };
+    resolve(a) == resolve(b)
+}
+
+/// A warning for a key file that is a symbolic link, belongs to another user,
+/// or is open to group or others. The key is still read, as for token files.
+fn key_file_warning(path: &std::path::Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        let mode = metadata.permissions().mode() & 0o777;
+        let problem = if metadata.file_type().is_symlink() {
+            "is a symbolic link".to_owned()
+        } else if metadata.uid() != me {
+            "belongs to another user".to_owned()
+        } else if mode & 0o077 != 0 {
+            format!("is open to other users (mode {mode:o})")
+        } else {
+            return None;
+        };
+        Some(format!(
+            "warning: the key file {} {problem}; keep keys in a regular mode-0600 file you own.",
+            path.display()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// `read_key_file`, warning on stderr when the file is unsafe to hold a key.
+fn read_key_file_checked(path: &std::path::Path) -> Option<String> {
+    let key = read_key_file(path)?;
+    if let Some(warning) = key_file_warning(path) {
+        eprintln!("{warning}");
+    }
+    Some(key)
+}
+
 fn read_key_file(path: &std::path::Path) -> Option<String> {
     std::fs::read_to_string(path)
         .ok()
@@ -1516,7 +1591,7 @@ fn key_from_file(path: &std::path::Path) -> Result<String, String> {
             path.display()
         ));
     }
-    read_key_file(path).ok_or_else(|| format!("The key file {} is empty.", path.display()))
+    read_key_file_checked(path).ok_or_else(|| format!("The key file {} is empty.", path.display()))
 }
 
 #[derive(serde::Deserialize)]
@@ -1551,11 +1626,11 @@ fn load_key(key_arg: &Option<String>, url: Option<&str>) -> String {
         if let Some(key) = hosted_key(&default_data_dir().join("hosted-bot.json"), url) {
             return key;
         }
-        if let Some(key) = server_key_path(url).and_then(|path| read_key_file(&path)) {
+        if let Some(key) = server_key_path(url).and_then(|path| read_key_file_checked(&path)) {
             return key;
         }
     }
-    read_key_file(&default_key_path()).unwrap_or_default()
+    read_key_file_checked(&default_key_path()).unwrap_or_default()
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
@@ -2892,6 +2967,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             action: InviteAction::Redeem { .. }
         }
     );
+    if matches.value_source("key") == Some(clap::parser::ValueSource::CommandLine) {
+        eprintln!(
+            "warning: --key puts the API key in shell history and `ps` output; pass \
+             --key-file PATH instead."
+        );
+    }
     if let (Some(path), false) = (&cli.key_file, redeeming) {
         cli.key = Some(key_from_file(path)?);
     }

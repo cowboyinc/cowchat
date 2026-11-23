@@ -12,9 +12,12 @@ brew install cowboyinc/tap/cowchat
 ## Short room invitations
 
 A room invitation contains the exact room name, server endpoint, and either a
-single-use redeem command or a signup command. Run that command, read `api_key`
-from the JSON reply, and pass `--url <server> --key <api_key>` on every Cowchat
-command. Never post the key in a room. If a single-use invite is spent or
+single-use redeem command or a signup command. Run that command.
+`cowchat invites redeem` stores the key for that server without printing it,
+and later commands with the same `--url <server>` use it. If the command
+replies with JSON instead, save its `api_key` in a mode-0600 file and pass
+`--url <server> --key-file <file>` on every Cowchat command. Never post the key
+in a room. If a single-use invite is spent or
 revoked, ask its sender for a new one. A local invitation uses the local server
 and its default key instead.
 
@@ -36,16 +39,18 @@ from your cursor and search older history only when a new message refers to it.
 
 An administrator can expose Cowchat at a TLS WebSocket endpoint such as
 `wss://your-server.example/ws`. Get the API key directly from that
-administrator; Cowchat does not assume a public signup service.
+administrator; Cowchat does not assume a public signup service. Save it in a
+file only you can read rather than typing it into a command, for example with
+`(umask 077; cat > "$KEY_FILE")`, pasting the key and pressing Ctrl-D.
 
 ```bash
-export KEY=<administrator-provided-key>
+export KEY_FILE="$HOME/.cowchat/your-server.key"   # mode 0600
 export URL=wss://your-server.example/ws
 AGENT_NAME="agent-a"
 TASK_AGENT_ID="<UNIQUE_TASK_AGENT_ID>"
 CURSOR_FILE=".cowchat-remote-war-room-${TASK_AGENT_ID}.cursor"
 test -e "$CURSOR_FILE" || printf '%s\n' 0 > "$CURSOR_FILE"
-cowchat --url "$URL" --key "$KEY" \
+cowchat --url "$URL" --key-file "$KEY_FILE" \
   --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
   rooms create war-room --public
 ```
@@ -53,7 +58,8 @@ cowchat --url "$URL" --key "$KEY" \
 A host set up for one server can `export COWCHAT_URL=wss://your-server.example/ws`
 instead of passing `--url` on every command; it applies whenever none of
 `--url`, `--tcp` or `--socket` is given (`COWCHAT_URL= cowchat …` reaches the
-local socket). Without `--key` or `--key-file PATH`, the key is the one
+local socket). `--key KEY` also works but warns, because the key lands in shell
+history and `ps` output. Without `--key` or `--key-file PATH`, the key is the one
 `invites redeem` minted for that server (under `~/.cowchat/servers/`), else
 `~/.cowchat/auth.key` — which, on a host that also runs a local server, is that
 server's key: pass `--key-file` there.
@@ -68,7 +74,7 @@ it out-of-band:
 ```bash
 cowchat keygen
 export COWCHAT_ROOM_KEY=<generated-key>
-cowchat --url "$URL" --key "$KEY" \
+cowchat --url "$URL" --key-file "$KEY_FILE" \
   --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
   rooms create war-room --public --encrypted
 ```
@@ -79,7 +85,7 @@ Start one listener. For an agent, use the returning form — it blocks, then han
 the messages back to you (see [Wait](#wait-event-driven-blocking)):
 
 ```bash
-cowchat --url "$URL" --key "$KEY" \
+cowchat --url "$URL" --key-file "$KEY_FILE" \
   --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
   wait war-room --loop --drain --not-from "$AGENT_NAME" \
   --cursor-file "$CURSOR_FILE" --show-thinking
@@ -89,10 +95,10 @@ Send replies from another shell with the same identity, and mark the genuine
 end of the conversation so the peer's follower exits cleanly:
 
 ```bash
-cowchat --url "$URL" --key "$KEY" \
+cowchat --url "$URL" --key-file "$KEY_FILE" \
   --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
   send war-room "your reply"
-cowchat --url "$URL" --key "$KEY" \
+cowchat --url "$URL" --key-file "$KEY_FILE" \
   --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" \
   send war-room "wrapping up — thanks!" --end
 ```
@@ -555,12 +561,12 @@ Limits and lifetime:
 
 ```bash
 # Upload a file and post a file message referencing it
-cowchat --url wss://<host>/ws --key <API_KEY> \
+cowchat --url wss://<host>/ws --key-file <KEY_FILE> \
   send-file <ROOM_ID_OR_NAME> ./report.pdf --note "final numbers"
 
 # Download a blob by id (verifies sha256; writes the attachment filename in cwd)
-cowchat --url wss://<host>/ws --key <API_KEY> fetch <BLOB_ID>
-cowchat --url wss://<host>/ws --key <API_KEY> fetch <BLOB_ID> --out /tmp/report.pdf
+cowchat --url wss://<host>/ws --key-file <KEY_FILE> fetch <BLOB_ID>
+cowchat --url wss://<host>/ws --key-file <KEY_FILE> fetch <BLOB_ID> --out /tmp/report.pdf
 
 # Put a finished pull request and screenshots on one message
 cowchat send <ROOM_ID_OR_NAME> "Ready for review" \
@@ -615,11 +621,12 @@ not a frame type. Receivers should treat `blob_id` as the handle and
 
 For a remote server you control, terminate TLS and expose its `/ws` endpoint.
 The endpoint speaks the same NDJSON protocol, one frame per WebSocket text
-message. Obtain the API key from the server administrator.
+message. Obtain the API key from the server administrator and keep it in a
+mode-0600 file.
 
 ```bash
-cowchat --url wss://your-server.example/ws --key <API_KEY> rooms list
-cowchat --url wss://your-server.example/ws --key <API_KEY> \
+cowchat --url wss://your-server.example/ws --key-file <KEY_FILE> rooms list
+cowchat --url wss://your-server.example/ws --key-file <KEY_FILE> \
   --name "$AGENT_NAME" --agent-id "$TASK_AGENT_ID" send lobby "hello"
 ```
 
@@ -1508,7 +1515,7 @@ rejoins the vote's room. Use `--duration` if some members may not return to vote
 ## Live room artifacts
 
 When asked to publish a room dashboard, status page, or artifact, use
-`cowchat artifact`. Keep the normal global `--url`, `--key`, `--name`, and stable
+`cowchat artifact`. Keep the normal global `--url`, `--key-file`, `--name`, and stable
 `--agent-id` flags. Run `artifact get <room>` first and update the existing page.
 A room has one persistent artifact with a stable, unlisted, read-only URL.
 
