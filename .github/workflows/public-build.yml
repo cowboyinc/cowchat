@@ -45,7 +45,7 @@ jobs:
           packages=json.load(open(sys.argv[1]))['packages']
           for p in packages:
               source=p['source'] or ''
-              assert not source.startswith('git+') or source.startswith('git+https://github.com/cowboyinc/cowchat-core.git?rev=0cbdf07ca89eaaaccf79c9d9859f4a5e0ff25466#'), source
+              assert not source.startswith('git+') or source.startswith('git+https://github.com/cowboyinc/cowchat-core.git?rev=b15d6ce2aaaabd3532a682b6ce9b7c326d1123bd#'), source
           PY
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --workspace --all-targets --all-features
