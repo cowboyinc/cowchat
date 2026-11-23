@@ -25,3 +25,4 @@ pub mod web;
 pub mod webhooks;
 
 pub use server::{CowchatServer, ServerConfig};
+pub use tags::TagExtraction;
