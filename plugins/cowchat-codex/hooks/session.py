@@ -12,7 +12,9 @@ import subprocess
 import sys
 import uuid
 
-RESTART_REFUSED = "session creation failed: 409"
+# The server refuses a restart with 409, or with 400 when the saved session was
+# minted by another key, such as one the bot has since rotated away from.
+RESTART_REFUSED = ("session creation failed: 400", "session creation failed: 409")
 
 
 def private_mapping(directory, identifier):
@@ -129,7 +131,7 @@ def hook_main(event, payload):
                 result = start_fresh()
             except subprocess.CalledProcessError as error:
                 # Any other failure may be temporary, so the saved identity stays.
-                if RESTART_REFUSED not in error.stderr:
+                if not any(refused in error.stderr for refused in RESTART_REFUSED):
                     raise
                 agent_id = f"session:{uuid.uuid4()}"
                 common = [cli_binary, "--url", url, "--name", name, "--agent-id", agent_id]
