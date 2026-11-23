@@ -1871,11 +1871,26 @@ struct MessageExpansion: Equatable {
     }
 }
 
+/// The row's opened or closed render plan. The row owns one; tests pass their own to watch it.
+@MainActor
+final class MessageExpansionState: ObservableObject {
+    @Published private(set) var expansion: MessageExpansion?
+
+    func toggle(content: String, makePlan: (String) -> MessageRenderPlan) {
+        expansion = MessageExpansion.toggled(expansion, content: content, makePlan: makePlan)
+    }
+
+    func contentChanged(to content: String) {
+        expansion = MessageExpansion.retained(expansion, for: content)
+    }
+}
+
 struct ExpandableMessageText: View {
     let content: String
     var textColor: Color
     @Environment(\.mentionMarks) private var mentionMarks
-    @State private var expansion: MessageExpansion?
+    @StateObject private var expansionState: MessageExpansionState
+    private var expansion: MessageExpansion? { expansionState.expansion }
 
     /// Open only while the message still has the text it was opened with.
     private var isExpanded: Bool { expansion?.openPlan(for: content) != nil }
@@ -1891,8 +1906,10 @@ struct ExpandableMessageText: View {
     init(
         content: String,
         textColor: Color = SemanticColor.textSecondary,
-        makeRenderPlan: ((String) -> MessageRenderPlan)? = nil
+        makeRenderPlan: ((String) -> MessageRenderPlan)? = nil,
+        expansionState: MessageExpansionState? = nil
     ) {
+        _expansionState = StateObject(wrappedValue: expansionState ?? MessageExpansionState())
         self.content = content
         self.textColor = textColor
         self.makeRenderPlan = makeRenderPlan ?? MessageRenderPlan.make
@@ -1908,7 +1925,7 @@ struct ExpandableMessageText: View {
                     .gallopText(.bodyS, color: SemanticColor.textTertiary)
             } else { textBody }
         }
-        .onChange(of: content) { expansion = MessageExpansion.retained(expansion, for: $0) }
+        .onChange(of: content) { expansionState.contentChanged(to: $0) }
     }
 
     private var textBody: some View {
@@ -2017,8 +2034,9 @@ struct ExpandableMessageText: View {
     private var showsResponseControl: Bool { layout.showsResponseControl }
 
     private func toggleExpansion() {
-        let next = MessageExpansion.toggled(expansion, content: content, makePlan: makeRenderPlan)
-        withAnimation(.easeInOut(duration: 0.16)) { expansion = next }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            expansionState.toggle(content: content, makePlan: makeRenderPlan)
+        }
     }
 
     private func headingStyle(for level: Int) -> GallopTextStyle {

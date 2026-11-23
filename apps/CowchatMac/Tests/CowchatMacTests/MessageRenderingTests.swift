@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import XCTest
 @testable import CowchatMac
@@ -137,5 +138,41 @@ final class MessageExpansionTests: XCTestCase {
 
         XCTAssertNil(MessageExpansion.retained(closed, for: placeholder))
         XCTAssertEqual(MessageExpansion.retained(closed, for: plaintext), closed)
+    }
+}
+
+final class ExpandableMessageRowTests: XCTestCase {
+    /// Drives the live row: expand, collapse, then forget the room key by redrawing the row with the placeholder.
+    @MainActor
+    func testForgettingTheKeyReleasesTheRowsClosedExpansion() async throws {
+        let plaintext = "Secret.\n\n## Heading\n\n" + (1...40).map { "- item \($0)" }.joined(separator: "\n")
+        let placeholder = "Encrypted message — add the room key to read it."
+        let state = MessageExpansionState()
+        let host = NSHostingView(rootView: ExpandableMessageText(content: plaintext, expansionState: state))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = host
+        func redraw() async throws {
+            window.display(); host.layoutSubtreeIfNeeded()
+            try await Task.sleep(nanoseconds: 100_000_000)
+            window.display(); host.layoutSubtreeIfNeeded()
+        }
+        try await redraw()
+
+        state.toggle(content: plaintext, makePlan: MessageRenderPlan.make)
+        state.toggle(content: plaintext, makePlan: MessageRenderPlan.make)
+        try await redraw()
+        XCTAssertEqual(state.expansion?.isOpen, false)
+        XCTAssertEqual(state.expansion?.content, plaintext, "a closed row keeps its plan while its text is unchanged")
+
+        host.rootView = ExpandableMessageText(content: placeholder, expansionState: state)
+        try await redraw()
+        XCTAssertNil(state.expansion, "the row must drop the old plaintext once its text changes")
     }
 }
