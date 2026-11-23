@@ -710,6 +710,29 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                 session_token: Some(token),
             });
         }
+        if let Some((owner_bot, room_id, room_name, false, minted_by)) = existing.clone() {
+            // A restart whose reply was lost: the key that minted the session asks
+            // again while it is live. It gets a fresh token under the same ID, and
+            // the token it never received stops working.
+            if restart
+                && owner_bot == bot
+                && p.session_id.is_none()
+                && minted_by.as_deref() == Some(hash(key).as_str())
+            {
+                let token = session_token();
+                tx.execute(
+                    "UPDATE social_sessions SET name=?2,harness=?3,folder=?4,branch=?5,token_digest=?6,last_seen=unixepoch() WHERE id=?1 AND ended_at IS NULL",
+                    params![session_id, name, harness, folder, branch, hash(&token)],
+                )?;
+                tx.commit()?;
+                return Ok(SessionRoom {
+                    room_id,
+                    room_name,
+                    agent_name: name.to_owned(),
+                    session_token: Some(token),
+                });
+            }
+        }
         if let Some((owner_bot, room_id, room_name, _, _)) = existing {
             anyhow::ensure!(
                 owner_bot == bot && p.session_id.as_deref() == Some(session_id),
