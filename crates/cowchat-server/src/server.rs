@@ -1517,6 +1517,7 @@ where
         "agent_id": agent_id,
         "name": agent_name,
         "protocol_version": PROTOCOL_VERSION,
+        "features": [FEATURE_SUBSCRIPTION_TAGS],
     });
     if let Some(room) = social_session_room.as_ref() {
         ok_payload["session_room"] = serde_json::json!({

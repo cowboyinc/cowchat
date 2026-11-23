@@ -4624,3 +4624,30 @@ async fn chart_media_allowance_does_not_bypass_text_or_upload_limits() {
         .unwrap();
     server.abort();
 }
+
+/// The client refuses a tagged subscription unless the server advertised
+/// `subscription_tags` when the agent registered, so this server must say so.
+#[tokio::test]
+async fn a_tagged_subscription_works_because_the_server_advertises_tag_support() {
+    let (_handle, addr, key, _tmp) = start_test_server().await;
+    let agent = connect_agent(&addr, &key, "Tagger").await;
+    let room = agent
+        .create_room("tagged-subscriptions", None, None)
+        .await
+        .unwrap();
+    let subscription = agent
+        .create_tagged_subscription(
+            &room.room_id,
+            "http://127.0.0.1:9/hook",
+            "secret",
+            vec![],
+            vec!["github=cowboyinc/cowchat#98".into()],
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(subscription.tags, vec!["github=cowboyinc/cowchat#98"]);
+}
