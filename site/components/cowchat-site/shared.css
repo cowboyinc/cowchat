@@ -1,0 +1,125 @@
+/* The rules this page shares with cowboy.inc's home and Marshal's site, copied from the prototype where all three are
+   designed (cowboyinc/prototype-site at 39d5d7f63): only the rules the page's markup uses, in the order the prototype
+   loads them, with their values as they are there. A change made there is carried here by hand. One change is this
+   site's own: the bar's and the actions' rules that name a button also name a link, since Download for Mac, GitHub and
+   Install are links here.
+
+   - src/components/site/site-structured.css: the column (.ss-wrap) and the line under a heading (.ss-line).
+   - src/components/site/site-full.css: the section's rhythm (.sf-section), the centred head (.sf-head) and the command
+     row with Copy (.sf-code, .sf-code-actions, .sf-copy-label).
+   - src/components/marshal-site/marshal-site.css: the page, the bar, the hero, the actions, the shot's drop, the band,
+     the footer and the motion (.ms-). */
+
+/* ---- site-structured.css ---- */
+.ss-wrap { width: 100%; max-width: calc(1280px + 2 * var(--sp-5)); margin: 0 auto; padding: 0 var(--sp-5); box-sizing: border-box; }
+.ss-line { margin: var(--sp-05) 0 0; color: var(--color-text-secondary); font-size: var(--type-body-l-size); line-height: var(--type-body-l-lh); text-wrap: balance; }
+
+@media (max-width: 720px) {
+  .ss-wrap { padding: 0 var(--sp-2); }
+}
+
+/* ---- site-full.css ---- */
+/* 80 above and below each section: 160 from one section's foot to the next head, the structured page's step. */
+.sf-section { padding: var(--sp-10) 0; }
+.sf-section { scroll-margin-top: var(--sp-4); }
+
+/* Every section opens the same way: the heading and one line, centred, at the structured heads' measure. */
+.sf-head { display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); max-width: 720px; margin-inline: auto; text-align: center; }
+.sf-head h2 { margin: 0; font-family: var(--font-display); font-size: var(--type-h1-size); line-height: var(--type-h1-lh); font-weight: var(--type-h2-wght); text-wrap: balance; }
+
+/* The line to paste in a raised well with Copy at its end. */
+.sf-code { display: flex; align-items: center; gap: var(--sp-2); max-width: 760px; margin: var(--sp-5) auto 0; padding: var(--sp-15) var(--sp-15) var(--sp-15) var(--sp-25); border-radius: var(--r-lg); background: var(--color-surface-600); box-shadow: var(--shadow-raised); box-sizing: border-box; }
+.sf-code code { flex: 1; min-width: 0; color: var(--color-text-primary); font-family: var(--font-mono); font-size: var(--type-code-size); line-height: var(--type-code-lh); overflow-wrap: anywhere; }
+.sf-code button { flex: none; white-space: nowrap; }
+.sf-code-actions { display: flex; flex: none; gap: var(--sp-1); }
+
+/* The copy button's two labels in one cell: the width is the wider word's, whichever shows. */
+.sf-copy-label { display: inline-grid; }
+.sf-copy-label > span { grid-area: 1 / 1; visibility: hidden; }
+.sf-copy-label > span[data-on] { visibility: visible; }
+
+@media (max-width: 720px) {
+  .sf-section { padding: var(--sp-8) 0; }
+  .sf-head h2 { font-size: var(--type-h3-size); line-height: var(--type-h3-lh); }
+  .sf-code { align-items: flex-start; flex-direction: column; gap: var(--sp-15); padding: var(--sp-2); }
+  .sf-code-actions { align-self: flex-end; }
+}
+
+@media (max-width: 720px) {
+  .sf-head .ss-line, .sf-head h2 { text-wrap: balance; }
+}
+
+/* ---- marshal-site.css ---- */
+.ms { min-height: 100svh; display: flex; flex-direction: column; background: var(--color-surface-400); color: var(--color-text-primary); font-family: var(--font-sans); }
+.ms main { flex: 1; display: flex; flex-direction: column; }
+.ms-h2 { margin: 0; font-family: var(--font-display); font-size: var(--type-h1-size); line-height: var(--type-h1-lh); font-weight: var(--type-h2-wght); text-wrap: balance; }
+
+/* The bar: clear on the hero, the house glass once the reader scrolls, as the home page's. */
+.ms-bar { position: sticky; top: 0; z-index: 5; border-bottom: 1px solid transparent; transition: background-color 300ms var(--ease-out), border-color 300ms var(--ease-out); }
+.ms-bar[data-scrolled] { background: var(--color-surface-glass-500); border-bottom-color: var(--color-border-default); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+.ms-brand { display: inline-flex; align-items: center; gap: var(--sp-1); justify-self: start; color: var(--color-text-primary); text-decoration: none; }
+.ms-brand-word { font-family: var(--font-display); font-size: var(--type-h4-size); line-height: var(--type-h4-lh); font-weight: var(--type-h4-wght); }
+.ms-doors { display: flex; align-items: center; gap: var(--sp-1); justify-self: end; }
+.ms-doors :is(button, a) { flex: none; white-space: nowrap; }
+.ms-bar-request { display: grid; grid-template-columns: 0fr; margin-left: calc(-1 * var(--sp-1)); opacity: 0; visibility: hidden; transition: grid-template-columns 300ms var(--ease-out), margin-left 300ms var(--ease-out), opacity 200ms var(--ease-out), visibility 0s linear 300ms; }
+.ms-bar-request[data-shown] { grid-template-columns: 1fr; margin-left: 0; opacity: 1; visibility: visible; transition: grid-template-columns 300ms var(--ease-out), margin-left 300ms var(--ease-out), opacity 200ms var(--ease-out) 100ms, visibility 0s; }
+/* The clip box reaches 4px past the button so its focus ring is not cut while the column is open. */
+.ms-bar-request > span { min-width: 0; overflow: hidden; padding: 4px; margin: -4px; }
+
+/* A product shot sits on its own ground with a soft drop under it. */
+.ms-shot { margin: 0; min-width: 0; overflow: hidden; border: 1px solid var(--color-border-default); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-raised), 0 32px 64px -40px color-mix(in srgb, var(--color-bison-950) 40%, transparent); }
+
+/* The hero: the words centred, then the product shot on a band that runs the page's width. */
+.ms-hero { padding: var(--sp-10) 0 0; }
+.ms-hero-copy { display: flex; flex-direction: column; align-items: center; max-width: 880px; margin: 0 auto; text-align: center; }
+.ms-hero-title { margin: 0; font-family: var(--font-display); font-size: var(--type-title-size); line-height: var(--type-title-lh); font-weight: var(--type-title-wght); letter-spacing: -0.01em; text-wrap: balance; }
+.ms-lede { max-width: 38em; margin: var(--sp-3) 0 0; color: var(--color-text-secondary); font-size: var(--text-size-6); line-height: var(--line-height-3); text-wrap: balance; }
+.ms-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--sp-2) var(--sp-4); margin-top: var(--sp-5); }
+.ms-actions :is(button, a) { flex: none; white-space: nowrap; }
+.ms-quiet-action { display: inline-flex; align-items: center; gap: var(--sp-05); white-space: nowrap; }
+.ms-quiet-action svg { width: 16px; height: 16px; }
+
+.ms-hero-stage { position: relative; margin-top: var(--sp-8); padding-bottom: var(--sp-10); scroll-margin-top: 72px; }
+.ms-hero-stage::before { content: ""; position: absolute; left: 0; right: 0; top: 200px; bottom: 0; border-top: 1px solid var(--color-border-default); background: var(--color-surface-300); }
+
+/* A band the page's width. */
+.ms-band { padding: var(--sp-10) 0; border-block: 1px solid var(--color-border-default); background: var(--color-surface-300); }
+
+/* The footer: the brand column, then the three groups. */
+.ms-foot { padding: var(--sp-8) 0 var(--sp-6); border-top: 1px solid var(--color-border-default); }
+.ms-foot-grid { display: grid; grid-template-columns: 2fr repeat(3, minmax(0, 1fr)); gap: var(--sp-4); }
+.ms-foot-brand { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-1); min-width: 0; }
+.ms-foot-brand small { margin-top: var(--sp-1); color: var(--color-text-tertiary); font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); }
+.ms-foot nav { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-1); }
+.ms-foot-title { margin: 0 0 var(--sp-05); color: var(--color-text-primary); font-family: var(--font-sans); font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); font-weight: 550; }
+
+/* Motion: content rises once into place as it enters, only when motion is allowed and the page has mounted. */
+.ms[data-motion] [data-reveal] { transition: opacity 600ms var(--ease-out), transform 600ms var(--ease-out); }
+.ms[data-motion] [data-reveal]:not([data-in]) { opacity: 0; transform: translateY(16px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ms-bar, .ms[data-motion] [data-reveal], .ms-bar-request, .ms-bar-request[data-shown] { transition: none; }
+}
+
+@media (max-width: 1080px) {
+  .ms-foot-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ms-foot-brand { grid-column: 1 / -1; }
+}
+
+@media (max-width: 720px) {
+  .ms-brand-word { font-size: var(--type-h5-size); line-height: var(--type-h5-lh); }
+  .ms-h2 { font-size: var(--type-h3-size); line-height: var(--type-h3-lh); }
+
+  .ms-hero { padding-top: var(--sp-6); }
+  .ms-hero-title { font-size: var(--type-h2-size); line-height: var(--type-h2-lh); }
+  .ms-lede { font-size: var(--type-body-l-size); line-height: var(--type-body-l-lh); }
+  .ms-actions { margin-top: var(--sp-4); }
+  .ms-hero-stage { margin-top: var(--sp-6); padding-bottom: var(--sp-8); }
+  .ms-hero-stage::before { top: 120px; }
+
+  .ms-band { padding: var(--sp-8) 0; }
+
+  .ms-foot { padding: var(--sp-6) 0 var(--sp-5); }
+  .ms-foot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-4) var(--sp-3); }
+}

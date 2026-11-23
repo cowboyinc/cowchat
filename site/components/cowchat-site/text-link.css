@@ -1,0 +1,9 @@
+/* TextLink (TextLink.tsx), copied from the prototype: the front door header's link values, as one component. */
+.text-link { color:var(--color-text-tertiary); font-weight:550; text-decoration:none; border-radius:var(--r-sm); transition:color var(--motion-hover-control) var(--ease-in); }
+.text-link-m { font-size:var(--type-body-m-size); line-height:var(--type-body-m-lh); letter-spacing:var(--type-body-m-ls); }
+.text-link-s { font-size:var(--type-body-s-size); line-height:var(--type-body-s-lh); letter-spacing:var(--type-body-s-ls); }
+.text-link:hover { color:var(--color-text-primary); }
+.text-link-on-dark { color:var(--color-bison-300); }
+.text-link-on-dark:hover { color:var(--color-hay-100); }
+.text-link:focus-visible { outline:2px solid var(--color-border-focus); outline-offset:2px; }
+@media (pointer:coarse) { .text-link { display:inline-flex; align-items:center; min-height:44px; } }

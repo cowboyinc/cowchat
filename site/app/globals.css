@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "./gallop.css";
+@import "./tokens.css";
 
 @layer base {
   html {
@@ -8,8 +9,41 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
+  /* Gallop's base type, as the prototype sets it: without it unstyled text falls to the browser's 16px at 400, which
+     is not a Gallop step. Tailwind's preflight makes strong text "bolder", which from a 550 base resolves to 900, a
+     weight Gallop does not have, so strong text is 750. */
   body {
     background-color: var(--color-surface-500);
     color: var(--color-text-primary);
+    font-size: var(--type-body-m-size);
+    line-height: var(--type-body-m-lh);
+    letter-spacing: var(--type-body-m-ls);
+    font-weight: var(--type-weight-regular);
+  }
+
+  b, strong { font-weight: var(--type-weight-strong); }
+
+  /* The focus ring for whatever draws none of its own, such as the brand link. It sits in the base layer, below
+     Tailwind's utilities and every unlayered rule, so Gallop's buttons keep their own ring. */
+  :focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; border-radius: 4px; }
+}
+
+/* A control's own ring is a box-shadow, which forced colours discard, so there the outline is the one indicator left. */
+@media (forced-colors: active) {
+  :focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
+}
+
+/* While a control is pressed, its transition runs at Gallop's press tempo. */
+:active { transition-duration: var(--motion-press); }
+
+/* Reduced motion: state changes still happen, but arrive rather than travel. Durations go to a hair above zero so
+   transitionend listeners still fire. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
   }
 }

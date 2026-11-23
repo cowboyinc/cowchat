@@ -1,0 +1,110 @@
+/* Cowchat's marketing page (CowchatSite.tsx, site/README.md). The column, the line, the section head and the command row
+   are cowboy.inc's home page's own, and the page's frame is Marshal's site's (the .ss-, .sf- and .ms- rules, copied into
+   shared.css from the prototype where all three are designed), so cowboy.inc, Marshal and Cowchat read as one family.
+   This file holds what is Cowchat's own: the 1080 column, the icon, the bar's row, the shots' frame, the sections'
+   forms (words beside a shot, a heading over one, the Works with card, the install rows, the repository and the close)
+   and the owners line. Every colour is a Gallop token. */
+
+.cs .ss-wrap { max-width: calc(1080px + 2 * var(--sp-5)); }
+.cs-section { scroll-margin-top: 72px; }
+/* Install is a link to #install, so the browser moves the keyboard's next Tab into the section. The page scrolls there
+   smoothly where motion is allowed, as the prototype's scroll did; globals.css's reduced-motion rule keeps it instant. */
+@media (prefers-reduced-motion: no-preference) { html:has(.cs) { scroll-behavior: smooth; } }
+
+/* The app's icon, rounded as macOS masks it. */
+.cs-icon { display: block; flex: none; border-radius: 22.5%; }
+.cs-hero-icon { margin-bottom: var(--sp-4); box-shadow: var(--shadow-raised); }
+
+/* The bar's row in the page's column: the brand at the left, GitHub and Download for Mac at the right, no section links. */
+.cs-bar-in { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding-block: var(--sp-2); }
+
+/* ---- A product shot: Marshal's frame (.ms-shot) around a drawn recreation of the Mac app (shots/). The frame is
+   the pane's own edge, cut to each shot's own height: the story whole, the pane off the bottom. ---- */
+.cs-shot { height: 480px; background: var(--color-surface-600); }
+.cs-shot[data-cs-shot="1"] { height: 480px; }
+.cs-shot[data-cs-shot="3"] { height: 440px; }
+.cs-hero-shot { position: relative; }
+.cs-open-link { margin-top: var(--sp-3); }
+
+/* ---- Words beside a shot: section 3 has the words at the left, section 5 the shot. ---- */
+.cs-split { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: var(--sp-8); align-items: center; }
+.cs-split-flip { grid-template-columns: minmax(0, 8fr) minmax(0, 4fr); }
+.cs-split-words { display: flex; flex-direction: column; }
+.cs-split-words .cs-h2, .cs-open-words .cs-h2 { font-size: var(--type-h2-size); line-height: var(--type-h2-lh); }
+
+/* ---- A heading over a wide shot: section 4. ---- */
+.cs-wide { margin-top: var(--sp-6); }
+
+/* ---- Works with: one card, three rows under hairlines, each with its marks or glyph at the left. ---- */
+.cs-works { display: flex; flex-direction: column; max-width: 760px; margin: var(--sp-6) auto 0; padding: var(--sp-1) var(--sp-4); list-style: none; border-radius: var(--r-lg); background: var(--color-surface-600); box-shadow: var(--shadow-raised); }
+.cs-join { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--sp-3); align-items: center; padding: var(--sp-3) 0; }
+.cs-join + .cs-join { border-top: 1px solid var(--color-border-default); }
+.cs-join h3 { margin: 0; font-family: var(--font-display); font-size: var(--type-h5-size); line-height: var(--type-h5-lh); font-weight: var(--type-h5-wght); }
+.cs-join p { margin: var(--sp-05) 0 0; color: var(--color-text-secondary); font-size: var(--type-body-m-size); line-height: var(--type-body-m-lh); text-wrap: pretty; }
+.cs-join-marks { display: flex; gap: var(--sp-1); }
+.cs-join-glyph { display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: var(--r-md); background: var(--color-surface-400); color: var(--color-icon-secondary); }
+.cs-join-glyph svg { width: 20px; height: 20px; }
+/* An agent's mark on the glyphs' tile, the owner's file at its own colours, with the owner's dark file in the dark theme.
+   OpenAI's Blossom file keeps a clear space of about a quarter of its box on each side, so it fills the tile. On the
+   install rows, which sit on the bare page, the tile takes the card's surface so it still reads as a tile. */
+.cs-mark { display: flex; flex: none; align-items: center; justify-content: center; box-sizing: border-box; width: 40px; height: 40px; border-radius: var(--r-md); background: var(--color-surface-400); }
+.cs-mark img { display: block; width: 60%; height: 60%; }
+.cs-mark[data-cs-mark='codex'] img { width: 100%; height: 100%; }
+.cs-mark img[data-cs-theme='dark'], .dark .cs-mark img[data-cs-theme='light'] { display: none; }
+.dark .cs-mark img[data-cs-theme='dark'] { display: block; }
+
+/* ---- Install: one row per piece across the column, the piece at the left and its command row at the right. ---- */
+.cs-install { display: flex; flex-direction: column; gap: var(--sp-2); margin: var(--sp-6) 0 0; padding: 0; list-style: none; }
+.cs-install-row { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: var(--sp-4); align-items: center; padding: var(--sp-2) 0; }
+.cs-install-row + .cs-install-row { border-top: 1px solid var(--color-border-default); }
+.cs-install-head { display: flex; align-items: center; gap: var(--sp-2); }
+.cs-install-head h3 { margin: 0; font-size: var(--type-body-m-size); line-height: var(--type-body-m-lh); font-weight: var(--type-weight-strong); }
+.cs-install-head p { margin: var(--sp-025) 0 0; color: var(--color-text-secondary); font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); text-wrap: pretty; }
+.cs-install-head .cs-mark { width: 32px; height: 32px; background: var(--color-surface-600); }
+.cs-install-guide { display: inline-block; margin-top: var(--sp-025); }
+.cs .cs-code { max-width: none; margin: 0; }
+
+/* ---- Open source: on Marshal's band, the words at the left and the repository at the right. ---- */
+.cs-open { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: var(--sp-8); align-items: center; }
+.cs-repo { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-05); padding: var(--sp-3); border-radius: var(--r-lg); background: var(--color-surface-600); box-shadow: var(--shadow-raised); }
+.cs-repo-name { margin: 0; font-family: var(--font-mono); font-size: var(--type-code-size); line-height: var(--type-code-lh); }
+.cs-repo-license { margin: 0 0 var(--sp-2); color: var(--color-text-secondary); font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); }
+.cs-repo :is(button, a) { flex: none; white-space: nowrap; }
+
+/* ---- The close: the icon, one line and the hero's two actions, centred on the page's ground. ---- */
+.cs-start { padding: var(--sp-10) 0; }
+.cs-start-in { display: flex; flex-direction: column; align-items: center; gap: var(--sp-3); text-align: center; }
+.cs-start-in .cs-h2 { max-width: 16em; }
+.cs-start-in .ms-actions { margin-top: var(--sp-1); }
+
+/* ---- The owners line under the footer's groups (msgblast's). ---- */
+.cs-foot-owners { margin: var(--sp-6) 0 0; color: var(--color-text-tertiary); font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); }
+
+@media (max-width: 1080px) {
+  .cs-split, .cs-split-flip, .cs-open { grid-template-columns: minmax(0, 1fr); gap: var(--sp-5); }
+  .cs-split-flip .cs-split-words { order: -1; }
+}
+
+/* The phone keeps the icon, the name and GitHub in the bar (plan, The page). Each shot takes its phone crop at its own
+   height (shots/shots.css, the phone). */
+@media (max-width: 720px) {
+  .cs-bar-download { display: none; }
+  .cs-split-words .cs-h2, .cs-open-words .cs-h2 { font-size: var(--type-h3-size); line-height: var(--type-h3-lh); }
+  .cs-hero-icon { width: 72px; height: 72px; margin-bottom: var(--sp-3); }
+  .cs-shot { height: 420px; }
+  .cs-shot[data-cs-shot="1"] { height: 480px; }
+  .cs-shot[data-cs-shot="3"] { height: 480px; }
+  .cs-shot[data-cs-shot="4"] { height: 470px; }
+  .cs-wide { margin-top: var(--sp-5); }
+  .cs-works { margin-top: var(--sp-5); padding: 0 var(--sp-2); }
+  .cs-join { grid-template-columns: minmax(0, 1fr); gap: var(--sp-15); }
+  .cs-install { margin-top: var(--sp-5); }
+  .cs-install-row { grid-template-columns: minmax(0, 1fr); gap: var(--sp-15); }
+  .cs-start { padding: var(--sp-8) 0; }
+}
+
+/* On a phone's coarse pointer the bar's brand and GitHub reach a 44px target, as every product's small button does
+   (the prototype's src/components/ui/btn.css). */
+@media (max-width: 640px) and (pointer: coarse) {
+  .cs-bar .cs-brand, .cs-bar [data-cs-github] { min-height: 44px; }
+}
