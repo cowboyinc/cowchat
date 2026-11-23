@@ -16,6 +16,11 @@ struct RoomView: View {
     @State private var isAddingPerson = false
     @State private var showsPeople = false
     @State private var secretError: String?
+
+    // Its own property: built inline in the modifier chain, this binding made the view too slow to type-check.
+    private var showsSecretError: Binding<Bool> {
+        Binding(get: { secretError != nil }, set: { if !$0 { secretError = nil } })
+    }
     @State private var isRenaming = false
     @State private var newName = ""
     @State private var invite: InviteToShare?
@@ -194,7 +199,7 @@ struct RoomView: View {
                 do { try session.setSecret(nil, roomID: roomID) } catch { secretError = error.localizedDescription }
             }
         }
-        .alert(secretError ?? "", isPresented: Binding(get: { secretError != nil }, set: { if !$0 { secretError = nil } })) {
+        .alert(secretError ?? "", isPresented: showsSecretError) {
             Button("OK", role: .cancel) {}
         }
         .confirmationDialog("Remove \(room?.name ?? "")?", isPresented: $confirmsRemove, titleVisibility: .visible) {

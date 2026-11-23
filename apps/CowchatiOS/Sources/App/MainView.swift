@@ -22,6 +22,10 @@ struct MainView: View {
     @EnvironmentObject private var store: ConnectionsStore
     @StateObject private var navigator = Navigator()
 
+    private var showsStorageError: Binding<Bool> {
+        Binding(get: { store.storageError != nil }, set: { if !$0 { store.storageError = nil } })
+    }
+
     var body: some View {
         TabView(selection: $navigator.tab) {
             RoomListView()
@@ -41,7 +45,7 @@ struct MainView: View {
                 .tag(AppTab.you)
         }
         .environmentObject(navigator)
-        .alert(store.storageError ?? "", isPresented: Binding(get: { store.storageError != nil }, set: { if !$0 { store.storageError = nil } })) {
+        .alert(store.storageError ?? "", isPresented: showsStorageError) {
             Button("OK", role: .cancel) {}
         }
         .background { ForEach(store.accounts, id: \.connectionID) { SetupGate(account: $0) } }
