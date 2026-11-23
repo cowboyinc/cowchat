@@ -180,6 +180,7 @@ public enum GallopIcon: String, CaseIterable, Sendable {
         return image
     }
     #else
+    // UIKit cannot read a bare SVG file, so on iOS the icons come from the package's own asset catalog.
     private func nativeImage(in bundle: Bundle?) -> UIImage? {
         guard let bundle else { return nil }
         return UIImage(named: rawValue, in: bundle, with: nil)?.withRenderingMode(.alwaysTemplate)

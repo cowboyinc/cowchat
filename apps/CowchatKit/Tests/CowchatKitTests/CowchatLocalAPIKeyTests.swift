@@ -1,3 +1,5 @@
+// The local key file exists on the Mac only.
+#if os(macOS)
 import Foundation
 import XCTest
 @testable import CowchatKit
@@ -24,3 +26,4 @@ final class CowchatLocalAPIKeyTests: XCTestCase {
         XCTAssertEqual(CowchatLocalAPIKey.load(from: missingURL), "")
     }
 }
+#endif

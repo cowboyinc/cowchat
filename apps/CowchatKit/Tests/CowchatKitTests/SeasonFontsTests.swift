@@ -1,3 +1,5 @@
+// These read fonts back through AppKit, so they run on the Mac only.
+#if canImport(AppKit)
 import AppKit
 import XCTest
 @testable import CowchatKit
@@ -28,3 +30,4 @@ final class SeasonFontsTests: XCTestCase {
         _ = SystemFontProvider().font(for: style) // must not trap
     }
 }
+#endif
