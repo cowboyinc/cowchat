@@ -3558,10 +3558,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     return false;
                 }
                 let msg_kind = msg.metadata.get("kind").and_then(|v| v.as_str());
-                if kind_skipped(msg_kind, &only_kinds, &not_kinds) {
-                    return false;
-                }
-                true
+                !kind_skipped(msg_kind, &only_kinds, &not_kinds)
             };
 
             // Inner loop: keep advancing the bookmark until the returned message

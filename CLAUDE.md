@@ -12,6 +12,8 @@ cowchat-cli       CLI tool wrapping the client library
 cowchat-codex     Experimental MCP bridge from durable room events to Codex tasks
 ```
 
+`cowchat-core` and `cowchat-client` (with `cowchat-crypto`) live in the public [cowboyinc/cowchat-core](https://github.com/cowboyinc/cowchat-core) repository, not in this workspace. They are pinned by `rev` in the root `Cargo.toml`; change them there and bump that `rev` here.
+
 ## Building & Running
 
 ```bash
@@ -116,15 +118,15 @@ cargo clippy -p cowchat-codex --all-targets -- -D warnings
 
 | File | What it does |
 |------|-------------|
-| `crates/cowchat-core/src/protocol.rs` | Frame struct, all FrameType variants |
-| `crates/cowchat-core/src/models.rs` | All payload types, Room, ChatMessage, VoteInfo |
-| `crates/cowchat-core/src/crypto.rs` | E2E content encryption (ChaCha20-Poly1305, `clw1:` blobs) |
+| `crates/cowchat-core/src/protocol.rs` (cowchat-core repo) | Frame struct, all FrameType variants |
+| `crates/cowchat-core/src/models.rs` (cowchat-core repo) | All payload types, Room, ChatMessage, VoteInfo |
+| `crates/cowchat-core/src/crypto.rs` (cowchat-core repo) | E2E content encryption (ChaCha20-Poly1305, `clw1:` blobs) |
 | `crates/cowchat-server/src/handler.rs` | Request routing — every command lands here |
 | `crates/cowchat-server/src/store.rs` | SQLite persistence layer |
 | `crates/cowchat-server/src/voting.rs` | Vote + election in-memory state |
 | `crates/cowchat-server/src/broker.rs` | Agent connection registry, message routing |
 | `crates/cowchat-server/src/server.rs` | Server startup, connection accept loop |
-| `crates/cowchat-client/src/connection.rs` | Full async client API |
+| `crates/cowchat-client/src/connection.rs` (cowchat-core repo) | Full async client API |
 | `crates/cowchat-cli/src/main.rs` | CLI subcommands (clap) |
 | `crates/cowchat-codex/src/main.rs` | Codex wake MCP server and diagnostics CLI |
 
@@ -171,10 +173,10 @@ Python examples use `examples/python/cowchat.py` — a standalone client library
 
 ## Adding Features
 
-1. Add the frame type to `cowchat-core/src/protocol.rs` (`FrameType` enum)
-2. Add payload structs to `cowchat-core/src/models.rs`
+1. Add the frame type to `cowchat-core/src/protocol.rs` (`FrameType` enum) in the cowchat-core repo, then bump the `cowchat-core` and `cowchat-client` `rev` pins in the root `Cargo.toml`
+2. Add payload structs to `cowchat-core/src/models.rs` (cowchat-core repo)
 3. Add handler function in `cowchat-server/src/handler.rs`
 4. Wire it into `handle_frame()` match in `handler.rs`
-5. Add client method in `cowchat-client/src/connection.rs`
+5. Add client method in `cowchat-client/src/connection.rs` (cowchat-core repo)
 6. Add CLI subcommand in `cowchat-cli/src/main.rs`
 7. Add integration test in `tests/integration_tests.rs`

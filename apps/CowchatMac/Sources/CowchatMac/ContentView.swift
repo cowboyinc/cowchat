@@ -873,7 +873,6 @@ private struct ChatRoomView: View {
     @State private var roomKeyDraft = ""
     @State private var roomKeyError: String?
     @State private var isComposerExpanded = false
-    @State private var isFieldHovering = false
     @State private var isDestroyConfirmationPresented = false
     @State private var isDestroyingRoom = false
     @State private var isInvitesPresented = false
@@ -1450,46 +1449,17 @@ private struct ChatRoomView: View {
                     .padding(.bottom, 8)
             }
 
-            HStack(spacing: 8) {
-                ComposerTextField(
-                    text: $store.draft,
-                    placeholder: "Message \(title)",
-                    isEnabled: !room.encrypted || store.unlockedRoomIDs.contains(room.id),
-                    onSubmit: sendDraft,
-                    onCancel: {
-                        withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
-                    },
-                    mentionMarks: mentionMarks
-                )
-                .frame(height: ComposerTextField.naturalHeight)
-                .padding(.horizontal, 16)
-                .frame(height: 44)
-                .background(
-                    isFieldHovering ? SemanticColor.textfieldHover : SemanticColor.textfieldDefault,
-                    in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(isFieldHovering ? SemanticColor.borderHover : SemanticColor.borderDefault, lineWidth: 1)
+            ComposerInputRow(
+                composer: store.composer,
+                placeholder: "Message \(title)",
+                isEnabled: isRoomWritable,
+                isSendable: store.connectionStatus.isConnected && isRoomWritable,
+                mentionMarks: mentionMarks,
+                onSubmit: sendDraft,
+                onCancel: {
+                    withAnimation(.easeInOut(duration: 0.18)) { isComposerExpanded = false }
                 }
-                .onHover { isFieldHovering = $0 }
-
-                Button { sendDraft() } label: {
-                    GallopIconView(icon: .send, fallbackSystemName: "paperplane.fill", size: 18)
-                        .foregroundStyle(SemanticColor.buttonPrimaryIconDefault)
-                        .frame(width: 36, height: 36)
-                        .background(SemanticColor.buttonPrimaryDefault, in: Circle())
-                        .overlay { Circle().stroke(Palette.nugget300, lineWidth: 1) }
-                }
-                .buttonStyle(.plain)
-                .disabled(!canSend)
-                .opacity(canSend ? 1 : 0.4)
-                .macAccessibleAction(
-                    label: "Send message",
-                    isEnabled: canSend,
-                    action: sendDraft
-                )
-            }
+            )
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -1502,10 +1472,67 @@ private struct ChatRoomView: View {
         store.sendDraft(mentions: ownsRoom ? sessions.mentions(in: store.draft) : [])
     }
 
+    private var isRoomWritable: Bool {
+        !room.encrypted || store.unlockedRoomIDs.contains(room.id)
+    }
+}
+
+/// The composer's field and send button. It alone observes the draft, so typing redraws this row and not the room
+/// view, its message list or anything else that watches `ChatStore`.
+private struct ComposerInputRow: View {
+    @ObservedObject var composer: ComposerDraft
+    let placeholder: String
+    let isEnabled: Bool
+    /// Whether the room can take a message now, before the draft's own text is considered.
+    let isSendable: Bool
+    let mentionMarks: MentionMarks
+    let onSubmit: () -> Void
+    let onCancel: () -> Void
+    @State private var isFieldHovering = false
+
     private var canSend: Bool {
-        store.connectionStatus.isConnected
-            && (!room.encrypted || store.unlockedRoomIDs.contains(room.id))
-            && !store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        isSendable && !composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ComposerTextField(
+                text: $composer.text,
+                placeholder: placeholder,
+                isEnabled: isEnabled,
+                onSubmit: onSubmit,
+                onCancel: onCancel,
+                mentionMarks: mentionMarks
+            )
+            .frame(height: ComposerTextField.naturalHeight)
+            .padding(.horizontal, 16)
+            .frame(height: 44)
+            .background(
+                isFieldHovering ? SemanticColor.textfieldHover : SemanticColor.textfieldDefault,
+                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(isFieldHovering ? SemanticColor.borderHover : SemanticColor.borderDefault, lineWidth: 1)
+            }
+            .onHover { isFieldHovering = $0 }
+
+            Button(action: onSubmit) {
+                GallopIconView(icon: .send, fallbackSystemName: "paperplane.fill", size: 18)
+                    .foregroundStyle(SemanticColor.buttonPrimaryIconDefault)
+                    .frame(width: 36, height: 36)
+                    .background(SemanticColor.buttonPrimaryDefault, in: Circle())
+                    .overlay { Circle().stroke(Palette.nugget300, lineWidth: 1) }
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSend)
+            .opacity(canSend ? 1 : 0.4)
+            .macAccessibleAction(
+                label: "Send message",
+                isEnabled: canSend,
+                action: onSubmit
+            )
+        }
     }
 }
 
