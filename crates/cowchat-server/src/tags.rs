@@ -13,13 +13,20 @@ const LINEAR_KEY: &str = "linear";
 const NOT_REPOSITORIES: [&str; 6] = ["pr", "prs", "issue", "issues", "pull", "ticket"];
 
 static GITHUB_LINK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)https?://(?:www\.)?github\.com/[\w.-]+/([\w.-]+)/(?:pull|issues)/(\d+)")
-        .unwrap()
+    Regex::new(
+        r"(?i)https?://(?:www\.)?github\.com/[A-Za-z0-9_.-]+/([A-Za-z0-9_.-]+)/(?:pull|issues)/(\d+)",
+    )
+    .unwrap()
 });
 static ANY_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://\S+").unwrap());
 static REPOSITORY_REFERENCE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|[^\w./@#-])(?:[\w.-]+/)?([A-Za-z][\w.-]*[A-Za-z0-9])#(\d+)\b").unwrap()
+    Regex::new(r"(?:^|[^A-Za-z0-9_./@#-])([A-Za-z0-9_.-]+/)?([A-Za-z0-9_.-]+)#(\d+)\b").unwrap()
 });
+static LINEAR_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)https?://linear\.app/[A-Za-z0-9_-]+/issue/([a-z][a-z0-9]*-\d+)").unwrap()
+});
+/// Bare ticket IDs are recognised for Cowboy's Linear team only; a bare
+/// `ABC-123` is too often something else (`SHA-256`, `CIP-49`).
 static LINEAR_TICKET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bCOW-\d+\b").unwrap());
 
 pub(crate) fn stamp_tags(
@@ -82,20 +89,43 @@ fn extracted_tags(content: &str, metadata: &Value) -> Vec<MessageTag> {
         tags.push(extracted(GITHUB_KEY, github_value(name, number)));
     }
     for link in GITHUB_LINK.captures_iter(content) {
-        tags.push(extracted(GITHUB_KEY, github_value(&link[1], &link[2])));
+        if is_repository_name(&link[1]) {
+            tags.push(extracted(GITHUB_KEY, github_value(&link[1], &link[2])));
+        }
     }
     let without_links = ANY_LINK.replace_all(content, " ");
     for reference in REPOSITORY_REFERENCE.captures_iter(&without_links) {
-        let name = reference[1].to_ascii_lowercase();
-        if !NOT_REPOSITORIES.contains(&name.as_str()) {
-            tags.push(extracted(GITHUB_KEY, github_value(&name, &reference[2])));
+        let name = &reference[2];
+        let named = match reference.get(1) {
+            Some(_) => is_repository_name(name),
+            None => is_bare_repository_name(name),
+        };
+        if named {
+            tags.push(extracted(GITHUB_KEY, github_value(name, &reference[3])));
         }
+    }
+    for link in LINEAR_LINK.captures_iter(content) {
+        tags.push(extracted(LINEAR_KEY, link[1].to_ascii_uppercase()));
     }
     for ticket in LINEAR_TICKET.find_iter(content) {
         tags.push(extracted(LINEAR_KEY, ticket.as_str().to_owned()));
     }
     tags.retain(|tag| tag.validate().is_ok());
     tags
+}
+
+/// A GitHub repository name, the same for a link and for `owner/repo#N`.
+fn is_repository_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".."
+}
+
+/// `repo#N` without an owner also has to look like a name rather than prose
+/// such as `C#7` or `PR#95`.
+fn is_bare_repository_name(name: &str) -> bool {
+    name.len() >= 2
+        && name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && name.ends_with(|c: char| c.is_ascii_alphanumeric())
+        && !NOT_REPOSITORIES.contains(&name.to_ascii_lowercase().as_str())
 }
 
 fn github_value(repository: &str, number: impl std::fmt::Display) -> String {
@@ -235,6 +265,32 @@ mod tests {
         ] {
             assert!(extracted(content).is_empty(), "{content}");
         }
+    }
+
+    #[test]
+    fn a_github_link_and_its_owner_shorthand_give_the_same_tag() {
+        for (repository, tag) in [
+            ("cowboyinc/cowchat", "github=cowchat#7"),
+            ("org/x", "github=x#7"),
+            ("org/3d", "github=3d#7"),
+            ("org/9", "github=9#7"),
+            ("org/my.repo_", "github=my.repo_#7"),
+            ("org/pr", "github=pr#7"),
+        ] {
+            let link = format!("https://github.com/{repository}/pull/7");
+            let shorthand = format!("see {repository}#7.");
+            assert_eq!(extracted(&link), [tag], "{link}");
+            assert_eq!(extracted(&shorthand), [tag], "{shorthand}");
+        }
+    }
+
+    #[test]
+    fn linear_links_are_tagged_for_any_team() {
+        assert_eq!(
+            extracted("https://linear.app/acme/issue/ENG-42/fix-login"),
+            ["linear=ENG-42"]
+        );
+        assert!(extracted("ENG-42").is_empty());
     }
 
     #[test]

@@ -1528,3 +1528,49 @@ async fn external_visibility_flag_survives_room_history() {
     assert!(error.to_string().contains("display_external"));
     server.abort();
 }
+
+/// An invalid `--only-tag` fails `wait` before it reads anything, in every
+/// mode, so a filter that matches nothing can never advance the cursor past
+/// unread messages.
+#[tokio::test]
+async fn wait_rejects_invalid_only_tag_before_reading() {
+    let (server, addr, key, tmp) = start_test_server().await;
+    let speaker = CowchatClient::connect_tcp(&addr, &key, "speaker", None, vec![])
+        .await
+        .unwrap();
+    let side = speaker.create_room("side", None, None).await.unwrap();
+    for room in ["lobby", side.room_id.as_str()] {
+        speaker.join_room(room).await.unwrap();
+        speaker
+            .send_message(room, "unread", None, vec![])
+            .await
+            .unwrap();
+    }
+    let cursor = tmp.path().join("bad-tag-cursor");
+    for (mode, saved) in [
+        (vec!["lobby", "--loop"], "0\n"),
+        (vec!["lobby", "--follow"], "0\n"),
+        (vec!["lobby", side.room_id.as_str(), "--loop"], "{}"),
+    ] {
+        std::fs::write(&cursor, saved).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command
+            .args(["--tcp", &addr, "--key", &key, "--name", "waiter"])
+            .args(["--agent-id", "bad-tag-waiter", "wait"])
+            .args(&mode)
+            .args(["--only-tag", "topic=", "--since-seq", "0"])
+            .args(["--cursor-file", cursor.to_str().unwrap()])
+            .args(["--idle-timeout", "3", "--heartbeat-secs", "0"])
+            .kill_on_drop(true);
+        let out = tokio::time::timeout(Duration::from_secs(10), command.output())
+            .await
+            .unwrap_or_else(|_| panic!("{mode:?}: wait kept running with an invalid tag"))
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{mode:?}: {stderr}");
+        assert!(stderr.contains("tag"), "{mode:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{mode:?} read messages");
+        assert_eq!(std::fs::read_to_string(&cursor).unwrap(), saved, "{mode:?}");
+    }
+    server.abort();
+}
