@@ -1474,9 +1474,27 @@ fn default_socket_path() -> &'static str {
     )
 }
 
-/// The local server's listener key, also the fallback key for any server.
+/// The local server's listener key.
 fn default_key_path() -> PathBuf {
     default_data_dir().join("auth.key")
+}
+
+/// Whether `auth.key` may authenticate this connection: a socket or `--tcp`
+/// connection, or a URL on this machine. A remote server never receives it.
+fn listener_key_serves(url: Option<&str>) -> bool {
+    let Some(url) = url else { return true };
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    host == "localhost"
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Where a key minted by one server's invite is kept:
@@ -1630,6 +1648,9 @@ fn load_key(key_arg: &Option<String>, url: Option<&str>) -> String {
             return key;
         }
     }
+    if !listener_key_serves(url) {
+        return String::new();
+    }
     read_key_file_checked(&default_key_path()).unwrap_or_default()
 }
 
@@ -1655,7 +1676,8 @@ fn url_from_env(cli: &mut Cli, socket_given: bool, env_url: Option<String>) {
 /// Whether `connect` would authenticate as someone: an explicit key, a bound
 /// hosted session, a saved hosted credential for this server (of any kind — a
 /// session-only one is still the identity to use, through `session start`), a
-/// key minted for this server, or a non-empty `auth.key`.
+/// key minted for this server, or a non-empty `auth.key` when the server is
+/// the local one.
 fn has_identity_for(cli: &Cli) -> bool {
     cli.key.is_some()
         || resolve_agent_id(cli).is_some_and(|id| id.starts_with("session:"))
@@ -1665,7 +1687,8 @@ fn has_identity_for(cli: &Cli) -> bool {
                     .and_then(|path| read_key_file(&path))
                     .is_some()
         })
-        || read_key_file(&default_key_path()).is_some()
+        || (listener_key_serves(cli.url.as_deref())
+            && read_key_file(&default_key_path()).is_some())
 }
 
 fn resolve_agent_id(cli: &Cli) -> Option<String> {
@@ -5515,5 +5538,30 @@ mod kind_filter_tests {
         let none: Vec<String> = vec![];
         assert!(!kind_skipped(Some("anything"), &none, &none));
         assert!(!kind_skipped(None, &none, &none));
+    }
+}
+
+#[cfg(test)]
+mod listener_key_scope_tests {
+    use super::listener_key_serves;
+
+    #[test]
+    fn the_listener_key_serves_only_the_local_server() {
+        assert!(listener_key_serves(None), "socket or --tcp connection");
+        for local in [
+            "ws://127.0.0.1:9229/ws",
+            "ws://localhost:9229/ws",
+            "ws://[::1]:9229/ws",
+        ] {
+            assert!(listener_key_serves(Some(local)), "{local}");
+        }
+        for remote in [
+            "wss://chat.cowchat.cowboy.inc/ws",
+            "ws://10.0.0.5:9229/ws",
+            "wss://localhost.example.com/ws",
+            "not a url",
+        ] {
+            assert!(!listener_key_serves(Some(remote)), "{remote}");
+        }
     }
 }

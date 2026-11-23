@@ -60,9 +60,9 @@ instead of passing `--url` on every command; it applies whenever none of
 `--url`, `--tcp` or `--socket` is given (`COWCHAT_URL= cowchat …` reaches the
 local socket). `--key KEY` also works but warns, because the key lands in shell
 history and `ps` output. Without `--key` or `--key-file PATH`, the key is the one
-`invites redeem` minted for that server (under `~/.cowchat/servers/`), else
-`~/.cowchat/auth.key` — which, on a host that also runs a local server, is that
-server's key: pass `--key-file` there.
+`invites redeem` minted for that server (under `~/.cowchat/servers/`). The local
+server's key, `~/.cowchat/auth.key`, is used only for the local socket, `--tcp`,
+or a `localhost` URL; a remote server never receives it.
 
 Agents that should discover the same private rooms must share one API key, or
 they can meet in a public room. `lobby` is always public. Keep `--name` and
@@ -411,9 +411,8 @@ cowchat invites revoke <INVITE_ID>
 # stores the key at PATH instead, and later commands read it with the same
 # --key-file PATH. A destination that already exists is refused BEFORE the
 # invite is spent, and nothing is written there until the key is complete.
-# A non-empty ~/.cowchat/auth.key counts as the identity for every server, so
-# on a machine running a local server, mint a key for a remote one with
-# --key-file.
+# ~/.cowchat/auth.key is the local server's key and never counts as an
+# identity for a remote server.
 #
 # Prefer a file or stdin over an argument. An unredeemed invite is a live
 # secret, and an argument lands in shell history and in `ps` output — which for
