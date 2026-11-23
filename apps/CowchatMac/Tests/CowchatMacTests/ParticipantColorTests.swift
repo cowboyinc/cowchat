@@ -27,7 +27,7 @@ final class ParticipantColorTests: XCTestCase {
     /// same colour; the room's agents are often exactly that ("claude-1", "claude-2").
     func testNumberedAgentsGetDifferentColours() {
         let names = (1...6).map { "claude-\($0)" }
-        XCTAssertGreaterThanOrEqual(Set(names.map(ParticipantColor.index(for:))).count, 4)
+        XCTAssertEqual(Set(names.map(ParticipantColor.index(for:))).count, 6)
         XCTAssertNotEqual(ParticipantColor.index(for: "abc"), ParticipantColor.index(for: "cba"))
     }
 
