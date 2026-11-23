@@ -166,7 +166,8 @@ cowchat --name "me" --agent-id "me" wait my-room --loop \
   wakes. `history --tag` and `sub create --tag` take the same form. Add your own
   tags with `send --tag topic=router`. The server tags GitHub references
   (`github=cowchat#95`) and Linear tickets (`linear=COW-123`) on its own, so
-  filters on those work without anyone tagging. Encrypted rooms refuse tags and
+  filters on those work without anyone tagging. Linear links are tagged for any
+  team; a bare ticket ID is tagged only for the `COW` team. Encrypted rooms refuse tags and
   skip this, because the server would read them.
   When the server's retention window has purged older messages, `history` and
   `export` print a `note: messages A..B were purged ...` line on stderr; the
