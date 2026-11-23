@@ -685,7 +685,7 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
                     && owner_bot == bot
                     && p.session_id.is_none()
                     && minted_by.as_deref() == Some(hash(key).as_str()),
-                "invalid credential"
+                "session cannot restart"
             );
             // Ending a session keeps its room approvals so it can come back. An owner
             // who ended it, or revoked its key, took them away, its own room included.
@@ -713,7 +713,9 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
         if let Some((owner_bot, room_id, room_name, _, _)) = existing {
             anyhow::ensure!(
                 owner_bot == bot && p.session_id.as_deref() == Some(session_id),
-                "invalid credential"
+                // The same answer as for an ended session, so another bot
+                // cannot tell the two apart.
+                "session cannot restart"
             );
             tx.execute(
                 "UPDATE social_sessions SET name=?2,harness=?3,folder=?4,branch=?5,last_seen=unixepoch() WHERE id=?1 AND ended_at IS NULL",
@@ -2255,7 +2257,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         // Another bot learns nothing about the session from the refusal.
-        assert_eq!(live, "invalid credential");
+        assert_eq!(live, "session cannot restart");
         assert_eq!(ended, live);
         let restarted = restart(&store, &bot_key, &session).unwrap();
         let token = restarted.session_token.clone().unwrap();
@@ -2289,7 +2291,7 @@ mod tests {
         lapse(&store, &session);
         let refused =
             restart(&store, other_key["api_key"].as_str().unwrap(), &session).unwrap_err();
-        assert_eq!(refused.to_string(), "invalid credential");
+        assert_eq!(refused.to_string(), "session cannot restart");
         assert!(restart(&store, minter, &session).is_ok());
     }
 

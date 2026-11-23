@@ -152,17 +152,16 @@ class SessionHookTest(unittest.TestCase):
             self.assertEqual(ids[5], ids[2])
             self.assertEqual(ids[6], ids[2])
             self.assertNotEqual(ids[7], ids[2])
-            # The bot rotated to a new key: the server refuses the restart of a
-            # session the old key minted as an invalid credential.
+            # Any other 400, such as the server's active-session limit, may clear
+            # up, so the identity stays.
             env["RESTART_ERROR"] = "session creation failed: 400 Bad Request"
             subprocess.run([sys.executable, str(ROOT / "hooks" / "session.py"), "start"], input=payload, text=True,
                            env=env, check=True, capture_output=True)
             starts = [json.loads(line) for line in calls.read_text().splitlines()]
             ids = [args[args.index("--id") + 1] for args in starts]
-            self.assertEqual(ids[8:10], [ids[7], ids[7]])
-            self.assertNotIn(ids[10], ids[:10])
+            self.assertEqual(ids[8:], [ids[7], ids[7]])
             mappings = list((home / ".cowchat" / "claude-sessions").glob("*.json"))
-            self.assertEqual(json.loads(mappings[0].read_text())["id"], ids[10])
+            self.assertEqual(json.loads(mappings[0].read_text())["id"], ids[7])
 
 
 if __name__ == "__main__":

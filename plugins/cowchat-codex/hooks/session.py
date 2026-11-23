@@ -14,7 +14,8 @@ import uuid
 
 # The server refuses a restart with 409, or with 400 when the saved session was
 # minted by another key, such as one the bot has since rotated away from.
-RESTART_REFUSED = ("session creation failed: 400", "session creation failed: 409")
+# The server answers 409 only when it refuses to restart this session ID.
+RESTART_REFUSED = ("session creation failed: 409",)
 
 
 def private_mapping(directory, identifier):

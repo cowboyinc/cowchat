@@ -133,10 +133,16 @@ class HookTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 start()
             self.assertEqual(calls, [first] * 3)
+            # Any other 400, such as the server's active-session limit, may clear
+            # up, so the identity stays.
+            restart_error[0] = "session creation failed: 400 Bad Request"
+            with self.assertRaises(subprocess.CalledProcessError):
+                start()
+            self.assertEqual(calls, [first] * 5)
             restart_error[0] = "session creation failed: 409 Conflict"
             start()
-            self.assertEqual(calls[3:5], [first, first])
-            self.assertNotEqual(calls[5], first)
+            self.assertEqual(calls[5:7], [first, first])
+            self.assertNotEqual(calls[7], first)
 
     def test_a_restart_refused_after_key_rotation_mints_a_new_identity(self):
         with tempfile.TemporaryDirectory() as root:
@@ -154,7 +160,7 @@ class HookTests(unittest.TestCase):
                     raise subprocess.CalledProcessError(1, args, "", "session heartbeat failed: 401 Unauthorized")
                 # After rotation the new key cannot restart what the old key minted.
                 if rotated and calls[-1] == rotated[0]:
-                    raise subprocess.CalledProcessError(1, args, "", "session creation failed: 400 Bad Request")
+                    raise subprocess.CalledProcessError(1, args, "", "session creation failed: 409 Conflict")
                 return subprocess.CompletedProcess(args, 0, json.dumps({
                     "room_id": "room-1", "room_name": "test-room", "session_file": str(session_file),
                 }), "")
