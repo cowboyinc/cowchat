@@ -124,4 +124,18 @@ final class MessageExpansionTests: XCTestCase {
         XCTAssertNil(expansion.openPlan(for: content))
         XCTAssertEqual(expansion.plan(for: content), .plainText(content))
     }
+
+    /// A closed row keeps its plan for reopening, but forgetting the room key must release that plaintext too.
+    func testForgettingTheKeyReleasesAClosedExpansion() {
+        let plaintext = "Secret.\n\n## Heading\n\n- item"
+        let placeholder = "Encrypted message — add the room key to read it."
+
+        let opened = MessageExpansion.toggled(nil, content: plaintext, makePlan: MessageRenderPlan.make)
+        let closed = MessageExpansion.toggled(opened, content: plaintext, makePlan: MessageRenderPlan.make)
+        XCTAssertFalse(closed.isOpen)
+        XCTAssertEqual(closed.content, plaintext)
+
+        XCTAssertNil(MessageExpansion.retained(closed, for: placeholder))
+        XCTAssertEqual(MessageExpansion.retained(closed, for: plaintext), closed)
+    }
 }

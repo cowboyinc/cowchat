@@ -1854,6 +1854,21 @@ struct MessageExpansion: Equatable {
     func plan(for current: String) -> MessageRenderPlan? { current == content ? plan : nil }
 
     func openPlan(for current: String) -> MessageRenderPlan? { isOpen ? plan(for: current) : nil }
+
+    /// Opens or closes the message, reusing the plan while the text is unchanged.
+    static func toggled(
+        _ expansion: MessageExpansion?,
+        content: String,
+        makePlan: (String) -> MessageRenderPlan
+    ) -> MessageExpansion {
+        let plan = expansion?.plan(for: content) ?? makePlan(content)
+        return MessageExpansion(content: content, plan: plan, isOpen: expansion?.openPlan(for: content) == nil)
+    }
+
+    /// Drops an expansion, open or closed, whose text is no longer the message's, so the row holds no old plaintext.
+    static func retained(_ expansion: MessageExpansion?, for content: String) -> MessageExpansion? {
+        expansion?.content == content ? expansion : nil
+    }
 }
 
 struct ExpandableMessageText: View {
@@ -1893,6 +1908,7 @@ struct ExpandableMessageText: View {
                     .gallopText(.bodyS, color: SemanticColor.textTertiary)
             } else { textBody }
         }
+        .onChange(of: content) { expansion = MessageExpansion.retained(expansion, for: $0) }
     }
 
     private var textBody: some View {
@@ -2001,11 +2017,8 @@ struct ExpandableMessageText: View {
     private var showsResponseControl: Bool { layout.showsResponseControl }
 
     private func toggleExpansion() {
-        let plan = expansion?.plan(for: content) ?? makeRenderPlan(content)
-        let isOpen = !isExpanded
-        withAnimation(.easeInOut(duration: 0.16)) {
-            expansion = MessageExpansion(content: content, plan: plan, isOpen: isOpen)
-        }
+        let next = MessageExpansion.toggled(expansion, content: content, makePlan: makeRenderPlan)
+        withAnimation(.easeInOut(duration: 0.16)) { expansion = next }
     }
 
     private func headingStyle(for level: Int) -> GallopTextStyle {
