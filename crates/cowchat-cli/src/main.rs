@@ -2746,6 +2746,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             drain,
             cursor_file,
         } => {
+            parse_tags(only_tags)?;
             if room.len() > 1 || *approved_rooms {
                 return run_wait_multiple(
                     &cli,
