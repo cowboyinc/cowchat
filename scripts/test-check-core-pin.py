@@ -13,8 +13,12 @@ CORE = "https://github.com/cowboyinc/cowchat-core.git"
 REV = "43822264de6d0921ee8bf294ef1713a44f7cf7e5"
 
 
-def package(source):
-    return {"name": "x", "source": source}
+def package(source, name="x"):
+    return {"name": name, "source": source}
+
+
+def pinned(rev=REV):
+    return [package(git_source(rev), "cowchat-core"), package(git_source(rev), "cowchat-client")]
 
 
 def git_source(rev, url=CORE, commit=None):
@@ -26,10 +30,29 @@ class PinTests(unittest.TestCase):
         metadata = {"packages": [
             package(None),
             package("registry+https://github.com/rust-lang/crates.io-index"),
-            package(git_source(REV)),
-            package(git_source(REV)),
+            *pinned(),
         ]}
         self.assertEqual(checker.core_pin(metadata), REV)
+
+    def test_a_path_sourced_client_is_refused(self):
+        metadata = {"packages": [package(git_source(REV), "cowchat-core"), package(None, "cowchat-client")]}
+        with self.assertRaisesRegex(checker.PinError, "cowchat-client"):
+            checker.core_pin(metadata)
+
+    def test_a_path_sourced_core_is_refused(self):
+        metadata = {"packages": [package(None, "cowchat-core"), package(git_source(REV), "cowchat-client")]}
+        with self.assertRaisesRegex(checker.PinError, "cowchat-core"):
+            checker.core_pin(metadata)
+
+    def test_a_missing_client_is_refused(self):
+        metadata = {"packages": [package(git_source(REV), "cowchat-core")]}
+        with self.assertRaisesRegex(checker.PinError, "cowchat-client"):
+            checker.core_pin(metadata)
+
+    def test_a_core_package_also_sourced_from_a_path_is_refused(self):
+        metadata = {"packages": [*pinned(), package(None, "cowchat-client")]}
+        with self.assertRaisesRegex(checker.PinError, "cowchat-client"):
+            checker.core_pin(metadata)
 
     def test_a_git_source_other_than_core_is_refused(self):
         metadata = {"packages": [package(git_source(REV, url="https://github.com/someone/else.git"))]}
@@ -38,13 +61,13 @@ class PinTests(unittest.TestCase):
 
     def test_two_core_revs_are_refused(self):
         other = "0cbdf07c" + REV[8:]
-        metadata = {"packages": [package(git_source(REV)), package(git_source(other))]}
+        metadata = {"packages": [*pinned(), package(git_source(other), "cowchat-client")]}
         with self.assertRaisesRegex(checker.PinError, "more than one"):
             checker.core_pin(metadata)
 
     def test_a_branch_or_short_rev_is_refused(self):
         for rev in ("main", REV[:8]):
-            metadata = {"packages": [package(git_source(rev, commit=REV))]}
+            metadata = {"packages": [package(git_source(rev, commit=REV), "cowchat-core")]}
             with self.assertRaisesRegex(checker.PinError, "full commit"):
                 checker.core_pin(metadata)
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check the cowchat-core pin in `cargo metadata` output.
 
-Every git dependency must be cowchat-core at one full commit. With
+Every git dependency must be cowchat-core at one full commit, and the
+cowchat-core and cowchat-client packages must both come from it. With
 --on-main, that commit must also be on cowchat-core's main branch, so a
 build never ships protocol code that hasn't merged there.
 """
@@ -14,6 +15,7 @@ import tempfile
 
 CORE = "https://github.com/cowboyinc/cowchat-core.git"
 FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
+REQUIRED = ("cowchat-core", "cowchat-client")
 
 
 class PinError(Exception):
@@ -22,8 +24,14 @@ class PinError(Exception):
 
 def core_pin(metadata):
     revs = set()
+    found = set()
     for package in metadata["packages"]:
+        name = package.get("name")
         source = package.get("source") or ""
+        if name in REQUIRED:
+            if not source.startswith("git+"):
+                raise PinError(f"{name} must come from the cowchat-core git pin, not {source or 'a local path'}")
+            found.add(name)
         if not source.startswith("git+"):
             continue
         url, _, rest = source[len("git+"):].partition("?")
@@ -34,8 +42,9 @@ def core_pin(metadata):
         if not FULL_COMMIT.fullmatch(rev) or rev != commit:
             raise PinError(f"cowchat-core must be pinned to a full commit with rev=: {source}")
         revs.add(rev)
-    if not revs:
-        raise PinError("no cowchat-core git dependency found")
+    for name in REQUIRED:
+        if name not in found:
+            raise PinError(f"no cowchat-core git dependency found for {name}")
     if len(revs) > 1:
         raise PinError(f"cowchat-core is pinned to more than one commit: {sorted(revs)}")
     return revs.pop()
