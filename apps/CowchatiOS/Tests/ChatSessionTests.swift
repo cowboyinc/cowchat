@@ -77,9 +77,9 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(connection.registeredNames, ["Ryan's iPhone"])
     }
 
-    func testSignInPersistsAStableAgentIDAcrossSessions() async {
+    func testSignInPersistsAStableAgentIDAcrossSessions() async throws {
         let first = await signedIn()
-        first.signOut()
+        try first.signOut()
         _ = await signedIn()
 
         XCTAssertEqual(connection.registeredAgentIDs.count, 2)
@@ -356,12 +356,12 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(connection.serverMessages["r1"], nil)
     }
 
-    func testEachKeyRegistersItsOwnAgentIdentity() async {
+    func testEachKeyRegistersItsOwnAgentIdentity() async throws {
         let session = makeSession()
         await session.signIn(server: tcp, credential: .key("k1"), displayName: "Ryan")
-        session.signOut()
+        try session.signOut()
         await session.signIn(server: tcp, credential: .key("k2"), displayName: "Ryan")
-        session.signOut()
+        try session.signOut()
         await session.signIn(server: tcp, credential: .key("k2"), displayName: "Ryan")
 
         let ids = connection.registeredAgentIDs
@@ -476,7 +476,7 @@ final class ChatSessionTests: XCTestCase {
         try session.setSecret("s3cret", roomID: "r1")
         XCTAssertNotEqual(credentials.values, [:])
 
-        session.signOut()
+        try session.signOut()
         connection.drop()
         try await Task.sleep(nanoseconds: 50_000_000)
 

@@ -97,18 +97,22 @@ struct SessionStorage {
         defaults.set(ids.sorted(), forKey: key(.secretRoomIDs))
     }
 
-    func eraseCredentials() {
+    /// Deletes the key and every room secret. Throws if the Keychain kept any of them, leaving the record of what
+    /// is saved as it was, so nothing is forgotten that is still there.
+    func eraseCredentials() throws {
+        var failure: Error?
         for roomID in defaults.stringArray(forKey: key(.secretRoomIDs)) ?? [] {
-            try? credentials.setCredential(nil, for: secretAccount(roomID))
+            do { try credentials.setCredential(nil, for: secretAccount(roomID)) } catch { failure = failure ?? error }
         }
-        try? credentials.setCredential(nil, for: apiKeyAccount)
+        do { try credentials.setCredential(nil, for: apiKeyAccount) } catch { failure = failure ?? error }
+        if let failure { throw failure }
         defaults.removeObject(forKey: key(.secretRoomIDs))
         defaults.removeObject(forKey: key(.readState))
     }
 
     /// Everything, including the agent identity. For a connection that is being removed for good.
-    func eraseAll() {
-        eraseCredentials()
+    func eraseAll() throws {
+        try eraseCredentials()
         Keys.allCases.forEach { defaults.removeObject(forKey: key($0)) }
     }
 }

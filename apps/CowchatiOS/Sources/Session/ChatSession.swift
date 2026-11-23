@@ -80,18 +80,20 @@ final class ChatSession: ObservableObject {
         _ = await connectFresh(server: server, credential: credential, displayName: displayName)
     }
 
-    func signOut() {
+    /// Signs out. The saved key goes first: if the Keychain keeps it, this throws and the session stays signed
+    /// in, which is how the next launch would find it anyway.
+    func signOut() throws {
+        try storage.eraseCredentials()
         stopActivity()
         phase = .signedOut
         connection.disconnect()
-        storage.eraseCredentials()
         resetAccountState()
     }
 
     /// Signs out and drops the agent identity too. For a connection that is being removed.
-    func forget() {
-        signOut()
-        storage.eraseAll()
+    func forget() throws {
+        try signOut()
+        try storage.eraseAll()
     }
 
     /// True when a key is saved for this connection, including one minted from an invite before a failed connect.
@@ -131,13 +133,13 @@ final class ChatSession: ObservableObject {
     func wasAddedByInvite(roomID: String) -> Bool { storage.invitedRoomIDs.contains(roomID) }
 
     /// Takes an invited room off this iPhone. The key keeps its access on the server.
-    func removeInvitedRoom(roomID: String) async {
+    func removeInvitedRoom(roomID: String) async throws {
         guard wasAddedByInvite(roomID: roomID) else { return }
+        // The room's secret goes first. If the Keychain keeps it, the room stays, with the secret it still holds.
+        try setSecret(nil, roomID: roomID)
         if joinedRoomIDs.remove(roomID) != nil { try? await connection.leave(roomID: roomID) }
         storage.invitedRoomIDs.remove(roomID)
         storage.removedRoomIDs.insert(roomID)
-        try? storage.setSecret(nil, roomID: roomID)
-        secrets[roomID] = nil
         openRoomIDs.remove(roomID)
         timelines[roomID] = nil
         messages[roomID] = nil

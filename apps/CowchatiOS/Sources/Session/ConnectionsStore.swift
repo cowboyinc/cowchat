@@ -34,6 +34,8 @@ final class ConnectionsStore: ObservableObject {
     @Published private(set) var inboxUnread = 0
     /// A friend link the app was opened with, waiting to be confirmed.
     @Published var pendingFriendLink: FriendLinkRoute?
+    /// Set when this iPhone's Keychain refused a change, so a screen can say so.
+    @Published var storageError: String?
     private var sessions: [String: ChatSession] = [:]
 
     convenience init() {
@@ -153,7 +155,8 @@ final class ConnectionsStore: ObservableObject {
                    let api = makeAccountAPI(endpoint, key) {
                     Task { try? await api.logout() }
                 }
-                session.forget()
+                // Nothing was saved for a connection that never came up, so there is nothing a failure here could leave.
+                try? session.forget()
             }
             throw SessionError(message)
         }
@@ -335,16 +338,26 @@ final class ConnectionsStore: ObservableObject {
         republish()
     }
 
-    func remove(connectionID: String) {
-        guard let session = sessions.removeValue(forKey: connectionID) else { return }
+    /// Removes a connection and everything saved for it. False, with the connection left as it was, when the
+    /// Keychain would not give up its key: a connection that vanished here would come back signed in next launch.
+    @discardableResult
+    func remove(connectionID: String) -> Bool {
+        guard let session = sessions[connectionID] else { return false }
+        do {
+            try session.forget()
+        } catch {
+            storageError = "Cowchat could not remove this connection's key from this iPhone. Try again."
+            return false
+        }
+        sessions[connectionID] = nil
         if let account = account(for: connectionID) { Task { await account.signOut() } }
         session.onChange = nil
-        session.forget()
         let prefix = "CowchatiOS.connection.\(connectionID)."
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) { defaults.removeObject(forKey: key) }
         connections.removeAll { $0.id == connectionID }
         persist()
         republish()
+        return true
     }
 
     /// True for a room an invite added, and for the rooms of a connection an invite made.
@@ -359,7 +372,11 @@ final class ConnectionsStore: ObservableObject {
         if record.fromInvite {
             remove(connectionID: record.id)
         } else {
-            await sessions[record.id]?.removeInvitedRoom(roomID: room.roomID)
+            do {
+                try await sessions[record.id]?.removeInvitedRoom(roomID: room.roomID)
+            } catch {
+                storageError = error.localizedDescription
+            }
         }
     }
 

@@ -110,8 +110,7 @@ private struct ConnectionDetailView: View {
         .onDisappear { store.rename(connectionID: connectionID, to: name) }
         .confirmationDialog("Remove this connection?", isPresented: $confirmsRemove, titleVisibility: .visible) {
             Button("Remove", role: .destructive) {
-                store.remove(connectionID: connectionID)
-                dismiss()
+                if store.remove(connectionID: connectionID) { dismiss() }
             }
             .accessibilityIdentifier("connections.confirmRemove")
         }

@@ -41,6 +41,9 @@ struct MainView: View {
                 .tag(AppTab.you)
         }
         .environmentObject(navigator)
+        .alert(store.storageError ?? "", isPresented: Binding(get: { store.storageError != nil }, set: { if !$0 { store.storageError = nil } })) {
+            Button("OK", role: .cancel) {}
+        }
         .background { ForEach(store.accounts, id: \.connectionID) { SetupGate(account: $0) } }
         .onChange(of: store.accounts.isEmpty) { _, hasNone in
             // Inbox and People go when the last account does.

@@ -63,6 +63,16 @@ jobs:
           xcrun simctl boot "$device" || true
           xcrun simctl bootstatus "$device" -b
           xcodebuild -scheme CowchatKit -destination "platform=iOS Simulator,name=$device" test
+      - if: runner.os == 'macOS'
+        working-directory: apps/CowchatiOS
+        run: |
+          # The iOS app's unit tests, on the simulator the package tests just booted. The project file is
+          # generated, so it is made here. Signing is local only: nothing here needs an Apple account.
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcodegen generate
+          device=$(xcrun simctl list devices available | grep -m1 -oE 'iPhone [^(]+' | sed 's/ *$//')
+          xcodebuild test -project CowchatiOS.xcodeproj -scheme CowchatiOS \
+            -destination "platform=iOS Simulator,name=$device" CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
   charts:
     runs-on: ubuntu-latest
     timeout-minutes: 15

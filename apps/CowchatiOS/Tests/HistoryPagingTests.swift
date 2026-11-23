@@ -117,7 +117,7 @@ final class HistoryPagingTests: XCTestCase {
 
     // MARK: Room secrets and the Keychain
 
-    func testASecretTheKeychainRefusedIsNotTreatedAsSaved() async {
+    func testASecretTheKeychainRefusedIsNotTreatedAsSaved() async throws {
         connection.serverRooms = [makeRoom(id: "r1", name: "General", encrypted: true)]
         let session = await signedIn()
         credentials.failsWrites = true
