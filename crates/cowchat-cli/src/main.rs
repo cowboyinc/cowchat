@@ -1687,8 +1687,7 @@ fn has_identity_for(cli: &Cli) -> bool {
                     .and_then(|path| read_key_file(&path))
                     .is_some()
         })
-        || (listener_key_serves(cli.url.as_deref())
-            && read_key_file(&default_key_path()).is_some())
+        || (listener_key_serves(cli.url.as_deref()) && read_key_file(&default_key_path()).is_some())
 }
 
 fn resolve_agent_id(cli: &Cli) -> Option<String> {
