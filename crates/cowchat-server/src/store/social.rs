@@ -2270,6 +2270,41 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_whose_reply_was_lost_comes_back_under_the_same_id() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, bot_key, session, room_id) = restart_fixture(&store, "restart-lost");
+        lapse(&store, &session);
+        // The server restarts the session, but its reply never reaches the hook.
+        let lost = restart(&store, &bot_key, &session).unwrap();
+        let lost_token = lost.session_token.unwrap();
+        // The hook retries with the same key and ID while the session is live.
+        let again = restart(&store, &bot_key, &session).unwrap();
+        assert_eq!(again.room_id, lost.room_id);
+        let token = again.session_token.unwrap();
+        assert_ne!(token, lost_token);
+        assert_eq!(store.social_room_access(&room_id, &token), Some(true));
+        assert_ne!(store.social_room_access(&room_id, &lost_token), Some(true));
+        // Another key of the same bot still can't take over the live session.
+        let bot_id = store
+            .social_action(&owner_key, "GET", "agents", &json!({}))
+            .unwrap()["agents"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let other_key = store
+            .social_action(
+                &owner_key,
+                "POST",
+                &format!("agents/{bot_id}/credentials"),
+                &json!({"mint_only":true}),
+            )
+            .unwrap();
+        let refused =
+            restart(&store, other_key["api_key"].as_str().unwrap(), &session).unwrap_err();
+        assert_eq!(refused.to_string(), "session cannot restart");
+    }
+
+    #[test]
     fn only_the_key_that_minted_a_session_can_restart_it() {
         let store = Store::open_in_memory().unwrap();
         let (owner_key, _) = login(&store, "restart-key");
