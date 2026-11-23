@@ -2887,11 +2887,7 @@ async fn handle_subscribe(
         );
     }
 
-    if let Some(error) = p
-        .tags
-        .iter()
-        .find_map(|tag| cowchat_core::tags::MessageTag::parse(tag).err())
-    {
+    if let Err(error) = crate::tags::validate_tag_filters(&p.tags) {
         return Frame::error(req_id, ErrorPayload::new(ErrorCode::InvalidPayload, error));
     }
 

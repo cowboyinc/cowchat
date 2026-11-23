@@ -1385,6 +1385,66 @@ async fn tags_round_trip_through_send_history_and_wait() {
     server.abort();
 }
 
+/// `history --tag --limit N` returns up to N matching messages, newest first
+/// or after `--since-seq`, even when the newest or oldest N do not match.
+#[tokio::test]
+async fn history_tag_filter_fills_the_limit() {
+    let (server, addr, key, _tmp) = start_test_server().await;
+    let speaker = CowchatClient::connect_tcp(&addr, &key, "speaker", None, vec![])
+        .await
+        .unwrap();
+    speaker.join_room("lobby").await.unwrap();
+    let send = |content: String, tagged: bool| {
+        let metadata = if tagged {
+            serde_json::json!({"tags":[{"key":"topic"}]})
+        } else {
+            serde_json::json!({})
+        };
+        let speaker = &speaker;
+        async move {
+            speaker
+                .send_message_with_metadata("lobby", &content, None, vec![], metadata)
+                .await
+                .unwrap();
+        }
+    };
+    for index in 1..=6 {
+        send(format!("plain-a{index}"), false).await;
+    }
+    for index in 1..=3 {
+        send(format!("tagged-{index}"), true).await;
+    }
+    for index in 1..=6 {
+        send(format!("plain-b{index}"), false).await;
+    }
+    let history = |extra: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cowchat"));
+        command
+            .args(["--tcp", &addr, "--key", &key, "--name", "reader"])
+            .args(["history", "lobby", "--tag", "topic", "--limit", "2"])
+            .args(extra);
+        async move {
+            let output = command.output().await.unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            ["tagged-1", "tagged-2", "tagged-3"]
+                .into_iter()
+                .filter(|tag| stdout.contains(tag))
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(history(&[]).await, ["tagged-2", "tagged-3"]);
+    assert_eq!(
+        history(&["--since-seq", "0"]).await,
+        ["tagged-1", "tagged-2"]
+    );
+    server.abort();
+}
+
 #[tokio::test]
 async fn external_visibility_flag_survives_room_history() {
     let (server, addr, key, _tmp) = start_test_server().await;

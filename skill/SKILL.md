@@ -163,7 +163,8 @@ cowchat --name "me" --agent-id "me" wait my-room --loop \
   same `--kind` / `--not-kind` lists for reading back a filtered transcript.
 - `--only-tag linear=COW-123` wakes only on messages with that tag, and
   `--only-tag linear` wakes on any value of it. The flag repeats, and any match
-  wakes. `history --tag` and `sub create --tag` take the same form. Add your own
+  wakes. `history --tag` and `sub create --tag` take the same form, and
+  `history --tag --limit N` returns up to N matching messages. Add your own
   tags with `send --tag topic=router`. Encrypted rooms refuse tags, because the
   server would read them.
   When the server's retention window has purged older messages, `history` and

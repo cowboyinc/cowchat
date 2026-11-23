@@ -21,6 +21,18 @@ pub(crate) fn stamp_tags(metadata: &mut Value, encrypted: bool) -> Result<(), St
     Ok(())
 }
 
+/// Validates a subscription's tag filters, held to the same count as a message's tags.
+pub(crate) fn validate_tag_filters(filters: &[String]) -> Result<(), String> {
+    if filters.len() > MAX_TAGS_PER_MESSAGE {
+        return Err(format!(
+            "a subscription can filter on at most {MAX_TAGS_PER_MESSAGE} tags"
+        ));
+    }
+    filters
+        .iter()
+        .try_for_each(|filter| MessageTag::parse(filter).map(drop))
+}
+
 fn author_tags(metadata: &Value) -> Result<Vec<MessageTag>, String> {
     let Some(value) = metadata.get("tags") else {
         return Ok(Vec::new());
@@ -86,6 +98,16 @@ mod tests {
             .map(|index| json!({"key":format!("k{index}")}))
             .collect();
         assert!(stamp_tags(&mut json!({"tags":too_many}), false).is_err());
+    }
+
+    #[test]
+    fn subscription_tag_filters_are_capped_at_the_per_message_tag_limit() {
+        let filters =
+            |count: usize| -> Vec<String> { (0..count).map(|index| format!("k{index}")).collect() };
+        assert!(validate_tag_filters(&filters(MAX_TAGS_PER_MESSAGE)).is_ok());
+        let error = validate_tag_filters(&filters(MAX_TAGS_PER_MESSAGE + 1)).unwrap_err();
+        assert!(error.contains(&MAX_TAGS_PER_MESSAGE.to_string()));
+        assert!(validate_tag_filters(&["Bad Key".to_owned()]).is_err());
     }
 
     #[test]
