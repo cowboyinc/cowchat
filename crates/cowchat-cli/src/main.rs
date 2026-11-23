@@ -1875,6 +1875,67 @@ fn parse_kinds(spec: Option<&String>) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Keep reading history past `first` until `limit` messages pass `keep`, so a
+/// client-side filter does not shrink the page. `forward` reads after the last
+/// message, otherwise before the first.
+async fn fill_filtered_history(
+    client: &CowchatClient,
+    room_id: &str,
+    limit: u32,
+    forward: bool,
+    first: Vec<ChatMessage>,
+    keep: impl Fn(&ChatMessage) -> bool,
+) -> Result<Vec<ChatMessage>, ClientError> {
+    let wanted = limit as usize;
+    let page = limit.max(100);
+    let mut exhausted = first.len() < wanted;
+    let mut oldest = first.first().map(|m| m.seq);
+    let mut newest = first.last().map(|m| m.seq);
+    let mut kept: Vec<ChatMessage> = first.into_iter().filter(|m| keep(m)).collect();
+    while kept.len() < wanted && !exhausted {
+        if forward {
+            let batch = client
+                .get_history_filtered(room_id, page, None, None, newest)
+                .await?;
+            exhausted = batch.len() < page as usize;
+            newest = batch.last().map(|m| m.seq).or(newest);
+            kept.extend(batch.into_iter().filter(|m| keep(m)));
+        } else {
+            let Some(below) = oldest.filter(|seq| *seq > 1) else {
+                break;
+            };
+            let start = (below - 1 - i64::from(page)).max(0);
+            let batch: Vec<ChatMessage> = client
+                .get_history_filtered(room_id, page, None, None, Some(start))
+                .await?
+                .into_iter()
+                .filter(|m| m.seq < below)
+                .collect();
+            exhausted = batch.is_empty() || start == 0;
+            oldest = batch.first().map(|m| m.seq);
+            let older: Vec<ChatMessage> = batch.into_iter().filter(|m| keep(m)).collect();
+            kept.splice(0..0, older);
+        }
+    }
+    if forward {
+        kept.truncate(wanted);
+    } else {
+        kept.drain(..kept.len().saturating_sub(wanted));
+    }
+    Ok(kept)
+}
+
+/// An older server ignores tag filters and would deliver every message.
+fn ensure_tag_filters_kept(
+    requested: &[String],
+    subscription: &cowchat_core::Subscription,
+) -> Result<(), String> {
+    if requested.is_empty() || subscription.tags == requested {
+        return Ok(());
+    }
+    Err("this server does not support tag filters, so the subscription would deliver every message. It was removed; upgrade the server to filter by tag.".to_owned())
+}
+
 /// Parse `--tag` specs so a typo fails loudly rather than filtering out everything.
 fn parse_tags(specs: &[String]) -> Result<Vec<MessageTag>, String> {
     specs.iter().map(|spec| MessageTag::parse(spec)).collect()
@@ -2659,18 +2720,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // --not-kind exclude-list, both comma/space-separated.
             let only_kinds = parse_kinds(kind.as_ref());
             let not_kinds = parse_kinds(not_kind.as_ref());
-            let filtered: Vec<&ChatMessage> = messages
-                .iter()
-                .filter(|m| {
-                    let msg_kind = m.metadata.get("kind").and_then(|v| v.as_str());
-                    !kind_skipped(msg_kind, &only_kinds, &not_kinds)
-                        && tags_match_any(tags, &m.metadata)
-                })
-                .collect();
+            let keep = |m: &ChatMessage| {
+                let msg_kind = m.metadata.get("kind").and_then(|v| v.as_str());
+                !kind_skipped(msg_kind, &only_kinds, &not_kinds)
+                    && tags_match_any(tags, &m.metadata)
+            };
+            let forward = since.is_some() || since_seq.is_some();
+            let filtered =
+                fill_filtered_history(&client, &room_id, *limit, forward, messages, keep).await?;
 
             let body: String = filtered
                 .iter()
-                .map(|m| format_message(m))
+                .map(format_message)
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -2908,10 +2969,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return false;
                 }
                 let msg_kind = msg.metadata.get("kind").and_then(|v| v.as_str());
-                if kind_skipped(msg_kind, &only_kinds, &not_kinds) {
-                    return false;
-                }
-                tags_match_any(only_tags, &msg.metadata)
+                !kind_skipped(msg_kind, &only_kinds, &not_kinds)
+                    && tags_match_any(only_tags, &msg.metadata)
             };
 
             // Inner loop: keep advancing the bookmark until the returned message
@@ -3439,6 +3498,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             since,
                         )
                         .await?;
+                    if let Err(error) = ensure_tag_filters_kept(tags, &sub) {
+                        client.unsubscribe(&sub.subscription_id).await?;
+                        return Err(error.into());
+                    }
                     println!("{}", serde_json::to_string_pretty(&sub)?);
                 }
                 SubAction::List { room } => {
@@ -4711,5 +4774,35 @@ mod kind_filter_tests {
         let none: Vec<String> = vec![];
         assert!(!kind_skipped(Some("anything"), &none, &none));
         assert!(!kind_skipped(None, &none, &none));
+    }
+}
+
+#[cfg(test)]
+mod tag_filter_tests {
+    use super::ensure_tag_filters_kept;
+
+    fn subscription(tags: &[&str]) -> cowchat_core::Subscription {
+        serde_json::from_value(serde_json::json!({
+            "subscription_id": "s",
+            "room_id": "r",
+            "webhook_url": "https://hook.example",
+            "tags": tags,
+            "exclude_thinking": false,
+            "since_seq": 0,
+            "last_delivered_seq": 0,
+            "status": "active",
+            "failure_count": 0,
+            "created_at": "2026-11-23T00:00:00Z",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_server_that_drops_tag_filters_is_refused() {
+        let requested = vec!["linear=COW-1".to_owned()];
+        let error = ensure_tag_filters_kept(&requested, &subscription(&[])).unwrap_err();
+        assert!(error.contains("does not support tag filters"), "{error}");
+        assert!(ensure_tag_filters_kept(&requested, &subscription(&["linear=COW-1"])).is_ok());
+        assert!(ensure_tag_filters_kept(&[], &subscription(&[])).is_ok());
     }
 }

@@ -35,17 +35,14 @@ pub(super) fn matches_actor(
     let Some((agent_id, mode)) = actor else {
         return Ok(true);
     };
-    if agent_id == append.agent_id
+    let skip = agent_id == append.agent_id
         || mode == "listen"
         || (mode == "addressed" && !append.mentions.contains(&agent_id))
         || matches!(
             append.metadata.get("type").and_then(|v| v.as_str()),
             Some("thinking" | "system")
-        )
-    {
-        return Ok(false);
-    }
-    Ok(true)
+        );
+    Ok(!skip)
 }
 
 pub(super) fn validate_reply(
