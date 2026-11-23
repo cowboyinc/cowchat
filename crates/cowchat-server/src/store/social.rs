@@ -953,15 +953,17 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
             "invalid credential"
         );
         let tx = conn.transaction()?;
+        // The owner can end a session that has already lapsed or ended itself, so
+        // its approvals go and it cannot restart.
         let room_id: String = tx
             .query_row(
-                "SELECT room_id FROM social_sessions WHERE id=?1 AND owner_id=?2 AND ended_at IS NULL AND (?3 IS NULL OR bot_id=?3)",
+                "SELECT room_id FROM social_sessions WHERE id=?1 AND owner_id=?2 AND (ended_at IS NULL OR ?3 IS NULL) AND (?3 IS NULL OR bot_id=?3)",
                 params![session_id, p.account_id, p.agent_id],
                 |row| row.get(0),
             )
             .map_err(|_| anyhow::anyhow!("session not found"))?;
         tx.execute(
-            "UPDATE social_sessions SET ended_at=unixepoch(),token_digest=NULL WHERE id=?1",
+            "UPDATE social_sessions SET ended_at=COALESCE(ended_at,unixepoch()),token_digest=NULL WHERE id=?1",
             [session_id],
         )?;
         if p.agent_id.is_none() {
@@ -2284,6 +2286,27 @@ mod tests {
     fn an_owner_ending_a_session_revokes_its_restart() {
         let store = Store::open_in_memory().unwrap();
         let (owner_key, bot_key, session, _) = restart_fixture(&store, "restart-owner");
+        store.social_end_session(&owner_key, &session).unwrap();
+        assert!(restart(&store, &bot_key, &session).is_err());
+    }
+
+    #[test]
+    fn an_owner_ending_an_inactive_session_revokes_its_restart() {
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, bot_key, session, _) = restart_fixture(&store, "restart-owner-late");
+        lapse(&store, &session);
+        store.social_end_session(&owner_key, &session).unwrap();
+        store.social_end_session(&owner_key, &session).unwrap();
+        assert!(restart(&store, &bot_key, &session).is_err());
+
+        let store = Store::open_in_memory().unwrap();
+        let (owner_key, bot_key, session, _) = restart_fixture(&store, "restart-owner-self");
+        lapse(&store, &session);
+        let token = restart(&store, &bot_key, &session)
+            .unwrap()
+            .session_token
+            .unwrap();
+        store.social_end_session(&token, &session).unwrap();
         store.social_end_session(&owner_key, &session).unwrap();
         assert!(restart(&store, &bot_key, &session).is_err());
     }
