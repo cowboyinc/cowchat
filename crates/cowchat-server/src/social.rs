@@ -145,6 +145,8 @@ fn fail(error: anyhow::Error) -> Response {
         (StatusCode::UNAUTHORIZED, "unauthorized")
     } else if msg == "human approval required" {
         (StatusCode::FORBIDDEN, "human approval required")
+    } else if msg == "session cannot restart" {
+        (StatusCode::CONFLICT, "session cannot restart")
     } else {
         (StatusCode::BAD_REQUEST, "Request could not be completed")
     };
@@ -705,6 +707,12 @@ mod tests {
             .unwrap();
         let (base, task) = serve(crate::web::router(state.clone())).await;
         (state, base, vec![task, mock_task])
+    }
+
+    #[test]
+    fn a_refused_restart_is_a_conflict() {
+        let response = fail(anyhow::anyhow!("session cannot restart"));
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

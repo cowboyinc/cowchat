@@ -680,12 +680,10 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
         if let Some((owner_bot, room_id, room_name, true, minted_by)) = existing {
             // Only the key that minted a session brings it back, so a leaked key
             // restores no more than the sessions it made itself.
+            anyhow::ensure!(restart && p.session_id.is_none(), "invalid credential");
             anyhow::ensure!(
-                restart
-                    && owner_bot == bot
-                    && p.session_id.is_none()
-                    && minted_by.as_deref() == Some(hash(key).as_str()),
-                "invalid credential"
+                owner_bot == bot && minted_by.as_deref() == Some(hash(key).as_str()),
+                "session cannot restart"
             );
             // Ending a session keeps its room approvals so it can come back. An owner
             // who ended it, or revoked its key, took them away, its own room included.
@@ -2278,7 +2276,9 @@ mod tests {
         let session = format!("session:{}", uuid::Uuid::new_v4());
         restart(&store, minter, &session).unwrap();
         lapse(&store, &session);
-        assert!(restart(&store, other_key["api_key"].as_str().unwrap(), &session).is_err());
+        let refused =
+            restart(&store, other_key["api_key"].as_str().unwrap(), &session).unwrap_err();
+        assert_eq!(refused.to_string(), "session cannot restart");
         assert!(restart(&store, minter, &session).is_ok());
     }
 
@@ -2308,7 +2308,8 @@ mod tests {
             .unwrap();
         store.social_end_session(&token, &session).unwrap();
         store.social_end_session(&owner_key, &session).unwrap();
-        assert!(restart(&store, &bot_key, &session).is_err());
+        let refused = restart(&store, &bot_key, &session).unwrap_err();
+        assert_eq!(refused.to_string(), "session cannot restart");
     }
 
     #[test]

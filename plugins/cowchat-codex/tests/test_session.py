@@ -96,6 +96,48 @@ class HookTests(unittest.TestCase):
             self.assertEqual(calls[8][0][-3:], ["session", "end", record["id"]])
             self.assertFalse(mappings[0].exists())
 
+    def test_only_a_refused_restart_mints_a_new_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            (home / ".cowchat").mkdir()
+            (home / ".cowchat/hosted-bot.json").write_text(json.dumps({"url": "wss://chat.example/ws"}))
+            payload = {"session_id": str(uuid.uuid4()), "cwd": root}
+            session_file = home / ".cowchat/sessions/private.json"
+            calls = []
+            restart_error = []
+
+            def fake_run(args, session_file_arg=None):
+                calls.append(args[args.index("--id") + 1])
+                if session_file_arg:
+                    raise subprocess.CalledProcessError(1, args, "", "session heartbeat failed: 401 Unauthorized")
+                if restart_error and calls.count(calls[-1]) > 1:
+                    raise subprocess.CalledProcessError(1, args, "", restart_error[0])
+                return subprocess.CompletedProcess(args, 0, json.dumps({
+                    "room_id": "room-1", "room_name": "test-room", "session_file": str(session_file),
+                }), "")
+
+            def start():
+                with patch.object(hook.Path, "home", return_value=home), \
+                        patch.object(hook, "run", side_effect=fake_run), \
+                        patch.object(hook, "start_listener"), \
+                        patch.object(hook, "parent_process", return_value=(1, "now")), \
+                        patch("sys.stdout", new_callable=io.StringIO):
+                    hook.hook_main("start", payload)
+
+            start()
+            session_file.parent.mkdir()
+            session_file.write_text("private")
+            os.chmod(session_file, 0o600)
+            first = calls[0]
+            restart_error.append("session creation failed: 503 Service Unavailable")
+            with self.assertRaises(subprocess.CalledProcessError):
+                start()
+            self.assertEqual(calls, [first] * 3)
+            restart_error[0] = "session creation failed: 409 Conflict"
+            start()
+            self.assertEqual(calls[3:5], [first, first])
+            self.assertNotEqual(calls[5], first)
+
 
 if __name__ == "__main__":
     unittest.main()
