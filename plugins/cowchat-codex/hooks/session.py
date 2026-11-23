@@ -12,9 +12,9 @@ import subprocess
 import sys
 import uuid
 
-# The server refuses a restart with 409, or with 400 when the saved session was
-# minted by another key, such as one the bot has since rotated away from.
-# The server answers 409 only when it refuses to restart this session ID.
+# The server answers 409 only when it refuses to restart this session ID, for
+# example one minted by a key the bot has since rotated away from. Any other
+# failure, a 400 included, may be temporary and keeps the saved ID.
 RESTART_REFUSED = ("session creation failed: 409",)
 
 
