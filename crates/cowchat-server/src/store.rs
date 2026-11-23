@@ -18,6 +18,7 @@ use crate::connection::{matches_room_owner, LEGACY_UNOWNED_OWNER_KEY};
 
 pub struct Store {
     pub(crate) social_configuration: std::sync::OnceLock<Option<crate::social::Configuration>>,
+    tag_extraction: std::sync::OnceLock<crate::tags::TagExtraction>,
     conn: Mutex<Connection>,
     pub(crate) artifact_changes: tokio::sync::watch::Sender<()>,
     /// In-memory mirror of `room_grants` (api_key -> granted room_ids).
@@ -146,6 +147,7 @@ impl Store {
         let store = Self {
             conn: Mutex::new(conn),
             social_configuration: std::sync::OnceLock::new(),
+            tag_extraction: std::sync::OnceLock::new(),
             artifact_changes: tokio::sync::watch::channel(()).0,
             grants: DashMap::new(),
             blob_dir,
@@ -166,6 +168,18 @@ impl Store {
         Ok(store)
     }
 
+    /// Sets what the tag extractor recognises without a link. Call it before
+    /// serving; the first message otherwise fixes the default (`COW` tickets).
+    pub fn set_tag_extraction(&self, extraction: crate::tags::TagExtraction) -> Result<(), String> {
+        self.tag_extraction
+            .set(extraction)
+            .map_err(|_| "tag extraction is already set".to_owned())
+    }
+
+    pub(crate) fn tag_extraction(&self) -> &crate::tags::TagExtraction {
+        self.tag_extraction.get_or_init(Default::default)
+    }
+
     pub fn open_in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
         // A unique per-store temp dir keeps parallel in-memory tests isolated;
@@ -174,6 +188,7 @@ impl Store {
         let store = Self {
             conn: Mutex::new(conn),
             social_configuration: std::sync::OnceLock::new(),
+            tag_extraction: std::sync::OnceLock::new(),
             artifact_changes: tokio::sync::watch::channel(()).0,
             grants: DashMap::new(),
             blob_dir,

@@ -1259,6 +1259,7 @@ pub(crate) async fn handle_send_message(
         &mut metadata,
         &p.content,
         room_is_encrypted(&p.room_id, store),
+        store.tag_extraction(),
     ) {
         return Frame::error(req_id, ErrorPayload::new(ErrorCode::InvalidPayload, error));
     }
