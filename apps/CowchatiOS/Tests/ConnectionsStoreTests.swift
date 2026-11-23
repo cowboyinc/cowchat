@@ -157,7 +157,7 @@ final class ConnectionsStoreTests: XCTestCase {
         XCTAssertEqual(store.connections.count, 2)
     }
 
-    func testAFailedFirstSignInLeavesNoConnection() async {
+    func testAFailedFirstSignInLeavesNoConnection() async throws {
         let failing = FakeConnection()
         failing.connectFailures = [CowchatConnectionError.timeout]
         upcoming = [failing]
@@ -381,7 +381,7 @@ final class ConnectionsStoreTests: XCTestCase {
         let first = try addedID(try await store.add(server: home, credential: .key("k1")))
         let second = try addedID(try await store.add(server: global, credential: .key("k2")))
 
-        store.session(for: first)?.setSecret("right", roomID: "lobby")
+        try store.session(for: first)?.setSecret("right", roomID: "lobby")
         a.deliver(makeMessage(id: "m2", room: "lobby", seq: 2))
         await store.session(for: second)?.open(roomID: "lobby")
 
@@ -442,8 +442,8 @@ final class ConnectionsStoreTests: XCTestCase {
         let store = makeStore()
         let first = try addedID(try await store.add(server: home, credential: .key("k1")))
         let second = try addedID(try await store.add(server: global, credential: .key("k2")))
-        store.session(for: first)?.setSecret("s1", roomID: "lobby")
-        store.session(for: second)?.setSecret("s2", roomID: "ops")
+        try store.session(for: first)?.setSecret("s1", roomID: "lobby")
+        try store.session(for: second)?.setSecret("s2", roomID: "ops")
 
         store.remove(connectionID: first)
 

@@ -468,11 +468,11 @@ final class ChatSession: ObservableObject {
 
     func loadEarlier(roomID: String) async {
         guard let timeline = timelines[roomID], timeline.hasEarlier, !timeline.isLoading,
-              let oldest = timeline.entries.first,
-              let cursor = messages[roomID]?[oldest.id]?.timestamp else { return }
+              let oldest = timeline.entries.first else { return }
         let generation = generation
         timelines[roomID]?.isLoading = true
-        let page = try? await connection.history(roomID: roomID, limit: pageSize, before: cursor)
+        // By sequence, not time: messages that share a timestamp would be skipped at the page's edge.
+        let page = try? await connection.history(roomID: roomID, limit: pageSize, beforeSeq: oldest.seq, kinds: [])
         guard generation == self.generation else { return }
         if let page {
             let countBefore = timelines[roomID]?.entries.count ?? 0
@@ -489,22 +489,31 @@ final class ChatSession: ObservableObject {
         joinedRoomIDs.insert(roomID)
     }
 
-    // Pages back from the newest message until it overlaps what is already loaded,
-    // so a long offline gap leaves no hole. Dedupe makes a repeat harmless.
+    /// How many pages one catch-up reads before it gives up on joining the old messages to the new.
+    private static let catchUpPageLimit = 40
+
+    // Pages back from the newest message, by sequence, until it joins what is already loaded, so time away
+    // leaves no hole. Where the gap is too long to fill, what was loaded before it is let go: the timeline is
+    // then one unbroken run ending at the newest message, and Load earlier carries on from its oldest.
     private func backfill(roomID: String) async throws {
         let knownMax = timelines[roomID]?.entries.last?.seq
-        var before: String?
-        for pageIndex in 0..<10 {
-            let page = try await connection.history(roomID: roomID, limit: pageSize, before: before)
+        var cursor: Int?
+        for pageIndex in 0..<Self.catchUpPageLimit {
+            let page = try await connection.history(roomID: roomID, limit: pageSize, beforeSeq: cursor, kinds: [])
             merge(page, into: roomID)
             page.forEach(noteForReadState)
             if knownMax == nil, pageIndex == 0 {
                 timelines[roomID]?.hasEarlier = page.count >= pageSize
             }
-            guard let knownMax, let oldest = page.first,
-                  page.count >= pageSize, oldest.seq > knownMax else { return }
-            before = oldest.timestamp
+            guard let knownMax, let oldest = page.first, page.count >= pageSize, oldest.seq > knownMax + 1 else { return }
+            // A server that returns the same page again has nothing older to give.
+            if let cursor, oldest.seq >= cursor { return }
+            cursor = oldest.seq
         }
+        guard let knownMax else { return }
+        messages[roomID] = messages[roomID]?.filter { $0.value.seq > knownMax }
+        timelines[roomID]?.entries.removeAll { $0.seq <= knownMax }
+        timelines[roomID]?.hasEarlier = true
     }
 
     func refreshPeople(roomID: String) async { await refreshMembers(roomID) }
@@ -575,9 +584,17 @@ final class ChatSession: ObservableObject {
         saveReadState(state, roomID: roomID)
     }
 
-    func setSecret(_ secret: String?, roomID: String) {
+    /// Saves or removes a room's secret. The room changes only once the Keychain has: a secret it refused is not
+    /// used, and one it would not remove stays in use, so the screen never shows what the next launch won't.
+    func setSecret(_ secret: String?, roomID: String) throws {
         let secret = secret?.isEmpty == true ? nil : secret
-        try? storage.setSecret(secret, roomID: roomID)
+        do {
+            try storage.setSecret(secret, roomID: roomID)
+        } catch {
+            throw SessionError(secret == nil
+                ? "Cowchat could not remove this room's secret from this iPhone."
+                : "Cowchat could not save this room's secret on this iPhone.")
+        }
         secrets[roomID] = secret
         if var timeline = timelines[roomID], let raw = messages[roomID] {
             timeline.entries = timeline.entries.compactMap { entry in

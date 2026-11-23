@@ -89,6 +89,9 @@ public protocol CowchatConnectionProtocol: AnyObject {
         before: String?
     ) async throws -> [ChatMessage]
     /// Sends a message. `mentions` holds the agent IDs it names, which the server keeps on the message.
+    /// One page of a room's messages below `beforeSeq`, oldest first, of the given kinds or of every kind when
+    /// `kinds` is empty. A sequence never repeats, so paging by it loses nothing where timestamps tie.
+    func history(roomID: String, limit: Int, beforeSeq: Int?, kinds: [String]) async throws -> [ChatMessage]
     func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage
     func disconnect()
 }
@@ -102,6 +105,10 @@ extension CowchatConnectionProtocol {
 
 extension CowchatConnectionProtocol {
     public func reconfigure(profile _: ConnectionProfile) {}
+
+    public func history(roomID: String, limit: Int, beforeSeq _: Int?, kinds _: [String]) async throws -> [ChatMessage] {
+        try await history(roomID: roomID, limit: limit, before: nil)
+    }
 
     public func roomLeases(roomID: String) async throws -> [RoomLease] {
         throw CowchatConnectionError.transport("Room leases require an updated Cowchat server.")
@@ -348,6 +355,14 @@ public final class CowchatConnection: CowchatConnectionProtocol {
             requestPayload["before_seq"] = previousCursor
         } while true
         return messages
+    }
+
+    public func history(roomID: String, limit: Int, beforeSeq: Int?, kinds: [String]) async throws -> [ChatMessage] {
+        var body: Payload = ["room_id": roomID, "limit": limit]
+        if !kinds.isEmpty { body["kinds"] = kinds }
+        if let beforeSeq { body["before_seq"] = beforeSeq }
+        let payload = try await request(type: "get_history", payload: body)
+        return try decode([ChatMessage].self, from: payload["messages"] ?? [])
     }
 
     public func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage {

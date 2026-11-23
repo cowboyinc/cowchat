@@ -147,6 +147,15 @@ final class FakeConnection: CowchatConnectionProtocol {
     var historyErrors: [String: Error] = [:]
     var beforeHistory: (() -> Void)?
 
+    /// As the server pages: only messages below the sequence, whatever their timestamps.
+    func history(roomID: String, limit: Int, beforeSeq: Int?, kinds: [String]) async throws -> [ChatMessage] {
+        beforeHistory?()
+        try requireConnected()
+        if let error = historyErrors[roomID] { throw error }
+        let all = (serverMessages[roomID] ?? []).sorted { $0.seq < $1.seq }.filter { message in beforeSeq.map { message.seq < $0 } ?? true }
+        return Array(all.suffix(limit))
+    }
+
     func history(roomID: String, limit: Int, before: String?) async throws -> [ChatMessage] {
         beforeHistory?()
         try requireConnected()

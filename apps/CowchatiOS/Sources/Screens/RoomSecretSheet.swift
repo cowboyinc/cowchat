@@ -6,6 +6,7 @@ struct RoomSecretSheet: View {
     @Environment(\.dismiss) private var dismiss
     let roomID: String
     @State private var secret = ""
+    @State private var error: String?
 
     var body: some View {
         NavigationStack {
@@ -15,6 +16,12 @@ struct RoomSecretSheet: View {
                     .autocorrectionDisabled()
                     .gallopText(.bodyL, color: SemanticColor.textPrimary)
                     .gallopFormRow()
+                if let error {
+                    Text(error)
+                        .gallopText(.bodyS, color: SemanticColor.textError)
+                        .gallopFormRow()
+                        .accessibilityIdentifier("secret.error")
+                }
             }
             .gallopForm()
             .navigationTitle("Room secret")
@@ -23,8 +30,12 @@ struct RoomSecretSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        session.setSecret(secret.trimmingCharacters(in: .whitespacesAndNewlines), roomID: roomID)
-                        dismiss()
+                        do {
+                            try session.setSecret(secret.trimmingCharacters(in: .whitespacesAndNewlines), roomID: roomID)
+                            dismiss()
+                        } catch {
+                            self.error = error.localizedDescription
+                        }
                     }
                     .disabled(secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }

@@ -87,7 +87,7 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertTrue(connection.registeredAgentIDs[0].hasPrefix("cowchat-ios-"))
     }
 
-    func testSignInFailureToReachServerIsActionable() async {
+    func testSignInFailureToReachServerIsActionable() async throws {
         connection.connectFailures = [CowchatConnectionError.timeout]
         let session = makeSession()
         await session.signIn(server: tcp, credential: .key("k1"), displayName: "Ryan")
@@ -99,7 +99,7 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(credentials.values, [:])
     }
 
-    func testSignInRejectedKeyIsActionable() async {
+    func testSignInRejectedKeyIsActionable() async throws {
         connection.registerError = CowchatConnectionError.server(message: "invalid api key", code: "unauthorized")
         let session = makeSession()
         await session.signIn(server: tcp, credential: .key("bad"), displayName: "Ryan")
@@ -275,7 +275,7 @@ final class ChatSessionTests: XCTestCase {
 
     func testSendEncryptsWhenTheRoomHasASecret() async throws {
         let session = await signedIn()
-        session.setSecret("s3cret", roomID: "r1")
+        try session.setSecret("s3cret", roomID: "r1")
         await session.open(roomID: "r1")
 
         try await session.send(roomID: "r1", text: "private", mentions: [])
@@ -286,7 +286,7 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(session.timelines["r1"]?.entries.map(\.body), [.text("private")])
     }
 
-    func testSendToAnEncryptedRoomWithoutASecretThrows() async {
+    func testSendToAnEncryptedRoomWithoutASecretThrows() async throws {
         connection.serverRooms = [makeRoom(id: "r1", name: "Vault", encrypted: true)]
         let session = await signedIn()
         do {
@@ -313,10 +313,10 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(session.rooms.first { $0.id == "r1" }?.isEncrypted, true)
         XCTAssertEqual(session.rooms.first { $0.id == "r1" }?.hasSecret, false)
 
-        session.setSecret("wrong", roomID: "r1")
+        try session.setSecret("wrong", roomID: "r1")
         XCTAssertEqual(session.timelines["r1"]?.entries.map(\.body), [.locked, .text("plain")])
 
-        session.setSecret("right", roomID: "r1")
+        try session.setSecret("right", roomID: "r1")
         XCTAssertEqual(session.timelines["r1"]?.entries.map(\.body), [.text("the plan"), .text("plain")])
         XCTAssertEqual(session.rooms.first { $0.id == "r1" }?.hasSecret, true)
     }
@@ -332,7 +332,7 @@ final class ChatSessionTests: XCTestCase {
         let sealed = try RoomCrypto.encrypt("kept", secret: "right", roomID: "r1")
         connection.serverMessages["r1"] = [makeMessage(id: "m1", seq: 1, content: sealed)]
         let session = await signedIn()
-        session.setSecret("right", roomID: "r1")
+        try session.setSecret("right", roomID: "r1")
 
         let relaunched = makeSession()
         await relaunched.restore()
@@ -340,9 +340,9 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(relaunched.timelines["r1"]?.entries.map(\.body), [.text("kept")])
     }
 
-    func testSendRefusesPlaintextWhenASavedRoomSecretCannotBeRead() async {
+    func testSendRefusesPlaintextWhenASavedRoomSecretCannotBeRead() async throws {
         let session = await signedIn()
-        session.setSecret("right", roomID: "r1")
+        try session.setSecret("right", roomID: "r1")
         credentials.values = credentials.values.filter { !$0.key.contains("r1") }
 
         let relaunched = makeSession()
@@ -473,7 +473,7 @@ final class ChatSessionTests: XCTestCase {
 
     func testSignOutDoesNotReconnectAndErasesCredentials() async throws {
         let session = await signedIn()
-        session.setSecret("s3cret", roomID: "r1")
+        try session.setSecret("s3cret", roomID: "r1")
         XCTAssertNotEqual(credentials.values, [:])
 
         session.signOut()
@@ -536,7 +536,7 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(connection.serverRooms.first { $0.id == "r1" }?.name, "Planning")
     }
 
-    func testRenameRefusesAnEmptyNameAndReportsAServerRefusal() async {
+    func testRenameRefusesAnEmptyNameAndReportsAServerRefusal() async throws {
         let session = await signedIn()
         do {
             try await session.rename(roomID: "r1", to: "   ")
@@ -588,7 +588,7 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertTrue(session.canRename(roomID: roomID))
     }
 
-    func testCreateRoomRefusesAnEmptyNameAndLobbyWithoutAskingTheServer() async {
+    func testCreateRoomRefusesAnEmptyNameAndLobbyWithoutAskingTheServer() async throws {
         let session = await signedIn()
         for (name, message) in [("  ", "Enter a room name."), ("Lobby", "\u{201C}lobby\u{201D} is reserved. Choose another name.")] {
             do {
@@ -601,7 +601,7 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertTrue(connection.createdRooms.isEmpty)
     }
 
-    func testCreateRoomReportsANameThatIsTaken() async {
+    func testCreateRoomReportsANameThatIsTaken() async throws {
         let session = await signedIn()
         do {
             _ = try await session.createRoom(name: "General")

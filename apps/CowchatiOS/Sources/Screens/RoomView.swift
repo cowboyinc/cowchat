@@ -15,6 +15,7 @@ struct RoomView: View {
     @State private var confirmsLeave = false
     @State private var isAddingPerson = false
     @State private var showsPeople = false
+    @State private var secretError: String?
     @State private var isRenaming = false
     @State private var newName = ""
     @State private var invite: InviteToShare?
@@ -189,7 +190,12 @@ struct RoomView: View {
             }
         }
         .confirmationDialog("Remove the secret from this phone?", isPresented: $confirmsRemoveSecret, titleVisibility: .visible) {
-            Button("Remove secret", role: .destructive) { session.setSecret(nil, roomID: roomID) }
+            Button("Remove secret", role: .destructive) {
+                do { try session.setSecret(nil, roomID: roomID) } catch { secretError = error.localizedDescription }
+            }
+        }
+        .alert(secretError ?? "", isPresented: Binding(get: { secretError != nil }, set: { if !$0 { secretError = nil } })) {
+            Button("OK", role: .cancel) {}
         }
         .confirmationDialog("Remove \(room?.name ?? "")?", isPresented: $confirmsRemove, titleVisibility: .visible) {
             Button("Remove", role: .destructive) {
