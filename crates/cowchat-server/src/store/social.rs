@@ -680,10 +680,12 @@ INSERT OR IGNORE INTO persistent_rooms(room_id) SELECT s.room_id FROM social_roo
         if let Some((owner_bot, room_id, room_name, true, minted_by)) = existing {
             // Only the key that minted a session brings it back, so a leaked key
             // restores no more than the sessions it made itself.
-            anyhow::ensure!(restart && p.session_id.is_none(), "invalid credential");
             anyhow::ensure!(
-                owner_bot == bot && minted_by.as_deref() == Some(hash(key).as_str()),
-                "session cannot restart"
+                restart
+                    && owner_bot == bot
+                    && p.session_id.is_none()
+                    && minted_by.as_deref() == Some(hash(key).as_str()),
+                "invalid credential"
             );
             // Ending a session keeps its room approvals so it can come back. An owner
             // who ended it, or revoked its key, took them away, its own room included.
@@ -2244,8 +2246,17 @@ mod tests {
         let other = store
             .social_action(&owner_key, "POST", "agents", &json!({"name":"Other"}))
             .unwrap();
+        let other_key = other["api_key"].as_str().unwrap();
+        let live = restart(&store, other_key, &session)
+            .unwrap_err()
+            .to_string();
         lapse(&store, &session);
-        assert!(restart(&store, other["api_key"].as_str().unwrap(), &session).is_err());
+        let ended = restart(&store, other_key, &session)
+            .unwrap_err()
+            .to_string();
+        // Another bot learns nothing about the session from the refusal.
+        assert_eq!(live, "invalid credential");
+        assert_eq!(ended, live);
         let restarted = restart(&store, &bot_key, &session).unwrap();
         let token = restarted.session_token.clone().unwrap();
         store.social_end_session(&token, &session).unwrap();
@@ -2278,7 +2289,7 @@ mod tests {
         lapse(&store, &session);
         let refused =
             restart(&store, other_key["api_key"].as_str().unwrap(), &session).unwrap_err();
-        assert_eq!(refused.to_string(), "session cannot restart");
+        assert_eq!(refused.to_string(), "invalid credential");
         assert!(restart(&store, minter, &session).is_ok());
     }
 
