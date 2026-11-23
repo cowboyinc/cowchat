@@ -467,7 +467,7 @@ dependencies = [
 [[package]]
 name = "cowchat-client"
 version = "0.9.1"
-source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=0cbdf07ca89eaaaccf79c9d9859f4a5e0ff25466#0cbdf07ca89eaaaccf79c9d9859f4a5e0ff25466"
+source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=b15d6ce2aaaabd3532a682b6ce9b7c326d1123bd#b15d6ce2aaaabd3532a682b6ce9b7c326d1123bd"
 dependencies = [
  "chrono",
  "cowchat-core",
@@ -514,7 +514,7 @@ dependencies = [
 [[package]]
 name = "cowchat-core"
 version = "0.9.1"
-source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=0cbdf07ca89eaaaccf79c9d9859f4a5e0ff25466#0cbdf07ca89eaaaccf79c9d9859f4a5e0ff25466"
+source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=b15d6ce2aaaabd3532a682b6ce9b7c326d1123bd#b15d6ce2aaaabd3532a682b6ce9b7c326d1123bd"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -531,7 +531,7 @@ dependencies = [
 [[package]]
 name = "cowchat-crypto"
 version = "0.9.1"
-source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=0cbdf07ca89eaaaccf79c9d9859f4a5e0ff25466#0cbdf07ca89eaaaccf79c9d9859f4a5e0ff25466"
+source = "git+https://github.com/cowboyinc/cowchat-core.git?rev=b15d6ce2aaaabd3532a682b6ce9b7c326d1123bd#b15d6ce2aaaabd3532a682b6ce9b7c326d1123bd"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
