@@ -4261,13 +4261,20 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
     }
 }
 
+/// How many characters of a peer-provided id an unknown-event line carries.
+const UNKNOWN_EVENT_ID_CHARS: usize = 64;
+
 /// One `monitor --json` line. An event of a type this build does not know is
 /// written as `{"unknown":true,"id":…}`: re-serialising it would invent the
 /// type `"unknown"`, which no peer sent, and print a payload whose sensitivity
 /// is unknown.
 fn monitor_json_line(frame: &cowchat_core::Frame) -> String {
     if frame.frame_type == cowchat_core::FrameType::Unknown {
-        return serde_json::json!({"unknown": true, "id": frame.id}).to_string();
+        let id = frame
+            .id
+            .as_deref()
+            .map(|id| id.chars().take(UNKNOWN_EVENT_ID_CHARS).collect::<String>());
+        return serde_json::json!({"unknown": true, "id": id}).to_string();
     }
     serde_json::to_string(frame).unwrap_or_default()
 }
@@ -4288,7 +4295,7 @@ fn render_unknown_event(frame: &cowchat_core::Frame) -> String {
         .as_deref()
         .unwrap_or("-")
         .escape_debug()
-        .take(64)
+        .take(UNKNOWN_EVENT_ID_CHARS)
         .collect();
     format!("[unknown] an event this build does not understand (id {id}; payload not shown)")
 }
@@ -4379,6 +4386,30 @@ mod room_key_tests {
             super::monitor_json_line(&known),
             serde_json::to_string(&known).unwrap()
         );
+    }
+
+    /// The peer-provided id is bounded in characters, not bytes, in both modes,
+    /// so a long multibyte id can neither flood a log line nor be cut mid-character.
+    #[test]
+    fn a_long_multibyte_unknown_event_id_is_bounded_in_both_modes() {
+        let frame = cowchat_core::Frame {
+            id: Some("é".repeat(500)),
+            reply_to: None,
+            frame_type: cowchat_core::FrameType::Unknown,
+            payload: serde_json::json!({}),
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&super::monitor_json_line(&frame)).unwrap();
+        assert_eq!(value["id"], serde_json::json!("é".repeat(64)));
+
+        let rendered = super::render_unknown_event(&frame);
+        assert_eq!(rendered.matches('é').count(), 64, "{rendered}");
+
+        let anonymous = cowchat_core::Frame { id: None, ..frame };
+        let value: serde_json::Value =
+            serde_json::from_str(&super::monitor_json_line(&anonymous)).unwrap();
+        assert_eq!(value, serde_json::json!({"unknown": true, "id": null}));
     }
 
     #[test]
