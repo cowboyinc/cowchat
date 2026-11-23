@@ -149,8 +149,8 @@ the initial alias backfill is complete. Versioned assets and Homebrew checksums
 remain unchanged.
 
 `scripts/publish-release.sh TAG REPO DIST_DIR POLICY MODE` requires Bash, Python 3,
-`jq`, `gh` with `api --paginate --slurp` support, and `curl`. `full` mode requires the versioned DMG and all four CLI
-archives. `installer-only` mode requires just the versioned DMG and is restricted
+`jq`, `gh` with `api --paginate --slurp` support, and `curl`. `full` mode requires the versioned DMG, the signed `appcast.xml` feed, and all
+four CLI archives. `installer-only` mode requires just the versioned DMG and is restricted
 to `preserve` policy on an already-published stable release. Non-stable tags,
 missing local artifacts, metadata failures, and differing/incomplete remote
 assets fail explicitly. The script never deletes or overwrites release assets.
