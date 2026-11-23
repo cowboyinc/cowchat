@@ -1479,22 +1479,25 @@ fn default_key_path() -> PathBuf {
     default_data_dir().join("auth.key")
 }
 
-/// Whether `auth.key` may authenticate this connection: a socket or `--tcp`
-/// connection, or a URL on this machine. A remote server never receives it.
-fn listener_key_serves(url: Option<&str>) -> bool {
-    let Some(url) = url else { return true };
-    let Some(host) = reqwest::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-    else {
-        return false;
+/// Whether `auth.key` may authenticate this connection: the Unix socket, or a
+/// `--tcp` address or URL on this machine. A remote server never receives it;
+/// an explicit `--key` or `--key-file` still reaches any server.
+fn listener_key_serves(url: Option<&str>, tcp: Option<&str>) -> bool {
+    let host = match (url, tcp) {
+        (Some(url), _) => reqwest::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned)),
+        (None, Some(addr)) => addr.rsplit_once(':').map(|(host, _)| host.to_owned()),
+        (None, None) => return true,
     };
-    host == "localhost"
-        || host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+    host.is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    })
 }
 
 /// Where a key minted by one server's invite is kept:
@@ -1636,7 +1639,7 @@ fn hosted_key(path: &std::path::Path, url: &str) -> Option<String> {
     hosted_credential(path, url).map(|saved| saved.api_key)
 }
 
-fn load_key(key_arg: &Option<String>, url: Option<&str>) -> String {
+fn load_key(key_arg: &Option<String>, url: Option<&str>, tcp: Option<&str>) -> String {
     if let Some(key) = key_arg {
         return key.clone();
     }
@@ -1648,7 +1651,7 @@ fn load_key(key_arg: &Option<String>, url: Option<&str>) -> String {
             return key;
         }
     }
-    if !listener_key_serves(url) {
+    if !listener_key_serves(url, tcp) {
         return String::new();
     }
     read_key_file_checked(&default_key_path()).unwrap_or_default()
@@ -1687,7 +1690,8 @@ fn has_identity_for(cli: &Cli) -> bool {
                     .and_then(|path| read_key_file(&path))
                     .is_some()
         })
-        || (listener_key_serves(cli.url.as_deref()) && read_key_file(&default_key_path()).is_some())
+        || (listener_key_serves(cli.url.as_deref(), cli.tcp.as_deref())
+            && read_key_file(&default_key_path()).is_some())
 }
 
 fn resolve_agent_id(cli: &Cli) -> Option<String> {
@@ -1840,7 +1844,7 @@ async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>>
         .key
         .clone()
         .or_else(|| saved_session.as_ref().map(|s| s.session_token.clone()))
-        .unwrap_or_else(|| load_key(&None, cli.url.as_deref()));
+        .unwrap_or_else(|| load_key(&None, cli.url.as_deref(), cli.tcp.as_deref()));
     let name = saved_session
         .as_ref()
         .filter(|_| cli.name == "cli")
@@ -2036,7 +2040,10 @@ async fn upload_attachments(
             if client.room_info(&room_id).await?["room"]["encrypted"] == true {
                 return Err("attachments cannot be sent to an encrypted room".into());
             }
-            (room_id, load_key(&cli.key, cli.url.as_deref()))
+            (
+                room_id,
+                load_key(&cli.key, cli.url.as_deref(), cli.tcp.as_deref()),
+            )
         };
     let mut attached = Vec::with_capacity(paths.len());
     for path in paths {
@@ -3843,7 +3850,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| format!("{} has no usable file name", path.display()))?;
-            let key = load_key(&cli.key, cli.url.as_deref());
+            let key = load_key(&cli.key, cli.url.as_deref(), cli.tcp.as_deref());
 
             let client = connect(&cli).await?;
             let room_id = resolve_room_id(&client, room).await?;
@@ -3896,7 +3903,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Fetch { blob_id, out } => {
             let base = attachment_http_base(cli.url.as_deref())?;
-            let key = load_key(&cli.key, cli.url.as_deref());
+            let key = load_key(&cli.key, cli.url.as_deref(), cli.tcp.as_deref());
             let response = reqwest::Client::new()
                 .get(format!("{base}/api/blobs/{blob_id}"))
                 .header("x-cowchat-key", &key)
@@ -5543,13 +5550,13 @@ mod listener_key_scope_tests {
 
     #[test]
     fn the_listener_key_serves_only_the_local_server() {
-        assert!(listener_key_serves(None), "socket or --tcp connection");
+        assert!(listener_key_serves(None, None), "Unix socket");
         for local in [
             "ws://127.0.0.1:9229/ws",
             "ws://localhost:9229/ws",
             "ws://[::1]:9229/ws",
         ] {
-            assert!(listener_key_serves(Some(local)), "{local}");
+            assert!(listener_key_serves(Some(local), None), "{local}");
         }
         for remote in [
             "wss://chat.cowchat.cowboy.inc/ws",
@@ -5557,7 +5564,13 @@ mod listener_key_scope_tests {
             "wss://localhost.example.com/ws",
             "not a url",
         ] {
-            assert!(!listener_key_serves(Some(remote)), "{remote}");
+            assert!(!listener_key_serves(Some(remote), None), "{remote}");
+        }
+        for local in ["127.0.0.1:9229", "localhost:9229", "[::1]:9229"] {
+            assert!(listener_key_serves(None, Some(local)), "--tcp {local}");
+        }
+        for remote in ["10.0.0.5:9229", "chat.cowchat.cowboy.inc:9229", "nonsense"] {
+            assert!(!listener_key_serves(None, Some(remote)), "--tcp {remote}");
         }
     }
 }
