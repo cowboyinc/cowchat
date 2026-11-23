@@ -1,0 +1,142 @@
+/* The Mac app's parts in the Cowchat site's four shots (parts.tsx). Sizes are the app's, read from the Mac prototype's
+   views and P9's renders at 1080 by 740: the pane's 12 corners and 16 inset, the message's 24 disc and 10 gap, the pull
+   request row's 40 height and 12 corners, the thumbnail's 120 height. Colours are Gallop's semantic tokens in the
+   app's roles; nothing here is a colour literal. Each shot is cropped to the pane its story happens in, so the shot
+   frame's edge (.cs-shot) is the pane's edge and the window around it is left out. Type is the app's: weight 550 and
+   each style's letter spacing. */
+.cs-app { position: relative; height: 100%; box-sizing: border-box; overflow: hidden; color: var(--color-text-primary); font-family: var(--font-sans); font-weight: var(--type-weight-regular); letter-spacing: var(--type-body-m-ls); text-align: left; }
+.cs-app-pane { box-sizing: border-box; min-height: calc(100% + var(--sp-6)); padding: var(--sp-2); background: var(--color-surface-600); }
+.cs-app-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.cs-app-title { font-family: var(--font-display); font-size: var(--type-h4-size); line-height: var(--type-h4-lh); font-weight: var(--type-h4-wght); letter-spacing: var(--type-h4-ls); overflow-wrap: anywhere; }
+.cs-app-line { color: var(--color-text-tertiary); font-size: var(--type-caption-size); line-height: var(--type-caption-lh); letter-spacing: var(--type-caption-ls); transition: color var(--motion-enter) var(--ease-out); }
+.cs-app-line[data-active] { color: var(--color-surface-glass-on-text-default); }
+.cs-app-head-end { display: flex; align-items: center; gap: var(--sp-1); flex: none; }
+.cs-app svg { display: block; width: 16px; height: 16px; flex: none; }
+.cs-hero-app { height: 100%; }
+
+/* The feed: messages 24 apart, as the room spaces them, each one's column at most 760 beside its 24 disc and 11 gap. */
+.cs-app-feed { display: flex; flex-direction: column; max-width: calc(24px + 11px + 760px); }
+.cs-app-feed > * + * { margin-top: var(--sp-3); }
+.cs-app-feed > .cs-app-arrive:not([data-open]) { margin-top: 0; transition-delay: 0s; }
+/* The thinking pill hangs 10 under the message above it, as the app spaces it under the agent's latest message. */
+.cs-app-feed > .cs-app-arrive.cs-app-pulse[data-open] { margin-top: 10px; }
+/* A message from anyone but the reader (ContentView's message row): the disc, 11, then the author in Body M Strong and
+   the time in Caption, 7 above the words in Body L and Text/Secondary. */
+.cs-app-message { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 11px; }
+/* A message's disc is AgentAvatar's rounded square (corners of 0.28 of its size); a person's on the Team page is round. */
+.cs-app-message .cs-app-initial { border-radius: 7px; }
+.cs-app-avatar { padding: 1.5px; }
+.cs-app-avatar img { display: block; width: 100%; height: 100%; }
+.cs-app-initial { display: inline-flex; align-items: center; justify-content: center; flex: none; box-sizing: border-box; width: 24px; height: 24px; border: 1px solid var(--color-border-default); border-radius: 50%; background: var(--color-surface-glass-on-default); color: var(--color-surface-glass-on-text-default); font-size: 10px; line-height: 1; font-weight: var(--type-weight-strong); }
+.cs-app-message-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--sp-1); min-height: 24px; }
+.cs-app-author { font-size: var(--type-body-m-size); line-height: 24px; font-weight: var(--type-weight-strong); }
+.cs-app-time { color: var(--color-text-tertiary); font-size: var(--type-caption-size); line-height: 24px; letter-spacing: var(--type-caption-ls); }
+.cs-app-words { margin-top: 7px; color: var(--color-text-secondary); font-size: var(--type-body-l-size); line-height: var(--type-body-l-lh); letter-spacing: var(--type-body-l-ls); }
+/* A mention of a session takes the accent with no fill; only a mention of the viewer is filled (LiveSessions.swift). */
+.cs-app-mention { color: var(--color-surface-glass-on-text-default); }
+.cs-app-message-main > .cs-app-pr, .cs-app-thumbs { margin-top: var(--sp-15); }
+
+/* The pull request row: one line of 40, or on a phone the app's two-line form. */
+.cs-app-pr { display: flex; align-items: center; gap: var(--sp-05) var(--sp-1); width: fit-content; max-width: 100%; box-sizing: border-box; padding: var(--sp-125) var(--sp-15); border: 1px solid var(--color-border-default); border-radius: 12px; font-size: var(--type-body-m-size); line-height: 18px; }
+.cs-app-pr-main { display: inline-flex; align-items: center; gap: var(--sp-1); min-width: 0; }
+.cs-app-pr-main .cs-app-pr-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.cs-app-pr-mark { fill: none; stroke: var(--color-icon-secondary); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cs-app-pr-name { font-weight: var(--type-weight-strong); white-space: nowrap; }
+.cs-app-pr-title { color: var(--color-text-secondary); }
+.cs-app-pr-status { display: inline-flex; align-items: center; gap: var(--sp-1); margin-left: var(--sp-05); font-size: var(--type-body-s-size); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cs-app-pr-checks { display: inline-flex; color: var(--color-notification-success-icon-primary); }
+.cs-app-pr-adds { color: var(--color-notification-success-text-default); }
+.cs-app-pr-dels { margin-left: calc(var(--sp-05) - var(--sp-1)); color: var(--color-notification-error-text-default); }
+
+/* What the feed folds away, the thinking pill and the screenshots. */
+.cs-app-fold { display: flex; align-items: center; gap: var(--sp-1); margin-left: 35px; color: var(--color-text-secondary); font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); }
+.cs-app-fold svg { color: var(--color-icon-secondary); }
+.cs-app-pill { display: flex; align-items: flex-start; gap: var(--sp-1); width: fit-content; margin-left: 35px; padding: 7px var(--sp-15); border: 1px solid var(--color-border-default); border-radius: 12px; background: var(--color-surface-600); color: var(--color-text-secondary); font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); }
+.cs-app-pill-dot { flex: none; width: 7px; height: 7px; margin-top: calc((var(--type-body-s-lh) - 7px) / 2); border-radius: 50%; background: var(--color-button-primary-default); animation: cs-app-pulse 1.4s var(--ease-out) infinite alternate; }
+@keyframes cs-app-pulse { to { opacity: 0.35; } }
+.cs-app-thumbs { display: flex; gap: var(--sp-1); }
+.cs-app-thumb { display: block; width: 192px; height: 120px; object-fit: cover; object-position: left top; border: 1px solid var(--color-border-default); border-radius: 12px; }
+
+/* A message arriving or leaving: the height and then the words on the way in, the reverse on the way out, on
+   the prototype's motion tokens stretched for a story, which reads slower than a control. */
+.cs-app-arrive { display: grid; grid-template-rows: 0fr; opacity: 0; transition: opacity var(--motion-enter) var(--ease-in), grid-template-rows calc(var(--motion-progress) * 1.6) var(--ease-out) var(--motion-enter); }
+.cs-app-arrive > div { min-height: 0; overflow: hidden; }
+.cs-app-arrive > div > * { transform: translateY(-6px); transition: transform calc(var(--motion-progress) * 1.6) var(--ease-out); }
+.cs-app-arrive[data-open] { grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows calc(var(--motion-progress) * 1.6) var(--ease-out), opacity calc(var(--motion-progress) * 1.2) var(--ease-out) calc(var(--motion-progress) * 1.6); }
+.cs-app-arrive[data-open] > div > * { transform: none; }
+/* A reset lands on the poster at once, so two messages never open together, each cut off while its height grows. */
+.cs-hero-app[data-jump] .cs-app-arrive, .cs-hero-app[data-jump] .cs-app-arrive > div > *, .cs-hero-app[data-jump] .cs-app-line { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .cs-app-arrive, .cs-app-arrive > div > * { transition: none; }
+  .cs-app-pill-dot { animation: none; }
+}
+
+/* The Inbox (InboxView.swift) under the Join sheet: rows 76 apart with a hairline, the unread dot and weight. */
+.cs-app-inbox-row { display: grid; grid-template-columns: 7px minmax(0, 1fr) auto auto; align-items: center; gap: var(--sp-2); padding: var(--sp-15) 0; border-bottom: 1px solid var(--color-border-default); }
+.cs-app-unread { width: 7px; height: 7px; border-radius: 50%; }
+.cs-app-inbox-row[data-unread] .cs-app-unread { background: var(--color-nugget-500); }
+.cs-app-inbox-words { min-width: 0; }
+.cs-app-inbox-title { font-size: var(--type-body-m-size); line-height: var(--type-body-m-lh); font-weight: 550; }
+.cs-app-inbox-row[data-unread] .cs-app-inbox-title { font-weight: var(--type-weight-strong); }
+.cs-app-inbox-preview { overflow: hidden; color: var(--color-text-secondary); font-size: var(--type-body-m-size); line-height: var(--type-body-m-lh); white-space: nowrap; text-overflow: ellipsis; }
+.cs-app-inbox-room, .cs-app-inbox-time { color: var(--color-text-secondary); font-size: var(--type-body-m-size); white-space: nowrap; }
+/* The window dims under the sheet as P9 draws it: near-black at about a fifth in light and twice that in dark. */
+.cs-app-scrim { position: absolute; inset: 0; background: var(--color-scrim-heavy); opacity: 0.5; }
+.dark .cs-app-scrim { opacity: 1; }
+
+/* The Join sheet (JoinRoomSheet.swift and SheetParts.swift): 24 inset, the title in the display face, a labelled list
+   of choices 48 tall with a 24 mark slot, then Decline at the start and Cancel and Join at the end. */
+.cs-app-sheet { position: absolute; top: var(--sp-5); left: 50%; box-sizing: border-box; width: min(444px, calc(100% - 2 * var(--sp-2))); padding: var(--sp-3); border: 1px solid var(--color-border-default); border-radius: 12px; background: var(--color-surface-600); box-shadow: var(--shadow-floating); transform: translateX(-50%); }
+.cs-app-sheet-title { font-family: var(--font-display); font-size: var(--type-h4-size); line-height: var(--type-h4-lh); font-weight: var(--type-h4-wght); letter-spacing: var(--type-h4-ls); }
+.cs-app-sheet-line { color: var(--color-text-secondary); font-size: var(--type-body-m-size); line-height: var(--type-body-m-lh); }
+.cs-app-sheet-label { margin-top: var(--sp-25); color: var(--color-text-tertiary); font-size: var(--type-caption-size); line-height: var(--type-caption-lh); letter-spacing: var(--type-caption-ls); }
+.cs-app-choices { margin-top: var(--sp-05); }
+.cs-app-choice { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto 16px; align-items: center; gap: var(--sp-15); min-height: 48px; padding: 0 var(--sp-1); font-size: var(--type-body-m-size); }
+.cs-app-choice + .cs-app-choice { border-top: 1px solid var(--color-border-default); }
+.cs-app-choice-mark { display: block; width: 24px; height: 24px; border-radius: 6px; }
+.cs-app-choice-repo { color: var(--color-text-secondary); }
+.cs-app-choice-tick { color: var(--color-icon-primary); }
+.cs-app-sheet-actions { display: flex; justify-content: space-between; gap: var(--sp-1); margin-top: var(--sp-3); }
+.cs-app-sheet-end { display: flex; gap: var(--sp-1); }
+
+/* The Team page (TeamView.swift): the switch and the 240 search beside the title, the labels in Body S and
+   Text/Tertiary 8 over the first person, each person's disc and name, and rows of 40 at the name's indent of 24 and
+   11. A row's columns are Repo 120, Pull request 88 and State 80 with 16 between them, and 40 after for the chevron's
+   slot; a number and a state's word each keep 6 and a 16 mark slot after them. People are 32 apart. Repo ends on the
+   right and its label ends over it, as the app draws it. Pull request and State start on the left with their labels
+   over their first letter, where the app ends both on the right and leaves each label off its values (REHEARSAL.md). */
+.cs-app-team-switch, .cs-app-search { display: inline-flex; align-items: center; gap: var(--sp-1); box-sizing: border-box; height: 36px; padding: 0 var(--sp-15); border: 1px solid var(--color-border-default); border-radius: var(--r-pill); font-size: var(--type-body-m-size); white-space: nowrap; }
+.cs-app-team-switch .cs-app-initial { width: 20px; height: 20px; font-size: 9px; }
+.cs-app-search { width: 240px; color: var(--color-text-tertiary); }
+.cs-app-search svg, .cs-app-team-switch svg { color: var(--color-icon-tertiary); }
+.cs-app-team-row { display: grid; grid-template-columns: minmax(0, 1fr) 120px 88px 80px; align-items: center; gap: var(--sp-2); min-height: 40px; padding: 0 40px 0 35px; font-size: var(--type-body-m-size); line-height: var(--type-body-m-lh); }
+.cs-app-team-row > :not(:first-child) { justify-self: start; font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); }
+.cs-app-team-row > .cs-app-team-repo { justify-self: end; }
+.cs-app-team-labels { min-height: 20px; margin-bottom: var(--sp-1); color: var(--color-text-tertiary); font-size: var(--type-body-s-size); line-height: var(--type-body-s-lh); }
+.cs-app-team-labels > * { white-space: nowrap; }
+.cs-app-team-person { display: flex; align-items: center; gap: 11px; min-height: 32px; font-weight: var(--type-weight-strong); }
+.cs-app-team-group + .cs-app-team-group { margin-top: var(--sp-4); }
+.cs-app-team-repo { color: var(--color-text-tertiary); }
+.cs-app-team-pr, .cs-app-team-state { display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-secondary); }
+.cs-app-team-state { color: var(--color-text-tertiary); }
+.cs-app-team-state[data-working] { color: var(--color-text-secondary); }
+.cs-app-team-mark { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; }
+.cs-app .cs-app-working { width: 12px; height: 12px; color: var(--color-icon-tertiary); }
+.cs-app .cs-app-working svg { width: 100%; height: 100%; }
+
+/* The phone: each shot crops closer at the same sizes (stageshow's compact design). */
+@media (max-width: 720px) {
+  .cs-hero-app .cs-app-head, .cs-room-app .cs-app-head, .cs-room-app .cs-app-fold { display: none; }
+  .cs-hero-app .cs-app-pane { display: flex; flex-direction: column; justify-content: flex-end; height: 100%; min-height: 0; overflow: hidden; -webkit-mask-image: linear-gradient(transparent, var(--color-surface-600) 48px); mask-image: linear-gradient(transparent, var(--color-surface-600) 48px); }
+  .cs-app-pr { flex-direction: column; align-items: flex-start; gap: var(--sp-05); }
+  .cs-app-pr-main { align-items: baseline; max-width: 100%; }
+  .cs-app-pr-main .cs-app-pr-mark { align-self: flex-start; margin-top: 1px; }
+  .cs-app-pr-main .cs-app-pr-title { flex: 1 1 auto; min-width: 0; white-space: normal; }
+  .cs-app-pr-status { margin-left: var(--sp-3); }
+  .cs-app-thumb { width: auto; min-width: 0; flex: 1; height: auto; aspect-ratio: 8 / 5; }
+  .cs-app-inbox-room { display: none; }
+  .cs-app-sheet { top: auto; bottom: var(--sp-1); width: calc(100% - var(--sp-2)); padding: var(--sp-25); }
+  .cs-app-sheet-actions .cs-app-sheet-end { margin-left: auto; }
+  .cs-app-head-end .cs-app-team-switch, .cs-app-head-end .cs-app-search, .cs-app-team-repo { display: none; }
+  .cs-app-team-row { grid-template-columns: minmax(0, 1fr) 88px 80px; gap: var(--sp-15); padding: 0; }
+}
