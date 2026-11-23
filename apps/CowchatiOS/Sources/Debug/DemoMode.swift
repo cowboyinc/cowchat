@@ -120,6 +120,11 @@ private final class DemoConnection: CowchatConnectionProtocol {
         before == nil ? Array((messages[roomID] ?? []).suffix(limit)) : []
     }
 
+    func history(roomID: String, limit: Int, beforeSeq: Int?, kinds: [String]) async throws -> [ChatMessage] {
+        let older = (messages[roomID] ?? []).filter { message in beforeSeq.map { message.seq < $0 } ?? true }
+        return Array(older.suffix(limit))
+    }
+
     func send(roomID: String, content: String, mentions: [String]) async throws -> ChatMessage {
         seq += 1
         let sent = Self.message("sent-\(seq)", room: roomID, seq: seq, from: agentID, name: name, kind: "person", text: content)

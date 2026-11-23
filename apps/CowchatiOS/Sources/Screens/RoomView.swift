@@ -25,6 +25,10 @@ struct RoomView: View {
     @State private var newName = ""
     @State private var invite: InviteToShare?
     @State private var errorMessage: String?
+
+    private var showsError: Binding<Bool> {
+        Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
+    }
     // Held, not observed: only the pill redraws when the scroll position changes. If the whole room redrew,
     // the lazy stack would lay out again, move the bottom marker, and loop.
     @State private var scroll = ScrollTracker()
@@ -42,7 +46,24 @@ struct RoomView: View {
     }
     private var needsSecret: Bool { (room?.isEncrypted ?? false) && !(room?.hasSecret ?? false) }
 
+    // The screen is built in three steps. As one chain of some twenty modifiers it took the compiler long enough
+    // to type-check that a slower build machine gave up on it.
     var body: some View {
+        withSheets
+            .task { await session.open(roomID: roomID) }
+            .task {
+                // Thinking signals expire on their own, so the feed re-reads the clock.
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(15))
+                    now = Date()
+                }
+            }
+            .onChange(of: session.pulses[roomID]) { now = Date() }
+            .onDisappear { session.close(roomID: roomID) }
+    }
+
+    /// The feed, the composer and the toolbar.
+    private var screen: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 20) {
@@ -194,15 +215,24 @@ struct RoomView: View {
                 .accessibilityIdentifier("room.more")
             }
         }
+    }
+
+    /// The screen with its confirmations and alerts.
+    private var withDialogs: some View {
+        let removeTitle: String = "Remove \(room?.name ?? "")?"
+        let leaveTitle: String = "Leave \(room?.name ?? "")?"
+        let secretErrorText: String = secretError ?? ""
+        let errorText: String = errorMessage ?? ""
+        return screen
         .confirmationDialog("Remove the secret from this phone?", isPresented: $confirmsRemoveSecret, titleVisibility: .visible) {
             Button("Remove secret", role: .destructive) {
                 do { try session.setSecret(nil, roomID: roomID) } catch { secretError = error.localizedDescription }
             }
         }
-        .alert(secretError ?? "", isPresented: showsSecretError) {
+        .alert(secretErrorText, isPresented: showsSecretError) {
             Button("OK", role: .cancel) {}
         }
-        .confirmationDialog("Remove \(room?.name ?? "")?", isPresented: $confirmsRemove, titleVisibility: .visible) {
+        .confirmationDialog(removeTitle, isPresented: $confirmsRemove, titleVisibility: .visible) {
             Button("Remove", role: .destructive) {
                 Task {
                     await store.remove(room: ref)
@@ -211,7 +241,7 @@ struct RoomView: View {
             }
             .accessibilityIdentifier("room.confirmRemove")
         }
-        .confirmationDialog("Leave \(room?.name ?? "")?", isPresented: $confirmsLeave, titleVisibility: .visible) {
+        .confirmationDialog(leaveTitle, isPresented: $confirmsLeave, titleVisibility: .visible) {
             Button("Leave", role: .destructive) {
                 Task {
                     await store.leave(ref)
@@ -220,11 +250,6 @@ struct RoomView: View {
             }
             .accessibilityIdentifier("room.confirmLeave")
         }
-        .sheet(isPresented: $isAddingPerson) {
-            if let account = store.account(for: session.connectionID) {
-                AddPersonSheet(account: account, roomID: roomID)
-            }
-        }
         .alert("Rename room", isPresented: $isRenaming) {
             TextField("Room name", text: $newName)
                 .textInputAutocapitalization(.never)
@@ -232,25 +257,22 @@ struct RoomView: View {
             Button("Rename") { rename() }
             Button("Cancel", role: .cancel) {}
         }
-        .alert(
-            errorMessage ?? "",
-            isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-        ) {
+        .alert(errorText, isPresented: showsError) {
             Button("OK", role: .cancel) {}
         }
-        .sheet(isPresented: $showSecretSheet) { RoomSecretSheet(roomID: roomID) }
-        .sheet(isPresented: $showsPeople) { RoomPeopleSheet(roomID: roomID) }
-        .sheet(item: $invite) { ShareSheet(text: $0.token).presentationDetents([.medium, .large]) }
-        .task { await session.open(roomID: roomID) }
-        .task {
-            // Thinking signals expire on their own, so the feed re-reads the clock.
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(15))
-                now = Date()
+    }
+
+    /// The screen with the sheets it opens.
+    private var withSheets: some View {
+        withDialogs
+            .sheet(isPresented: $isAddingPerson) {
+                if let account = store.account(for: session.connectionID) {
+                    AddPersonSheet(account: account, roomID: roomID)
+                }
             }
-        }
-        .onChange(of: session.pulses[roomID]) { now = Date() }
-        .onDisappear { session.close(roomID: roomID) }
+            .sheet(isPresented: $showSecretSheet) { RoomSecretSheet(roomID: roomID) }
+            .sheet(isPresented: $showsPeople) { RoomPeopleSheet(roomID: roomID) }
+            .sheet(item: $invite) { ShareSheet(text: $0.token).presentationDetents([.medium, .large]) }
     }
 
     private func shareInvite() {
