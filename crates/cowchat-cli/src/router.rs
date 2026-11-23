@@ -138,6 +138,8 @@ struct Decision<'a> {
     seq: i64,
     message_id: &'a str,
     sender: &'a str,
+    sender_id: &'a str,
+    mentioned: &'a [String],
     kind: &'a str,
     message: &'a str,
     routes: Vec<&'a str>,
@@ -163,6 +165,10 @@ struct RoutedMessage {
     seq: i64,
     message_id: String,
     sender: String,
+    #[serde(default)]
+    sender_id: String,
+    #[serde(default)]
+    mentioned: Vec<String>,
     missing: Vec<String>,
     #[serde(default)]
     reasons: Vec<Reason>,
@@ -399,6 +405,8 @@ async fn decide(rules: &Rules, judge: &Judge, wake: &Wake) -> String {
         seq: wake.seq,
         message_id: &wake.message_id,
         sender: &wake.sender,
+        sender_id: &wake.sender_id,
+        mentioned: &wake.mentioned,
         kind: &wake.kind,
         message: &wake.line,
         routes: ids(&wake.routes),
@@ -462,7 +470,7 @@ fn targets(routed: &RoutedMessage, attention_mentions: &[String]) -> Vec<String>
     let mut targets = routed.missing.clone();
     if routed.attention {
         for id in attention_mentions {
-            if !targets.contains(id) {
+            if *id != routed.sender_id && !routed.mentioned.contains(id) && !targets.contains(id) {
                 targets.push(id.clone());
             }
         }
@@ -849,6 +857,8 @@ mod tests {
             seq: 7,
             message_id: "original".to_owned(),
             sender: "coord".to_owned(),
+            sender_id: String::new(),
+            mentioned: Vec::new(),
             missing: vec!["a".to_owned()],
             reasons: vec![
                 Reason {
@@ -876,6 +886,8 @@ mod tests {
             seq: 7,
             message_id: String::new(),
             sender: "coord".to_owned(),
+            sender_id: String::new(),
+            mentioned: Vec::new(),
             missing: vec!["a".to_owned()],
             reasons: Vec::new(),
             attention: true,
@@ -884,5 +896,30 @@ mod tests {
             targets(&routed, &["a".to_owned(), "owner".to_owned()]),
             ["a", "owner"]
         );
+    }
+
+    async fn follow_up_targets(message: RoomMessage, attention_mentions: &[&str]) -> Vec<String> {
+        let wake = classify(&rules(), &message).unwrap();
+        let line = decide(&rules(), &Judge::Off, &wake).await;
+        let routed: RoutedMessage = serde_json::from_str(&line).unwrap();
+        let attention_mentions: Vec<String> =
+            attention_mentions.iter().map(|id| id.to_string()).collect();
+        targets(&routed, &attention_mentions)
+    }
+
+    #[tokio::test]
+    async fn attention_skips_who_the_question_already_mentions() {
+        let mut asked = message("coord", "question", "who can take this?");
+        asked.metadata["mentions"] = json!(["owner"]);
+        assert_eq!(
+            follow_up_targets(asked, &["owner", "backup"]).await,
+            ["backup"]
+        );
+    }
+
+    #[tokio::test]
+    async fn attention_never_wakes_the_sender_with_its_own_question() {
+        let asked = message("owner", "question", "who can take this?");
+        assert!(follow_up_targets(asked, &["owner-id"]).await.is_empty());
     }
 }
