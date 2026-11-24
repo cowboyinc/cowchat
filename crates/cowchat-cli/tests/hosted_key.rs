@@ -5,13 +5,10 @@ use std::os::unix::fs::PermissionsExt;
 #[tokio::test]
 async fn send_uses_url_bound_key_without_a_flag_or_local_key_file() {
     let dir = tempfile::tempdir().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
     let server = CowchatServer::new(ServerConfig {
         socket_path: dir.path().join("server.sock"),
         tcp_addr: None,
-        http_addr: Some(addr.to_string()),
+        http_addr: Some("127.0.0.1:0".into()),
         db_path: dir.path().join("server.db"),
         auth_key_path: dir.path().join("server-auth.key"),
         no_auth: false,
@@ -26,8 +23,8 @@ async fn send_uses_url_bound_key_without_a_flag_or_local_key_file() {
     })
     .unwrap();
     let key = server.api_key().to_owned();
+    let url = format!("ws://{}/ws", server.http_addr().unwrap());
     let task = tokio::spawn(async move { server.run().await.unwrap() });
-    let url = format!("ws://{addr}/ws");
     let owner = CowchatClient::connect_ws(&url, &key, "Owner", Some("owner"), vec![])
         .await
         .unwrap();
@@ -138,9 +135,6 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
 
     std::env::set_var("COWCHAT_SOCIAL_PUBLIC_ORIGIN", "https://chat.example");
     let dir = tempfile::tempdir().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
     let db_path = dir.path().join("server.db");
     let store = cowchat_server::store::Store::open(&db_path).unwrap();
     let verifier = "v".repeat(64);
@@ -168,7 +162,7 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
     let server = CowchatServer::new(ServerConfig {
         socket_path: dir.path().join("server.sock"),
         tcp_addr: None,
-        http_addr: Some(addr.to_string()),
+        http_addr: Some("127.0.0.1:0".into()),
         db_path: db_path.clone(),
         auth_key_path: dir.path().join("server-auth.key"),
         no_auth: false,
@@ -182,6 +176,7 @@ async fn saved_mint_key_starts_session_and_cli_uses_only_its_token() {
         max_rooms: None,
     })
     .unwrap();
+    let addr = server.http_addr().unwrap().to_owned();
     let task = tokio::spawn(async move { server.run().await.unwrap() });
     let url = format!("ws://{addr}/ws");
     let home = dir.path().join("home");

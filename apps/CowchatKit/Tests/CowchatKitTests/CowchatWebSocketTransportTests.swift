@@ -10,6 +10,8 @@ private final class ScriptedWebSocketTask: CowchatWebSocketTaskProtocol {
     private(set) var sentTexts: [String] = []
     private(set) var wasResumed = false
     private(set) var wasCancelled = false
+    var injectedSendError: Error?
+    var beforeSend: (() async throws -> Void)?
     var onSend: (([String: Any]) -> Void)?
 
     func resume() {
@@ -28,6 +30,8 @@ private final class ScriptedWebSocketTask: CowchatWebSocketTaskProtocol {
               let type = frame["type"] as? String else {
             throw CowchatConnectionError.invalidResponse
         }
+        try await beforeSend?()
+        if let injectedSendError { throw injectedSendError }
         sentTexts.append(text)
         sentFrames.append(frame)
         onSend?(frame)
@@ -237,6 +241,90 @@ final class CowchatWebSocketTransportTests: XCTestCase {
 
         XCTAssertTrue(task.wasCancelled)
         XCTAssertEqual(connection.profile, .local)
+    }
+}
+
+extension CowchatWebSocketTransportTests {
+    @MainActor
+    func testSendFailureClosesTransportAndNotifiesReconnect() async throws {
+        let socket = ScriptedWebSocketTask()
+        let profile = try ConnectionProfile.cowchatCloud(
+            urlString: "wss://cloud.example/ws", apiKey: "fixture"
+        )
+        let connection = CowchatConnection(profile: profile) { _ in socket }
+        var statuses: [ConnectionStatus] = []
+        connection.onStatusChange = { statuses.append($0) }
+        try await connection.connect()
+        _ = try await connection.register(name: "test", agentID: "test")
+        socket.injectedSendError = URLError(.cancelled)
+        do {
+            _ = try await connection.listRooms()
+            XCTFail("Expected transport failure")
+        } catch let error as CowchatConnectionError {
+            XCTAssertEqual(error.errorDescription, URLError(.cancelled).localizedDescription)
+        }
+        XCTAssertEqual(statuses.last, .failed(URLError(.cancelled).localizedDescription))
+        XCTAssertTrue(socket.wasCancelled)
+        connection.disconnect()
+    }
+
+    @MainActor
+    func testTimeoutClosesUnresponsiveTransportButCompletedRequestTimerDoesNot() async throws {
+        let socket = ScriptedWebSocketTask()
+        let profile = try ConnectionProfile.cowchatCloud(
+            urlString: "wss://cloud.example/ws", apiKey: "fixture"
+        )
+        let connection = CowchatConnection(
+            profile: profile, requestTimeoutNanoseconds: 50_000_000
+        ) { _ in socket }
+        var statuses: [ConnectionStatus] = []
+        connection.onStatusChange = { statuses.append($0) }
+        try await connection.connect()
+        _ = try await connection.register(name: "test", agentID: "test")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(socket.wasCancelled, "Completed registration timer must be harmless")
+        do {
+            _ = try await connection.listRooms()
+            XCTFail("Expected request timeout")
+        } catch let error as CowchatConnectionError {
+            XCTAssertEqual(error.errorDescription, CowchatConnectionError.timeout.errorDescription)
+        }
+        XCTAssertTrue(socket.wasCancelled)
+        XCTAssertEqual(statuses.last, .failed(CowchatConnectionError.timeout.localizedDescription))
+        connection.disconnect()
+    }
+}
+
+extension CowchatWebSocketTransportTests {
+    @MainActor
+    func testLateSendFailureCannotCloseReplacementConnection() async throws {
+        let oldSocket = ScriptedWebSocketTask()
+        let newSocket = ScriptedWebSocketTask()
+        let profile = try ConnectionProfile.cowchatCloud(
+            urlString: "wss://cloud.example/ws", apiKey: "fixture"
+        )
+        var sockets = [oldSocket, newSocket]
+        let connection = CowchatConnection(profile: profile) { _ in sockets.removeFirst() }
+        try await connection.connect()
+        _ = try await connection.register(name: "test", agentID: "test")
+        var sendContinuation: CheckedContinuation<Void, Error>?
+        let blocked = expectation(description: "old send blocked")
+        oldSocket.beforeSend = {
+            try await withCheckedThrowingContinuation { continuation in
+                sendContinuation = continuation
+                blocked.fulfill()
+            }
+        }
+        let oldRequest = Task { try await connection.listRooms() }
+        await fulfillment(of: [blocked], timeout: 1)
+        try await connection.connect()
+        _ = try await connection.register(name: "test", agentID: "test")
+        sendContinuation?.resume(throwing: URLError(.cancelled))
+        _ = try? await oldRequest.value
+        await Task.yield()
+        XCTAssertFalse(newSocket.wasCancelled)
+        _ = try await connection.register(name: "test", agentID: "test")
+        connection.disconnect()
     }
 }
 

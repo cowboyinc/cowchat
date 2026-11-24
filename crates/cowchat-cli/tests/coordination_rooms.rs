@@ -20,12 +20,9 @@ struct Net {
 
 async fn start_server() -> Net {
     let dir = tempfile::tempdir().unwrap();
-    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = tcp.local_addr().unwrap().to_string();
-    drop(tcp);
     let config = ServerConfig {
         socket_path: dir.path().join("server.sock"),
-        tcp_addr: Some(addr.clone()),
+        tcp_addr: Some("127.0.0.1:0".into()),
         http_addr: None,
         db_path: dir.path().join("server.db"),
         auth_key_path: dir.path().join("auth.key"),
@@ -40,6 +37,7 @@ async fn start_server() -> Net {
         max_rooms: None,
     };
     let server = CowchatServer::new(config).unwrap();
+    let addr = server.tcp_addr().unwrap().to_owned();
     let key = server.api_key().to_owned();
     tokio::spawn(async move { server.run().await.unwrap() });
     tokio::time::sleep(Duration::from_millis(100)).await;

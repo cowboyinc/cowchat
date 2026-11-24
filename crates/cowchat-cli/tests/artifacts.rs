@@ -5,13 +5,10 @@ use serde_json::{json, Value};
 #[tokio::test]
 async fn artifact_cli_publishes_merges_retries_and_revokes_through_authenticated_http() {
     let dir = tempfile::tempdir().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
     let server = CowchatServer::new(ServerConfig {
         socket_path: dir.path().join("server.sock"),
         tcp_addr: None,
-        http_addr: Some(addr.to_string()),
+        http_addr: Some("127.0.0.1:0".into()),
         db_path: dir.path().join("server.db"),
         auth_key_path: dir.path().join("auth.key"),
         no_auth: false,
@@ -27,8 +24,8 @@ async fn artifact_cli_publishes_merges_retries_and_revokes_through_authenticated
     .unwrap();
     let store = server.store().clone();
     let key = server.api_key().to_owned();
+    let url = format!("ws://{}/ws", server.http_addr().unwrap());
     let task = tokio::spawn(async move { server.run().await.unwrap() });
-    let url = format!("ws://{addr}/ws");
     let owner = CowchatClient::connect_ws(&url, &key, "Owner", Some("owner"), vec![])
         .await
         .unwrap();
