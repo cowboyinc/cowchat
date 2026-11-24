@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 import UserNotifications
+import CowchatKit
 
 struct SocialNotificationSnapshot {
     let session: SocialSession

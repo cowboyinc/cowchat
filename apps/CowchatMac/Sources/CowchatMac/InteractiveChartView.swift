@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import CowchatKit
 
 struct InteractiveChartSheet: View {
     let chart: ChartMessage

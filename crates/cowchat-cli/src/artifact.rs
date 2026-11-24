@@ -196,7 +196,7 @@ pub async fn run(cli: &Cli, args: &Args) -> Result<()> {
     let mut result = request(
         method,
         endpoint(&base, &segments)?,
-        &load_key(&cli.key, cli.url.as_deref()),
+        &load_key(&cli.key, cli.url.as_deref(), cli.tcp.as_deref()),
         body,
     )
     .await

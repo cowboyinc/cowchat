@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class RoomLocalPreferencesTests: XCTestCase {
     func testArchiveAndPendingSetupSelectionsRoundTripLocally() {

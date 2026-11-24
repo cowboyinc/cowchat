@@ -228,9 +228,15 @@ struct Cli {
     #[arg(long, global = true)]
     url: Option<String>,
 
-    /// API key for authenticated remote servers (local connections are keyless)
+    /// API key for authenticated remote servers (local connections are keyless).
+    /// Visible in shell history and `ps`; prefer --key-file.
     #[arg(long, global = true)]
     key: Option<String>,
+
+    /// Read the API key from this file. `invites redeem` stores a newly minted
+    /// key here instead of reading one.
+    #[arg(long, global = true, value_name = "PATH", conflicts_with = "key")]
+    key_file: Option<PathBuf>,
 
     /// Pre-shared key for end-to-end encrypted rooms. Overrides the
     /// COWCHAT_ROOM_KEY environment variable.
@@ -922,6 +928,11 @@ enum InviteAction {
         /// Default is single-use (self-destructs on first redemption).
         #[arg(long)]
         open: bool,
+        /// Write the token to this file (mode 0600) instead of printing it.
+        /// Printing it means retyping it onto a command line to use it, which
+        /// is the leak this avoids.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<String>,
     },
     /// List a room's invites (metadata only — tokens cannot be recovered).
     List {
@@ -942,9 +953,506 @@ enum InviteAction {
     /// key. Redeeming a room your key already accesses returns the room
     /// without consuming the invite.
     Redeem {
-        /// The raw invite token (cinv_…)
-        token: String,
+        /// The raw invite token (cinv_…). Prefer `--token-file` or
+        /// COWCHAT_INVITE_TOKEN: an argument lands in the shell history and in
+        /// process listings, where a still-unredeemed invite is a live secret.
+        token: Option<String>,
+        /// Read the token from a file, or from stdin when the path is `-`.
+        /// This is the delivery path remote setup uses: write the token to a
+        /// mode-0600 sidecar, then consume it without it ever reaching argv.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<String>,
+        /// Report where the token was resolved from, and its length,
+        /// without contacting a server. Never prints the token itself: this
+        /// command confirms delivery of a secret, and its output goes to
+        /// terminals, CI logs and agent transcripts.
+        #[arg(long)]
+        dry_run: bool,
     },
+}
+
+/// Resolve an invite token from a positional argument, a file (or stdin via
+/// `-`), or `COWCHAT_INVITE_TOKEN`.
+///
+/// The two *explicit* sources conflict: passing both an argument and
+/// `--token-file` is an error, because silently preferring one would let a
+/// stale sidecar shadow the token the caller just typed, and the failure would
+/// look like a server-side invite problem.
+///
+/// The environment is *ambient*, so an explicit source simply overrides it —
+/// the same precedence `resolve_agent_id` uses for `COWCHAT_AGENT_ID`. Treating
+/// an exported variable as a conflict would break `redeem <token>` for anyone
+/// who set one, which used to work.
+fn resolve_invite_token(
+    positional: Option<&str>,
+    token_file: Option<&str>,
+    env_token: Option<String>,
+) -> Result<String, String> {
+    if positional.is_some() && token_file.is_some() {
+        return Err(
+            "Pass the invite token exactly one way: as an argument or with --token-file, not both."
+                .to_string(),
+        );
+    }
+
+    let raw = if let Some(token) = positional {
+        token.to_string()
+    } else if let Some(path) = token_file {
+        if path == "-" {
+            use std::io::IsTerminal as _;
+            if std::io::stdin().is_terminal() {
+                return Err(
+                    "`--token-file -` reads the token from stdin, but stdin is a \
+                            terminal. Pipe the token in, or pass a file path."
+                        .to_string(),
+                );
+            }
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+                .map_err(|e| format!("Could not read the invite token from stdin: {e}"))?;
+            buffer
+        } else {
+            #[cfg(unix)]
+            if let Ok(meta) = std::fs::metadata(path) {
+                use std::os::unix::fs::PermissionsExt as _;
+                if meta.permissions().mode() & 0o077 != 0 {
+                    eprintln!(
+                        "warning: {path} is readable by other users; keep invite tokens in \
+                         a mode-0600 file."
+                    );
+                }
+            }
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("Could not read the invite token from {path}: {e}"))?
+        }
+    } else if let Some(token) = env_token.filter(|t| !t.trim().is_empty()) {
+        token
+    } else {
+        return Err(
+            "No invite token. Pass it as an argument, as --token-file <PATH> (or `-` for stdin), \
+             or in COWCHAT_INVITE_TOKEN."
+                .to_string(),
+        );
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("The invite token is empty.".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Create `dir` and any missing ancestors, hardening only the directories this
+/// call actually creates.
+///
+/// `create_dir_all` plus an unconditional chmod would change the mode of a
+/// *pre-existing* parent — `--key-file ~/k` would silently make `$HOME` 0700,
+/// with no record of the previous mode to restore.
+fn create_dirs_hardened(dir: &std::path::Path) -> std::io::Result<()> {
+    if dir.as_os_str().is_empty() || dir.is_dir() {
+        return Ok(()); // already there: leave whatever mode the user chose
+    }
+    if let Some(parent) = dir.parent() {
+        create_dirs_hardened(parent)?;
+    }
+    // Set the mode at creation: create_dir applies 0o777 & ~umask, so chmodding
+    // afterwards leaves a window at up to 0777 under a permissive umask.
+    let created = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(dir)
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir(dir)
+        }
+    };
+    match created {
+        Ok(()) => Ok(()),
+        // Lost a race with another process; it exists now, which is what we wanted.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Bytes written into a `SecretSlot` before the irreversible step, so a full
+/// disk or a file-size limit normally fails while nothing has been spent. Keys
+/// and invite tokens are far shorter. Non-zero, so compression and zero-block
+/// detection cannot skip the allocation; on copy-on-write filesystems the
+/// rewrite can still need new blocks, and that failure is reported as unsaved.
+const SECRET_SLOT_BYTES: usize = 4096;
+
+/// A private file prepared for a secret before the irreversible step that
+/// produces it — minting an invite the server keeps only a hash of, or
+/// redeeming one.
+///
+/// The destination itself is never touched until the secret is complete. An
+/// empty placeholder there would read as "no key" to a local `cowchat-server`,
+/// which then writes its own. The secret goes into a same-directory temporary,
+/// opened with `create_new` (so a pre-planted file or symlink is never reused
+/// or followed) and pre-filled with `SECRET_SLOT_BYTES`. It is published with a
+/// hard link, which fails rather than replace anything that appeared at the
+/// destination meanwhile, so another writer's key is never overwritten or
+/// removed; `cowchat-server`'s first-start key creation publishes the same
+/// way, so neither side replaces the other. When publishing fails, the
+/// temporary is kept and named, because it may hold the only copy of the
+/// secret.
+///
+/// It deliberately *differs* from `auth.rs` on parent directories: that copy
+/// chmods a pre-existing parent to 0700 unconditionally, so pointing it at an
+/// existing shared directory silently re-permissions it. See
+/// `create_dirs_hardened`. The server has the same bug; fixing it is follow-up
+/// work, not this change.
+struct SecretSlot {
+    dest: PathBuf,
+    temporary: PathBuf,
+    file: std::fs::File,
+}
+
+impl SecretSlot {
+    /// Prepare a slot for `dest`, failing with `AlreadyExists` if anything is
+    /// there. The check never opens `dest`: a FIFO would block and a symlink
+    /// would be followed.
+    fn prepare(dest: &std::path::Path) -> std::io::Result<Self> {
+        use std::io::Write as _;
+
+        if std::fs::symlink_metadata(dest).is_ok() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{} already exists", dest.display()),
+            ));
+        }
+        if let Some(parent) = dest.parent() {
+            create_dirs_hardened(parent)?;
+        }
+        let name = dest
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "secret".to_string());
+        let mut last_err = None;
+        for _ in 0..8 {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or_default();
+            let temporary =
+                dest.with_file_name(format!(".{name}.{}.{nonce:08x}.tmp", std::process::id()));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = match options.open(&temporary) {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let filled = file
+                .write_all(&[b'.'; SECRET_SLOT_BYTES])
+                .and_then(|()| file.sync_all());
+            if let Err(e) = filled {
+                drop(file);
+                let _ = std::fs::remove_file(&temporary);
+                return Err(e);
+            }
+            return Ok(Self {
+                dest: dest.to_path_buf(),
+                temporary,
+                file,
+            });
+        }
+        Err(last_err.unwrap_or_else(|| std::io::Error::other("could not create a temporary file")))
+    }
+
+    /// Give the slot up; it never held a secret.
+    fn discard(&self) {
+        let _ = std::fs::remove_file(&self.temporary);
+    }
+
+    /// Write `contents` and publish it at the destination. The error says
+    /// whether the secret was kept, and where.
+    fn install(mut self, contents: &str) -> Result<(), String> {
+        use std::io::{Seek as _, Write as _};
+
+        let written = (|| {
+            self.file.seek(std::io::SeekFrom::Start(0))?;
+            self.file.write_all(contents.as_bytes())?;
+            self.file.write_all(b"\n")?;
+            self.file.set_len(contents.len() as u64 + 1)?;
+            self.file.sync_all()
+        })();
+        if let Err(e) = written {
+            self.discard();
+            return Err(format!(
+                "it could not be written ({e}), so it was not saved anywhere"
+            ));
+        }
+        match std::fs::hard_link(&self.temporary, &self.dest) {
+            Ok(()) => {
+                self.discard();
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(format!(
+                "another file appeared at {} during the request and was left untouched. \
+                 The secret is saved at {} (mode 0600)",
+                self.dest.display(),
+                self.temporary.display()
+            )),
+            Err(e) => Err(format!(
+                "it could not be linked into place ({e}). The secret is saved at {} \
+                 (mode 0600) — move it into place",
+                self.temporary.display()
+            )),
+        }
+    }
+}
+
+/// Wrap a value in POSIX single quotes so a path with spaces or metacharacters
+/// pastes correctly. `'` is closed, escaped, and reopened — the only sequence a
+/// single-quoted string cannot contain.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+/// The part of a failed redemption's response body that is safe to print.
+///
+/// A response other than 201 can still carry a credential, or echo the invite
+/// back. Only a top-level JSON `error` string is considered, and only when it
+/// holds neither the submitted token, an invite token, nor a long run of
+/// key-like characters. Anything else, plain text included, is withheld.
+fn displayable_error(body: &str, token: &str) -> String {
+    const WITHHELD: &str = "[response body withheld]";
+    let Some(error) = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+    else {
+        return WITHHELD.to_string();
+    };
+    let token = token.trim();
+    let key_like = error
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .any(|word| word.len() >= 24);
+    if (!token.is_empty() && error.contains(token)) || error.contains("cinv_") || key_like {
+        return WITHHELD.to_string();
+    }
+    let mut shown: String = error.trim().chars().take(300).collect();
+    if error.trim().chars().count() > 300 {
+        shown.push('…');
+    }
+    shown
+}
+
+/// Redeem an invite for a machine that has no API key yet: POST the server's
+/// HTTP redeem endpoint in-process and store the minted key directly, so the
+/// key never crosses a pipe, a terminal, or an agent transcript — and so an
+/// HTTP error can never be mistaken for a credential (the status code is
+/// authoritative; no shape-guessing).
+///
+/// The key's file is prepared *before* the request. The server keeps only a
+/// hash of the invite and single-use invites burn on redemption, so a refusal
+/// is only free while the invite is still live; preparing first makes "a key
+/// is already there" or a full disk cost nothing instead of stranding an
+/// unrecoverable key.
+async fn keyless_redeem(
+    cli: &Cli,
+    token: &str,
+    key_file: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(url) = cli.url.as_deref() else {
+        return Err(
+            "Minting a key needs the server's HTTP surface; connect with --url \
+             wss://<host>/ws. (A local server writes its own key at startup — \
+             no minting needed.)"
+                .into(),
+        );
+    };
+    // The token goes out and a durable key comes back, so require TLS except to
+    // this machine, as hosted sessions do.
+    let endpoint = session::http_url(url, "/api/invites/redeem").map_err(|_| {
+        format!(
+            "Refusing to redeem against {url}: minting a key needs a wss://<host>/ws \
+             URL (ws:// only for localhost). Nothing was redeemed."
+        )
+    })?;
+    let base = invite_http_base(Some(url));
+    // Build the client before preparing the slot so a builder failure has
+    // nothing to clean up. The timeout bounds a hang against a stalled server. Redirects are refused: a
+    // followed 307/308 would re-send the token, possibly to another origin.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let server_path =
+        server_key_path(url).ok_or("Minting a key needs a ws:// or wss:// server URL.")?;
+    let dest = key_file.map_or_else(|| server_path.clone(), std::path::Path::to_path_buf);
+    if same_location(&dest, &default_key_path()) {
+        return Err(format!(
+            "{} is the local server's own key, so a key minted by {url} will not be \
+             stored there. Nothing was redeemed — the invite is still live. Leave out \
+             --key-file to keep the key for that server, or choose another path.",
+            dest.display()
+        )
+        .into());
+    }
+    let slot = SecretSlot::prepare(&dest).map_err(|e| {
+        // A refusal here happens before the POST, so "still live" is true —
+        // this is the one place that claim is safe.
+        if e.kind() == std::io::ErrorKind::AlreadyExists && key_file.is_some() {
+            format!(
+                "A file already exists at {} and will not be overwritten. Nothing \
+                 was redeemed — the invite is still live. If it holds a key for this \
+                 server, save that key at {} (mode 0600) and run the same redeem \
+                 without --key-file to grant it the room; otherwise move the file \
+                 aside or choose another --key-file path.",
+                dest.display(),
+                server_path.display()
+            )
+        } else if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!(
+                "A file already exists at {} and will not be overwritten. Nothing \
+                 was redeemed — the invite is still live. Move it aside, or store \
+                 the new key elsewhere with --key-file.",
+                dest.display()
+            )
+        } else {
+            format!(
+                "Cannot write a key to {} ({e}). Nothing was redeemed — the invite \
+                 is still live.",
+                dest.display()
+            )
+        }
+    })?;
+    // Every failure below discards the slot: it holds no secret. Whether the
+    // INVITE survived is a separate question the messages answer per case —
+    // the server burns a single-use invite before its late error paths, so
+    // only a refusal that provably preceded the request may claim it is still
+    // live.
+    let release = |message: String| {
+        slot.discard();
+        message
+    };
+
+    let response = client
+        .post(endpoint)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "token": token }).to_string())
+        .send()
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(e) => {
+            let verdict = if e.is_connect() {
+                "The server was never reached, so the invite is still live."
+            } else {
+                "The request may or may not have reached the server — check \
+                 `cowchat invites list` before minting another invite."
+            };
+            return Err(release(format!(
+                "Could not redeem against {base} ({e}). Nothing was stored. {verdict}"
+            ))
+            .into());
+        }
+    };
+    let status = response.status();
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(e) => {
+            // The transfer died mid-response: the server may or may not have
+            // burned the invite, so promise nothing about it.
+            return Err(release(format!(
+                "The redemption response could not be read ({e}). Nothing was \
+                 stored; check `cowchat invites list` before minting another invite."
+            ))
+            .into());
+        }
+    };
+    if status != reqwest::StatusCode::CREATED {
+        // The status being exactly 201 is what proves the body is a
+        // credential; by the same token a body on any OTHER status might carry
+        // one, or reflect the submitted invite. Only a top-level JSON `error`
+        // string that passes `displayable_error` is shown; everything else is
+        // withheld.
+        let shown = displayable_error(&body, token);
+        // The server commits the burn of a single-use invite BEFORE its late
+        // failure paths (get_room miss, create_api_key, add_room_grant), so a
+        // non-201 must not claim the invite survived.
+        let message = if status == reqwest::StatusCode::NOT_FOUND {
+            format!(
+                "The server refused the redemption (404 Not Found): {shown}\n\
+                 Nothing was stored. Unknown, revoked and used-up invites all \
+                 return this same 404 — and so does a redemption that raced a \
+                 room destroy, which does consume the invite."
+            )
+        } else {
+            format!(
+                "The server failed during the redemption ({status}): {shown}\n\
+                 Nothing was stored locally, but the server may have already \
+                 consumed the invite — check `cowchat invites list` before \
+                 minting another."
+            )
+        };
+        return Err(release(message).into());
+    }
+
+    // 201: the invite is now spent. The body carries the key, so from here no
+    // error may include it.
+    let key = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.get("api_key")
+                .and_then(|k| k.as_str())
+                .filter(|k| !k.is_empty())
+                .map(|k| (k.to_string(), v.clone()))
+        });
+    let (key, redeemed) = match key {
+        Some(pair) => pair,
+        None => {
+            slot.discard();
+            return Err("The server said 201 but the response carried no readable \
+                        `api_key`. The invite is spent and the key could not be \
+                        recovered from the response."
+                .into());
+        }
+    };
+    slot.install(&key).map_err(|e| {
+        // The inner error says whether, and where, the key was kept.
+        format!(
+            "Could not store the minted key at {}: {e}\nThe invite that minted \
+             it is already spent.",
+            dest.display()
+        )
+    })?;
+
+    // Deliberately does not print the key.
+    println!(
+        "Invite redeemed — a new API key was minted and stored at {} (mode 0600).",
+        dest.display()
+    );
+    if let (Some(name), Some(id)) = (
+        redeemed.get("room_name").and_then(|v| v.as_str()),
+        redeemed.get("room_id").and_then(|v| v.as_str()),
+    ) {
+        println!("  Room granted: {name} ({id})");
+    }
+    if hosted_credential(&default_data_dir().join("hosted-bot.json"), url).is_some() {
+        println!(
+            "  Note: the saved hosted credential for this server takes precedence, so \
+             cowchat keeps using it for {url}; pass --key-file {} to use this key.",
+            dest.display()
+        );
+    } else if key_file.is_some() {
+        println!(
+            "  Note: pass --key-file {} to use this key.",
+            dest.display()
+        );
+    }
+    Ok(())
 }
 
 /// Classify a `invites revoke` argument: `cinv_…` values are raw tokens,
@@ -990,8 +1498,145 @@ fn default_socket_path() -> &'static str {
     )
 }
 
+/// The local server's listener key.
 fn default_key_path() -> PathBuf {
     default_data_dir().join("auth.key")
+}
+
+/// Whether `auth.key` may authenticate this connection: the Unix socket, or a
+/// `--tcp` address or URL on this machine. A remote server never receives it;
+/// an explicit `--key` or `--key-file` still reaches any server.
+fn listener_key_serves(url: Option<&str>, tcp: Option<&str>) -> bool {
+    let host = match (url, tcp) {
+        (Some(url), _) => reqwest::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned)),
+        (None, Some(addr)) => addr.rsplit_once(':').map(|(host, _)| host.to_owned()),
+        (None, None) => return true,
+    };
+    host.is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    })
+}
+
+/// Where a key minted by one server's invite is kept:
+/// `~/.cowchat/servers/NAME/api.key`, NAME from the server's HTTP origin plus a
+/// digest of it, so two origins never share a file.
+fn server_key_path(url: &str) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let scheme = match parsed.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        _ => return None,
+    };
+    let host = parsed.host_str()?;
+    let origin = match parsed.port() {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    };
+    let readable: String = origin
+        .replacen("://", "_", 1)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let digest = hex::encode(Sha256::digest(origin.as_bytes()));
+    Some(
+        default_data_dir()
+            .join("servers")
+            .join(format!("{readable}-{}", &digest[..12]))
+            .join("api.key"),
+    )
+}
+
+/// Whether two paths name the same file, which need not exist yet.
+fn same_location(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let resolve = |path: &std::path::Path| match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => {
+            let parent = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            std::fs::canonicalize(parent)
+                .map(|parent| parent.join(name))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    };
+    resolve(a) == resolve(b)
+}
+
+/// A warning for a key file that is a symbolic link, belongs to another user,
+/// or is open to group or others. The key is still read, as for token files.
+fn key_file_warning(path: &std::path::Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        let mode = metadata.permissions().mode() & 0o777;
+        let problem = if metadata.file_type().is_symlink() {
+            "is a symbolic link".to_owned()
+        } else if metadata.uid() != me {
+            "belongs to another user".to_owned()
+        } else if mode & 0o077 != 0 {
+            format!("is open to other users (mode {mode:o})")
+        } else {
+            return None;
+        };
+        Some(format!(
+            "warning: the key file {} {problem}; keep keys in a regular mode-0600 file you own.",
+            path.display()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// `read_key_file`, warning on stderr when the file is unsafe to hold a key.
+fn read_key_file_checked(path: &std::path::Path) -> Option<String> {
+    let key = read_key_file(path)?;
+    if let Some(warning) = key_file_warning(path) {
+        eprintln!("{warning}");
+    }
+    Some(key)
+}
+
+fn read_key_file(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
+/// `--key-file PATH`: the key, read before any connection. A missing, empty or
+/// non-regular file is an error rather than a fall-back to another key.
+fn key_from_file(path: &std::path::Path) -> Result<String, String> {
+    let regular = std::fs::metadata(path)
+        .map_err(|e| format!("Cannot read the key file {} ({e}).", path.display()))?;
+    if !regular.is_file() {
+        return Err(format!(
+            "The key file {} is not a regular file.",
+            path.display()
+        ));
+    }
+    read_key_file_checked(path).ok_or_else(|| format!("The key file {} is empty.", path.display()))
 }
 
 #[derive(serde::Deserialize)]
@@ -1018,7 +1663,7 @@ fn hosted_key(path: &std::path::Path, url: &str) -> Option<String> {
     hosted_credential(path, url).map(|saved| saved.api_key)
 }
 
-fn load_key(key_arg: &Option<String>, url: Option<&str>) -> String {
+fn load_key(key_arg: &Option<String>, url: Option<&str>, tcp: Option<&str>) -> String {
     if let Some(key) = key_arg {
         return key.clone();
     }
@@ -1026,11 +1671,14 @@ fn load_key(key_arg: &Option<String>, url: Option<&str>) -> String {
         if let Some(key) = hosted_key(&default_data_dir().join("hosted-bot.json"), url) {
             return key;
         }
+        if let Some(key) = server_key_path(url).and_then(|path| read_key_file_checked(&path)) {
+            return key;
+        }
     }
-    let key_path = default_key_path();
-    std::fs::read_to_string(key_path)
-        .map(|key| key.trim().to_string())
-        .unwrap_or_default()
+    if !listener_key_serves(url, tcp) {
+        return String::new();
+    }
+    read_key_file_checked(&default_key_path()).unwrap_or_default()
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
@@ -1050,6 +1698,24 @@ fn url_from_env(cli: &mut Cli, socket_given: bool, env_url: Option<String>) {
             })
         });
     }
+}
+
+/// Whether `connect` would authenticate as someone: an explicit key, a bound
+/// hosted session, a saved hosted credential for this server (of any kind — a
+/// session-only one is still the identity to use, through `session start`), a
+/// key minted for this server, or a non-empty `auth.key` when the server is
+/// the local one.
+fn has_identity_for(cli: &Cli) -> bool {
+    cli.key.is_some()
+        || resolve_agent_id(cli).is_some_and(|id| id.starts_with("session:"))
+        || cli.url.as_deref().is_some_and(|url| {
+            hosted_credential(&default_data_dir().join("hosted-bot.json"), url).is_some()
+                || server_key_path(url)
+                    .and_then(|path| read_key_file(&path))
+                    .is_some()
+        })
+        || (listener_key_serves(cli.url.as_deref(), cli.tcp.as_deref())
+            && read_key_file(&default_key_path()).is_some())
 }
 
 fn resolve_agent_id(cli: &Cli) -> Option<String> {
@@ -1202,7 +1868,7 @@ async fn connect(cli: &Cli) -> Result<CowchatClient, Box<dyn std::error::Error>>
         .key
         .clone()
         .or_else(|| saved_session.as_ref().map(|s| s.session_token.clone()))
-        .unwrap_or_else(|| load_key(&None, cli.url.as_deref()));
+        .unwrap_or_else(|| load_key(&None, cli.url.as_deref(), cli.tcp.as_deref()));
     let name = saved_session
         .as_ref()
         .filter(|_| cli.name == "cli")
@@ -1398,7 +2064,10 @@ async fn upload_attachments(
             if client.room_info(&room_id).await?["room"]["encrypted"] == true {
                 return Err("attachments cannot be sent to an encrypted room".into());
             }
-            (room_id, load_key(&cli.key, cli.url.as_deref()))
+            (
+                room_id,
+                load_key(&cli.key, cli.url.as_deref(), cli.tcp.as_deref()),
+            )
         };
     let mut attached = Vec::with_capacity(paths.len());
     for path in paths {
@@ -2409,7 +3078,23 @@ async fn run_shell(
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    // Print failures with Display, not the Debug formatting `Termination` uses
+    // for a returned Err — Debug renders a multi-line message as one quoted
+    // line of literal `\n`, which garbles exactly the errors whose formatting
+    // matters most (the credential-recovery instructions).
+    if let Err(e) = run().await {
+        eprintln!("Error: {e}");
+        let mut source = e.source();
+        while let Some(cause) = source {
+            eprintln!("  caused by: {cause}");
+            source = cause.source();
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     // parsed by hand to tell an explicit --socket from its default
@@ -2418,6 +3103,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket_given =
         matches.value_source("socket") == Some(clap::parser::ValueSource::CommandLine);
     url_from_env(&mut cli, socket_given, env_non_empty("COWCHAT_URL"));
+    let redeeming = matches!(
+        &cli.command,
+        Commands::Invites {
+            action: InviteAction::Redeem { .. }
+        }
+    );
+    if matches.value_source("key") == Some(clap::parser::ValueSource::CommandLine) {
+        eprintln!(
+            "warning: --key puts the API key in shell history and `ps` output; pass \
+             --key-file PATH instead."
+        );
+    }
+    if let (Some(path), false) = (&cli.key_file, redeeming) {
+        cli.key = Some(key_from_file(path)?);
+    }
     require_stable_named_agent(&cli)?;
 
     match &cli.command {
@@ -3256,7 +3956,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| format!("{} has no usable file name", path.display()))?;
-            let key = load_key(&cli.key, cli.url.as_deref());
+            let key = load_key(&cli.key, cli.url.as_deref(), cli.tcp.as_deref());
 
             let client = connect(&cli).await?;
             let room_id = resolve_room_id(&client, room).await?;
@@ -3309,7 +4009,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Fetch { blob_id, out } => {
             let base = attachment_http_base(cli.url.as_deref())?;
-            let key = load_key(&cli.key, cli.url.as_deref());
+            let key = load_key(&cli.key, cli.url.as_deref(), cli.tcp.as_deref());
             let response = reqwest::Client::new()
                 .get(format!("{base}/api/blobs/{blob_id}"))
                 .header("x-cowchat-key", &key)
@@ -3543,12 +4243,108 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Invites { action } => {
+            // Resolve the token before touching the network. Resolving it after
+            // connect meant a missing token or a source conflict surfaced as a
+            // connection error, sending the operator to debug their VPN over a
+            // typo.
+            let mut resolved_token: Option<String> = None;
+            if let InviteAction::Redeem {
+                token,
+                token_file,
+                dry_run,
+            } = action
+            {
+                let resolved = resolve_invite_token(
+                    token.as_deref(),
+                    token_file.as_deref(),
+                    env_non_empty("COWCHAT_INVITE_TOKEN"),
+                )?;
+                if *dry_run {
+                    let source = if token.is_some() {
+                        "argument"
+                    } else if token_file.as_deref() == Some("-") {
+                        "stdin"
+                    } else if token_file.is_some() {
+                        "file"
+                    } else {
+                        "COWCHAT_INVITE_TOKEN"
+                    };
+                    println!(
+                        "Resolved invite token from {source} ({} bytes)",
+                        resolved.len()
+                    );
+                    println!("Dry run — no server was contacted. The token is not printed.");
+                    return Ok(());
+                }
+                // Mint a fresh key over HTTP when asked for one with
+                // --key-file, or when a remote server is named and this
+                // machine has no identity for it. Otherwise grant the room to
+                // the identity `connect` uses, as before.
+                if cli.key_file.is_some() || (cli.url.is_some() && !has_identity_for(&cli)) {
+                    return keyless_redeem(&cli, &resolved, cli.key_file.as_deref()).await;
+                }
+                resolved_token = Some(resolved);
+            }
+
             let client = connect(&cli).await?;
             match action {
-                InviteAction::Create { room, open } => {
+                InviteAction::Create {
+                    room,
+                    open,
+                    token_file,
+                } => {
                     let room_id = resolve_room_id(&client, room).await?;
-                    let invite = client.create_invite(&room_id, !*open).await?;
-                    println!("Invite token: {}", invite.token);
+
+                    // Prepare the token's file BEFORE minting. The server
+                    // stores only a hash, so a token that cannot be written is
+                    // gone — and an existing file may hold an unredeemed invite
+                    // whose only copy this would replace.
+                    let slot = match token_file {
+                        Some(dest) => {
+                            let dest = std::path::PathBuf::from(dest);
+                            let slot = SecretSlot::prepare(&dest).map_err(|e| {
+                                format!(
+                                    "Cannot write the invite token to {} ({e}). Nothing was \
+                                     minted. If a token is already there it may be unredeemed — \
+                                     the server keeps only its hash, so this refuses rather than \
+                                     replacing it.",
+                                    dest.display()
+                                )
+                            })?;
+                            Some((dest, slot))
+                        }
+                        None => None,
+                    };
+
+                    let invite = match client.create_invite(&room_id, !*open).await {
+                        Ok(invite) => invite,
+                        Err(e) => {
+                            if let Some((_, slot)) = &slot {
+                                slot.discard();
+                            }
+                            return Err(e.into());
+                        }
+                    };
+                    let written = match slot {
+                        Some((dest, slot)) => {
+                            if let Err(e) = slot.install(&invite.token) {
+                                return Err(format!(
+                                    "The invite was minted but could not be installed at {}: \
+                                     {e}. The server stores only its hash — if no saved copy \
+                                     is named, the token is lost: revoke it by id from \
+                                     `cowchat invites list` and mint another.",
+                                    dest.display()
+                                )
+                                .into());
+                            }
+                            println!("Invite token written to {} (mode 0600).", dest.display());
+                            Some(dest)
+                        }
+                        None => {
+                            println!("Invite token: {}", invite.token);
+                            None
+                        }
+                    };
                     println!("  Room: {} ({})", invite.room_name, invite.room_id);
                     println!(
                         "  Mode: {}",
@@ -3560,12 +4356,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     println!("  Shown once — the server stores only a hash.");
                     println!();
-                    println!("Redeem it for an API key + room access:");
+                    println!("Redeem it for an API key + room access.");
                     println!(
-                        "  curl -fsS -X POST {}/api/invites/redeem -H 'Content-Type: application/json' -d '{{\"token\":\"{}\"}}'",
-                        invite_http_base(cli.url.as_deref()),
-                        invite.token
+                        "On a machine with no key, redeeming mints and stores one (mode 0600,"
                     );
+                    println!(
+                        "never printed); with an existing key it grants the room to that key:"
+                    );
+                    println!();
+                    // Start from the file that was actually written. Printing a
+                    // fixed `tok` path told anyone using --token-file to mint a
+                    // *second* invite and leave the first one live.
+                    let token_path = match written {
+                        Some(dest) => shell_quote(&dest.to_string_lossy()),
+                        None => {
+                            // The token above is already minted and live. Anyone
+                            // switching to the file flow must retire it first, or
+                            // it stays redeemable in their scrollback.
+                            println!(
+                                "  # printed token above: save it to `tok` yourself, or retire it"
+                            );
+                            println!(
+                                "  # (`cowchat invites revoke <id from invites list>`) and re-mint:"
+                            );
+                            println!(
+                                "  cowchat invites create <ROOM> --token-file tok   # never printed"
+                            );
+                            "tok".to_string()
+                        }
+                    };
+                    println!(
+                        "  cowchat invites redeem --token-file {token_path} --url {}",
+                        cli.url.as_deref().unwrap_or("wss://<host>/ws")
+                    );
+                    println!("  rm -f {token_path}");
                 }
                 InviteAction::List { room } => {
                     let room_id = resolve_room_id(&client, room).await?;
@@ -3607,7 +4431,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     println!("Invite revoked. Keys already minted through it keep their access.");
                 }
-                InviteAction::Redeem { token } => {
+                InviteAction::Redeem { .. } => {
+                    let token = resolved_token
+                        .as_deref()
+                        .expect("the invite token is resolved before connecting");
                     let redeemed = client.redeem_invite(token).await?;
                     println!(
                         "Invite redeemed — your key now has access to {} ({}).",
@@ -4373,7 +5200,8 @@ fn print_event(frame: &cowchat_core::Frame, room_secret: Option<&[u8]>) {
 #[cfg(test)]
 mod room_key_tests {
     use super::{
-        invite_http_base, resolve_room_key, url_from_env, Cli, Commands, InviteAction, RoomAction,
+        invite_http_base, resolve_invite_token, resolve_room_key, shell_quote, url_from_env, Cli,
+        Commands, InviteAction, RoomAction,
     };
     use clap::Parser;
 
@@ -4424,7 +5252,7 @@ mod room_key_tests {
         let cli = Cli::try_parse_from(["cowchat", "invites", "create", "my-room"]).unwrap();
         match cli.command {
             Commands::Invites {
-                action: InviteAction::Create { room, open },
+                action: InviteAction::Create { room, open, .. },
             } => {
                 assert_eq!(room, "my-room");
                 assert!(!open);
@@ -4456,10 +5284,61 @@ mod room_key_tests {
         let cli = Cli::try_parse_from(["cowchat", "invites", "redeem", "cinv_abc"]).unwrap();
         match cli.command {
             Commands::Invites {
-                action: InviteAction::Redeem { token },
-            } => assert_eq!(token, "cinv_abc"),
+                action:
+                    InviteAction::Redeem {
+                        token,
+                        token_file,
+                        dry_run,
+                    },
+            } => {
+                assert_eq!(token.as_deref(), Some("cinv_abc"));
+                assert!(token_file.is_none());
+                assert!(!dry_run);
+            }
             _ => panic!("expected invites redeem"),
         }
+
+        // The token may also arrive by file or stdin, so it never has to sit in
+        // argv or shell history.
+        let cli = Cli::try_parse_from(["cowchat", "invites", "redeem", "--token-file", "/tmp/t"])
+            .unwrap();
+        match cli.command {
+            Commands::Invites {
+                action:
+                    InviteAction::Redeem {
+                        token, token_file, ..
+                    },
+            } => {
+                assert!(token.is_none());
+                assert_eq!(token_file.as_deref(), Some("/tmp/t"));
+            }
+            _ => panic!("expected invites redeem --token-file"),
+        }
+
+        assert_eq!(
+            resolve_invite_token(Some("cinv_arg"), None, None).unwrap(),
+            "cinv_arg"
+        );
+        assert_eq!(
+            resolve_invite_token(None, None, Some("  cinv_env\n".into())).unwrap(),
+            "cinv_env"
+        );
+        // The environment is ambient: an explicit source overrides it rather than
+        // conflicting, matching resolve_agent_id.
+        assert_eq!(
+            resolve_invite_token(Some("cinv_arg"), None, Some("cinv_env".into())).unwrap(),
+            "cinv_arg"
+        );
+        // Whitespace-only env is not a source at all.
+        assert!(resolve_invite_token(None, None, Some("   ".into())).is_err());
+        assert!(resolve_invite_token(None, None, None).is_err());
+        // The two explicit sources do conflict.
+        assert!(resolve_invite_token(Some("a"), Some("/tmp/x"), None).is_err());
+
+        assert_eq!(shell_quote("tok"), "'tok'");
+        assert_eq!(shell_quote("/a b/tok"), "'/a b/tok'");
+        // The one sequence a single-quoted string cannot contain.
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
 
         assert_eq!(
             invite_http_base(Some("wss://chat.example.com/ws")),
@@ -4804,5 +5683,36 @@ mod tag_filter_tests {
         assert!(error.contains("does not support tag filters"), "{error}");
         assert!(ensure_tag_filters_kept(&requested, &subscription(&["linear=COW-1"])).is_ok());
         assert!(ensure_tag_filters_kept(&[], &subscription(&[])).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod listener_key_scope_tests {
+    use super::listener_key_serves;
+
+    #[test]
+    fn the_listener_key_serves_only_the_local_server() {
+        assert!(listener_key_serves(None, None), "Unix socket");
+        for local in [
+            "ws://127.0.0.1:9229/ws",
+            "ws://localhost:9229/ws",
+            "ws://[::1]:9229/ws",
+        ] {
+            assert!(listener_key_serves(Some(local), None), "{local}");
+        }
+        for remote in [
+            "wss://chat.cowchat.cowboy.inc/ws",
+            "ws://10.0.0.5:9229/ws",
+            "wss://localhost.example.com/ws",
+            "not a url",
+        ] {
+            assert!(!listener_key_serves(Some(remote), None), "{remote}");
+        }
+        for local in ["127.0.0.1:9229", "localhost:9229", "[::1]:9229"] {
+            assert!(listener_key_serves(None, Some(local)), "--tcp {local}");
+        }
+        for remote in ["10.0.0.5:9229", "chat.cowchat.cowboy.inc:9229", "nonsense"] {
+            assert!(!listener_key_serves(None, Some(remote)), "--tcp {remote}");
+        }
     }
 }

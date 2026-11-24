@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 /// The sidebar's list model (navigation note, sections 3.3 to 3.11, with navigation round 2, section 3): the one flat
 /// order across the three connections, the filter and its placeholder, the search's groups, the cell's end slot, the

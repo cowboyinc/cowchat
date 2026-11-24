@@ -1,6 +1,7 @@
 import Combine
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class SocialNotificationTests: XCTestCase {
     private let me = SocialAccount(id: "me", handle: "chad", displayName: "Chad")
