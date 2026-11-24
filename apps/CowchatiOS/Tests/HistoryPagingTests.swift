@@ -67,6 +67,34 @@ final class HistoryPagingTests: XCTestCase {
         XCTAssertEqual(session.rooms.first?.isUnread, false)
     }
 
+    func testInterruptedSecondPageKeepsHistoryAndReadPositionRecoverable() async {
+        connection.serverMessages["r1"] = messages(1...1)
+        let session = await signedIn()
+        await session.open(roomID: "r1")
+        session.close(roomID: "r1")
+        connection.serverMessages["r1"] = messages(1...151)
+
+        var page = 0
+        connection.beforeHistory = { [connection] in
+            page += 1
+            if page == 2 {
+                connection?.historyErrors["r1"] = CowchatConnectionError.notConnected
+            }
+        }
+        await session.open(roomID: "r1")
+        let storage = SessionStorage(defaults: defaults, credentials: credentials, connectionID: "c1")
+        XCTAssertEqual(page, 2)
+        XCTAssertEqual(storage.readStates["r1"]?.lastRead, 1, "Read position while the middle is missing")
+
+        connection.historyErrors.removeAll()
+        connection.beforeHistory = nil
+        session.close(roomID: "r1")
+        await session.open(roomID: "r1")
+        XCTAssertEqual(seqs(session).count, 151, "Messages recovered after an interrupted request")
+        XCTAssertTrue(seqs(session).contains(2), "First message after the original timeline")
+        XCTAssertEqual(storage.readStates["r1"]?.lastRead, 151)
+    }
+
     func testAGapTooLongToFillLeavesTheNewestMessagesWithNoHole() async {
         connection.serverMessages["r1"] = messages(1...30)
         let session = await signedIn()
