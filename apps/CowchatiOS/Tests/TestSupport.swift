@@ -129,9 +129,12 @@ final class FakeConnection: CowchatConnectionProtocol {
         return joinableRooms
     }
 
+    var afterJoinForHistoryTest: ((String) -> Void)?
+
     func join(roomID: String) async throws {
         try requireConnected()
         joinedRooms.insert(roomID)
+        afterJoinForHistoryTest?(roomID)
         if let index = joinableRooms.firstIndex(where: { $0.id == roomID }) {
             serverRooms.append(joinableRooms.remove(at: index))
         }

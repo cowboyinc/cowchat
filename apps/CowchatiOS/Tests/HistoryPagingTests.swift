@@ -95,6 +95,58 @@ final class HistoryPagingTests: XCTestCase {
         XCTAssertEqual(storage.readStates["r1"]?.lastRead, 151)
     }
 
+    func testLiveMessageDuringRejoinLeavesTheOfflineHistoryReachable() async {
+        connection.serverMessages["r1"] = messages(1...1)
+        let session = await signedIn()
+        await session.open(roomID: "r1")
+        session.sceneEnteredBackground()
+        connection.serverMessages["r1"] = messages(1...150)
+        let latest = messages(151...151)[0]
+        var delivered = false
+        connection.afterJoinForHistoryTest = { [weak connection] room in
+            guard room == "r1", let connection else { return }
+            connection.afterJoinForHistoryTest = nil
+            delivered = true
+            connection.deliver(latest)
+        }
+
+        session.sceneBecameActive()
+        let connected = await eventually { session.phase == .connected }
+        XCTAssertTrue(connected)
+        XCTAssertTrue(delivered)
+        XCTAssertEqual(seqs(session).count, 151, "Messages recovered when a live event arrives during rejoin")
+        XCTAssertTrue(seqs(session).contains(2))
+    }
+
+    func testALiveMessageDuringAFailedCatchUpDoesNotMoveTheReadPositionPastTheGap() async {
+        connection.serverMessages["r1"] = messages(1...1)
+        let session = await signedIn()
+        await session.open(roomID: "r1")
+        session.close(roomID: "r1")
+        connection.serverMessages["r1"] = messages(1...151)
+        let live = messages(152...152)[0]
+
+        // The room is open again, a new message arrives while the first page is being fetched, then page two fails.
+        var page = 0
+        connection.beforeHistory = { [unowned self] in
+            page += 1
+            if page == 1 { connection.deliver(live) }
+            if page == 2 { connection.historyErrors["r1"] = CowchatConnectionError.notConnected }
+        }
+        await session.open(roomID: "r1")
+
+        let storage = SessionStorage(defaults: defaults, credentials: credentials, connectionID: "c1")
+        XCTAssertEqual(storage.readStates["r1"]?.lastRead, 1, "nothing past the gap counts as read")
+        XCTAssertEqual(session.rooms.first?.isUnread, true)
+
+        connection.historyErrors.removeAll()
+        connection.beforeHistory = nil
+        session.close(roomID: "r1")
+        await session.open(roomID: "r1")
+        XCTAssertEqual(seqs(session), Array(1...152))
+        XCTAssertEqual(storage.readStates["r1"]?.lastRead, 152)
+    }
+
     func testAGapTooLongToFillLeavesTheNewestMessagesWithNoHole() async {
         connection.serverMessages["r1"] = messages(1...30)
         let session = await signedIn()

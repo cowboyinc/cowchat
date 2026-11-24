@@ -540,11 +540,12 @@ final class ChatSession: ObservableObject {
             timelines[roomID]?.entries.removeAll { $0.seq < floor }
         }
         merge(staged, into: roomID)
-        staged.forEach(noteForReadState)
         if tip == nil { timelines[roomID]?.hasEarlier = firstPageWasFull }
         if !joined { timelines[roomID]?.hasEarlier = true }
         caughtUpThrough[roomID] = max(tip ?? 0, staged.last?.seq ?? 0, timelines[roomID]?.entries.last?.seq ?? 0)
         caughtUp.insert(roomID)
+        // Only now, with nothing missing, may the read position move.
+        staged.forEach(noteForReadState)
     }
 
     /// A catch-up that failed still learned that newer messages exist. The room shows as unread for them, though
@@ -622,7 +623,10 @@ final class ChatSession: ObservableObject {
         let isFolded = !MessageVisibility.showsByDefault(message) && !showAllRoomIDs.contains(roomID)
         let wasRead = !state.isUnread
         state.latest = max(state.latest, message.seq)
-        if openRoomIDs.contains(roomID) || message.agentID == myAgentID || (isFolded && wasRead) {
+        // While a loaded room still has a gap to fill, nothing past the gap counts as read, whoever sent it and
+        // whether or not the room is on screen. The catch-up that closes the gap moves the read position.
+        let hasGap = timelines[roomID] != nil && !caughtUp.contains(roomID)
+        if !hasGap, openRoomIDs.contains(roomID) || message.agentID == myAgentID || (isFolded && wasRead) {
             state.lastRead = max(state.lastRead, message.seq)
         }
         saveReadState(state, roomID: roomID)
