@@ -1207,6 +1207,7 @@ private struct ChatRoomView: View {
                                         onSaveAttachment: room.encrypted ? nil : { saveAttachment($0) },
                                         onOpenAttachment: room.encrypted ? nil : { openAttachment($0) }
                                     )
+                                    .equatable()
                                     ForEach(
                                         pulseAnchors.byMessageID[message.id] ?? [],
                                         id: \.agentID
@@ -1546,7 +1547,18 @@ private struct FeedBottomOffsetKey: PreferenceKey {
     }
 }
 
-private struct MessageFeedRow: View {
+/// Equatable so the feed can skip a row whose message has not changed: the room view redraws on every store change,
+/// and the attachment closures it passes are new each time. Whether each closure is set is all that differs between
+/// them, since the room they act on is the row's own. A skipped row also skips its agent-app lookup, so an app installed
+/// or removed shows on the row at its next change, such as the minute's timestamp tick.
+private struct MessageFeedRow: View, Equatable {
+    static func == (lhs: MessageFeedRow, rhs: MessageFeedRow) -> Bool {
+        lhs.message == rhs.message && lhs.isMine == rhs.isMine && lhs.now == rhs.now && lhs.quiet == rhs.quiet
+            && lhs.senderName == rhs.senderName
+            && (lhs.onSaveAttachment == nil) == (rhs.onSaveAttachment == nil)
+            && (lhs.onOpenAttachment == nil) == (rhs.onOpenAttachment == nil)
+    }
+
     let message: ChatMessage
     let isMine: Bool
     let now: Date
@@ -1809,31 +1821,101 @@ enum MessageRenderPlan: Equatable {
     }
 }
 
-struct ExpandableMessageText: View {
-    let content: String
-    var textColor: Color
-    @Environment(\.mentionMarks) private var mentionMarks
-    @State private var isExpanded = false
-    @State private var expandedPlan: MessageRenderPlan?
-    private let chart: ChartMessage?
-    private let collapsedPreview: MessagePreview.CollapsedPreview
-    private let collapsedPlan: MessageRenderPlan
-    private let makeRenderPlan: (String) -> MessageRenderPlan
+/// What a message's text view draws before it is opened: its chart, its collapsed preview and that preview's plan.
+/// Built once per distinct content, since the room view rebuilds every row on each redraw.
+final class MessageTextLayout {
+    static let cache = ParseCache<MessageTextLayout>(countLimit: 2_000, byteLimit: 32 << 20)
 
-    init(
-        content: String,
-        textColor: Color = SemanticColor.textSecondary,
-        makeRenderPlan: @escaping (String) -> MessageRenderPlan = MessageRenderPlan.make
-    ) {
-        self.content = content
-        self.textColor = textColor
-        self.makeRenderPlan = makeRenderPlan
+    let chart: ChartMessage?
+    let collapsedPreview: MessagePreview.CollapsedPreview
+    let collapsedPlan: MessageRenderPlan
+    let showsResponseControl: Bool
 
+    init(content: String, makeRenderPlan: (String) -> MessageRenderPlan) {
         let chart = ChartMessage(content: content)
         self.chart = chart
         let preview = MessagePreview.collapsedPreview(for: chart?.title ?? content)
         collapsedPreview = preview
         collapsedPlan = makeRenderPlan(preview.source)
+        showsResponseControl = MessagePreview.needsDisclosure(for: content)
+    }
+
+    static func cached(for content: String) -> MessageTextLayout {
+        cache.value(for: content) { MessageTextLayout(content: $0, makeRenderPlan: MessageRenderPlan.make) }
+    }
+}
+
+/// A message's full render plan, kept with the text it was built from. A message whose text has changed since, as an
+/// encrypted one does when its room key is forgotten, gets no plan, so its view never draws the old text again.
+struct MessageExpansion: Equatable {
+    let content: String
+    let plan: MessageRenderPlan
+    var isOpen: Bool
+
+    func plan(for current: String) -> MessageRenderPlan? { current == content ? plan : nil }
+
+    func openPlan(for current: String) -> MessageRenderPlan? { isOpen ? plan(for: current) : nil }
+
+    /// Opens or closes the message, reusing the plan while the text is unchanged.
+    static func toggled(
+        _ expansion: MessageExpansion?,
+        content: String,
+        makePlan: (String) -> MessageRenderPlan
+    ) -> MessageExpansion {
+        let plan = expansion?.plan(for: content) ?? makePlan(content)
+        return MessageExpansion(content: content, plan: plan, isOpen: expansion?.openPlan(for: content) == nil)
+    }
+
+    /// Drops an expansion, open or closed, whose text is no longer the message's, so the row holds no old plaintext.
+    static func retained(_ expansion: MessageExpansion?, for content: String) -> MessageExpansion? {
+        expansion?.content == content ? expansion : nil
+    }
+}
+
+/// The row's opened or closed render plan. The row owns one; tests pass their own to watch it.
+@MainActor
+final class MessageExpansionState: ObservableObject {
+    @Published private(set) var expansion: MessageExpansion?
+
+    func toggle(content: String, makePlan: (String) -> MessageRenderPlan) {
+        expansion = MessageExpansion.toggled(expansion, content: content, makePlan: makePlan)
+    }
+
+    func contentChanged(to content: String) {
+        expansion = MessageExpansion.retained(expansion, for: content)
+    }
+}
+
+struct ExpandableMessageText: View {
+    let content: String
+    var textColor: Color
+    @Environment(\.mentionMarks) private var mentionMarks
+    @StateObject private var expansionState: MessageExpansionState
+    private var expansion: MessageExpansion? { expansionState.expansion }
+
+    /// Open only while the message still has the text it was opened with.
+    private var isExpanded: Bool { expansion?.openPlan(for: content) != nil }
+    private let layout: MessageTextLayout
+    private let makeRenderPlan: (String) -> MessageRenderPlan
+
+    private var chart: ChartMessage? { layout.chart }
+    private var collapsedPreview: MessagePreview.CollapsedPreview { layout.collapsedPreview }
+    private var collapsedPlan: MessageRenderPlan { layout.collapsedPlan }
+
+    /// `makeRenderPlan` replaces the planner for tests; a message drawn with the default planner shares its layout
+    /// through `MessageTextLayout.cache`.
+    init(
+        content: String,
+        textColor: Color = SemanticColor.textSecondary,
+        makeRenderPlan: ((String) -> MessageRenderPlan)? = nil,
+        expansionState: MessageExpansionState? = nil
+    ) {
+        _expansionState = StateObject(wrappedValue: expansionState ?? MessageExpansionState())
+        self.content = content
+        self.textColor = textColor
+        self.makeRenderPlan = makeRenderPlan ?? MessageRenderPlan.make
+        layout = makeRenderPlan.map { MessageTextLayout(content: content, makeRenderPlan: $0) }
+            ?? MessageTextLayout.cached(for: content)
     }
 
     var body: some View {
@@ -1844,6 +1926,7 @@ struct ExpandableMessageText: View {
                     .gallopText(.bodyS, color: SemanticColor.textTertiary)
             } else { textBody }
         }
+        .onChange(of: content) { expansionState.contentChanged(to: $0) }
     }
 
     private var textBody: some View {
@@ -1874,7 +1957,7 @@ struct ExpandableMessageText: View {
                 }
             }
 
-            renderedContent(isExpanded ? (expandedPlan ?? collapsedPlan) : collapsedPlan)
+            renderedContent(expansion?.openPlan(for: content) ?? collapsedPlan)
 
             if !isExpanded, collapsedPreview.isTruncated {
                 Text("…")
@@ -1897,18 +1980,18 @@ struct ExpandableMessageText: View {
                 ForEach(segments) { segment in
                     switch segment.kind {
                     case .prose:
-                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
+                        Text(mentionMarks.marking(MessageContentParser.cachedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(.bodyL, color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
                     case .heading(let level):
-                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
+                        Text(mentionMarks.marking(MessageContentParser.cachedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(headingStyle(for: level), color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityAddTraits(.isHeader)
                     case .unorderedList, .orderedList:
-                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
+                        Text(mentionMarks.marking(MessageContentParser.cachedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(.bodyL, color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1923,7 +2006,7 @@ struct ExpandableMessageText: View {
                             RoundedRectangle(cornerRadius: 1)
                                 .fill(SemanticColor.borderDefault)
                                 .frame(width: 3)
-                            Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
+                            Text(mentionMarks.marking(MessageContentParser.cachedInline(segment.text)))
                                 .textSelection(.enabled)
                                 .gallopText(.bodyL, color: textColor)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1949,15 +2032,12 @@ struct ExpandableMessageText: View {
         }
     }
 
-    private var showsResponseControl: Bool {
-        MessagePreview.needsDisclosure(for: content)
-    }
+    private var showsResponseControl: Bool { layout.showsResponseControl }
 
     private func toggleExpansion() {
-        if !isExpanded, expandedPlan == nil {
-            expandedPlan = makeRenderPlan(content)
+        withAnimation(.easeInOut(duration: 0.16)) {
+            expansionState.toggle(content: content, makePlan: makeRenderPlan)
         }
-        withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
     }
 
     private func headingStyle(for level: Int) -> GallopTextStyle {
@@ -1965,7 +2045,7 @@ struct ExpandableMessageText: View {
     }
 
     private func accessibleText(_ source: String) -> String {
-        String(MessageContentParser.attributedInline(source).characters)
+        String(MessageContentParser.cachedInline(source).characters)
     }
 
     private func monospacedBlock(

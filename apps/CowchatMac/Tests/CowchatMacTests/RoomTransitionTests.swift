@@ -2154,6 +2154,22 @@ final class RoomTransitionTests: XCTestCase {
         XCTAssertEqual(store.draft, "note for B")
     }
 
+    /// The room list refreshes every 30 seconds; an unchanged list must not redraw every view that watches the store.
+    @MainActor
+    func testRefreshingAnUnchangedRoomListDoesNotRepublishRooms() async throws {
+        let connection = MockRoomConnection()
+        connection.listedRooms = [try decodeRoom(id: "A", name: "A"), try decodeRoom(id: "B", name: "B")]
+        let store = makeStore(connection: connection)
+        try await store.refreshRooms()
+
+        var roomPublishes = 0
+        let sink = store.$rooms.dropFirst().sink { _ in roomPublishes += 1 }
+        defer { sink.cancel() }
+        try await store.refreshRooms()
+
+        XCTAssertEqual(roomPublishes, 0)
+    }
+
     /// Typing must not invalidate every view that observes the store (the window, the sidebar, the message list):
     /// only the composer watches the draft.
     @MainActor
@@ -2738,6 +2754,99 @@ final class RoomTransitionTests: XCTestCase {
         } catch ChatStore.AttachmentError.encryptedRoom {} catch {
             XCTFail("Unexpected attachment error: \(error)")
         }
+    }
+
+    /// An encrypted room with its key saved and loaded, and one message whose plaintext the feed has drawn.
+    @MainActor
+    private func makeUnlockedEncryptedStore() async throws
+        -> (store: ChatStore, room: Room, message: ChatMessage, plaintext: String, defaults: UserDefaults, suite: String)
+    {
+        let room = try JSONDecoder().decode(Room.self, from: Data(#"{"room_id":"encrypted-render","name":"Private","encrypted":true}"#.utf8))
+        let plaintext = "private \(UUID())"
+        let wire = try RoomCrypto.encrypt(plaintext, secret: "room-secret", roomID: room.id)
+        let message = try decodeMessage(id: "m", roomID: room.id, content: wire, timestamp: "2026-09-21T00:00:00Z", sequence: 1)
+        let connection = MockRoomConnection()
+        connection.historiesByRoom[room.id] = [message]
+        let suite = "RoomCryptoTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        let credentials = RoomTransitionCredentialStore()
+        credentials.credential = "room-secret"
+        let store = ChatStore(connection: connection, defaults: defaults, roomCredentialStore: credentials)
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+        _ = ExpandableMessageText(content: store.displayMessage(message).content)
+        XCTAssertTrue(MessageTextLayout.cache.contains(plaintext))
+        return (store, room, message, plaintext, defaults, suite)
+    }
+
+    /// Signing out or turning global rooms off discards a store; the plaintext it decrypted must go with it.
+    @MainActor
+    func testRemovingAStoreDropsItsPlaintextFromTheRenderCaches() async throws {
+        let fixture = try await makeUnlockedEncryptedStore()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suite) }
+
+        fixture.store.shutdownForRemoval()
+
+        XCTAssertFalse(MessageTextLayout.cache.contains(fixture.plaintext))
+        XCTAssertNotEqual(fixture.store.displayMessage(fixture.message).content, fixture.plaintext,
+                          "a removed store must not decrypt again")
+    }
+
+    /// The store bounds the plaintext it holds by clearing its display cache; the render caches must not outlast that.
+    @MainActor
+    func testTheDisplayCachePurgeAlsoDropsRenderedPlaintext() async throws {
+        let fixture = try await makeUnlockedEncryptedStore()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suite) }
+
+        for index in 0..<1_001 {
+            let wire = try RoomCrypto.encrypt("filler \(index)", secret: "room-secret", roomID: fixture.room.id)
+            let filler = try decodeMessage(id: "f\(index)", roomID: fixture.room.id, content: wire,
+                                           timestamp: "2026-09-21T00:00:00Z", sequence: index + 2)
+            _ = fixture.store.displayMessage(filler)
+        }
+
+        XCTAssertFalse(MessageTextLayout.cache.contains(fixture.plaintext))
+    }
+
+    /// Opening an encrypted room again with the same saved key changes no plaintext, so the render caches stay warm.
+    @MainActor
+    func testReopeningARoomWithAnUnchangedKeyKeepsTheRenderCaches() async throws {
+        let fixture = try await makeUnlockedEncryptedStore()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suite) }
+
+        await fixture.store.select(room: fixture.room)
+
+        XCTAssertTrue(MessageTextLayout.cache.contains(fixture.plaintext))
+    }
+
+    /// The feed caches what it draws by text, and an unlocked room's text is plaintext, so forgetting a key must drop it.
+    @MainActor
+    func testForgettingARoomKeyDropsItsPlaintextFromTheRenderCaches() async throws {
+        let room = try JSONDecoder().decode(Room.self, from: Data(#"{"room_id":"encrypted-cache","name":"Private","encrypted":true}"#.utf8))
+        let plaintext = "private \(UUID())"
+        let wire = try RoomCrypto.encrypt(plaintext, secret: "room-secret", roomID: room.id)
+        let message = try decodeMessage(id: "m", roomID: room.id, content: wire, timestamp: "2026-09-21T00:00:00Z", sequence: 1)
+        let connection = MockRoomConnection()
+        connection.historiesByRoom[room.id] = [message]
+        let suite = "RoomCryptoTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ChatStore(connection: connection, defaults: defaults, roomCredentialStore: RoomTransitionCredentialStore())
+        store.rooms = [room]
+        store.connectionStatus = .connected
+        await store.select(room: room)
+        try store.saveRoomSecret("room-secret", for: room)
+
+        _ = ExpandableMessageText(content: store.displayMessage(message).content)
+        _ = MessageContentParser.cachedInline(plaintext)
+        XCTAssertTrue(MessageTextLayout.cache.contains(plaintext))
+        XCTAssertTrue(MessageContentParser.inlineCache.contains(plaintext))
+
+        try store.forgetRoomSecret(for: room)
+
+        XCTAssertFalse(MessageTextLayout.cache.contains(plaintext))
+        XCTAssertFalse(MessageContentParser.inlineCache.contains(plaintext))
     }
 
     private func decodeRoom(
