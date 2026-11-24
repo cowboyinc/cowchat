@@ -1,19 +1,6 @@
 import AppKit
 import Foundation
-
-struct SocialSession: Codable, Equatable {
-    let endpoint: URL
-    let deviceKey: String
-    let account: SocialAccount
-    let scopeId: String
-
-    init(endpoint: URL, deviceKey: String, account: SocialAccount, scopeId: String = UUID().uuidString.lowercased()) {
-        self.endpoint = endpoint
-        self.deviceKey = deviceKey
-        self.account = account
-        self.scopeId = scopeId
-    }
-}
+import CowchatKit
 
 @MainActor
 final class SocialStore: ObservableObject {

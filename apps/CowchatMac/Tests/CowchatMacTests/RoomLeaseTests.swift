@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class RoomLeaseTests: XCTestCase {
     @MainActor

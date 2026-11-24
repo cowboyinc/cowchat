@@ -10,29 +10,24 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
+        .package(path: "../CowchatKit"),
     ],
     targets: [
         .executableTarget(
             name: "CowchatMac",
-            dependencies: [.product(name: "Sparkle", package: "Sparkle")],
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "CowchatKit", package: "CowchatKit"),
+            ],
             resources: [
                 .process("Resources"),
-                // Directory-preserving copies — GallopIcon/SeasonFonts look up
-                // "Icons/svg/<name>.svg" and "Fonts/<name>.ttf" by subpath.
-                // NOTE: SwiftPM forbids overlapping resource declarations; if
-                // .process("Resources") conflicts with nested .copy dirs, move the
-                // font/icon dirs OUT of Resources/ to Sources/CowchatMac/Bundled/
-                // and declare .copy("Bundled/Fonts"), .copy("Bundled/Icons") instead
-                // (lookup subpaths stay "Fonts/…" and "Icons/…").
-                .copy("Bundled/Fonts"),
-                .copy("Bundled/Icons"),
                 .copy("Bundled/Charts"),
             ],
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@loader_path/../Frameworks"]),
             ]
         ),
-        .testTarget(name: "CowchatMacTests", dependencies: ["CowchatMac"]),
+        .testTarget(name: "CowchatMacTests", dependencies: ["CowchatMac", .product(name: "CowchatKit", package: "CowchatKit")]),
     ],
     swiftLanguageVersions: [.v5]
 )

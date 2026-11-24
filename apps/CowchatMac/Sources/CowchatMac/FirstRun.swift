@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import CowchatKit
 
 /// Where first run stands. The workspace keeps it, so the wizard picks up where it was, and the wait on its last step
 /// runs whether or not the wizard is drawn. The steps run in the app's order: sign in, the name (which sets up the

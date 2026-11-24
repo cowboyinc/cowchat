@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 /// The archive rule's decisions for an ended session's room (navigation note, section 4.4). The simulated server's
 /// tests in `Proto/ProtoSessionRoomsTests` run it through the workspace.

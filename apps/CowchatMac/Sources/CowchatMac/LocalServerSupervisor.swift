@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import CowchatKit
 
 enum LocalServerSupervisorError: LocalizedError {
     case missingBundledServer(URL)

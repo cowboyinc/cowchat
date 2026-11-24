@@ -1,4 +1,5 @@
 import Foundation
+import CowchatKit
 
 private struct MessageSearchContext: Equatable {
     let query: String

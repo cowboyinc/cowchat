@@ -1,0 +1,42 @@
+import Foundation
+
+/// Per-room last-seen state, modeled on the cowboy app's ConversationReadState:
+/// epoch-milliseconds map, seeded all-read on first run, marked read on selection.
+public struct RoomReadState: Codable, Equatable {
+    public private(set) var hasSeeded = false
+    public private(set) var entries: [String: Double] = [:]
+
+    public init() {}
+
+    public static func milliseconds(from date: Date) -> Double {
+        (date.timeIntervalSince1970 * 1000).rounded()
+    }
+
+    public mutating func seed(rooms: [Room]) {
+        guard !hasSeeded else { return }
+        for room in rooms {
+            if let activity = room.activityDate {
+                entries[room.id] = Self.milliseconds(from: activity)
+            } else {
+                entries[room.id] = 0
+            }
+        }
+        hasSeeded = true
+    }
+
+    public mutating func markRead(roomID: String, activityDate: Date?) {
+        let stamp = activityDate.map(Self.milliseconds(from:)) ?? 0
+        if stamp >= (entries[roomID] ?? -1) { entries[roomID] = stamp }
+    }
+
+    public func isUnread(_ room: Room, selectedRoomID: String?) -> Bool {
+        guard hasSeeded, room.id != selectedRoomID,
+              let activity = room.activityDate else { return false }
+        guard let seen = entries[room.id] else { return true }
+        return Self.milliseconds(from: activity) > seen
+    }
+
+    public mutating func reconcile(validRoomIDs: Set<String>) {
+        entries = entries.filter { validRoomIDs.contains($0.key) }
+    }
+}
