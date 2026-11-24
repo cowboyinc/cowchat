@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 /// Which messages a room shows, how it folds the rest, and the finished work a message carries in its metadata.
 final class MessagesForPeopleTests: XCTestCase {

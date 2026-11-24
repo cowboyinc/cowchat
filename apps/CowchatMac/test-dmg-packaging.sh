@@ -201,7 +201,7 @@ APP_HOME="$APP_TEST/home"
 APP_CARGO_TARGET="$APP_TEST/cargo-target"
 APP_BUILD_EVENTS="$APP_TEST/build-events.log"
 TEST_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/AppBundle/Info.plist")
-mkdir -p "$APP_SHIMS" "$APP_BIN/CowchatMac_CowchatMac.bundle" \
+mkdir -p "$APP_SHIMS" "$APP_BIN/CowchatMac_CowchatMac.bundle" "$APP_BIN/CowchatKit_CowchatKit.bundle" \
 	"$APP_HOME/Applications/Cowchat.app/Contents" \
 	"$APP_CARGO_TARGET/aarch64-apple-darwin/release" \
 	"$APP_CARGO_TARGET/x86_64-apple-darwin/release"

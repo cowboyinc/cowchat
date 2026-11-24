@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 /// Gives custom-drawn SwiftUI controls a native macOS accessibility element.
 /// SwiftUI's plain buttons in this app do not currently publish their labels

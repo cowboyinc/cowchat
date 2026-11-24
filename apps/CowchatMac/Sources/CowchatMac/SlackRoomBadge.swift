@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// Compact Slack hash mark, legible over every generated room avatar.
 struct SlackRoomBadge: View {

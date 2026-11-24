@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CowchatKit
 
 /// The Inbox's unread count on the Dock's icon, with nothing at zero or while signed out. Cowchat puts nothing in the
 /// menu bar (Patrick, 2 November): this badge and a Mac notification for each new item cover what its panel showed.

@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// The Inbox page: the header with Mark all read, then one list of rows capped at the message column's width, open
 /// invitations first and then everything else, newest first. Before the first poll answers it draws only its header.

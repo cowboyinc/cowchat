@@ -1,5 +1,6 @@
 import CoreGraphics
 import SwiftUI
+import CowchatKit
 
 /// Draws a procedural room icon. `.initials` is not handled here — that style
 /// keeps the plain lettered avatar in `RoomAvatar`.

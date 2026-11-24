@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 @MainActor
 final class CowchatAppDelegate: NSObject, NSApplicationDelegate {

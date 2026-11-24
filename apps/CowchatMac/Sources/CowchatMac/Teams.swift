@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 /// A team the account belongs to, as `GET /social/v1/teams` lists it. The server has no teams yet: Chad's plan
 /// (task 12) asks him what makes one, and proposes the account's company rooms. The prototype's simulated server
