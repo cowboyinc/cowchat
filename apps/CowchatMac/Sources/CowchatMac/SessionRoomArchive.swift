@@ -1,4 +1,5 @@
 import Foundation
+import CowchatKit
 
 /// The archive rule for ended sessions (Patrick, 2 November; navigation note, section 4.4). When a session ends, its
 /// room moves to Archived, unless someone other than the person is in it or it has unread messages. A room with unread

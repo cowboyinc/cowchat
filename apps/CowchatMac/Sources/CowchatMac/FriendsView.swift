@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 /// What the Friends page makes of the account's friends and pending requests: Requests (sent to the person), Sent (sent
 /// by them, which the server can't withdraw) and Friends, in that order, each drawn only when it holds a row.

@@ -1056,11 +1056,20 @@ async fn export_and_history_name_the_purged_range() {
         .unwrap();
     assert_eq!(deleted, 2);
 
+    // A key file, because `--key` adds a warning to stderr.
+    let key_file = tmp.path().join("api.key");
+    std::fs::write(&key_file, &key).unwrap();
+    std::fs::set_permissions(
+        &key_file,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
     let expected =
         "note: messages 1..2 were purged by the server's retention window; room tip is 3\n";
     for command in ["export", "history"] {
         let out = Command::new(env!("CARGO_BIN_EXE_cowchat"))
-            .args(["--tcp", &addr, "--key", &key, command, "lobby"])
+            .args(["--tcp", &addr, "--key-file", key_file.to_str().unwrap()])
+            .args([command, "lobby"])
             .output()
             .await
             .unwrap();

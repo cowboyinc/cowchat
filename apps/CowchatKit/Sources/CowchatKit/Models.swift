@@ -1,0 +1,404 @@
+import Foundation
+
+public enum CowchatWireProtocol {
+    public static let currentVersion = 2
+}
+
+public struct CowchatRegistration: Equatable {
+    public let agentID: String
+    public let restoredRoomIDs: Set<String>
+
+    public init(agentID: String, restoredRoomIDs: Set<String> = []) {
+        self.agentID = agentID
+        self.restoredRoomIDs = restoredRoomIDs
+    }
+}
+
+public struct Room: Codable, Identifiable, Hashable {
+    public let roomID: String
+    public let name: String
+    public let description: String?
+    public let parentID: String?
+    public let createdAt: String
+    public let createdBy: String?
+    public let visibility: String
+    public let lastActivity: String?
+    public let memberCount: Int?
+    public let encrypted: Bool
+
+    public var id: String { roomID }
+
+    public enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case name, description
+        case parentID = "parent_id"
+        case createdAt = "created_at"
+        case createdBy = "created_by"
+        case visibility
+        case lastActivity = "last_activity"
+        case memberCount = "member_count"
+        case encrypted
+    }
+
+    public init(
+        roomID: String,
+        name: String,
+        description: String?,
+        parentID: String?,
+        createdAt: String,
+        createdBy: String?,
+        visibility: String,
+        lastActivity: String?,
+        memberCount: Int?,
+        encrypted: Bool
+    ) {
+        self.roomID = roomID
+        self.name = name
+        self.description = description
+        self.parentID = parentID
+        self.createdAt = createdAt
+        self.createdBy = createdBy
+        self.visibility = visibility
+        self.lastActivity = lastActivity
+        self.memberCount = memberCount
+        self.encrypted = encrypted
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        roomID = try values.decode(String.self, forKey: .roomID)
+        name = try values.decode(String.self, forKey: .name)
+        description = try values.decodeIfPresent(String.self, forKey: .description)
+        parentID = try values.decodeIfPresent(String.self, forKey: .parentID)
+        createdAt = try values.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
+        createdBy = try values.decodeIfPresent(String.self, forKey: .createdBy)
+        visibility = try values.decodeIfPresent(String.self, forKey: .visibility) ?? "private"
+        lastActivity = try values.decodeIfPresent(String.self, forKey: .lastActivity)
+        memberCount = try values.decodeIfPresent(Int.self, forKey: .memberCount)
+        encrypted = try values.decodeIfPresent(Bool.self, forKey: .encrypted) ?? false
+    }
+
+    public func updating(lastActivity: String) -> Room {
+        Room(
+            roomID: roomID,
+            name: name,
+            description: description,
+            parentID: parentID,
+            createdAt: createdAt,
+            createdBy: createdBy,
+            visibility: visibility,
+            lastActivity: lastActivity,
+            memberCount: memberCount,
+            encrypted: encrypted
+        )
+    }
+
+    public func updating(memberCount: Int) -> Room {
+        Room(
+            roomID: roomID,
+            name: name,
+            description: description,
+            parentID: parentID,
+            createdAt: createdAt,
+            createdBy: createdBy,
+            visibility: visibility,
+            lastActivity: lastActivity,
+            memberCount: memberCount,
+            encrypted: encrypted
+        )
+    }
+}
+
+/// One agent's most recent "thinking out loud" signal in a room — text from
+/// the dedicated `thinking` event, or presence status detail/progress.
+public struct AgentThinkingPulse: Equatable {
+    public let agentID: String
+    public let agentName: String
+    public let text: String?
+    public let progress: Int?
+    public let at: Date
+
+    public init(agentID: String, agentName: String, text: String?, progress: Int?, at: Date) {
+        self.agentID = agentID
+        self.agentName = agentName
+        self.text = text
+        self.progress = progress
+        self.at = at
+    }
+}
+
+/// Invite metadata from `list_invites`. The redeemable token is hash-at-rest
+/// server-side, so listings carry only this opaque handle — fresh tokens are
+/// shown once at mint time and never again.
+public struct RoomInvite: Codable, Identifiable, Equatable {
+    public let inviteID: String
+    public let roomID: String
+    public let singleUse: Bool
+    public let redeemedCount: Int
+    public let revoked: Bool
+    public let createdAt: String
+    public let mine: Bool
+
+    public var id: String { inviteID }
+
+    public enum CodingKeys: String, CodingKey {
+        case inviteID = "invite_id"
+        case roomID = "room_id"
+        case singleUse = "single_use"
+        case redeemedCount = "redeemed_count"
+        case revoked
+        case createdAt = "created_at"
+        case mine
+    }
+}
+
+public struct MessageMetadata: Codable, Equatable {
+    public let displayExternal: Bool?
+    public var shouldDisplayExternal: Bool { displayExternal ?? true }
+    public let type: String?
+    public let blobID: String?
+    public let name: String?
+    public let sha256: String?
+    public let size: Int?
+    /// Who sent the message, as the server records it from the connection. Nil on messages from before the server
+    /// recorded it and on a kind this app does not know.
+    public let senderKind: MessageSenderKind?
+    /// The pull request the message carries as finished work.
+    public let pullRequest: MessagePullRequest?
+    /// Files the message carries under its text, such as screenshots. Each is a blob, as a file message's is.
+    public let attachments: [MessageAttachment]
+    /// Who the message mentions, as the server records it in `metadata.mentions`: a session's agent ID or a person's
+    /// account ID (Chad's plan, task 3).
+    public let mentions: [String]
+    /// Labels on the message, in `metadata.tags`: what its author set and what the server found in its text.
+    public let tags: [MessageTag]
+
+    public enum CodingKeys: String, CodingKey {
+        case type, name, sha256, size, attachments, mentions, tags
+        case displayExternal = "display_external"
+        case blobID = "blob_id"
+        case senderKind = "sender_kind"
+        case pullRequest = "pull_request"
+    }
+
+    public init(
+        displayExternal: Bool? = nil,
+        type: String? = nil,
+        blobID: String? = nil,
+        name: String? = nil,
+        sha256: String? = nil,
+        size: Int? = nil,
+        senderKind: MessageSenderKind? = nil,
+        pullRequest: MessagePullRequest? = nil,
+        attachments: [MessageAttachment] = [],
+        mentions: [String] = [],
+        tags: [MessageTag] = []
+    ) {
+        self.displayExternal = displayExternal
+        self.type = type
+        self.blobID = blobID
+        self.name = name
+        self.sha256 = sha256
+        self.size = size
+        self.senderKind = senderKind
+        self.pullRequest = pullRequest
+        self.attachments = attachments
+        self.mentions = mentions
+        self.tags = tags
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        displayExternal = try values.decodeIfPresent(Bool.self, forKey: .displayExternal)
+        type = try values.decodeIfPresent(String.self, forKey: .type)
+        blobID = try values.decodeIfPresent(String.self, forKey: .blobID)
+        name = try values.decodeIfPresent(String.self, forKey: .name)
+        sha256 = try values.decodeIfPresent(String.self, forKey: .sha256)
+        size = try values.decodeIfPresent(Int.self, forKey: .size)
+        // Newer than most clients, so a malformed one is dropped on its own and the fields above stay.
+        senderKind = try? values.decodeIfPresent(MessageSenderKind.self, forKey: .senderKind)
+        pullRequest = try? values.decodeIfPresent(MessagePullRequest.self, forKey: .pullRequest)
+        attachments = (try? values.decodeIfPresent([MessageAttachment.Lenient].self, forKey: .attachments))?
+            .compactMap(\.attachment) ?? []
+        mentions = (try? values.decodeIfPresent([String].self, forKey: .mentions)) ?? []
+        tags = (try? values.decodeIfPresent([MessageTag.Lenient].self, forKey: .tags))?.compactMap(\.tag) ?? []
+    }
+}
+
+/// A blob attachment referenced by a message (`metadata.type == "file"`).
+public struct FileAttachment: Equatable {
+    public let blobID: String
+    public let name: String
+    public let size: Int?
+}
+
+public struct ChatMessage: Codable, Identifiable, Equatable {
+    public let messageID: String
+    public let roomID: String
+    public let agentID: String
+    public let agentName: String
+    public var content: String
+    public let replyToMessage: String?
+    public let metadata: MessageMetadata
+    public let timestamp: String
+    public let seq: Int
+
+    public var id: String { messageID }
+
+    public enum CodingKeys: String, CodingKey {
+        case messageID = "message_id"
+        case roomID = "room_id"
+        case agentID = "agent_id"
+        case agentName = "agent_name"
+        case content
+        case replyToMessage = "reply_to_message"
+        case metadata
+        case timestamp, seq
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        messageID = try values.decode(String.self, forKey: .messageID)
+        roomID = try values.decode(String.self, forKey: .roomID)
+        agentID = try values.decode(String.self, forKey: .agentID)
+        agentName = try values.decode(String.self, forKey: .agentName)
+        content = try values.decode(String.self, forKey: .content)
+        replyToMessage = try values.decodeIfPresent(String.self, forKey: .replyToMessage)
+        // Metadata is an arbitrary JSON value on the wire. Read the optional
+        // string `type` when it has the expected object shape, but never drop
+        // an otherwise valid message because another client sent a scalar,
+        // array, or differently typed field.
+        metadata = (try? values.decode(MessageMetadata.self, forKey: .metadata))
+            ?? MessageMetadata()
+        timestamp = try values.decodeIfPresent(String.self, forKey: .timestamp) ?? ""
+        seq = try values.decodeIfPresent(Int.self, forKey: .seq) ?? 0
+    }
+
+    public var isThinking: Bool {
+        metadata.type?.localizedCaseInsensitiveCompare("thinking") == .orderedSame
+    }
+
+    public var fileAttachment: FileAttachment? {
+        guard metadata.type?.localizedCaseInsensitiveCompare("file") == .orderedSame,
+              let blobID = metadata.blobID, !blobID.isEmpty else { return nil }
+        return FileAttachment(
+            blobID: blobID,
+            name: metadata.name?.isEmpty == false ? metadata.name! : "attachment",
+            size: metadata.size
+        )
+    }
+}
+
+public struct MessageArrivalIdentity: Equatable {
+    public let messageID: String
+    public let sequence: Int
+
+    public static func latest(in messages: [ChatMessage]) -> MessageArrivalIdentity? {
+        messages.last.map {
+            MessageArrivalIdentity(messageID: $0.id, sequence: $0.seq)
+        }
+    }
+}
+
+public struct AgentPresence: Codable, Identifiable, Equatable {
+    public let agentID: String
+    public let name: String
+    public let capabilities: [String]
+    public let connectedAt: String?
+    public let lastActive: String?
+    public let status: String?
+    public let statusDetail: String?
+    public let progress: Int?
+
+    public var id: String { agentID }
+
+    public enum CodingKeys: String, CodingKey {
+        case agentID = "agent_id"
+        case name, capabilities
+        case connectedAt = "connected_at"
+        case lastActive = "last_active"
+        case status
+        case statusDetail = "status_detail"
+        case progress
+    }
+
+    public init(
+        agentID: String,
+        name: String,
+        capabilities: [String] = [],
+        connectedAt: String? = nil,
+        lastActive: String? = nil,
+        status: String? = nil,
+        statusDetail: String? = nil,
+        progress: Int? = nil
+    ) {
+        self.agentID = agentID
+        self.name = name
+        self.capabilities = capabilities
+        self.connectedAt = connectedAt
+        self.lastActive = lastActive
+        self.status = status
+        self.statusDetail = statusDetail
+        self.progress = progress
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        agentID = try values.decode(String.self, forKey: .agentID)
+        name = try values.decode(String.self, forKey: .name)
+        capabilities = try values.decodeIfPresent([String].self, forKey: .capabilities) ?? []
+        connectedAt = try values.decodeIfPresent(String.self, forKey: .connectedAt)
+        lastActive = try values.decodeIfPresent(String.self, forKey: .lastActive)
+        status = try values.decodeIfPresent(String.self, forKey: .status)
+        statusDetail = try values.decodeIfPresent(String.self, forKey: .statusDetail)
+        progress = try values.decodeIfPresent(Int.self, forKey: .progress)
+    }
+
+    public func updating(status: String?, detail: String?, progress: Int?) -> AgentPresence {
+        AgentPresence(
+            agentID: agentID,
+            name: name,
+            capabilities: capabilities,
+            connectedAt: connectedAt,
+            lastActive: lastActive,
+            status: status,
+            statusDetail: detail,
+            progress: progress
+        )
+    }
+}
+
+public enum ConnectionStatus: Equatable {
+    case disconnected
+    case connecting
+    case connected
+    case failed(String)
+
+    public var label: String {
+        switch self {
+        case .disconnected: return "Offline"
+        case .connecting: return "Connecting…"
+        case .connected: return "Connected"
+        case .failed: return "Connection failed"
+        }
+    }
+
+    public var failureMessage: String? {
+        guard case let .failed(message) = self else { return nil }
+        return message
+    }
+
+    public var isConnected: Bool { self == .connected }
+}
+
+extension String {
+    public var cowchatTime: String {
+        guard !isEmpty else { return "" }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        guard let date = fractional.date(from: self) ?? plain.date(from: self) else { return "" }
+        return date.formatted(date: .omitted, time: .shortened)
+    }
+}

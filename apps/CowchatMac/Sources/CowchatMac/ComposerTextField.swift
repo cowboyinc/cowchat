@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 /// A native macOS text field for the chat composer. Using AppKit here avoids
 /// SwiftUI focus regressions inside a NavigationSplitView detail column.

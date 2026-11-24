@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// Who may use People… in a room's menu: rooms on the account's server, which signs in with a `csoc_` key, where the
 /// API-key server's rooms offer Invites… instead.

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import CowchatKit
 
 struct HostedAgentCredentialFile {
     private let directory: URL

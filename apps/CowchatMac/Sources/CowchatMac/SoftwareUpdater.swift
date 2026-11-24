@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import Sparkle
+import CowchatKit
 
 @MainActor
 final class SoftwareUpdater: ObservableObject {

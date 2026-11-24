@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 /// Invite management for one room: list active invites, mint single-use or
 /// open ones, revoke. Fresh tokens are shown once — the server keeps only

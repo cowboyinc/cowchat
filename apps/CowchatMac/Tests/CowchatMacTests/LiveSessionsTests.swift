@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 /// The person's live sessions: reading them from the account rooms' `session` field, keeping them current with
 /// `session_state`, their names, the pick of five the sheets use, and the @ mentions.
