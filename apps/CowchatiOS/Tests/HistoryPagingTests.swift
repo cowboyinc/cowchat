@@ -89,6 +89,81 @@ final class HistoryPagingTests: XCTestCase {
         XCTAssertEqual(earlier.first, (loaded.first ?? 0) - 50)
     }
 
+    // MARK: A catch-up that fails part way
+
+    /// Makes the given history call fail once, counting from the next call.
+    private func failHistoryCall(_ number: Int) {
+        var calls = 0
+        connection.beforeHistory = { [unowned self] in
+            calls += 1
+            connection.historyErrors["r1"] = calls == number ? CowchatConnectionError.transport("dropped") : nil
+        }
+    }
+
+    func testACatchUpThatFailsPartWayLeavesNoGapOnceItIsRetried() async {
+        connection.serverMessages["r1"] = messages(1...30)
+        let session = await signedIn()
+        await session.open(roomID: "r1")
+        session.close(roomID: "r1")
+        connection.serverMessages["r1"] = messages(1...230)
+
+        // The newest page arrives, the next one fails.
+        failHistoryCall(2)
+        await session.open(roomID: "r1")
+
+        let afterFailure = seqs(session)
+        XCTAssertEqual(afterFailure, Array((afterFailure.first ?? 0)...(afterFailure.last ?? 0)), "a half-finished catch-up shows no hole")
+        XCTAssertEqual(session.rooms.first?.isUnread, true, "the room has messages that were not read")
+
+        connection.beforeHistory = nil
+        connection.historyErrors = [:]
+        session.close(roomID: "r1")
+        await session.open(roomID: "r1")
+
+        XCTAssertEqual(seqs(session), Array(1...230), "the retry fills the middle")
+        XCTAssertEqual(session.rooms.first?.isUnread, false)
+    }
+
+    func testAMessageArrivingAfterAFailedCatchUpDoesNotHideTheGap() async {
+        connection.serverMessages["r1"] = messages(1...30)
+        let session = await signedIn()
+        await session.open(roomID: "r1")
+        session.close(roomID: "r1")
+        connection.serverMessages["r1"] = messages(1...230)
+        failHistoryCall(2)
+        await session.open(roomID: "r1")
+        connection.beforeHistory = nil
+        connection.historyErrors = [:]
+
+        // A new message arrives live. It must not be taken as proof that everything before it is loaded.
+        let live = messages(231...231)[0]
+        connection.serverMessages["r1"]?.append(live)
+        connection.onEvent?("message_received", messagePayload(live))
+        session.close(roomID: "r1")
+        await session.open(roomID: "r1")
+
+        XCTAssertEqual(seqs(session), Array(1...231))
+    }
+
+    func testAReconnectDoesNotTakeLiveMessagesAsProofOfNoGap() async {
+        connection.serverMessages["r1"] = messages(1...30)
+        let session = await signedIn()
+        await session.open(roomID: "r1")
+        // While connected, live messages extend what is known to be loaded.
+        for message in messages(31...33) {
+            connection.serverMessages["r1"]?.append(message)
+            connection.onEvent?("message_received", messagePayload(message))
+        }
+        XCTAssertEqual(seqs(session), Array(1...33))
+        session.close(roomID: "r1")
+        connection.serverMessages["r1"] = messages(1...40)
+
+        await session.open(roomID: "r1")
+
+        XCTAssertEqual(seqs(session), Array(1...40))
+        XCTAssertEqual(connection.sequenceRequests.suffix(1), [nil], "one page was enough: 31 to 33 were already known")
+    }
+
     // MARK: Messages that share a timestamp
 
     func testMessagesSharingATimestampAreNotLostAtAPageBoundary() async {

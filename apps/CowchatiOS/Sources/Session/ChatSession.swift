@@ -35,7 +35,11 @@ final class ChatSession: ObservableObject {
     private var openRoomIDs: Set<String> = []
     private var archivedRoomIDs: Set<String> = []
     private var sessionStates: [String: String] = [:]
-    private var transportUp = false
+    private var transportUp = false { didSet { if !transportUp { caughtUp = [] } } }
+    /// For each room, the newest message known to have nothing missing before it back to the oldest one loaded.
+    private var caughtUpThrough: [String: Int] = [:]
+    /// Rooms whose last catch-up finished on this connection. Only then does a live message extend the run.
+    private var caughtUp: Set<String> = []
     private var reconnectTask: Task<Void, Never>?
     // Bumped by every sign-in, sign-out, background and reconnect restart, so work
     // started under an older generation drops its results instead of racing.
@@ -246,6 +250,8 @@ final class ChatSession: ObservableObject {
         myAgentID = nil
         serverRooms = []
         messages = [:]
+        caughtUpThrough = [:]
+        caughtUp = []
         secrets = [:]
         readStates = storage.readStates
         showAllRoomIDs = storage.showAllRoomIDs
@@ -495,27 +501,60 @@ final class ChatSession: ObservableObject {
     private static let catchUpPageLimit = 40
 
     // Pages back from the newest message, by sequence, until it joins what is already loaded, so time away
-    // leaves no hole. Where the gap is too long to fill, what was loaded before it is let go: the timeline is
-    // then one unbroken run ending at the newest message, and Load earlier carries on from its oldest.
+    // leaves no hole. The pages are held back until they join up: a catch-up that fails part way changes nothing,
+    // so the next one starts from the same place. Where the gap is too long to fill, everything older than what
+    // was fetched is let go: the timeline is then one unbroken run ending at the newest message, and Load earlier
+    // carries on from its oldest.
     private func backfill(roomID: String) async throws {
-        let knownMax = timelines[roomID]?.entries.last?.seq
+        // Not the newest message on screen: one that arrived live after a failed catch-up proves nothing about
+        // the messages before it.
+        let tip = caughtUpThrough[roomID]
+        caughtUp.remove(roomID)
+        var staged: [ChatMessage] = []
         var cursor: Int?
+        var joined = false
+        var firstPageWasFull = false
         for pageIndex in 0..<Self.catchUpPageLimit {
-            let page = try await connection.history(roomID: roomID, limit: pageSize, beforeSeq: cursor, kinds: [])
-            merge(page, into: roomID)
-            page.forEach(noteForReadState)
-            if knownMax == nil, pageIndex == 0 {
-                timelines[roomID]?.hasEarlier = page.count >= pageSize
+            let page: [ChatMessage]
+            do {
+                page = try await connection.history(roomID: roomID, limit: pageSize, beforeSeq: cursor, kinds: [])
+            } catch {
+                noteUnfetched(staged, roomID: roomID)
+                throw error
             }
-            guard let knownMax, let oldest = page.first, page.count >= pageSize, oldest.seq > knownMax + 1 else { return }
+            staged.insert(contentsOf: page, at: 0)
+            if pageIndex == 0 { firstPageWasFull = page.count >= pageSize }
+            guard let tip, let oldest = page.first, page.count >= pageSize, oldest.seq > tip + 1 else {
+                joined = true
+                break
+            }
             // A server that returns the same page again has nothing older to give.
-            if let cursor, oldest.seq >= cursor { return }
+            if let cursor, oldest.seq >= cursor {
+                joined = true
+                break
+            }
             cursor = oldest.seq
         }
-        guard let knownMax else { return }
-        messages[roomID] = messages[roomID]?.filter { $0.value.seq > knownMax }
-        timelines[roomID]?.entries.removeAll { $0.seq <= knownMax }
-        timelines[roomID]?.hasEarlier = true
+        if !joined, let floor = staged.first?.seq {
+            messages[roomID] = messages[roomID]?.filter { $0.value.seq >= floor }
+            timelines[roomID]?.entries.removeAll { $0.seq < floor }
+        }
+        merge(staged, into: roomID)
+        staged.forEach(noteForReadState)
+        if tip == nil { timelines[roomID]?.hasEarlier = firstPageWasFull }
+        if !joined { timelines[roomID]?.hasEarlier = true }
+        caughtUpThrough[roomID] = max(tip ?? 0, staged.last?.seq ?? 0, timelines[roomID]?.entries.last?.seq ?? 0)
+        caughtUp.insert(roomID)
+    }
+
+    /// A catch-up that failed still learned that newer messages exist. The room shows as unread for them, though
+    /// none is on screen yet.
+    private func noteUnfetched(_ staged: [ChatMessage], roomID: String) {
+        guard let newest = staged.last?.seq else { return }
+        var state = readStates[roomID] ?? ReadState()
+        guard newest > state.latest else { return }
+        state.latest = newest
+        saveReadState(state, roomID: roomID)
     }
 
     func refreshPeople(roomID: String) async { await refreshMembers(roomID) }
@@ -562,7 +601,10 @@ final class ChatSession: ObservableObject {
 
     private func receive(_ message: ChatMessage) {
         let roomID = message.roomID
-        if timelines[roomID] != nil { merge([message], into: roomID) }
+        if timelines[roomID] != nil {
+            merge([message], into: roomID)
+            if caughtUp.contains(roomID) { caughtUpThrough[roomID] = max(caughtUpThrough[roomID] ?? 0, message.seq) }
+        }
         if let date = CowchatDate.parse(message.timestamp) {
             liveActivity[roomID] = max(liveActivity[roomID] ?? date, date)
         }
@@ -658,6 +700,8 @@ final class ChatSession: ObservableObject {
         openRoomIDs.remove(roomID)
         timelines[roomID] = nil
         messages[roomID] = nil
+        caughtUpThrough[roomID] = nil
+        caughtUp.remove(roomID)
         members[roomID] = nil
         pulses[roomID] = nil
     }
