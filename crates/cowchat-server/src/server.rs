@@ -2052,6 +2052,43 @@ mod startup_tests {
         );
     }
 
+    #[tokio::test]
+    async fn port_zero_reports_the_bound_tcp_and_http_addresses() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut server_config = config(
+            temp.path().join("server.db"),
+            temp.path().join("server.sock"),
+            temp.path().join("auth.key"),
+        );
+        server_config.tcp_addr = Some("127.0.0.1:0".into());
+        server_config.http_addr = Some("127.0.0.1:0".into());
+
+        let server = CowchatServer::new(server_config).unwrap();
+        let tcp = server.tcp_addr().expect("TCP was configured");
+        let http = server.http_addr().expect("HTTP was configured");
+
+        assert_ne!(tcp.port(), 0);
+        assert_ne!(http.port(), 0);
+        assert_ne!(tcp, http);
+        // The listeners are bound and listening before run(), so a client can
+        // connect to the reported address without any port being released.
+        std::net::TcpStream::connect(tcp).unwrap();
+        std::net::TcpStream::connect(http).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unconfigured_listeners_report_no_address() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = CowchatServer::new(config(
+            temp.path().join("server.db"),
+            temp.path().join("server.sock"),
+            temp.path().join("auth.key"),
+        ))
+        .unwrap();
+        assert_eq!(server.tcp_addr(), None);
+        assert_eq!(server.http_addr(), None);
+    }
+
     #[test]
     fn occupied_tcp_listener_fails_before_database_open_and_cleans_own_uds() {
         let temp = tempfile::tempdir().unwrap();
