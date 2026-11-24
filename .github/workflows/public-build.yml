@@ -39,7 +39,7 @@ jobs:
         run: |
           export CARGO_HOME="$RUNNER_TEMP/public-cargo"
           echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
-          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          cargo metadata --locked --all-features --format-version 1 > "$RUNNER_TEMP/metadata.json"
           python3 scripts/check-core-pin.py "$RUNNER_TEMP/metadata.json"
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --workspace --all-targets --all-features
@@ -85,7 +85,7 @@ jobs:
           GIT_TERMINAL_PROMPT: '0'
         run: |
           export CARGO_HOME="$RUNNER_TEMP/public-cargo"
-          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          cargo metadata --locked --all-features --format-version 1 > "$RUNNER_TEMP/metadata.json"
           python3 scripts/check-core-pin.py --on-main "$RUNNER_TEMP/metadata.json"
   charts:
     runs-on: ubuntu-latest

@@ -66,7 +66,7 @@ def is_on_main(url, rev):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("metadata", help="path to `cargo metadata --format-version 1` output")
+    parser.add_argument("metadata", help="path to `cargo metadata --all-features --format-version 1` output")
     parser.add_argument("--on-main", action="store_true", help="also require the pin to be on cowchat-core main")
     args = parser.parse_args()
     with open(args.metadata) as handle:
