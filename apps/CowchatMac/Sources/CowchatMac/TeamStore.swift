@@ -1,4 +1,5 @@
 import Foundation
+import CowchatKit
 
 /// `GET /social/v1/team` (Chad's plan, task 12): each teammate who shares their work, with their live sessions, and
 /// whether the person's own work is shared. A session carries its folder, branch and state, the session room it works

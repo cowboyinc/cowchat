@@ -1,6 +1,7 @@
 import XCTest
 import Combine
 @testable import CowchatMac
+@testable import CowchatKit
 
 @MainActor
 private final class MockRoomConnection: CowchatConnectionProtocol {

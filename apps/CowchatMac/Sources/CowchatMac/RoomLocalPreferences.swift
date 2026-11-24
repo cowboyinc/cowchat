@@ -1,4 +1,5 @@
 import Foundation
+import CowchatKit
 
 struct RoomLocalPreferences {
     static let archivedRoomIDsKey = "CowchatMac.archivedRoomIDs"

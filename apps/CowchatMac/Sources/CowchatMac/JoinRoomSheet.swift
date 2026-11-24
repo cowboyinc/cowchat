@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// Accepting an invitation, as the Inbox's Join sheet and from Friends, drawn from the Rename room sheet: 480 wide on
 /// Surface/600 with 26 padding and its parts 20 apart. The room's name in Heading 4 with who invited 3 under it, then
