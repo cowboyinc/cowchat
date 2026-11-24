@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// The colour a room participant's avatar is drawn in, picked from the Gallop palette by a stable hash of their
 /// name, so a participant keeps one colour in every room and across launches.

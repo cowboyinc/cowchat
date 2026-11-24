@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+import CowchatKit
 
 final class ParticipantColorTests: XCTestCase {
     func testEverySwatchComesFromTheCowboyPalette() {
