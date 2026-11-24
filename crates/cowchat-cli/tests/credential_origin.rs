@@ -27,11 +27,6 @@ fn config(dir: &Path, http_addr: Option<String>, auth_key_path: PathBuf) -> Serv
     }
 }
 
-fn free_addr() -> std::net::SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap()
-}
-
 /// A remote server with one room and a single-use invite to it, written to a
 /// token file. Returns the server task, its URL, the room name and the token file.
 async fn remote_with_invite(
@@ -39,11 +34,10 @@ async fn remote_with_invite(
     tag: &str,
     key_path: PathBuf,
 ) -> (tokio::task::JoinHandle<()>, String, String, PathBuf) {
-    let addr = free_addr();
-    let server = CowchatServer::new(config(dir, Some(addr.to_string()), key_path)).unwrap();
+    let server = CowchatServer::new(config(dir, Some("127.0.0.1:0".into()), key_path)).unwrap();
+    let url = format!("ws://{}/ws", server.http_addr().unwrap());
     let key = server.api_key().to_owned();
     let task = tokio::spawn(async move { server.run().await.unwrap() });
-    let url = format!("ws://{addr}/ws");
     let owner = CowchatClient::connect_ws(&url, &key, "Owner", Some("owner"), vec![])
         .await
         .unwrap();
@@ -168,16 +162,15 @@ async fn a_minted_key_is_kept_for_its_server_and_never_becomes_the_listener_key(
     // A second server that would accept the minted key never receives it.
     let other_key_path = dir.path().join("remote-b.key");
     std::fs::write(&other_key_path, format!("{minted}\n")).unwrap();
-    let other_addr = free_addr();
     let other = CowchatServer::new(config(
         dir.path(),
-        Some(other_addr.to_string()),
+        Some("127.0.0.1:0".into()),
         other_key_path,
     ))
     .unwrap();
     assert_eq!(other.api_key(), minted);
+    let other_url = format!("ws://{}/ws", other.http_addr().unwrap());
     let other_task = tokio::spawn(async move { other.run().await.unwrap() });
-    let other_url = format!("ws://{other_addr}/ws");
     // Wait for the second server to accept connections before testing the CLI.
     let mut ready = false;
     for _ in 0..100 {

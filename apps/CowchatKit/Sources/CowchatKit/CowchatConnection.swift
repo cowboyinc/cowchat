@@ -135,6 +135,7 @@ public final class CowchatConnection: CowchatConnectionProtocol {
     private var readyContinuation: CheckedContinuation<Void, Error>?
     private var pending: [String: CheckedContinuation<Payload, Error>] = [:]
     private var connectAttempt: UUID?
+    private var requestTimeoutNanoseconds: UInt64 = 10_000_000_000
 
     public init(host: String = "127.0.0.1", port: UInt16 = 9229) {
         profile = .local(host: host, port: port)
@@ -148,10 +149,12 @@ public final class CowchatConnection: CowchatConnectionProtocol {
 
     public init(
         profile: ConnectionProfile,
+        requestTimeoutNanoseconds: UInt64 = 10_000_000_000,
         webSocketTaskFactory: @escaping (URL) -> any CowchatWebSocketTaskProtocol
     ) {
         self.profile = profile
         makeWebSocketTask = webSocketTaskFactory
+        self.requestTimeoutNanoseconds = requestTimeoutNanoseconds
     }
 
     public func reconfigure(profile: ConnectionProfile) {
@@ -381,8 +384,7 @@ public final class CowchatConnection: CowchatConnectionProtocol {
 
     private func request(
         type: String,
-        payload: Payload,
-        timeoutNanoseconds: UInt64 = 10_000_000_000
+        payload: Payload
     ) async throws -> Payload {
         guard connection != nil || webSocketTask != nil else {
             throw CowchatConnectionError.notConnected
@@ -406,6 +408,7 @@ public final class CowchatConnection: CowchatConnectionProtocol {
                 }
                 pending[id] = continuation
                 sendRequestFrame(data, id: id)
+                let timeoutNanoseconds = requestTimeoutNanoseconds
                 Task { [weak self] in
                     try? await Task.sleep(nanoseconds: timeoutNanoseconds)
                     guard !Task.isCancelled else { return }
@@ -423,13 +426,11 @@ public final class CowchatConnection: CowchatConnectionProtocol {
         if let connection {
             var terminated = data
             terminated.append(0x0A)
-            connection.send(content: terminated, completion: .contentProcessed { [weak self] error in
+            connection.send(content: terminated, completion: .contentProcessed { [weak self, weak connection] error in
                 guard let error else { return }
                 Task { @MainActor in
-                    self?.finishRequest(
-                        id: id,
-                        result: .failure(Self.transportError(error))
-                    )
+                    guard let self, let connection, self.connection === connection else { return }
+                    self.failConnection(Self.transportError(error))
                 }
             })
             return
@@ -444,10 +445,8 @@ public final class CowchatConnection: CowchatConnectionProtocol {
             do {
                 try await webSocketTask.send(.string(text))
             } catch {
-                self?.finishRequest(
-                    id: id,
-                    result: .failure(Self.transportError(error))
-                )
+                guard let self, self.webSocketTask === webSocketTask else { return }
+                self.failConnection(Self.transportError(error))
             }
         }
     }
@@ -612,7 +611,8 @@ public final class CowchatConnection: CowchatConnectionProtocol {
     }
 
     private func timeoutRequest(id: String) {
-        finishRequest(id: id, result: .failure(CowchatConnectionError.timeout))
+        guard pending[id] != nil else { return }
+        failConnection(CowchatConnectionError.timeout)
     }
 
     private func timeoutConnect(attempt: UUID) {

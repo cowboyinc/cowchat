@@ -2093,8 +2093,9 @@ private struct AgentAvatar: View {
     let size: CGFloat
 
     var body: some View {
+        let swatch = ParticipantColor.swatch(for: name)
         RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-            .fill(SemanticColor.surfaceGlassOnDefault)
+            .fill(swatch.fill)
             .overlay {
                 if let appIcon {
                     Image(nsImage: appIcon)
@@ -2104,7 +2105,7 @@ private struct AgentAvatar: View {
                 } else {
                     Text(initial)
                         .font(.system(size: size * 0.42, weight: .bold, design: .rounded))
-                        .foregroundStyle(SemanticColor.surfaceGlassOnTextDefault)
+                        .foregroundStyle(swatch.text)
                 }
             }
             .overlay {
