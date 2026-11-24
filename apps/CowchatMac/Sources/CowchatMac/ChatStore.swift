@@ -690,7 +690,6 @@ final class ChatStore: ObservableObject {
     /// explicit boundary that permits one new helper launch after a previously
     /// latched crash, while background reconnects remain unable to respawn-loop.
     func reconnect() {
-        guard !connectionStatus.isConnected else { return }
         reconnectTask?.cancel()
         reconnectTask = nil
         connectionAttemptTask?.cancel()
