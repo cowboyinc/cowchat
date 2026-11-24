@@ -2908,3 +2908,20 @@ final class RoomTransitionTests: XCTestCase {
         )
     }
 }
+
+extension RoomTransitionTests {
+    @MainActor
+    func testExplicitReconnectReplacesApparentlyConnectedTransport() async throws {
+        let connection = MockRoomConnection()
+        let defaults = UserDefaults(suiteName: "RoomTransitionTests.reconnect.\(UUID().uuidString)")!
+        let store = ChatStore(connection: connection, defaults: defaults)
+        await store.connect()
+        XCTAssertEqual(store.connectionStatus, .connected)
+        let previousCount = connection.connectCallCount
+        store.reconnect()
+        for _ in 0..<100 where connection.connectCallCount == previousCount {
+            await Task.yield()
+        }
+        XCTAssertEqual(connection.connectCallCount, previousCount + 1)
+    }
+}

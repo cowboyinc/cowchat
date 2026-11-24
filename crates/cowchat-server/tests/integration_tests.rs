@@ -27,15 +27,9 @@ async fn start_test_server_with_keyless_local(
     let key_path = tmp_dir.path().join("auth.key");
     let socket_path = tmp_dir.path().join("test.sock");
 
-    // Find a free port
-    let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = tcp_listener.local_addr().unwrap();
-    let tcp_addr = addr.to_string();
-    drop(tcp_listener);
-
     let config = ServerConfig {
         socket_path,
-        tcp_addr: Some(tcp_addr.clone()),
+        tcp_addr: Some("127.0.0.1:0".into()),
         http_addr: None,
         db_path,
         auth_key_path: key_path,
@@ -51,6 +45,7 @@ async fn start_test_server_with_keyless_local(
     };
 
     let server = CowchatServer::new(config).unwrap();
+    let tcp_addr = server.tcp_addr().unwrap().to_owned();
     let api_key = server.api_key().to_string();
 
     let handle = tokio::spawn(async move {
@@ -1009,12 +1004,9 @@ async fn test_open_vote_and_ballots_survive_server_restart() {
     handle.abort();
     let _ = handle.await;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let restarted_addr = listener.local_addr().unwrap().to_string();
-    drop(listener);
     let restarted = CowchatServer::new(ServerConfig {
         socket_path: tmp.path().join("vote-restart.sock"),
-        tcp_addr: Some(restarted_addr.clone()),
+        tcp_addr: Some("127.0.0.1:0".into()),
         http_addr: None,
         db_path: tmp.path().join("test.db"),
         auth_key_path: tmp.path().join("auth.key"),
@@ -1029,6 +1021,7 @@ async fn test_open_vote_and_ballots_survive_server_restart() {
         max_rooms: None,
     })
     .unwrap();
+    let restarted_addr = restarted.tcp_addr().unwrap().to_owned();
     let restarted_handle = tokio::spawn(async move {
         let _ = restarted.run().await;
     });
@@ -3048,12 +3041,9 @@ async fn test_agent_id_ownership_survives_server_restart() {
             [key_b],
         )
         .unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let restarted_addr = listener.local_addr().unwrap().to_string();
-    drop(listener);
     let restarted = CowchatServer::new(ServerConfig {
         socket_path: tmp.path().join("restart.sock"),
-        tcp_addr: Some(restarted_addr.clone()),
+        tcp_addr: Some("127.0.0.1:0".into()),
         http_addr: None,
         db_path: tmp.path().join("test.db"),
         auth_key_path: tmp.path().join("auth.key"),
@@ -3068,6 +3058,7 @@ async fn test_agent_id_ownership_survives_server_restart() {
         max_rooms: None,
     })
     .unwrap();
+    let restarted_addr = restarted.tcp_addr().unwrap().to_owned();
     let restarted_handle = tokio::spawn(async move {
         let _ = restarted.run().await;
     });
@@ -3843,19 +3834,10 @@ async fn start_test_server_with_http() -> (
     let key_path = tmp_dir.path().join("auth.key");
     let socket_path = tmp_dir.path().join("test.sock");
 
-    let mut addrs = Vec::new();
-    for _ in 0..2 {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        addrs.push(listener.local_addr().unwrap().to_string());
-        drop(listener);
-    }
-    let tcp_addr = addrs[0].clone();
-    let http_addr = addrs[1].clone();
-
     let config = ServerConfig {
         socket_path,
-        tcp_addr: Some(tcp_addr.clone()),
-        http_addr: Some(http_addr.clone()),
+        tcp_addr: Some("127.0.0.1:0".into()),
+        http_addr: Some("127.0.0.1:0".into()),
         db_path,
         auth_key_path: key_path,
         no_auth: false,
@@ -3870,6 +3852,8 @@ async fn start_test_server_with_http() -> (
     };
 
     let server = CowchatServer::new(config).unwrap();
+    let tcp_addr = server.tcp_addr().unwrap().to_owned();
+    let http_addr = server.http_addr().unwrap().to_owned();
     let api_key = server.api_key().to_string();
     let handle = tokio::spawn(async move {
         let _ = server.run().await;
@@ -4362,12 +4346,9 @@ async fn start_room_cap_server(
     socket: &str,
     max_rooms: Option<u64>,
 ) -> (tokio::task::JoinHandle<()>, String, String) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    drop(listener);
     let server = CowchatServer::new(ServerConfig {
         socket_path: dir.join(socket),
-        tcp_addr: Some(addr.clone()),
+        tcp_addr: Some("127.0.0.1:0".into()),
         http_addr: None,
         db_path: dir.join("test.db"),
         auth_key_path: dir.join("auth.key"),
@@ -4382,6 +4363,7 @@ async fn start_room_cap_server(
         max_rooms,
     })
     .unwrap();
+    let addr = server.tcp_addr().unwrap().to_owned();
     let key = server.api_key().to_string();
     let handle = tokio::spawn(async move {
         let _ = server.run().await;
