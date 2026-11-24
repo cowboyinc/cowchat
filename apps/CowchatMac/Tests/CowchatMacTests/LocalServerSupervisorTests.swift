@@ -1,6 +1,7 @@
 import Darwin
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class LocalServerSupervisorTests: XCTestCase {
     private var temporaryDirectories: [URL] = []

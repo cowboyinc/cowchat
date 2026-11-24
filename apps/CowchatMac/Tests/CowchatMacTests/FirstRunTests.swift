@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 /// First run's steps, the agents and Settings' agents, the last step's wait for the first session, and New room's
 /// friend search with the invitations it sends.

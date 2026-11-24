@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// Add person (add-new-company note, section 1, with the navigation note's section 7.5): friends are invited to one of
 /// the person's live sessions' rooms. The title is the room's name. Under "Add people" the friend search lists the

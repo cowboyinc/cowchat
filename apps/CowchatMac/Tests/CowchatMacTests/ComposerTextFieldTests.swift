@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class ComposerTextFieldTests: XCTestCase {
     @MainActor

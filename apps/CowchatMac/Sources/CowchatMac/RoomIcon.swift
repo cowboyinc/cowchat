@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import CowchatKit
 
 /// Deterministic parameter source for procedural room icons.
 ///

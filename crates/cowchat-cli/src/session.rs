@@ -209,7 +209,7 @@ pub(crate) async fn run(
                 );
                 return Ok(());
             }
-            let key = load_key(&cli.key, Some(url));
+            let key = load_key(&cli.key, Some(url), None);
             if key.is_empty() {
                 return Err("hosted bot credential missing".into());
             }

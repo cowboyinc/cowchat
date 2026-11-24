@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// A live session's state, which its room's cell shows in its end slot.
 enum SidebarMark: Equatable {

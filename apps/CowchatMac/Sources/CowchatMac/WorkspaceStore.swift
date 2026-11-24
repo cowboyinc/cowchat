@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import CowchatKit
 
 enum GlobalSignupError: LocalizedError, Equatable {
     case signupClosed

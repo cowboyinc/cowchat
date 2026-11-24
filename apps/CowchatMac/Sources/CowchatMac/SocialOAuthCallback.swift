@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import CowchatKit
 
 @MainActor
 final class SocialOAuthCallback {

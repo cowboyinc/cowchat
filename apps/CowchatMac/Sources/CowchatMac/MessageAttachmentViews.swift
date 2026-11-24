@@ -1,6 +1,7 @@
 import AppKit
 import Quartz
 import SwiftUI
+import CowchatKit
 
 /// A run of agent messages the room hides, as one quiet row lined up with the messages' text. It is the feed's "Show
 /// full response" control with other words: Caption in Text/Tertiary, 6 between the glyph, the words and the fold's

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UserNotifications
+import CowchatKit
 
 struct SocialNotificationSettings: View {
     @ObservedObject var notifications: SocialNotifications

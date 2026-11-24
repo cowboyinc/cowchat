@@ -6,6 +6,16 @@ on:
 permissions:
   contents: read
 jobs:
+  release-publisher:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: bash scripts/test-publish-release.sh
   rust:
     strategy:
       fail-fast: false
@@ -52,6 +62,17 @@ jobs:
       - if: runner.os == 'macOS'
         working-directory: apps/CowchatMac
         run: swift test && swift build -c release
+      - if: runner.os == 'macOS'
+        working-directory: apps/CowchatKit
+        run: |
+          swift test
+          # Run the package's tests on an iPhone simulator, not just a build: resources such as the icons load
+          # differently on iOS, and only running them shows it.
+          device=$(xcrun simctl list devices available | grep -m1 -oE 'iPhone [^(]+' | sed 's/ *$//')
+          # Boot it first: a test run that also has to cold-boot the simulator can time out.
+          xcrun simctl boot "$device" || true
+          xcrun simctl bootstatus "$device" -b
+          xcodebuild -scheme CowchatKit -destination "platform=iOS Simulator,name=$device" test
   charts:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// The Team page: the header with the count under the title and the team field and the search at its end, then 32 under
 /// it the column labels and one group per person who shares their work, 32 apart, each with a head, up to five rows and

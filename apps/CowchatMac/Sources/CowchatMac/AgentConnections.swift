@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// Where Cowchat's hook into one of the person's coding agents stands. An agent this Mac doesn't have is installed
 /// first. Codex asks the person once, the next time it starts, whether to trust the hooks Cowchat added, so it waits
