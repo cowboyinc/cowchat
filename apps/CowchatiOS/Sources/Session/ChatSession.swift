@@ -519,7 +519,9 @@ final class ChatSession: ObservableObject {
             do {
                 page = try await connection.history(roomID: roomID, limit: pageSize, beforeSeq: cursor, kinds: [])
             } catch {
-                noteUnfetched(staged, roomID: roomID)
+                // Only the session that asked may note what it learned: after a sign-out the read states are
+                // no longer this catch-up's to write.
+                if generation == self.generation { noteUnfetched(staged, roomID: roomID) }
                 throw error
             }
             // Pages asked for by a session that has since signed out, gone to the background or lost the room are

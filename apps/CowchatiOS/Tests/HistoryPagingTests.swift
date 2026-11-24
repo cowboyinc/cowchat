@@ -165,6 +165,28 @@ final class HistoryPagingTests: XCTestCase {
         XCTAssertNil(session.timelines["r1"]?.entries.first, "a destroyed room is not rebuilt from pages already asked for")
     }
 
+    func testACatchUpThatFailsAfterSignOutWritesNothing() async throws {
+        connection.serverMessages["r1"] = messages(1...30)
+        let session = await signedIn()
+        await session.open(roomID: "r1")
+        session.close(roomID: "r1")
+        connection.serverMessages["r1"] = messages(1...430)
+
+        // The person signs out while the second page is on its way, and that page then fails.
+        var page = 0
+        connection.beforeHistory = { [unowned self] in
+            page += 1
+            guard page == 2 else { return }
+            try? session.signOut()
+            connection.historyErrors["r1"] = CowchatConnectionError.notConnected
+        }
+        await session.open(roomID: "r1")
+
+        XCTAssertEqual(page, 2)
+        let storage = SessionStorage(defaults: defaults, credentials: credentials, connectionID: "c1")
+        XCTAssertNil(storage.readStates["r1"], "sign-out cleared the read states, and the old catch-up writes none back")
+    }
+
     func testARoomWhoseCatchUpWasRefusedOnReconnectIsNotMarkedRead() async {
         connection.serverMessages["r1"] = messages(1...1)
         let session = await signedIn()
