@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// The kinds of room New room makes (add-new-company note, section 3b, decided by Patrick on 2 November): account
 /// rooms, rooms on this Mac's server, and rooms on the API-key connection. It never makes a session's room, since the

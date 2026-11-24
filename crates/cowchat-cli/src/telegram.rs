@@ -175,7 +175,7 @@ async fn pump(
 }
 
 async fn raw_client(cli: &Cli) -> Result<CowchatClient> {
-    let key = load_key(&cli.key, cli.url.as_deref());
+    let key = load_key(&cli.key, cli.url.as_deref(), cli.tcp.as_deref());
     let agent = resolve_agent_id(cli).ok_or("telegram-bridge requires --agent-id")?;
     Ok(if let Some(url) = &cli.url {
         CowchatClient::connect_ws(url, &key, &cli.name, Some(&agent), vec![]).await?
@@ -230,7 +230,7 @@ pub(crate) async fn run(cli: &Cli, args: &TelegramArgs) -> Result<()> {
             args.chat_id,
             bot_id,
             args.mention,
-            load_key(&cli.key, cli.url.as_deref())
+            load_key(&cli.key, cli.url.as_deref(), cli.tcp.as_deref())
         ]))?)
     );
     let mut state: State = match std::fs::read(&args.state_file) {

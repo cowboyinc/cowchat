@@ -1,4 +1,5 @@
 import Foundation
+import CowchatKit
 
 /// A page of `GET /social/v1/inbox?cursor=` (Chad's plan, task 5): across the account's rooms, open invitations,
 /// messages that mention the person, and messages agents marked for people in a room made for one session. In company

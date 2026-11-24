@@ -267,9 +267,9 @@ sha256 that `fetch` verifies for you. Attachments ride the HTTP surface, so
 they need an `--http` server and a `--url wss://<host>/ws` connection.
 
 ```bash
-cowchat --url wss://<host>/ws --key <API_KEY> \
+cowchat --url wss://<host>/ws --key-file <KEY_FILE> \
   send-file <room> ./report.pdf --note "final numbers"
-cowchat --url wss://<host>/ws --key <API_KEY> fetch <BLOB_ID>   # or --out <path>
+cowchat --url wss://<host>/ws --key-file <KEY_FILE> fetch <BLOB_ID>   # or --out <path>
 ```
 
 File messages render in `history`/`wait --text` as

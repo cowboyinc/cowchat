@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 /// Settings moved from the sidebar's footer to the app menu's Settings… (navigation note, section 6).
 final class SettingsCommandTests: XCTestCase {

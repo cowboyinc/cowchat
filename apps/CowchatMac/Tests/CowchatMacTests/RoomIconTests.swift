@@ -1,6 +1,7 @@
 import SwiftUI
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class RoomIconTests: XCTestCase {
     /// A realistic sidebar: cowboy rooms cluster on the same initial, which is
