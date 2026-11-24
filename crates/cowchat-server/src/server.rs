@@ -138,6 +138,8 @@ pub struct CowchatServer {
     config: ServerConfig,
     _instance_lock: File,
     listeners: Mutex<Option<PreparedListeners>>,
+    tcp_local_addr: Option<std::net::SocketAddr>,
+    http_local_addr: Option<std::net::SocketAddr>,
     _socket_guard: OwnedSocketPath,
     broker: Arc<Broker>,
     store: Arc<Store>,
@@ -409,6 +411,8 @@ impl CowchatServer {
             .as_deref()
             .map(bind_tcp_listener)
             .transpose()?;
+        let tcp_local_addr = tcp_listener.as_ref().map(|l| l.local_addr()).transpose()?;
+        let http_local_addr = http_listener.as_ref().map(|l| l.local_addr()).transpose()?;
 
         let store = Arc::new(Store::open(&config.db_path)?);
         let agents: Arc<DashMap<String, AgentConnection>> = Arc::new(DashMap::new());
@@ -435,6 +439,8 @@ impl CowchatServer {
                 tcp: tcp_listener,
                 http: http_listener,
             })),
+            tcp_local_addr,
+            http_local_addr,
             _socket_guard: socket_guard,
             broker,
             store,
@@ -717,6 +723,17 @@ impl CowchatServer {
 
     pub fn api_key(&self) -> &str {
         &self.api_key
+    }
+
+    /// The address the TCP listener is bound to, so a caller that configured
+    /// port 0 can learn the port the OS assigned.
+    pub fn tcp_addr(&self) -> Option<std::net::SocketAddr> {
+        self.tcp_local_addr
+    }
+
+    /// The address the HTTP/WebSocket listener is bound to.
+    pub fn http_addr(&self) -> Option<std::net::SocketAddr> {
+        self.http_local_addr
     }
 
     pub fn socket_path(&self) -> &Path {

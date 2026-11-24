@@ -4,7 +4,7 @@ use cowchat_server::{CowchatServer, ServerConfig};
 use std::{process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-async fn start_host(addr: &str, key: &str, room: &str, port: &str) -> tokio::process::Child {
+async fn start_host(addr: &str, key: &str, room: &str) -> tokio::process::Child {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/python/fizzbuzz_actor.py");
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cowchat"))
@@ -20,7 +20,7 @@ async fn start_host(addr: &str, key: &str, room: &str, port: &str) -> tokio::pro
             "actor-host",
             room,
             "--listen",
-            port,
+            "127.0.0.1:0",
             "--",
             "python3",
         ])
@@ -65,15 +65,9 @@ async fn reply(client: &CowchatClient, room: &str, input_id: &str) -> String {
 #[tokio::test]
 async fn actor_host_fizzbuzz_recovers_pending_work_after_sigkill() {
     let dir = tempfile::tempdir().unwrap();
-    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = tcp.local_addr().unwrap().to_string();
-    drop(tcp);
-    let wake = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = wake.local_addr().unwrap().to_string();
-    drop(wake);
     let config = ServerConfig {
         socket_path: dir.path().join("server.sock"),
-        tcp_addr: Some(addr.clone()),
+        tcp_addr: Some("127.0.0.1:0".into()),
         http_addr: None,
         db_path: dir.path().join("server.db"),
         auth_key_path: dir.path().join("auth.key"),
@@ -89,6 +83,7 @@ async fn actor_host_fizzbuzz_recovers_pending_work_after_sigkill() {
     };
     let server = CowchatServer::new(config).unwrap();
     let key = server.api_key().to_owned();
+    let addr = server.tcp_addr().unwrap().to_string();
     let task = tokio::spawn(async move { server.run().await.unwrap() });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let mut human = CowchatClient::connect_tcp(&addr, &key, "Human", Some("human"), vec![])
@@ -106,7 +101,7 @@ async fn actor_host_fizzbuzz_recovers_pending_work_after_sigkill() {
         .unwrap();
     human.join_room(&room.room_id).await.unwrap();
     observer.join_room(&room.room_id).await.unwrap();
-    let mut host = start_host(&addr, &key, &room.room_id, &port).await;
+    let mut host = start_host(&addr, &key, &room.room_id).await;
     let first = human
         .send_message(&room.room_id, "15", None, vec!["fizzbuzz-actor".into()])
         .await
@@ -149,7 +144,7 @@ async fn actor_host_fizzbuzz_recovers_pending_work_after_sigkill() {
         .await
         .unwrap();
     // No actor receiver is running. The committed obligation survives independently.
-    let mut restarted = start_host(&addr, &key, &room.room_id, &port).await;
+    let mut restarted = start_host(&addr, &key, &room.room_id).await;
     assert_eq!(
         reply(&observer, &room.room_id, &pending.message_id)
             .await

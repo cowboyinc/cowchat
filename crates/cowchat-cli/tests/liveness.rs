@@ -21,13 +21,10 @@ async fn start_test_server() -> (
     tempfile::TempDir,
 ) {
     let tmp_dir = tempfile::TempDir::new().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let tcp_addr = listener.local_addr().unwrap().to_string();
-    drop(listener);
 
     let config = ServerConfig {
         socket_path: tmp_dir.path().join("test.sock"),
-        tcp_addr: Some(tcp_addr.clone()),
+        tcp_addr: Some("127.0.0.1:0".into()),
         http_addr: None,
         db_path: tmp_dir.path().join("test.db"),
         auth_key_path: tmp_dir.path().join("auth.key"),
@@ -42,6 +39,7 @@ async fn start_test_server() -> (
         max_rooms: None,
     };
     let server = CowchatServer::new(config).unwrap();
+    let tcp_addr = server.tcp_addr().unwrap().to_string();
     let api_key = server.api_key().to_string();
     let handle = tokio::spawn(async move {
         let _ = server.run().await;

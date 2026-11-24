@@ -107,12 +107,9 @@ fn state_lock_excludes_second_bridge_and_atomic_save_contains_no_plaintext() {
 async fn encrypted_bridge_recovers_append_and_retries_telegram_without_advancing_cursor() {
     use cowchat_server::{CowchatServer, ServerConfig};
     let dir = tempfile::tempdir().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    drop(listener);
     let server = CowchatServer::new(ServerConfig {
         socket_path: dir.path().join("server.sock"),
-        tcp_addr: Some(addr.clone()),
+        tcp_addr: Some("127.0.0.1:0".into()),
         http_addr: None,
         db_path: dir.path().join("server.db"),
         auth_key_path: dir.path().join("auth.key"),
@@ -127,6 +124,7 @@ async fn encrypted_bridge_recovers_append_and_retries_telegram_without_advancing
         max_rooms: None,
     })
     .unwrap();
+    let addr = server.tcp_addr().unwrap().to_string();
     let key = server.api_key().to_owned();
     let task = tokio::spawn(async move { server.run().await.unwrap() });
     tokio::time::sleep(Duration::from_millis(100)).await;
