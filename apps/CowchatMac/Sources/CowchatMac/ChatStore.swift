@@ -737,6 +737,10 @@ final class ChatStore: ObservableObject {
         profileGeneration += 1
         connection.disconnect()
         connectionStatus = .disconnected
+        // A caller still holding this store must find nothing left to decrypt with.
+        roomSecrets.removeAll()
+        unlockedRoomIDs.removeAll()
+        clearDisplayedPlaintext()
     }
 
     func stopOwnedLocalServer() {
@@ -798,7 +802,7 @@ final class ChatStore: ObservableObject {
             errorMessage = nil
             guard reloadedProfile != connectionProfile else { return }
             roomSecrets.removeAll()
-            decryptedDisplayCache.removeAll()
+            clearDisplayedPlaintext()
             unlockedRoomIDs.removeAll()
             connectionProfile = reloadedProfile
             stableAgentID = Self.resolveAgentID(
@@ -841,7 +845,7 @@ final class ChatStore: ObservableObject {
         connectionConfigurationError = nil
         errorMessage = nil
         roomSecrets.removeAll()
-        decryptedDisplayCache.removeAll()
+        clearDisplayedPlaintext()
         unlockedRoomIDs.removeAll()
         connectionProfile = profile
         stableAgentID = Self.resolveAgentID(
@@ -985,7 +989,9 @@ final class ChatStore: ObservableObject {
                 if let current = currentByID[roomID] { refreshed.append(current) }
             }
         }
-        rooms = refreshed.sorted(by: roomSort)
+        // The list refreshes every 30 seconds; republishing an unchanged one redraws every view that watches the store.
+        let sorted = refreshed.sorted(by: roomSort)
+        if sorted != rooms { rooms = sorted }
         refreshSlackBadges()
         // `list_rooms` is an authoritative server snapshot. It includes this
         // client only when the registration restored membership before the
@@ -1466,9 +1472,16 @@ final class ChatStore: ObservableObject {
             display.content = "Encrypted message — add the room key to read it."
         }
         // Bound memory independently of how many rooms have been visited.
-        if decryptedDisplayCache.count >= 1_000 { decryptedDisplayCache.removeAll() }
+        if decryptedDisplayCache.count >= 1_000 { clearDisplayedPlaintext() }
         decryptedDisplayCache[message.id] = (message, display)
         return display
+    }
+
+    /// Drops the decrypted text this store holds and the feed's shared render caches, which key what they draw by the
+    /// text itself. Clearing the shared caches costs other stores only a re-parse.
+    private func clearDisplayedPlaintext() {
+        decryptedDisplayCache.removeAll()
+        RenderCaches.clearPlaintext()
     }
 
     private func loadRoomSecret(for room: Room) {
@@ -1476,7 +1489,8 @@ final class ChatStore: ObservableObject {
         do {
             let account = RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id)
             if let secret = try roomCredentialStore.credential(for: account) {
-                decryptedDisplayCache.removeAll()
+                // An unchanged key decrypts to the same text, so what is already drawn stays valid.
+                if roomSecrets[room.id] != secret { clearDisplayedPlaintext() }
                 roomSecrets[room.id] = secret
                 unlockedRoomIDs.insert(room.id)
             }
@@ -1489,7 +1503,7 @@ final class ChatStore: ObservableObject {
             _ = try RoomCrypto.decrypt(encrypted.content, secret: secret, roomID: room.id)
         }
         try roomCredentialStore.setCredential(secret, for: RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id))
-        decryptedDisplayCache.removeAll()
+        clearDisplayedPlaintext()
         roomSecrets[room.id] = secret
         unlockedRoomIDs.insert(room.id)
     }
@@ -1506,7 +1520,7 @@ final class ChatStore: ObservableObject {
 
     func forgetRoomSecret(for room: Room) throws {
         try roomCredentialStore.setCredential(nil, for: RoomCrypto.credentialAccount(profile: connectionProfile, roomID: room.id))
-        decryptedDisplayCache.removeAll()
+        clearDisplayedPlaintext()
         roomSecrets.removeValue(forKey: room.id)
         unlockedRoomIDs.remove(room.id)
     }
