@@ -459,7 +459,7 @@ final class ChatSession: ObservableObject {
         var loaded = false
         do {
             try await joinIfNeeded(roomID)
-            try await backfill(roomID: roomID)
+            try await backfill(roomID: roomID, generation: generation)
             try checkCurrent(generation)
             loaded = true
             await refreshMembers(roomID)
@@ -505,7 +505,7 @@ final class ChatSession: ObservableObject {
     // so the next one starts from the same place. Where the gap is too long to fill, everything older than what
     // was fetched is let go: the timeline is then one unbroken run ending at the newest message, and Load earlier
     // carries on from its oldest.
-    private func backfill(roomID: String) async throws {
+    private func backfill(roomID: String, generation: Int) async throws {
         // Not the newest message on screen: one that arrived live after a failed catch-up proves nothing about
         // the messages before it.
         let tip = caughtUpThrough[roomID]
@@ -522,6 +522,10 @@ final class ChatSession: ObservableObject {
                 noteUnfetched(staged, roomID: roomID)
                 throw error
             }
+            // Pages asked for by a session that has since signed out, gone to the background or lost the room are
+            // not written: they would rebuild what was just cleared.
+            try checkCurrent(generation)
+            guard timelines[roomID] != nil else { return }
             staged.insert(contentsOf: page, at: 0)
             if pageIndex == 0 { firstPageWasFull = page.count >= pageSize }
             guard let tip, let oldest = page.first, page.count >= pageSize, oldest.seq > tip + 1 else {
@@ -572,7 +576,10 @@ final class ChatSession: ObservableObject {
         timelines[roomID] = (timelines[roomID] ?? RoomTimeline()).merging(entries)
     }
 
+    /// Marks everything loaded in the room as read. Only a room with nothing missing: one whose catch-up failed or
+    /// was refused keeps its read position, or the messages in its gap would count as read unseen.
     private func markRead(_ roomID: String) {
+        guard caughtUp.contains(roomID) else { return }
         var state = readStates[roomID] ?? ReadState()
         state.latest = max(state.latest, timelines[roomID]?.entries.last?.seq ?? 0)
         state.lastRead = state.latest
@@ -792,7 +799,7 @@ final class ChatSession: ObservableObject {
                 for roomID in timelines.keys.sorted() {
                     do {
                         try await joinIfNeeded(roomID)
-                        try await backfill(roomID: roomID)
+                        try await backfill(roomID: roomID, generation: generation)
                     } catch CowchatConnectionError.server {
                         // The server refused this one room, say because it is gone. The rest still load.
                     }

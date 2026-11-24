@@ -147,6 +147,48 @@ final class HistoryPagingTests: XCTestCase {
         XCTAssertEqual(storage.readStates["r1"]?.lastRead, 152)
     }
 
+    func testACatchUpForARoomThatWasDestroyedMeanwhileWritesNothing() async {
+        connection.serverMessages["r1"] = messages(1...30)
+        let session = await signedIn()
+        await session.open(roomID: "r1")
+        session.close(roomID: "r1")
+        connection.serverMessages["r1"] = messages(1...230)
+
+        // The room is destroyed while the second page is on its way. Its pages must not bring it back.
+        var page = 0
+        connection.beforeHistory = { [unowned self] in
+            page += 1
+            if page == 2 { connection.onEvent?("room_destroyed", ["room_id": "r1"]) }
+        }
+        await session.open(roomID: "r1")
+
+        XCTAssertNil(session.timelines["r1"]?.entries.first, "a destroyed room is not rebuilt from pages already asked for")
+    }
+
+    func testARoomWhoseCatchUpWasRefusedOnReconnectIsNotMarkedRead() async {
+        connection.serverMessages["r1"] = messages(1...1)
+        let session = await signedIn()
+        await session.open(roomID: "r1")
+        session.sceneEnteredBackground()
+        connection.serverMessages["r1"] = messages(1...40)
+        connection.historyErrors["r1"] = CowchatConnectionError.server(message: "not a member", code: "access_denied")
+        // A new message arrives live as the room rejoins, though its catch-up is about to be refused.
+        let live = messages(41...41)[0]
+        connection.afterJoinForHistoryTest = { [weak connection] room in
+            guard room == "r1", let connection else { return }
+            connection.afterJoinForHistoryTest = nil
+            connection.deliver(live)
+        }
+
+        session.sceneBecameActive()
+        let connected = await eventually { session.phase == .connected }
+        XCTAssertTrue(connected)
+
+        let storage = SessionStorage(defaults: defaults, credentials: credentials, connectionID: "c1")
+        XCTAssertEqual(storage.readStates["r1"]?.lastRead, 1, "an open room that could not catch up keeps its read position")
+        XCTAssertEqual(session.rooms.first?.isUnread, true)
+    }
+
     func testAGapTooLongToFillLeavesTheNewestMessagesWithNoHole() async {
         connection.serverMessages["r1"] = messages(1...30)
         let session = await signedIn()
