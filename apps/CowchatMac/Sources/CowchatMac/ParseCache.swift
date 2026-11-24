@@ -1,4 +1,5 @@
 import Foundation
+import CowchatKit
 
 /// A bounded cache of values worked out from a string. The room view rebuilds every message row each time it redraws,
 /// so work that depends only on a message's text belongs here rather than in a view's initialiser or body.
@@ -48,5 +49,14 @@ enum RenderCaches {
         MessageTextLayout.cache.removeAll()
         MessageContentParser.inlineCache.removeAll()
         ChartMessage.decodedImages.removeAllObjects()
+    }
+}
+
+extension MessageContentParser {
+    /// Inline markdown for the Mac feed, cached by text so a redraw doesn't parse every block again.
+    static let inlineCache = ParseCache<AttributedString>(countLimit: 4_000, byteLimit: 8 << 20)
+
+    static func cachedInline(_ source: String) -> AttributedString {
+        inlineCache.value(for: source) { attributedInline($0) }
     }
 }

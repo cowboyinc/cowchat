@@ -1,6 +1,7 @@
 import XCTest
 import Combine
 @testable import CowchatMac
+@testable import CowchatKit
 
 @MainActor
 private final class MockRoomConnection: CowchatConnectionProtocol {
@@ -2838,7 +2839,7 @@ final class RoomTransitionTests: XCTestCase {
         try store.saveRoomSecret("room-secret", for: room)
 
         _ = ExpandableMessageText(content: store.displayMessage(message).content)
-        _ = MessageContentParser.attributedInline(plaintext)
+        _ = MessageContentParser.cachedInline(plaintext)
         XCTAssertTrue(MessageTextLayout.cache.contains(plaintext))
         XCTAssertTrue(MessageContentParser.inlineCache.contains(plaintext))
 

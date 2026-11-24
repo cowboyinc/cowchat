@@ -1,4 +1,5 @@
 import SwiftUI
+import CowchatKit
 
 /// The frame of the sheets that start something, New room, Join with invite code and Add person
 /// (add-new-company note, section 0), drawn from the Join sheet's: 480 wide on Surface/600 with 26 padding and its

@@ -39,38 +39,38 @@ pub fn principal(conn: &Connection, key: &str) -> rusqlite::Result<Option<Princi
     if !key.starts_with(PREFIX) {
         return Ok(None);
     }
-    let principal: Option<Principal> = conn.query_row(
+    let digest = hash(key);
+    let principal: Option<Principal> = conn.prepare_cached(
         "SELECT account_id,agent_id,kind FROM social_credentials WHERE digest=?1 AND revoked=0 AND expires>=unixepoch()",
-        [hash(key)],
+    )?.query_row(
+        [&digest],
         |row| Ok(Principal { account_id: row.get(0)?, agent_id: row.get(1)?, session_id: None, mint_only: row.get::<_, String>(2)? == "mint_only" }),
     ).optional()?;
     if principal.is_some() {
         return Ok(principal);
     }
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT s.owner_id,s.bot_id,s.id FROM social_sessions s JOIN social_agents b ON b.id=s.bot_id AND b.owner_id=s.owner_id AND b.revoked=0 WHERE s.token_digest=?1 AND s.ended_at IS NULL",
-        [hash(key)],
+    )?.query_row(
+        [&digest],
         |row| Ok(Principal { account_id: row.get(0)?, agent_id: row.get(1)?, session_id: row.get(2)?, mint_only: false }),
     ).optional()
 }
 fn guest_room(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT i.room_id FROM social_guest_invites i JOIN rooms r ON r.room_id=i.room_id
          WHERE i.guest_digest=?1 AND i.revoked=0 AND i.guest_expires>unixepoch()",
-        [hash(key)],
-        |row| row.get(0),
-    )
+    )?
+    .query_row([hash(key)], |row| row.get(0))
     .optional()
 }
 pub fn room_access(conn: &Connection, room: &str, key: &str) -> rusqlite::Result<Option<bool>> {
     if key.starts_with(GUEST_PREFIX) {
         return Ok(Some(guest_room(conn, key)?.as_deref() == Some(room)));
     }
-    let managed: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM social_rooms WHERE room_id=?1)",
-        [room],
-        |r| r.get(0),
-    )?;
+    let managed: bool = conn
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM social_rooms WHERE room_id=?1)")?
+        .query_row([room], |r| r.get(0))?;
     if !managed {
         return Ok(key.starts_with(PREFIX).then_some(false));
     }
@@ -82,20 +82,20 @@ pub fn room_access(conn: &Connection, room: &str, key: &str) -> rusqlite::Result
     } else if let Some(bot) = p.agent_id {
         let requested = p.session_id.as_deref().unwrap_or(&bot);
         if requested != bot {
-            conn.query_row(
+            conn.prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_sessions s ON s.id=a.agent_id JOIN social_members m ON m.room_id=a.room_id AND m.account_id=s.owner_id JOIN social_agents b ON b.id=s.bot_id WHERE a.room_id=?1 AND a.agent_id=?2 AND s.bot_id=?3 AND s.owner_id=?4 AND s.ended_at IS NULL AND b.revoked=0)",
+            )?.query_row(
                 params![room, requested, bot, p.account_id],
                 |row| row.get(0),
             )?
         } else {
-            conn.query_row("SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_members m ON m.room_id=a.room_id AND m.account_id=?3 JOIN social_agents g ON g.id=a.agent_id WHERE a.room_id=?1 AND a.agent_id=?2 AND g.revoked=0 AND g.owner_id=?3)", params![room,bot,p.account_id],|r|r.get(0))?
+            conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM social_admissions a JOIN social_members m ON m.room_id=a.room_id AND m.account_id=?3 JOIN social_agents g ON g.id=a.agent_id WHERE a.room_id=?1 AND a.agent_id=?2 AND g.revoked=0 AND g.owner_id=?3)")?.query_row(params![room,bot,p.account_id],|r|r.get(0))?
         }
     } else {
-        conn.query_row(
+        conn.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM social_members WHERE room_id=?1 AND account_id=?2)",
-            params![room, p.account_id],
-            |r| r.get(0),
         )?
+        .query_row(params![room, p.account_id], |r| r.get(0))?
     };
     Ok(Some(allowed))
 }

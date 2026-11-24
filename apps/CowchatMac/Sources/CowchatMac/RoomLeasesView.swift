@@ -1,36 +1,6 @@
 import Foundation
 import SwiftUI
-
-struct RoomLease: Decodable, Identifiable {
-    let name: String
-    let generation: Int64
-    let holderName: String
-    let taskState: String
-    let detail: String?
-    let progress: String?
-    let lastHeartbeatAt: TimeInterval
-    let lastProgressAt: TimeInterval
-    let overdueAt: TimeInterval
-    let expiresAt: TimeInterval
-    let releasedAt: TimeInterval?
-    var id: String { name }
-    enum CodingKeys: String, CodingKey {
-        case name, generation, detail, progress
-        case holderName = "holder_name", taskState = "task_state"
-        case lastHeartbeatAt = "last_heartbeat_at", lastProgressAt = "last_progress_at"
-        case overdueAt = "overdue_at", expiresAt = "expires_at", releasedAt = "released_at"
-    }
-    func status(at date: Date) -> String {
-        if releasedAt != nil { return "Released" }
-        if date.timeIntervalSince1970 >= expiresAt { return "Expired" }
-        if date.timeIntervalSince1970 >= overdueAt { return "Overdue" }
-        switch taskState {
-        case "waiting_for_human": return "Waiting for human"
-        case "waiting_for_dependency": return "Waiting for dependency"
-        default: return "Working"
-        }
-    }
-}
+import CowchatKit
 
 struct RoomLeasesView: View {
     @EnvironmentObject private var store: ChatStore

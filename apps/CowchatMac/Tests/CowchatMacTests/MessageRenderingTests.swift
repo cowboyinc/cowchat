@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 final class MessageRenderingTests: XCTestCase {
     @MainActor
@@ -99,11 +100,11 @@ final class MessageParseCacheTests: XCTestCase {
         let text = "some **bold** \(UUID())"
         let misses = MessageContentParser.inlineCache.misses
 
-        let first = MessageContentParser.attributedInline(text)
-        for _ in 0..<50 { _ = MessageContentParser.attributedInline(text) }
+        let first = MessageContentParser.cachedInline(text)
+        for _ in 0..<50 { _ = MessageContentParser.cachedInline(text) }
 
         XCTAssertEqual(MessageContentParser.inlineCache.misses, misses + 1)
-        XCTAssertEqual(MessageContentParser.attributedInline(text), first)
+        XCTAssertEqual(MessageContentParser.cachedInline(text), first)
     }
 }
 

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CowchatKit
 
 private enum AppAppearance: String, CaseIterable, Identifiable {
     case system
@@ -1979,18 +1980,18 @@ struct ExpandableMessageText: View {
                 ForEach(segments) { segment in
                     switch segment.kind {
                     case .prose:
-                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
+                        Text(mentionMarks.marking(MessageContentParser.cachedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(.bodyL, color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
                     case .heading(let level):
-                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
+                        Text(mentionMarks.marking(MessageContentParser.cachedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(headingStyle(for: level), color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityAddTraits(.isHeader)
                     case .unorderedList, .orderedList:
-                        Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
+                        Text(mentionMarks.marking(MessageContentParser.cachedInline(segment.text)))
                             .textSelection(.enabled)
                             .gallopText(.bodyL, color: textColor)
                             .fixedSize(horizontal: false, vertical: true)
@@ -2005,7 +2006,7 @@ struct ExpandableMessageText: View {
                             RoundedRectangle(cornerRadius: 1)
                                 .fill(SemanticColor.borderDefault)
                                 .frame(width: 3)
-                            Text(mentionMarks.marking(MessageContentParser.attributedInline(segment.text)))
+                            Text(mentionMarks.marking(MessageContentParser.cachedInline(segment.text)))
                                 .textSelection(.enabled)
                                 .gallopText(.bodyL, color: textColor)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -2044,7 +2045,7 @@ struct ExpandableMessageText: View {
     }
 
     private func accessibleText(_ source: String) -> String {
-        String(MessageContentParser.attributedInline(source).characters)
+        String(MessageContentParser.cachedInline(source).characters)
     }
 
     private func monospacedBlock(

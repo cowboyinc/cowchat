@@ -1,5 +1,6 @@
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 /// The starting sheets' rules that need no server (navigation note, section 7, and the add-new-company note): New
 /// room's kinds and name check, and the people list's order, height and more row.

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import CowchatKit
 
 struct RoomArtifactMetadata: Decodable {
     let title: String

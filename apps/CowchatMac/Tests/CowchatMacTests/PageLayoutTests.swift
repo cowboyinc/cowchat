@@ -1,6 +1,7 @@
 import SwiftUI
 import XCTest
 @testable import CowchatMac
+@testable import CowchatKit
 
 /// On every page the list's first line of text sits 32 under the header's last line of text, and a header with no line
 /// under its title keeps no empty one (navigation round 2, section 4.2 as amended). `ProtoPageTopTests` measures the

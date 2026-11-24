@@ -128,6 +128,7 @@ swift build -c release --arch arm64 --arch x86_64
 BIN_DIR=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)
 APP_DIR="$BIN_DIR/$APP_NAME"
 RESOURCE_BUNDLE="$BIN_DIR/${PRODUCT}_${PRODUCT}.bundle"
+KIT_RESOURCE_BUNDLE="$BIN_DIR/CowchatKit_CowchatKit.bundle"
 
 for server_target in aarch64-apple-darwin x86_64-apple-darwin; do
 	if ! rustup target list --installed --toolchain "$RUST_TOOLCHAIN" | \
@@ -175,6 +176,10 @@ if [ ! -d "$RESOURCE_BUNDLE" ]; then
 	printf '%s\n' "Missing SwiftPM resource bundle: $RESOURCE_BUNDLE" >&2
 	exit 1
 fi
+if [ ! -d "$KIT_RESOURCE_BUNDLE" ]; then
+	printf '%s\n' "Missing SwiftPM resource bundle: $KIT_RESOURCE_BUNDLE" >&2
+	exit 1
+fi
 if ! lipo "$BIN_DIR/$PRODUCT" -verify_arch arm64 || ! lipo "$BIN_DIR/$PRODUCT" -verify_arch x86_64; then
 	printf '%s\n' 'Release executable is not universal (arm64 + x86_64).' >&2
 	exit 1
@@ -186,6 +191,7 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" \
 cp "$BIN_DIR/$PRODUCT" "$APP_DIR/Contents/MacOS/Cowchat"
 cp "$APP_INFO_PLIST" "$APP_DIR/Contents/Info.plist"
 cp -R "$RESOURCE_BUNDLE" "$APP_DIR/Contents/Resources/"
+cp -R "$KIT_RESOURCE_BUNDLE" "$APP_DIR/Contents/Resources/"
 # SwiftPM supplies a binary artifact; copy the complete framework (including
 # symlinks and Sparkle's installer services), not just its linked executable.
 SPARKLE_FRAMEWORK=$(find "${COWCHAT_SWIFT_ARTIFACTS_DIR:-$ROOT/.build/artifacts}" -type d -path '*/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework' -print)
