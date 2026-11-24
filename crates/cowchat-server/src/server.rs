@@ -353,9 +353,10 @@ fn bind_unix_listener(path: &Path) -> io::Result<(StdUnixListener, OwnedSocketPa
     }
 }
 
-fn bind_tcp_listener(addr: &str) -> io::Result<std::net::TcpListener> {
-    let listener = std::net::TcpListener::bind(addr)?;
+fn bind_tcp_listener(addr: &mut String) -> io::Result<std::net::TcpListener> {
+    let listener = std::net::TcpListener::bind(addr.as_str())?;
     listener.set_nonblocking(true)?;
+    *addr = listener.local_addr()?.to_string();
     Ok(listener)
 }
 
@@ -401,12 +402,12 @@ impl CowchatServer {
         let (uds_listener, socket_guard) = bind_unix_listener(&config.socket_path)?;
         let tcp_listener = config
             .tcp_addr
-            .as_deref()
+            .as_mut()
             .map(bind_tcp_listener)
             .transpose()?;
         let http_listener = config
             .http_addr
-            .as_deref()
+            .as_mut()
             .map(bind_tcp_listener)
             .transpose()?;
 
@@ -721,6 +722,16 @@ impl CowchatServer {
 
     pub fn socket_path(&self) -> &Path {
         &self.config.socket_path
+    }
+
+    /// Bound TCP address, including the port assigned when port zero was requested.
+    pub fn tcp_addr(&self) -> Option<&str> {
+        self.config.tcp_addr.as_deref()
+    }
+
+    /// Bound HTTP address, including the port assigned when port zero was requested.
+    pub fn http_addr(&self) -> Option<&str> {
+        self.config.http_addr.as_deref()
     }
 
     pub fn store(&self) -> &Arc<Store> {
@@ -2051,6 +2062,27 @@ mod startup_tests {
             !key_path.exists(),
             "listener failure must precede auth open"
         );
+    }
+
+    #[tokio::test]
+    async fn ephemeral_ports_are_reserved_before_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut server_config = config(
+            temp.path().join("server.db"),
+            temp.path().join("server.sock"),
+            temp.path().join("auth.key"),
+        );
+        server_config.tcp_addr = Some("127.0.0.1:0".into());
+        server_config.http_addr = Some("127.0.0.1:0".into());
+        let server = CowchatServer::new(server_config).unwrap();
+
+        let tcp = server.tcp_addr().unwrap();
+        let http = server.http_addr().unwrap();
+        assert_ne!(tcp, http);
+        for addr in [tcp, http] {
+            let error = std::net::TcpListener::bind(addr).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+        }
     }
 
     #[test]
