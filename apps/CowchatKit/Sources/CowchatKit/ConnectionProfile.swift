@@ -113,13 +113,13 @@ public struct ConnectionProfile: Equatable, CustomStringConvertible, CustomDebug
 
     public var debugDescription: String { description }
 
-    public static func local(host: String, port: UInt16) -> ConnectionProfile {
+    public static func local(host: String, port: UInt16, apiKey: String = "") -> ConnectionProfile {
         ConnectionProfile(
             kind: .local,
             localHost: host,
             localPort: port,
             endpointURL: nil,
-            apiKey: "",
+            apiKey: apiKey,
             cloudAccountID: nil
         )
     }

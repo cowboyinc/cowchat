@@ -6,23 +6,48 @@ public struct SocialAccount: Codable, Identifiable, Equatable {
     public let id: String
     public var handle: String
     public var displayName: String
+
+    public init(id: String, handle: String, displayName: String) {
+        self.id = id
+        self.handle = handle
+        self.displayName = displayName
+    }
 }
 public struct SocialAgent: Codable, Identifiable, Equatable {
     public let id: String
     public let ownerId: String
     public let name: String
     public let discoverable: Bool
+
+    public init(id: String, ownerId: String, name: String, discoverable: Bool) {
+        self.id = id
+        self.ownerId = ownerId
+        self.name = name
+        self.discoverable = discoverable
+    }
 }
 public struct SocialFriend: Decodable, Identifiable {
     public let account: SocialAccount
     public let agents: [SocialAgent]
     public var id: String { account.id }
+
+    public init(account: SocialAccount, agents: [SocialAgent]) {
+        self.account = account
+        self.agents = agents
+    }
 }
 public struct SocialFriendRequest: Decodable, Identifiable {
     public let id: String
     public let from: SocialAccount
     public let to: SocialAccount
     public let status: String
+
+    public init(id: String, from: SocialAccount, to: SocialAccount, status: String) {
+        self.id = id
+        self.from = from
+        self.to = to
+        self.status = status
+    }
 }
 public struct SocialRoom: Decodable, Identifiable {
     /// The session an account room was made for, which the server records when the session registers and keeps for
@@ -69,6 +94,21 @@ public struct SocialRoomInvitation: Decodable, Identifiable {
     public let encrypted: Bool
     public let slackConnected: Bool
     public let status: String
+
+    public init(id: String, roomId: String, roomName: String, from: SocialAccount, to: SocialAccount, proposedAgents: [SocialAgent], members: [SocialAccount], agents: [SocialAgent], historyPolicy: String, encrypted: Bool, slackConnected: Bool, status: String) {
+        self.id = id
+        self.roomId = roomId
+        self.roomName = roomName
+        self.from = from
+        self.to = to
+        self.proposedAgents = proposedAgents
+        self.members = members
+        self.agents = agents
+        self.historyPolicy = historyPolicy
+        self.encrypted = encrypted
+        self.slackConnected = slackConnected
+        self.status = status
+    }
 }
 public struct SocialParticipants: Decodable {
     public let roomId: String
@@ -79,11 +119,27 @@ public struct SocialParticipants: Decodable {
     public let slackConnected: Bool
     public let members: [SocialAccount]
     public let agents: [SocialAgent]
+
+    public init(roomId: String, name: String, ownerId: String, historyPolicy: String, encrypted: Bool, slackConnected: Bool, members: [SocialAccount], agents: [SocialAgent]) {
+        self.roomId = roomId
+        self.name = name
+        self.ownerId = ownerId
+        self.historyPolicy = historyPolicy
+        self.encrypted = encrypted
+        self.slackConnected = slackConnected
+        self.members = members
+        self.agents = agents
+    }
 }
 public struct SocialMe: Decodable {
     public struct Identity: Decodable, Equatable { public let provider: String; public let subject: String; public let label: String }
     public let account: SocialAccount
     public let identities: [Identity]
+
+    public init(account: SocialAccount, identities: [Identity]) {
+        self.account = account
+        self.identities = identities
+    }
 }
 public struct SocialCapabilities: Decodable {
     public let providers: [String]
@@ -91,9 +147,17 @@ public struct SocialCapabilities: Decodable {
     public let handleAvailability: Bool?
     public let friendLinks: Bool?
     public let setupHandle: Bool?
+
+    public init(providers: [String], setupVersion: Int?, handleAvailability: Bool?, friendLinks: Bool?, setupHandle: Bool?) {
+        self.providers = providers
+        self.setupVersion = setupVersion
+        self.handleAvailability = handleAvailability
+        self.friendLinks = friendLinks
+        self.setupHandle = setupHandle
+    }
 }
-public struct SocialHandleAvailability: Decodable { public let handle: String; public let available: Bool; public let valid: Bool }
-public struct SocialFriendLink: Decodable, Equatable { public let slug: String; public let url: URL }
+public struct SocialHandleAvailability: Decodable { public let handle: String; public let available: Bool; public let valid: Bool; public init(handle: String, available: Bool, valid: Bool) { self.handle = handle; self.available = available; self.valid = valid } }
+public struct SocialFriendLink: Decodable, Equatable { public let slug: String; public let url: URL; public init(slug: String, url: URL) { self.slug = slug; self.url = url } }
 public enum SocialFriendLinkState: Equatable {
     case idle, loading, loaded(SocialFriendLink), failed(String)
 }
@@ -103,7 +167,7 @@ public enum SocialFriendRelationship: String, Decodable {
     case incomingPending = "incoming_pending"
     case none
 }
-public struct SocialFriendLinkPreview: Decodable { public let account: SocialAccount; public let relationship: SocialFriendRelationship }
+public struct SocialFriendLinkPreview: Decodable { public let account: SocialAccount; public let relationship: SocialFriendRelationship; public init(account: SocialAccount, relationship: SocialFriendRelationship) { self.account = account; self.relationship = relationship } }
 public enum SocialHandleCheck: Equatable {
     case idle, checking(String), available(String), unavailable(String), invalid(String), failed(String)
     public func permits(_ input: String) -> Bool { self == .available(input) }
@@ -125,6 +189,13 @@ public struct SocialSetup: Decodable {
     public let agentName: String
     public let agent: SocialAgent?
     public let botAdmitted: Bool
+
+    public init(agentId: String, agentName: String, agent: SocialAgent?, botAdmitted: Bool) {
+        self.agentId = agentId
+        self.agentName = agentName
+        self.agent = agent
+        self.botAdmitted = botAdmitted
+    }
 }
 public struct SocialSetupReply: Decodable { public let setup: SocialSetup? }
 
@@ -151,11 +222,17 @@ public struct SocialRequests: Decodable { public let requests: [SocialFriendRequ
 public struct SocialInvitations: Decodable { public let invitations: [SocialRoomInvitation] }
 public struct SocialRooms: Decodable { public let rooms: [SocialRoom] }
 public struct SocialCreatedAgent: Decodable { public let agent: SocialAgent; public let apiKey: String }
-public struct SocialOAuthStart: Decodable { public let requestId: String; public let authorizationUrl: URL; public let expiresIn: Int }
+public struct SocialOAuthStart: Decodable { public let requestId: String; public let authorizationUrl: URL; public let expiresIn: Int; public init(requestId: String, authorizationUrl: URL, expiresIn: Int) { self.requestId = requestId; self.authorizationUrl = authorizationUrl; self.expiresIn = expiresIn } }
 public struct SocialOAuthExchange: Decodable {
     public let status: String
     public let deviceKey: String?
     public let account: SocialAccount?
+
+    public init(status: String, deviceKey: String?, account: SocialAccount?) {
+        self.status = status
+        self.deviceKey = deviceKey
+        self.account = account
+    }
 }
 
 public enum SocialAPIError: LocalizedError {
