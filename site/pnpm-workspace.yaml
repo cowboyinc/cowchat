@@ -3,3 +3,9 @@
 # Install scripts npm already ran; pnpm 12 fails the install until each is decided.
 allowBuilds:
   sharp: true # next/image
+
+# Security pins for packages Next.js pins below their patched releases
+# (the dashboard and explorer frontends carry the same overrides).
+overrides:
+  "next>postcss": "^8.5.23"
+  "next>sharp": "^0.35.5"

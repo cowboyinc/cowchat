@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- site: Next.js 15.5.29 (from 15.5.22) fixes the critical Next.js advisories, and overrides lift the PostCSS and sharp copies Next.js pins to 8.5.26 and 0.35.5; `pnpm audit` in `site/` reports no known vulnerabilities.
+- tools/cowchat-artifacts: Zod 4.6.7 (from 4.3.6) fixes the Zod memory-exhaustion advisory, and the embedded artifact renderer is rebuilt with it. The Zod 3 copy that `@openuidev/react-ui` pulls in through `@ag-ui/core` has no patched 3.x release and stays.
 - CLAUDE.md (and its AGENTS.md symlink): point the key-file paths and the "Adding Features" steps for `cowchat-core` and `cowchat-client` at the cowboyinc/cowchat-core repository, where those crates now live.
 - site: install with pnpm 12.21.0 instead of npm (`packageManager` in `site/package.json`), with every resolved package version and integrity hash unchanged; Amplify builds with `pnpm install --frozen-lockfile`.
 - README: the public site `cowchat.cowboy.inc` is hosted on AWS Amplify in Cowboy's Cloud account (app `drnvkg75a9cx5`) and deploys automatically from `main`.
