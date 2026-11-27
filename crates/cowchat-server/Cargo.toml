@@ -30,6 +30,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4", features = ["derive", "env"] }
 directories = "5"
 rand = "0.8"
+regex = "1"
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 rust-embed = "8"
