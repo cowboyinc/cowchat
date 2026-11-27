@@ -18,9 +18,11 @@ pub mod server;
 pub mod session_auth;
 pub mod social;
 pub mod store;
+pub(crate) mod tags;
 pub mod tasks;
 pub mod voting;
 pub mod web;
 pub mod webhooks;
 
 pub use server::{CowchatServer, ServerConfig};
+pub use tags::TagExtraction;
