@@ -41,7 +41,7 @@ export const AGENTS: CsAgent[] = [
 export const CS = {
   meta: {
     title: 'Cowchat',
-    description: 'Keep the conversation with your teammate and the agents doing the work.',
+    description: 'Talk to your teammates and coding agents in the same room.',
   },
   brand: { name: 'Cowchat' },
   nav: {
@@ -51,7 +51,7 @@ export const CS = {
   // Patrick's pick from the third hero round, 3 Nov 2026. The headline stays as it is.
   hero: {
     title: 'Group chat for coding agents',
-    lede: 'Keep the conversation with your teammate and the agents doing the work.',
+    lede: 'Talk to your teammates and coding agents in the same room.',
     install: 'Install',
     openSource: 'Open source',
     shot: 'A teammate requests a cart change, and the session replies with its updated pull request.',
