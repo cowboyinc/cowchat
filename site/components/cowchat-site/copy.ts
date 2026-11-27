@@ -11,6 +11,10 @@
 // README links, Setup. Both READMEs say to connect an agent in the Mac app first, and both hooks fail without it. Codex
 // kept the plugin row's line. Each README link goes to that plugin's README on GitHub, which has the full setup.
 
+// Neon's copy pass of 26 Nov 2026 over the live page, made in the prototype first (cowboyinc/prototype-site,
+// src/app/cowchat-site/CLAUDE.md, Copy), cut three section lines and rewrote one, the closing title, shot 2's report
+// and the sample's names.
+
 export const GITHUB = 'https://github.com/cowboyinc/cowchat'
 export const RELEASES = `${GITHUB}/releases`
 // The latest release's page until PR 53 gives the DMG a stable address.
@@ -54,22 +58,19 @@ export const CS = {
   },
   rooms: {
     title: 'A room per session',
-    line: 'Talk to each session in the room where it shares its results.',
     shot: 'A search results report has a pull request and two shop screenshots attached.',
   },
   teammate: {
     title: 'Bring someone in',
-    line: 'Work through a problem with a teammate and the sessions you’re both running.',
+    line: 'Invite a teammate to a room and add your own sessions.',
     shot: 'A Join sheet over the Inbox shows two available sessions, with the first selected.',
   },
   team: {
     title: 'Team sessions',
-    line: 'Follow the team’s live sessions and see where each one stands.',
     shot: 'The Team page lists branches under two people, with two sessions marked Working.',
   },
   works: {
     title: 'Works with your tools',
-    line: 'Bring the tools you use and the people you build with.',
     rows: [
       { id: 'agents', title: 'Claude Code and Codex', line: 'Sessions join their rooms automatically through the plugin and hooks.' },
       { id: 'shell', title: 'Any agent with a shell', line: 'Use the CLI and skill file to tell it how to join a room.' },
@@ -97,7 +98,7 @@ export const CS = {
     action: 'View on GitHub',
   },
   start: {
-    title: 'A shared home for sessions',
+    title: 'Try Cowchat',
   },
   footer: {
     groups: [
@@ -114,9 +115,9 @@ export const CS = {
 // the hero's question reads "now", since it arrives in view. No real person, company or repository appears.
 export const SAMPLE = {
   people: {
-    you: { name: 'Nella Verran', handle: 'nella' },
-    teammate: { name: 'Ivo Selden', handle: 'ivo' },
-    other: { name: 'Tessa Orven', handle: 'tessa' },
+    you: { name: 'Nora Chen', handle: 'nora' },
+    teammate: { name: 'Ian Park', handle: 'ian' },
+    other: { name: 'Tess Miller', handle: 'tess' },
   },
   hero: {
     session: 'cart-total',
@@ -130,7 +131,7 @@ export const SAMPLE = {
   },
   room: {
     session: 'search-grid',
-    report: 'Aligned prices in the widget search results. Checked the eight-card grid and the linked Widget page, including its $249.00 price and Add to cart button.',
+    report: 'Aligned prices across the search results grid and checked the Widget product page.',
     pr: { repo: 'shelf', number: 187, title: 'Align prices in search results', adds: 42, dels: 19 },
     time: '8 min ago',
     // The prototype's own synthetic shop pages (its public/assets/chat/browser/), drawn as the report's two screenshots.
@@ -141,19 +142,19 @@ export const SAMPLE = {
     sessions: [{ name: 'cart-total', repo: 'shelf' }, { name: 'stock-sync', repo: 'parcel' }],
     inbox: [
       { title: 'stock-sync', preview: 'Stock updates now retry after a timeout. Tests pass.', room: 'stock-sync', time: '6 min ago' },
-      { title: 'Tessa Orven', preview: 'I checked the receipt link. It opens the right order.', room: 'receipt-link', time: '12 min ago' },
+      { title: 'Tess Miller', preview: 'I checked the receipt link. It opens the right order.', room: 'receipt-link', time: '12 min ago' },
     ],
     time: '2 min ago',
   },
   team: {
-    name: 'Mosswick',
+    name: 'Millbrook',
     people: [
-      { name: 'Nella Verran', rows: [
+      { name: 'Nora Chen', rows: [
         { branch: 'cart-total', repo: 'shelf', pr: 184, state: 'Idle' },
         { branch: 'stock-sync', repo: 'parcel', pr: null, state: 'Working' },
         { branch: 'receipt-link', repo: 'parcel', pr: 181, state: 'Idle' },
       ] },
-      { name: 'Ivo Selden', rows: [
+      { name: 'Ian Park', rows: [
         { branch: 'search-grid', repo: 'shelf', pr: 187, state: 'Idle' },
         { branch: 'filter-reset', repo: 'shelf', pr: 189, state: 'Working' },
         { branch: 'parcel-retry', repo: 'parcel', pr: 176, state: 'Idle' },
