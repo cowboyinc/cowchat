@@ -187,7 +187,6 @@ export function CowchatSite() {
           <div className="ss-wrap cs-split" data-reveal="">
             <div className="cs-split-words">
               <h2 id="cs-rooms-title" className="ms-h2 cs-h2">{CS.rooms.title}</h2>
-              <p className="ss-line">{CS.rooms.line}</p>
             </div>
             <Shot id={2} label={CS.rooms.shot}><RoomShot /></Shot>
           </div>
@@ -211,7 +210,6 @@ export function CowchatSite() {
             <Shot id={4} label={CS.team.shot}><TeamShot /></Shot>
             <div className="cs-split-words">
               <h2 id="cs-team-title" className="ms-h2 cs-h2">{CS.team.title}</h2>
-              <p className="ss-line">{CS.team.line}</p>
             </div>
           </div>
         </section>
@@ -221,7 +219,6 @@ export function CowchatSite() {
           <div className="ss-wrap" data-reveal="">
             <div className="sf-head">
               <h2 id="cs-works-title">{CS.works.title}</h2>
-              <p className="ss-line">{CS.works.line}</p>
             </div>
             <ul className="cs-works">
               {CS.works.rows.map((row) => (
