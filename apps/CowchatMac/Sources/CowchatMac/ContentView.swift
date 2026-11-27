@@ -1012,6 +1012,18 @@ private struct ChatRoomView: View {
                         get: { store.showsAllMessages(in: room.id) },
                         set: { store.setShowsAllMessages($0, in: room.id) }
                     ))
+                    // copy:
+                    let tags = MessageFeed.tagLabels(store.messages)
+                    if !tags.isEmpty || store.tagFilter(in: room.id) != nil {
+                        Picker("Filter by tag", selection: Binding(
+                            get: { store.tagFilter(in: room.id) },
+                            set: { store.setTagFilter($0, in: room.id) }
+                        )) {
+                            Text("All messages").tag(String?.none)
+                            ForEach(tags, id: \.self) { Text($0).tag(String?.some($0)) }
+                        }
+                        .pickerStyle(.menu)
+                    }
                     Divider()
                     Button("Leases…") { isLeasesPresented = true }
                     Button("Copy connect prompt") { copyConnectPrompt() }
@@ -1191,7 +1203,8 @@ private struct ChatRoomView: View {
                         let feed = MessageFeed.items(
                             store.messages,
                             showsAll: store.showsAllMessages(in: room.id),
-                            openRuns: openRuns
+                            openRuns: openRuns,
+                            tag: store.tagFilter(in: room.id)
                         )
 
                         ForEach(feed) { item in

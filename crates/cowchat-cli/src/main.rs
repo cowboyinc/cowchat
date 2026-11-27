@@ -7,6 +7,7 @@ mod telegram;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use cowchat_client::{ClientError, CowchatClient};
+use cowchat_core::tags::{tags_match_any, MessageTag};
 use cowchat_core::{ChatMessage, ErrorCode, FrameType};
 use std::io::Write;
 use std::path::PathBuf;
@@ -294,6 +295,10 @@ enum Commands {
         /// loop terminates cleanly instead of blocking for another turn.
         #[arg(long, conflicts_with = "kind")]
         end: bool,
+        /// Add a tag, as `key` or `key=value` (repeatable). Peers can filter on
+        /// tags via `wait --only-tag`, `history --tag` and `sub create --tag`.
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
         /// Mention an agent by agent-id (repeatable). Mentions route the message
         /// to `addressed`-mode actor subscriptions.
         #[arg(long = "mention")]
@@ -353,6 +358,10 @@ enum Commands {
         /// space-separated) — e.g. `--not-kind pulse,fyi` to drop heartbeats.
         #[arg(long)]
         not_kind: Option<String>,
+        /// Only return messages with this tag, as `key` for any value or
+        /// `key=value` (repeatable, any-of).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
         /// Write to file instead of stdout
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
@@ -430,6 +439,10 @@ enum Commands {
         /// Untagged messages are never suppressed by this filter.
         #[arg(long)]
         not_kind: Option<String>,
+        /// Only wake on messages with this tag, as `key` for any value or
+        /// `key=value` (repeatable, any-of).
+        #[arg(long = "only-tag", value_name = "TAG")]
+        only_tags: Vec<String>,
         /// Print peer `thinking` pulses to stderr while blocked, for live
         /// visibility during long runs. Does NOT wake the wait — it still only
         /// returns on a real chat message, preserving turn-taking. Content is
@@ -868,6 +881,10 @@ enum SubAction {
         /// Restrict to specific `--kind` values on the message (comma-separated).
         #[arg(long, value_delimiter = ',')]
         kinds: Vec<String>,
+        /// Only deliver messages with this tag, as `key` for any value or
+        /// `key=value` (repeatable, any-of).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
         /// Only deliver messages from this `--name`.
         #[arg(long)]
         only_from: Option<String>,
@@ -2174,6 +2191,7 @@ async fn run_wait_multiple(
     not_from: Option<&str>,
     only_kind: Option<&str>,
     not_kind: Option<&str>,
+    only_tags: &[String],
     text_mode: bool,
     drain: bool,
     since_seq: Option<&str>,
@@ -2360,6 +2378,7 @@ async fn run_wait_multiple(
                         &only_kinds,
                         &not_kinds,
                     )
+                    && tags_match_any(only_tags, &msg.metadata)
             };
             let mut batch = Vec::new();
             if drain {
@@ -2518,6 +2537,72 @@ fn parse_kinds(spec: Option<&String>) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Keep reading history past `first` until `limit` messages pass `keep`, so a
+/// client-side filter does not shrink the page. `forward` reads after the last
+/// message, otherwise before the first.
+async fn fill_filtered_history(
+    client: &CowchatClient,
+    room_id: &str,
+    limit: u32,
+    forward: bool,
+    first: Vec<ChatMessage>,
+    keep: impl Fn(&ChatMessage) -> bool,
+) -> Result<Vec<ChatMessage>, ClientError> {
+    let wanted = limit as usize;
+    let page = limit.max(100);
+    let mut exhausted = first.len() < wanted;
+    let mut oldest = first.first().map(|m| m.seq);
+    let mut newest = first.last().map(|m| m.seq);
+    let mut kept: Vec<ChatMessage> = first.into_iter().filter(|m| keep(m)).collect();
+    while kept.len() < wanted && !exhausted {
+        if forward {
+            let batch = client
+                .get_history_filtered(room_id, page, None, None, newest)
+                .await?;
+            exhausted = batch.len() < page as usize;
+            newest = batch.last().map(|m| m.seq).or(newest);
+            kept.extend(batch.into_iter().filter(|m| keep(m)));
+        } else {
+            let Some(below) = oldest.filter(|seq| *seq > 1) else {
+                break;
+            };
+            let start = (below - 1 - i64::from(page)).max(0);
+            let batch: Vec<ChatMessage> = client
+                .get_history_filtered(room_id, page, None, None, Some(start))
+                .await?
+                .into_iter()
+                .filter(|m| m.seq < below)
+                .collect();
+            exhausted = batch.is_empty() || start == 0;
+            oldest = batch.first().map(|m| m.seq);
+            let older: Vec<ChatMessage> = batch.into_iter().filter(|m| keep(m)).collect();
+            kept.splice(0..0, older);
+        }
+    }
+    if forward {
+        kept.truncate(wanted);
+    } else {
+        kept.drain(..kept.len().saturating_sub(wanted));
+    }
+    Ok(kept)
+}
+
+/// An older server ignores tag filters and would deliver every message.
+fn ensure_tag_filters_kept(
+    requested: &[String],
+    subscription: &cowchat_core::Subscription,
+) -> Result<(), String> {
+    if requested.is_empty() || subscription.tags == requested {
+        return Ok(());
+    }
+    Err("this server does not support tag filters, so the subscription would deliver every message. It was removed; upgrade the server to filter by tag.".to_owned())
+}
+
+/// Parse `--tag` specs so a typo fails loudly rather than filtering out everything.
+fn parse_tags(specs: &[String]) -> Result<Vec<MessageTag>, String> {
+    specs.iter().map(|spec| MessageTag::parse(spec)).collect()
+}
+
 /// True if a message carrying `msg_kind` should be SKIPPED (not woken on / not
 /// shown) under the given `only`/`not` kind lists. `only` is any-of allow-list;
 /// `not` is an exclude-list. An untagged message (`msg_kind == None`) is skipped
@@ -2555,6 +2640,7 @@ async fn run_wait_follow(
     not_from: Option<&String>,
     only_kind: Option<&String>,
     not_kind: Option<&String>,
+    only_tags: &[String],
     show_thinking: bool,
     text: bool,
     output: Option<&PathBuf>,
@@ -2667,6 +2753,7 @@ async fn run_wait_follow(
                         message.agent_name == *name || message.agent_id == *name
                     }) || (mentions_only && !mentions_self(&message, own_id.as_deref()))
                         || kind_skipped(msg_kind, &only_kinds, &not_kinds)
+                        || !tags_match_any(only_tags, &message.metadata)
                     {
                         advance_cursor(&mut cursor, cursor_file, message.seq)?;
                         continue;
@@ -3020,6 +3107,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             reply_to,
             kind,
             end,
+            tags,
             mentions,
             pull_request,
             attachments,
@@ -3034,6 +3122,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut metadata = serde_json::json!({});
             if let Some(kind) = kind {
                 metadata["kind"] = serde_json::json!(kind);
+            }
+            if !tags.is_empty() {
+                metadata["tags"] = serde_json::json!(parse_tags(tags)?);
             }
             if let Some(display_external) =
                 external_display_flag(*display_external, resolve_agent_id(&cli).as_deref())
@@ -3303,8 +3394,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             since_seq,
             kind,
             not_kind,
+            tags,
             output,
         } => {
+            parse_tags(tags)?;
             let client = connect(&cli).await?;
             let room_id = resolve_room_id(&client, room).await?;
 
@@ -3320,17 +3413,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             // --not-kind exclude-list, both comma/space-separated.
             let only_kinds = parse_kinds(kind.as_ref());
             let not_kinds = parse_kinds(not_kind.as_ref());
-            let filtered: Vec<&ChatMessage> = messages
-                .iter()
-                .filter(|m| {
-                    let msg_kind = m.metadata.get("kind").and_then(|v| v.as_str());
-                    !kind_skipped(msg_kind, &only_kinds, &not_kinds)
-                })
-                .collect();
+            let keep = |m: &ChatMessage| {
+                let msg_kind = m.metadata.get("kind").and_then(|v| v.as_str());
+                !kind_skipped(msg_kind, &only_kinds, &not_kinds)
+                    && tags_match_any(tags, &m.metadata)
+            };
+            let forward = since.is_some() || since_seq.is_some();
+            let filtered =
+                fill_filtered_history(&client, &room_id, *limit, forward, messages, keep).await?;
 
             let body: String = filtered
                 .iter()
-                .map(|m| format_message(m))
+                .map(format_message)
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -3407,11 +3501,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             not_from,
             only_kind,
             not_kind,
+            only_tags,
             show_thinking,
             output,
             drain,
             cursor_file,
         } => {
+            parse_tags(only_tags)?;
             if room.len() > 1 || *approved_rooms {
                 return run_wait_multiple(
                     &cli,
@@ -3427,6 +3523,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     not_from.as_deref(),
                     only_kind.as_deref(),
                     not_kind.as_deref(),
+                    only_tags,
                     *text,
                     *drain,
                     since_seq.as_deref(),
@@ -3447,6 +3544,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     not_from.as_ref(),
                     only_kind.as_ref(),
                     not_kind.as_ref(),
+                    only_tags,
                     *show_thinking,
                     *text,
                     output.as_ref(),
@@ -3565,6 +3663,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let msg_kind = msg.metadata.get("kind").and_then(|v| v.as_str());
                 !kind_skipped(msg_kind, &only_kinds, &not_kinds)
+                    && tags_match_any(only_tags, &msg.metadata)
             };
 
             // Inner loop: keep advancing the bookmark until the returned message
@@ -4063,6 +4162,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     url,
                     secret,
                     kinds,
+                    tags,
                     only_from,
                     not_from,
                     exclude_thinking,
@@ -4079,17 +4179,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         })?),
                     };
                     let sub = client
-                        .create_subscription(
+                        .create_tagged_subscription(
                             &room_id,
                             url,
                             secret,
                             kinds.clone(),
+                            tags.clone(),
                             only_from.as_deref(),
                             not_from.as_deref(),
                             *exclude_thinking,
                             since,
                         )
                         .await?;
+                    if let Err(error) = ensure_tag_filters_kept(tags, &sub) {
+                        client.unsubscribe(&sub.subscription_id).await?;
+                        return Err(error.into());
+                    }
                     println!("{}", serde_json::to_string_pretty(&sub)?);
                 }
                 SubAction::List { room } => {
@@ -5541,6 +5646,36 @@ mod kind_filter_tests {
         let none: Vec<String> = vec![];
         assert!(!kind_skipped(Some("anything"), &none, &none));
         assert!(!kind_skipped(None, &none, &none));
+    }
+}
+
+#[cfg(test)]
+mod tag_filter_tests {
+    use super::ensure_tag_filters_kept;
+
+    fn subscription(tags: &[&str]) -> cowchat_core::Subscription {
+        serde_json::from_value(serde_json::json!({
+            "subscription_id": "s",
+            "room_id": "r",
+            "webhook_url": "https://hook.example",
+            "tags": tags,
+            "exclude_thinking": false,
+            "since_seq": 0,
+            "last_delivered_seq": 0,
+            "status": "active",
+            "failure_count": 0,
+            "created_at": "2026-11-23T00:00:00Z",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_server_that_drops_tag_filters_is_refused() {
+        let requested = vec!["linear=COW-1".to_owned()];
+        let error = ensure_tag_filters_kept(&requested, &subscription(&[])).unwrap_err();
+        assert!(error.contains("does not support tag filters"), "{error}");
+        assert!(ensure_tag_filters_kept(&requested, &subscription(&["linear=COW-1"])).is_ok());
+        assert!(ensure_tag_filters_kept(&[], &subscription(&[])).is_ok());
     }
 }
 

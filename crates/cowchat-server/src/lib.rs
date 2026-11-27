@@ -18,6 +18,7 @@ pub mod server;
 pub mod session_auth;
 pub mod social;
 pub mod store;
+pub(crate) mod tags;
 pub mod tasks;
 pub mod voting;
 pub mod web;
