@@ -117,6 +117,7 @@ class SessionHookTest(unittest.TestCase):
                 "#!/usr/bin/env python3\n"
                 "import json,os,sys\n"
                 "with open(os.environ['CALLS'],'a') as out: out.write(json.dumps(sys.argv[1:])+'\\n')\n"
+                "if os.getenv('RESTART_ERROR') and not os.getenv('COWCHAT_SESSION_FILE') and sys.argv[sys.argv.index('--id')+1] in open(os.environ['CALLS']).read().rsplit('\\n',2)[0]: print(os.environ['RESTART_ERROR'],file=sys.stderr); sys.exit(1)\n"
                 "if os.getenv('COWCHAT_SESSION_FILE'): print('session heartbeat failed: 401 Unauthorized',file=sys.stderr); sys.exit(1)\n"
                 "print(json.dumps({'session_file':os.environ['MOCK_SESSION_FILE'],'room_id':'r','room_name':'work'}))\n"
             )
@@ -134,7 +135,33 @@ class SessionHookTest(unittest.TestCase):
             ids = [args[args.index("--id") + 1] for args in starts]
             self.assertEqual(len(ids), 3)
             self.assertEqual(ids[0], ids[1])
-            self.assertNotEqual(ids[1], ids[2])
+            self.assertEqual(ids[1], ids[2])
+            # A server error or lost reply keeps the identity for the next start.
+            env["RESTART_ERROR"] = "session creation failed: 503 Service Unavailable"
+            subprocess.run([sys.executable, str(ROOT / "hooks" / "session.py"), "start"], input=payload, text=True,
+                           env=env, check=True, capture_output=True)
+            starts = [json.loads(line) for line in calls.read_text().splitlines()]
+            ids = [args[args.index("--id") + 1] for args in starts]
+            self.assertEqual(ids[3:], [ids[2], ids[2]])
+            # Only the server refusing the restart mints a new identity.
+            env["RESTART_ERROR"] = "session creation failed: 409 Conflict"
+            subprocess.run([sys.executable, str(ROOT / "hooks" / "session.py"), "start"], input=payload, text=True,
+                           env=env, check=True, capture_output=True)
+            starts = [json.loads(line) for line in calls.read_text().splitlines()]
+            ids = [args[args.index("--id") + 1] for args in starts]
+            self.assertEqual(ids[5], ids[2])
+            self.assertEqual(ids[6], ids[2])
+            self.assertNotEqual(ids[7], ids[2])
+            # Any other 400, such as the server's active-session limit, may clear
+            # up, so the identity stays.
+            env["RESTART_ERROR"] = "session creation failed: 400 Bad Request"
+            subprocess.run([sys.executable, str(ROOT / "hooks" / "session.py"), "start"], input=payload, text=True,
+                           env=env, check=True, capture_output=True)
+            starts = [json.loads(line) for line in calls.read_text().splitlines()]
+            ids = [args[args.index("--id") + 1] for args in starts]
+            self.assertEqual(ids[8:], [ids[7], ids[7]])
+            mappings = list((home / ".cowchat" / "claude-sessions").glob("*.json"))
+            self.assertEqual(json.loads(mappings[0].read_text())["id"], ids[7])
 
 
 if __name__ == "__main__":

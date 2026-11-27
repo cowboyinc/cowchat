@@ -31,9 +31,9 @@ base64 = "0.22"
 # protocol-compatible commonware family unified in this executable workspace.
 [workspace.dependencies.cowchat-client]
 git = "https://github.com/cowboyinc/cowchat-core.git"
-rev = "43822264de6d0921ee8bf294ef1713a44f7cf7e5"
+rev = "0e484faf366828988321ad3acc9c9ca9efff0da1"
 
 
 [workspace.dependencies.cowchat-core]
 git = "https://github.com/cowboyinc/cowchat-core.git"
-rev = "43822264de6d0921ee8bf294ef1713a44f7cf7e5"
+rev = "0e484faf366828988321ad3acc9c9ca9efff0da1"

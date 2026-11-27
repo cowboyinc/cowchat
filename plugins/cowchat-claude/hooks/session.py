@@ -17,6 +17,11 @@ import subprocess
 import sys
 import uuid
 
+# The server answers 409 only when it refuses to restart this session ID, for
+# example one minted by a key the bot has since rotated away from. Any other
+# failure, a 400 included, may be temporary and keeps the saved ID.
+RESTART_REFUSED = ("session creation failed: 409",)
+
 
 def run(args, session_file=None):
     env = os.environ.copy()
@@ -107,8 +112,14 @@ def hook_main(event, payload):
                 for marker in ("session heartbeat failed: 401", "session heartbeat failed: 404")
             ):
                 raise
-            agent_id = f"session:{uuid.uuid4()}"
-            result = json.loads(run(start_command(agent_id)).stdout)
+            try:
+                result = json.loads(run(start_command(agent_id)).stdout)
+            except subprocess.CalledProcessError as error:
+                # Any other failure may be temporary, so the saved identity stays.
+                if not any(refused in error.stderr for refused in RESTART_REFUSED):
+                    raise
+                agent_id = f"session:{uuid.uuid4()}"
+                result = json.loads(run(start_command(agent_id)).stdout)
         session_file = result["session_file"]
         record = {"id": agent_id, "name": name, "folder": folder, "branch": branch, "session_file": session_file}
         temporary = records / f".{uuid.uuid4()}.tmp"

@@ -47,7 +47,7 @@ pub fn sign_request(secret: &str, webhook_id: &str, timestamp: i64, body: &str) 
 }
 
 /// Decide whether `msg` matches `sub`'s filter. Cross-field semantics are AND;
-/// within `kinds`, semantics are OR.
+/// within `kinds` and within `tags`, semantics are OR.
 pub fn matches_filter(sub: &Subscription, msg: &ChatMessage) -> bool {
     if msg.seq <= sub.last_delivered_seq {
         return false;
@@ -66,6 +66,9 @@ pub fn matches_filter(sub: &Subscription, msg: &ChatMessage) -> bool {
         if !any_match {
             return false;
         }
+    }
+    if !cowchat_core::tags::tags_match_any(&sub.tags, &msg.metadata) {
+        return false;
     }
     if let Some(only) = &sub.only_from {
         if &msg.agent_name != only {
@@ -505,6 +508,7 @@ mod tests {
             room_id: "r".into(),
             webhook_url: "http://x".into(),
             kinds: vec![],
+            tags: vec![],
             only_from: None,
             not_from: None,
             exclude_thinking: false,
@@ -576,6 +580,24 @@ mod tests {
         let mut sys_msg = msg.clone();
         sys_msg.metadata = json!({"type": "system"});
         assert!(!matches_filter(&sub_base, &sys_msg));
+
+        // Tag filter: any listed tag delivers, and other filters still apply.
+        let tagged = ChatMessage {
+            metadata: json!({"tags":[{"key":"linear","value":"COW-1","source":"extractor"}]}),
+            ..msg.clone()
+        };
+        let s = Subscription {
+            tags: vec!["linear=COW-1".into(), "topic".into()],
+            ..sub_base.clone()
+        };
+        assert!(matches_filter(&s, &tagged));
+        assert!(!matches_filter(&s, &msg));
+        let s = Subscription {
+            tags: vec!["linear".into()],
+            not_from: Some("alice".into()),
+            ..sub_base.clone()
+        };
+        assert!(!matches_filter(&s, &tagged));
 
         // Thinking pulse excluded only when exclude_thinking is set.
         let mut think_msg = msg.clone();

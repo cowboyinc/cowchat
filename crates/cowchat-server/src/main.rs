@@ -34,6 +34,8 @@ struct Cli {
     command: Commands,
 }
 
+// Parsed once at startup, so the size of the serve variant does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     /// Start the Cowchat server
@@ -90,6 +92,18 @@ enum Commands {
         /// tier default (free 50, pro 500)
         #[arg(long, env = "COWCHAT_MAX_ROOMS")]
         max_rooms: Option<u64>,
+
+        /// Linear team whose bare ticket IDs (`COW-123`) get a `linear` tag.
+        /// Repeatable or comma-separated; pass an empty value for none. Linear
+        /// links are tagged for every team.
+        #[arg(long = "linear-team", value_delimiter = ',', default_value = "COW")]
+        linear_teams: Vec<String>,
+
+        /// GitHub repository, as `owner/repo`, whose bare `repo#N` references
+        /// get a `github` tag. Repeatable or comma-separated. Links and
+        /// `owner/repo#N` are tagged for every repository.
+        #[arg(long = "github-repo", value_delimiter = ',')]
+        github_repos: Vec<String>,
 
         /// SQLite database path
         #[arg(long, default_value = default_db_path())]
@@ -256,10 +270,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     require_local_auth,
                     allow_private_webhooks,
                     max_rooms,
+                    linear_teams,
+                    github_repos,
                     db,
                     key_file,
                     app_control_stdin,
                 } => {
+                    let tag_extraction =
+                        cowchat_server::TagExtraction::new(&linear_teams, &github_repos)?;
                     let config = ServerConfig {
                         socket_path: socket,
                         tcp_addr: if no_tcp { None } else { Some(tcp) },
@@ -279,6 +297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
 
                     let server = CowchatServer::new(config)?;
+                    server.store().set_tag_extraction(tag_extraction)?;
                     if no_auth {
                         log::info!("Running in NO-AUTH mode (open access)");
                     } else {
